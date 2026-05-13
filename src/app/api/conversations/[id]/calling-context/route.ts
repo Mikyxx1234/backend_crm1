@@ -1,0 +1,294 @@
+import { NextResponse } from "next/server";
+
+import { auth } from "@/lib/auth";
+import { getCallPermissionTemplateName } from "@/lib/call-permission-env";
+import { requireConversationAccess } from "@/lib/conversation-access";
+import { prisma } from "@/lib/prisma";
+
+/**
+ * Resolve o nome do template de Call Permission com fallback em cascata:
+ *
+ * 1. ENV (`META_WHATSAPP_CALL_PERMISSION_TEMPLATE`) — manda se estiver
+ *    configurada (útil para overrides manuais no servidor).
+ * 2. Banco (`WhatsAppTemplateConfig`) — qualquer registro cujo nome contenha
+ *    `call_permission` (convenção da Meta para templates do tipo
+ *    `CALL_PERMISSIONS_REQUEST`). Ordenado pelo mais recente para refletir
+ *    atualizações de rótulo/liberação feitas em `/settings/whatsapp-templates`.
+ *
+ * Retorna `null` quando nada foi encontrado — o chip exibe "Voz indisponível"
+ * e o agente vê orientação para cadastrar um template aprovado.
+ */
+async function resolveCallPermissionTemplate(): Promise<string | null> {
+  const fromEnv = getCallPermissionTemplateName();
+  if (fromEnv) return fromEnv;
+  try {
+    const cfg = await prisma.whatsAppTemplateConfig.findFirst({
+      where: {
+        metaTemplateName: { contains: "call_permission", mode: "insensitive" },
+      },
+      orderBy: { updatedAt: "desc" },
+      select: { metaTemplateName: true },
+    });
+    return cfg?.metaTemplateName ?? null;
+  } catch (e) {
+    // Tabela ausente (migration antiga) ou erro transitório — degrada para env.
+    console.warn(
+      "[calling-context] resolveCallPermissionTemplate fallback:",
+      e instanceof Error ? e.message : e,
+    );
+    return null;
+  }
+}
+
+type RouteContext = { params: Promise<{ id: string }> };
+
+function suggestFromText(content: string | null | undefined): boolean {
+  if (!content) return false;
+  const t = content.toLowerCase();
+  return (
+    /\bpode\s+(me\s+)?lig/.test(t) ||
+    /\bliga(r|me)?\b/.test(t) ||
+    /\bchamad\w*\b/.test(t) ||
+    /\bfalar\s+por\s+(voz|telefone|liga)/.test(t) ||
+    /\btelefon/.test(t)
+  );
+}
+
+/**
+ * Decide se a conversa tem uma chamada Meta ativa agora.
+ *
+ * Fontes de imprecisão que já observamos em produção:
+ *  1. A Meta às vezes manda `terminate` com um `metaCallId` ligeiramente
+ *     diferente do `connect` (prefixo `wacid.` vs numérico puro, etc.) — o
+ *     match estrito por ID deixava o chip preso em "Em chamada".
+ *  2. Perda de webhook de `terminate` (retries do lado deles, queda de rede)
+ *     deixava um `connect` órfão mantendo a chamada ativa para sempre.
+ *
+ * Regras atuais (mais tolerantes):
+ *  - Qualquer `terminate` encerra a chamada ativa, independente do ID.
+ *  - Se o último evento é `terminate`, a chamada está encerrada.
+ *  - Se o último `connect` tem mais de STALE_CONNECT_MS sem terminate, tratamos
+ *    como encerrado (sanity fallback para webhook perdido).
+ */
+const STALE_CONNECT_MS = 30 * 60 * 1000;
+
+function computeActiveCallId(
+  events: { metaCallId: string; eventKind: string; createdAt: Date }[]
+): string | null {
+  const asc = [...events].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+  let active: string | null = null;
+  let activeSince: number | null = null;
+  for (const e of asc) {
+    if (e.eventKind === "connect") {
+      active = e.metaCallId;
+      activeSince = e.createdAt.getTime();
+    } else if (e.eventKind === "terminate") {
+      active = null;
+      activeSince = null;
+    }
+  }
+  if (active && activeSince && Date.now() - activeSince > STALE_CONNECT_MS) {
+    return null;
+  }
+  return active;
+}
+
+type CallEvRow = {
+  metaCallId: string;
+  direction: string;
+  eventKind: string;
+  signalingStatus: string | null;
+  terminateStatus: string | null;
+  durationSec: number | null;
+  createdAt: Date;
+};
+
+/** Uma linha por chamada (agrupa sinalização + connect + terminate). */
+function buildCompactCallTimeline(events: CallEvRow[]): {
+  at: string;
+  kind: "call_event";
+  label: string;
+  metaCallId: string;
+}[] {
+  const byId = new Map<string, CallEvRow[]>();
+  for (const e of events) {
+    const list = byId.get(e.metaCallId) ?? [];
+    list.push(e);
+    byId.set(e.metaCallId, list);
+  }
+  const rows: { at: string; kind: "call_event"; label: string; metaCallId: string }[] = [];
+  for (const [metaCallId, ge] of byId) {
+    ge.sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    const connect = ge.find((x) => x.eventKind === "connect");
+    const term = ge.find((x) => x.eventKind === "terminate");
+    if (!connect && !term) continue;
+    const dirFrom =
+      connect?.direction ?? term?.direction ?? ge.find((x) => x.direction)?.direction ?? "UNKNOWN";
+    const outbound = dirFrom === "BUSINESS_INITIATED";
+    const arrow = outbound ? "Saída" : "Entrada";
+    const t = connect?.createdAt ?? term!.createdAt;
+    const time = new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" }).format(t);
+    let suffix = "";
+    if (term) {
+      const st = term.terminateStatus ?? "";
+      const ds = term.durationSec;
+      const durShort =
+        ds != null && ds > 0
+          ? ds >= 60
+            ? `${Math.floor(ds / 60)}m${String(ds % 60).padStart(2, "0")}s`
+            : `${ds}s`
+          : "";
+      if (st === "COMPLETED") suffix = durShort ? ` · ${durShort} · ok` : " · ok";
+      else if (st === "FAILED") suffix = " · falhou";
+      else suffix = durShort ? ` · ${durShort}` : " · fim";
+    } else {
+      suffix = " · ativa";
+    }
+    rows.push({
+      at: t.toISOString(),
+      metaCallId,
+      kind: "call_event",
+      label: `${arrow} · ${time}${suffix}`,
+    });
+  }
+  rows.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+  return rows;
+}
+
+export async function GET(_request: Request, context: RouteContext) {
+  try {
+    const session = await auth();
+    if (!session?.user) {
+      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+    }
+
+    const { id } = await context.params;
+    const denied = await requireConversationAccess(session, id);
+    if (denied) return denied;
+
+    const conv = await prisma.conversation.findUnique({
+      where: { id },
+      select: {
+        channel: true,
+        whatsappCallConsentStatus: true,
+        whatsappCallConsentUpdatedAt: true,
+      },
+    });
+    if (!conv) {
+      return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
+    }
+
+    // Raw query para colunas novas (migration pode ainda não ter sido aplicada em todos os envs).
+    let consentType: "TEMPORARY" | "PERMANENT" | null = null;
+    let consentExpiresAt: Date | null = null;
+    try {
+      const rows = (await prisma.$queryRaw`
+        SELECT
+          "whatsappCallConsentType"::text AS "consentType",
+          "whatsappCallConsentExpiresAt" AS "consentExpiresAt"
+        FROM "conversations"
+        WHERE "id" = ${id}
+      `) as Array<{ consentType: string | null; consentExpiresAt: Date | string | null }>;
+      const row = rows[0];
+      if (row) {
+        consentType =
+          row.consentType === "PERMANENT" || row.consentType === "TEMPORARY"
+            ? row.consentType
+            : null;
+        consentExpiresAt = row.consentExpiresAt
+          ? new Date(row.consentExpiresAt as Date | string)
+          : null;
+      }
+    } catch (err) {
+      // migration ainda não rodou — segue sem os campos novos (cliente cai no fallback 7d)
+      console.warn(
+        "[calling-context] type/expiresAt ausente (migration pendente):",
+        err instanceof Error ? err.message : err,
+      );
+    }
+
+    if (conv.channel !== "whatsapp") {
+      const templateName = await resolveCallPermissionTemplate();
+      return NextResponse.json({
+        channel: conv.channel,
+        consentStatus: null,
+        consentUpdatedAt: null,
+        consentType: null,
+        consentExpiresAt: null,
+        permissionTemplateConfigured: !!templateName,
+        envCallPermissionTemplate: templateName,
+        activeCallMetaId: null,
+        suggestCallPermission: false,
+        timeline: [],
+      });
+    }
+
+    const [events, lastInbound] = await Promise.all([
+      prisma.whatsappCallEvent.findMany({
+        where: { conversationId: id },
+        orderBy: { createdAt: "desc" },
+        take: 60,
+        select: {
+          metaCallId: true,
+          direction: true,
+          eventKind: true,
+          signalingStatus: true,
+          terminateStatus: true,
+          durationSec: true,
+          createdAt: true,
+        },
+      }),
+      prisma.message.findFirst({
+        where: { conversationId: id, direction: "in" },
+        orderBy: { createdAt: "desc" },
+        select: { content: true },
+      }),
+    ]);
+
+    const activeCallMetaId = computeActiveCallId(events);
+
+    const timeline: {
+      at: string;
+      kind: "call_event" | "consent";
+      label: string;
+      metaCallId?: string;
+    }[] = buildCompactCallTimeline(events);
+
+    if (conv.whatsappCallConsentUpdatedAt) {
+      timeline.push({
+        at: conv.whatsappCallConsentUpdatedAt.toISOString(),
+        kind: "consent",
+        label:
+          conv.whatsappCallConsentStatus === "REQUESTED"
+            ? "Opt-in · pedido enviado"
+            : conv.whatsappCallConsentStatus === "GRANTED"
+              ? "Opt-in · permitido"
+              : conv.whatsappCallConsentStatus === "EXPIRED"
+                ? "Opt-in · expirado"
+                : conv.whatsappCallConsentStatus === "DENIED"
+                  ? "Opt-in · recusado"
+                  : "Opt-in · atualizado",
+      });
+      timeline.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+    }
+
+    const templateName = await resolveCallPermissionTemplate();
+
+    return NextResponse.json({
+      channel: conv.channel,
+      consentStatus: conv.whatsappCallConsentStatus,
+      consentUpdatedAt: conv.whatsappCallConsentUpdatedAt?.toISOString() ?? null,
+      consentType,
+      consentExpiresAt: consentExpiresAt?.toISOString() ?? null,
+      permissionTemplateConfigured: !!templateName,
+      envCallPermissionTemplate: templateName,
+      activeCallMetaId,
+      suggestCallPermission:
+        conv.whatsappCallConsentStatus === "NONE" && suggestFromText(lastInbound?.content),
+      timeline,
+    });
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ message: "Erro ao carregar contexto de chamada." }, { status: 500 });
+  }
+}

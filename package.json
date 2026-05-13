@@ -1,0 +1,71 @@
+{
+  "name": "crm-eduit-backend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --turbopack -p 3001",
+    "dev:webpack": "next dev -p 3001",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0",
+    "lint": "next lint",
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
+    "db:seed": "prisma db seed",
+    "db:seed:saleshub": "tsx prisma/seed-sales-hub.ts",
+    "db:ensure-conversations": "tsx prisma/ensure-deal-conversations.ts",
+    "db:studio": "prisma studio",
+    "worker:automation": "tsx src/workers/automation-worker.ts",
+    "worker:baileys": "tsx src/workers/baileys/index.ts",
+    "postinstall": "prisma generate"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "overrides": {
+    "protobufjs": "^7.5.5"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.71",
+    "@ai-sdk/openai": "^3.0.53",
+    "@auth/prisma-adapter": "^2.11.2",
+    "@hookform/resolvers": "^5.2.2",
+    "@prisma/adapter-pg": "^7.7.0",
+    "@prisma/client": "^6.19.3",
+    "@types/node": "^25.6.0",
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "ai": "^6.0.168",
+    "bcryptjs": "^3.0.3",
+    "bullmq": "^5.74.1",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.1.0",
+    "ffmpeg-static": "^5.3.0",
+    "ioredis": "^5.10.1",
+    "next": "^15.5.15",
+    "next-auth": "^5.0.0-beta.30",
+    "pg": "^8.20.0",
+    "prisma": "^6.19.3",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "react-hook-form": "^7.72.2",
+    "tailwind-merge": "^3.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3",
+    "web-push": "^3.6.7",
+    "zod": "^4.3.6",
+    "zustand": "^5.0.12"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/pg": "^8.20.0",
+    "@types/web-push": "^3.6.4",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.2.4"
+  }
+}

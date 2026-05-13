@@ -1,0 +1,6 @@
+/* Backend API — sem Tailwind; folha mínima para o App Router. */
+html,
+body {
+  margin: 0;
+  padding: 0;
+}

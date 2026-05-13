@@ -1,0 +1,141 @@
+import { NextResponse } from "next/server";
+import QRCode from "qrcode";
+
+import { auth } from "@/lib/auth";
+import { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
+import {
+  getChannelById,
+  parseChannelConfig,
+  updateChannel,
+} from "@/services/channels";
+
+type RouteContext = { params: Promise<{ id: string }> };
+
+function str(cfg: Record<string, unknown>, key: string): string | undefined {
+  const v = cfg[key];
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
+}
+
+async function imageUrlToDataUri(url: string): Promise<string | null> {
+  try {
+    const res = await fetch(url, { cache: "no-store" });
+    if (!res.ok) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    const mime = res.headers.get("content-type")?.split(";")[0]?.trim() || "image/png";
+    return `data:${mime};base64,${buf.toString("base64")}`;
+  } catch {
+    return null;
+  }
+}
+
+type MetaQrdlItem = {
+  code?: string;
+  prefilled_message?: string;
+  deep_link_url?: string;
+  qr_image_url?: string;
+};
+
+function firstMetaQrdl(payload: unknown): MetaQrdlItem | null {
+  if (!payload || typeof payload !== "object") return null;
+  const o = payload as Record<string, unknown>;
+  if (Array.isArray(o.data) && o.data.length > 0) {
+    const first = o.data[0];
+    if (first && typeof first === "object") return first as MetaQrdlItem;
+  }
+  if (typeof o.code === "string" || typeof o.deep_link_url === "string") {
+    return o as MetaQrdlItem;
+  }
+  return null;
+}
+
+export async function GET(request: Request, context: RouteContext) {
+  try {
+    const session = await auth();
+    if (!session?.user) {
+      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+    }
+
+    const { id } = await context.params;
+    const channel = await getChannelById(id);
+    if (!channel) {
+      return NextResponse.json({ message: "Canal não encontrado." }, { status: 404 });
+    }
+
+    if (channel.provider === "BAILEYS_MD") {
+      return NextResponse.json({
+        qrCode: channel.qrCode ?? null,
+        status: channel.status,
+      });
+    }
+
+    if (channel.provider !== "META_CLOUD_API") {
+      return NextResponse.json(
+        { message: "QR code não disponível para este provedor.", qrCode: null, status: channel.status },
+        { status: 404 }
+      );
+    }
+
+    const cfg = parseChannelConfig(channel.config);
+    const accessToken = str(cfg, "accessToken");
+    const phoneNumberId = str(cfg, "phoneNumberId") ?? channel.phoneNumber ?? undefined;
+    const businessAccountId = str(cfg, "businessAccountId");
+    if (!accessToken || !phoneNumberId || !businessAccountId) {
+      return NextResponse.json(
+        { message: "Config Meta incompleta (accessToken, phoneNumberId, businessAccountId).", status: channel.status },
+        { status: 400 }
+      );
+    }
+
+    const meta = new MetaWhatsAppClient(accessToken, phoneNumberId, businessAccountId);
+    const { searchParams } = new URL(request.url);
+    const prefilledRaw = searchParams.get("prefilled_message");
+    const prefilled =
+      typeof prefilledRaw === "string" && prefilledRaw.trim() !== ""
+        ? prefilledRaw.trim().slice(0, 140)
+        : "Oi";
+
+    const storedId = str(cfg, "metaQrCodeId");
+    let item: MetaQrdlItem | null = null;
+
+    if (storedId) {
+      try {
+        const one = await meta.getMessageQrDlByCode(phoneNumberId, storedId);
+        item = firstMetaQrdl(one) ?? (one as MetaQrdlItem);
+      } catch {
+        item = null;
+      }
+    }
+
+    if (!item?.qr_image_url && !item?.deep_link_url) {
+      const listPayload = await meta.getQRCode(phoneNumberId);
+      item = firstMetaQrdl(listPayload);
+    }
+
+    if (!item?.qr_image_url && !item?.deep_link_url) {
+      const created = await meta.generateQRCode(phoneNumberId, prefilled || "Oi");
+      item = firstMetaQrdl(created) ?? (created as MetaQrdlItem);
+      if (item?.code) {
+        await updateChannel(id, {
+          config: { ...cfg, metaQrCodeId: item.code },
+        });
+      }
+    }
+
+    let qrCode: string | null = null;
+    if (item?.qr_image_url) {
+      qrCode = await imageUrlToDataUri(item.qr_image_url);
+    }
+    if (!qrCode && item?.deep_link_url) {
+      qrCode = await QRCode.toDataURL(item.deep_link_url, { margin: 1 });
+    }
+
+    return NextResponse.json({
+      qrCode,
+      status: channel.status,
+    });
+  } catch (e: unknown) {
+    console.error(e);
+    const msg = e instanceof Error ? e.message : "Erro ao obter QR code.";
+    return NextResponse.json({ message: msg }, { status: 500 });
+  }
+}

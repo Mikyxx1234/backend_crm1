@@ -1,0 +1,138 @@
+import { Worker, type Job } from "bullmq";
+import IORedis from "ioredis";
+import path from "path";
+import fs from "fs/promises";
+
+import { prisma } from "@/lib/prisma";
+import {
+  BAILEYS_OUTBOUND_QUEUE_NAME,
+  type BaileysOutboundPayload,
+} from "@/lib/queue";
+import type { BaileysManager } from "./baileys-manager";
+import type { AnyMessageContent } from "@whiskeysockets/baileys";
+
+const SSE_REDIS_CHANNEL = "crm:sse:events";
+
+function publishSse(redis: IORedis, event: string, data: unknown) {
+  redis.publish(SSE_REDIS_CHANNEL, JSON.stringify({ event, data })).catch(() => {});
+}
+
+export function startOutboundConsumer(
+  manager: BaileysManager,
+  redisUrl: string,
+): Worker<BaileysOutboundPayload> {
+  const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
+
+  const worker = new Worker<BaileysOutboundPayload>(
+    BAILEYS_OUTBOUND_QUEUE_NAME,
+    async (job: Job<BaileysOutboundPayload>) => {
+      const { channelId, to, content, mediaUrl, replyTo, messageType, messageId } = job.data;
+
+      const session = manager.getSession(channelId);
+      if (!session?.socket) {
+        await markFailed(messageId, "Sessão Baileys não está conectada");
+        throw new Error(`Sessão ${channelId} não conectada`);
+      }
+
+      const jid = to.includes("@") ? to : to.replace(/\D/g, "") + "@s.whatsapp.net";
+      let waContent: AnyMessageContent;
+
+      if (mediaUrl && messageType !== "text") {
+        const localPath = mediaUrl.startsWith("/uploads/")
+          ? path.join(process.cwd(), "public", mediaUrl)
+          : null;
+
+        let buffer: Buffer | undefined;
+        if (localPath) {
+          try {
+            buffer = await fs.readFile(localPath);
+          } catch {
+            /* file not found — fallback to URL */
+          }
+        }
+
+        const mediaPayload = buffer
+          ? buffer
+          : { url: mediaUrl };
+
+        const ext = mediaUrl.split(".").pop()?.toLowerCase() ?? "";
+        const mimeFromExt: Record<string, string> = {
+          jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", gif: "image/gif", webp: "image/webp",
+          mp4: "video/mp4", mov: "video/quicktime", "3gp": "video/3gpp",
+          ogg: "audio/ogg; codecs=opus", mp3: "audio/mpeg", m4a: "audio/mp4", wav: "audio/wav",
+          pdf: "application/pdf", doc: "application/msword",
+          docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          xls: "application/vnd.ms-excel",
+          xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        };
+        const detectedMime = mimeFromExt[ext] ?? "application/octet-stream";
+
+        switch (messageType) {
+          case "image":
+            waContent = { image: mediaPayload, caption: content || undefined };
+            break;
+          case "video":
+            waContent = { video: mediaPayload, caption: content || undefined };
+            break;
+          case "audio":
+          case "ptt":
+            waContent = { audio: mediaPayload, mimetype: "audio/ogg; codecs=opus", ptt: true };
+            break;
+          case "sticker":
+            waContent = { sticker: mediaPayload };
+            break;
+          case "document":
+            waContent = {
+              document: mediaPayload,
+              mimetype: detectedMime,
+              fileName: content || mediaUrl.split("/").pop() || "file",
+            };
+            break;
+          default:
+            waContent = { text: content || "[media]" };
+        }
+      } else {
+        waContent = { text: content };
+      }
+
+      if (replyTo) {
+        (waContent as Record<string, unknown>).quoted = {
+          key: { remoteJid: jid, id: replyTo },
+        };
+      }
+
+      const sent = await session.sendMessage(jid, waContent);
+
+      if (sent?.key?.id) {
+        await prisma.message.update({
+          where: { id: messageId },
+          data: { externalId: sent.key.id, sendStatus: "sent" },
+        }).catch(() => {});
+      }
+
+      publishSse(connection, "message_status", {
+        messageId,
+        status: "sent",
+      });
+    },
+    { connection },
+  );
+
+  worker.on("failed", (job, err) => {
+    console.error(`[baileys-outbound] job ${job?.id} falhou:`, err.message);
+  });
+
+  worker.on("completed", (job) => {
+    console.info(`[baileys-outbound] job ${job.id} concluído`);
+  });
+
+  console.info(`[baileys-outbound] ouvindo fila "${BAILEYS_OUTBOUND_QUEUE_NAME}"`);
+  return worker;
+}
+
+async function markFailed(messageId: string, error: string) {
+  await prisma.message.update({
+    where: { id: messageId },
+    data: { sendStatus: "failed", sendError: error },
+  }).catch(() => {});
+}

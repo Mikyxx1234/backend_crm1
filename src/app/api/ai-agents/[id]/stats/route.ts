@@ -1,0 +1,104 @@
+import { NextResponse } from "next/server";
+
+import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+
+/**
+ * Estatísticas de uso de um agente: totais, série diária e últimos runs.
+ * Serve o painel "Uso" no dialog de edição e a aba "Agentes IA" no
+ * /monitor.
+ */
+export async function GET(
+  request: Request,
+  { params }: { params: Promise<{ id: string }> },
+) {
+  const session = await auth();
+  if (!session?.user) {
+    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+  }
+  const { id } = await params;
+  const url = new URL(request.url);
+  const days = Math.min(Math.max(Number(url.searchParams.get("days")) || 7, 1), 30);
+
+  const since = new Date();
+  since.setDate(since.getDate() - days);
+  since.setHours(0, 0, 0, 0);
+
+  const [totals, statusBreak, perDay, lastRuns, draftsPending] =
+    await Promise.all([
+      prisma.aIAgentRun.aggregate({
+        where: { agentId: id, createdAt: { gte: since } },
+        _sum: { inputTokens: true, outputTokens: true, costUsd: true },
+        _count: { _all: true },
+      }),
+      prisma.aIAgentRun.groupBy({
+        by: ["status"],
+        where: { agentId: id, createdAt: { gte: since } },
+        _count: { _all: true },
+      }),
+      prisma.$queryRaw<
+        Array<{ day: Date; runs: bigint; tokens: bigint; cost: number }>
+      >`
+        SELECT DATE_TRUNC('day', "createdAt") AS day,
+               COUNT(*) AS runs,
+               SUM("inputTokens" + "outputTokens") AS tokens,
+               SUM("costUsd") AS cost
+          FROM "ai_agent_runs"
+         WHERE "agentId" = ${id}
+           AND "createdAt" >= ${since}
+         GROUP BY DATE_TRUNC('day', "createdAt")
+         ORDER BY day ASC
+      `,
+      prisma.aIAgentRun.findMany({
+        where: { agentId: id },
+        orderBy: { createdAt: "desc" },
+        take: 10,
+        select: {
+          id: true,
+          source: true,
+          status: true,
+          inputTokens: true,
+          outputTokens: true,
+          costUsd: true,
+          responsePreview: true,
+          errorMessage: true,
+          createdAt: true,
+          finishedAt: true,
+        },
+      }),
+      prisma.message.count({
+        where: {
+          aiAgentUser: { aiAgentConfig: { id } },
+          messageType: "ai_draft",
+          isPrivate: true,
+        },
+      }),
+    ]);
+
+  const statusCounts = statusBreak.reduce(
+    (acc, row) => {
+      acc[row.status] = row._count._all;
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+
+  return NextResponse.json({
+    windowDays: days,
+    totals: {
+      runs: totals._count._all ?? 0,
+      inputTokens: totals._sum.inputTokens ?? 0,
+      outputTokens: totals._sum.outputTokens ?? 0,
+      costUsd: Number((totals._sum.costUsd ?? 0).toFixed(4)),
+    },
+    statusCounts,
+    perDay: perDay.map((d) => ({
+      day: d.day,
+      runs: Number(d.runs ?? 0),
+      tokens: Number(d.tokens ?? 0),
+      cost: Number(d.cost ?? 0),
+    })),
+    lastRuns,
+    draftsPending,
+  });
+}

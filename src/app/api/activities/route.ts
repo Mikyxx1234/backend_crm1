@@ -1,0 +1,151 @@
+import { NextResponse } from "next/server";
+
+import { authenticateApiRequest } from "@/lib/api-auth";
+import { createActivity, getActivities, isValidActivityType } from "@/services/activities";
+import { createDealEvent } from "@/services/deals";
+
+function parseIntParam(v: string | null, fallback: number) {
+  if (v === null || v === "") return fallback;
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export async function GET(request: Request) {
+  try {
+    const authResult = await authenticateApiRequest(request);
+    if (!authResult.ok) return authResult.response;
+
+    const { searchParams } = new URL(request.url);
+    const dealId = searchParams.get("dealId") ?? undefined;
+    const contactId = searchParams.get("contactId") ?? undefined;
+    const userId = searchParams.get("userId") ?? undefined;
+    const typeRaw = searchParams.get("type");
+    const type = typeRaw && isValidActivityType(typeRaw) ? typeRaw : undefined;
+    const completedParam = searchParams.get("completed");
+    let completed: boolean | undefined;
+    if (completedParam === "true") completed = true;
+    else if (completedParam === "false") completed = false;
+    const page = parseIntParam(searchParams.get("page"), 1);
+    const perPage = parseIntParam(searchParams.get("perPage"), 20);
+
+    const result = await getActivities({
+      dealId,
+      contactId,
+      userId,
+      type,
+      completed,
+      page,
+      perPage,
+    });
+
+    return NextResponse.json(result);
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ message: "Erro ao listar atividades." }, { status: 500 });
+  }
+}
+
+export async function POST(request: Request) {
+  try {
+    const authResult = await authenticateApiRequest(request);
+    if (!authResult.ok) return authResult.response;
+
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
+    }
+
+    if (!body || typeof body !== "object") {
+      return NextResponse.json({ message: "Corpo inválido." }, { status: 400 });
+    }
+
+    const b = body as Record<string, unknown>;
+
+    if (typeof b.type !== "string" || !isValidActivityType(b.type)) {
+      return NextResponse.json({ message: "Tipo de atividade inválido." }, { status: 400 });
+    }
+    if (typeof b.title !== "string" || b.title.trim().length < 1) {
+      return NextResponse.json({ message: "Título é obrigatório." }, { status: 400 });
+    }
+
+    if (b.completed !== undefined && typeof b.completed !== "boolean") {
+      return NextResponse.json({ message: "completed inválido." }, { status: 400 });
+    }
+
+    let scheduledAt: Date | string | null | undefined;
+    if (b.scheduledAt === null) {
+      scheduledAt = null;
+    } else if (typeof b.scheduledAt === "string") {
+      const d = new Date(b.scheduledAt);
+      if (Number.isNaN(d.getTime())) {
+        return NextResponse.json({ message: "scheduledAt inválido." }, { status: 400 });
+      }
+      scheduledAt = d;
+    } else if (b.scheduledAt !== undefined) {
+      return NextResponse.json({ message: "scheduledAt inválido." }, { status: 400 });
+    }
+
+    let completedAt: Date | string | null | undefined;
+    if (b.completedAt === null) {
+      completedAt = null;
+    } else if (typeof b.completedAt === "string") {
+      const d = new Date(b.completedAt);
+      if (Number.isNaN(d.getTime())) {
+        return NextResponse.json({ message: "completedAt inválido." }, { status: 400 });
+      }
+      completedAt = d;
+    } else if (b.completedAt !== undefined) {
+      return NextResponse.json({ message: "completedAt inválido." }, { status: 400 });
+    }
+
+    try {
+      const resolvedDealId =
+        b.dealId === null ? null : typeof b.dealId === "string" ? b.dealId : undefined;
+
+      const activity = await createActivity({
+        type: b.type,
+        title: b.title,
+        description:
+          b.description === null
+            ? null
+            : typeof b.description === "string"
+              ? b.description
+              : undefined,
+        completed: typeof b.completed === "boolean" ? b.completed : undefined,
+        scheduledAt,
+        completedAt,
+        contactId:
+          b.contactId === null
+            ? null
+            : typeof b.contactId === "string"
+              ? b.contactId
+              : undefined,
+        dealId: resolvedDealId,
+        userId: authResult.user.id,
+      });
+
+      if (resolvedDealId) {
+        const uid = authResult.user.id;
+        createDealEvent(resolvedDealId, uid, "ACTIVITY_ADDED", {
+          activityType: b.type,
+          title: b.title,
+        }).catch(() => {});
+      }
+
+      return NextResponse.json(activity, { status: 201 });
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message === "INVALID_TITLE") {
+        return NextResponse.json({ message: "Título inválido." }, { status: 400 });
+      }
+      throw err;
+    }
+  } catch (e: unknown) {
+    console.error(e);
+    if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2003") {
+      return NextResponse.json({ message: "Referência inválida." }, { status: 400 });
+    }
+    return NextResponse.json({ message: "Erro ao criar atividade." }, { status: 500 });
+  }
+}

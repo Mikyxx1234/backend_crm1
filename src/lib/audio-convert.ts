@@ -1,0 +1,305 @@
+import { execFile, execFileSync } from "child_process";
+import { existsSync } from "fs";
+import { writeFile, readFile, unlink, mkdir } from "fs/promises";
+import os from "os";
+import path from "path";
+
+function resolveFFmpeg(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const staticBin = require("ffmpeg-static") as string;
+    if (staticBin && existsSync(staticBin)) {
+      console.log("[audio-convert] Usando ffmpeg-static:", staticBin);
+      return staticBin;
+    }
+  } catch { /* ffmpeg-static not available */ }
+
+  try {
+    execFileSync("ffmpeg", ["-version"], { timeout: 5000, stdio: "pipe" });
+    console.log("[audio-convert] Usando ffmpeg do sistema (PATH)");
+    return "ffmpeg";
+  } catch {
+    console.warn("[audio-convert] ffmpeg nao encontrado nem via ffmpeg-static nem no PATH");
+    return "ffmpeg";
+  }
+}
+
+let _ffmpeg: string | undefined;
+function getFFmpeg(): string {
+  if (!_ffmpeg) _ffmpeg = resolveFFmpeg();
+  return _ffmpeg;
+}
+
+const TMP_DIR = path.join(os.tmpdir(), "crm-audio-convert");
+
+const OGG_MAGIC = Buffer.from([0x4f, 0x67, 0x67, 0x53]); // "OggS"
+
+/**
+ * Validate that a buffer is a valid OGG file by checking magic bytes
+ * and minimum size (a valid OGG/Opus file is at least ~200 bytes).
+ */
+export function isValidOgg(buf: Buffer): boolean {
+  return buf.length >= 200 && buf.subarray(0, 4).equals(OGG_MAGIC);
+}
+
+/**
+ * Build FFmpeg argument strategies in priority order:
+ * 1. Remux (codec copy) — fast, works when input already has Opus codec (webm/opus)
+ * 2. Transcode with libopus — high quality, requires libopus linked in FFmpeg
+ * 3. Transcode with built-in opus encoder — fallback
+ */
+function getConversionStrategies(inputExt: string): { label: string; args: string[] }[] {
+  const strategies: { label: string; args: string[] }[] = [];
+
+  if (inputExt === "webm" || inputExt === "ogg") {
+    strategies.push({ label: "remux (codec copy)", args: ["-c:a", "copy"] });
+  }
+
+  strategies.push({ label: "transcode libopus", args: ["-c:a", "libopus", "-b:a", "48k", "-application", "voip"] });
+  strategies.push({ label: "transcode opus", args: ["-c:a", "opus", "-b:a", "48k"] });
+
+  return strategies;
+}
+
+function runFFmpeg(bin: string, args: string[], timeoutMs = 30_000): Promise<{ ok: boolean; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(bin, args, { timeout: timeoutMs }, (error, _stdout, stderr) => {
+      if (error) {
+        resolve({ ok: false, stderr: stderr?.slice(-500) ?? error.message });
+      } else {
+        resolve({ ok: true, stderr: stderr ?? "" });
+      }
+    });
+  });
+}
+
+/**
+ * Converts any audio buffer to OGG/Opus via FFmpeg.
+ * Tries multiple strategies: remux first (for webm/opus), then transcode.
+ * Returns the converted buffer, or null if all strategies fail.
+ */
+export async function convertToOgg(
+  inputBuffer: Buffer,
+  inputExt = "webm",
+): Promise<Buffer | null> {
+  await mkdir(TMP_DIR, { recursive: true });
+
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 8);
+  const inputPath = path.join(TMP_DIR, `in-${ts}-${rand}.${inputExt}`);
+  const outputPath = path.join(TMP_DIR, `out-${ts}-${rand}.ogg`);
+
+  try {
+    await writeFile(inputPath, inputBuffer);
+
+    const bin = getFFmpeg();
+    const strategies = getConversionStrategies(inputExt);
+
+    for (const strategy of strategies) {
+      const fullArgs = ["-i", inputPath, "-vn", ...strategy.args, "-y", outputPath];
+      console.log(`[ffmpeg] Tentando ${strategy.label}: ${bin} ${fullArgs.join(" ")}`);
+
+      const { ok, stderr } = await runFFmpeg(bin, fullArgs);
+
+      if (!ok) {
+        console.warn(`[ffmpeg] Estrategia "${strategy.label}" falhou: ${stderr.slice(-200)}`);
+        await unlink(outputPath).catch(() => {});
+        continue;
+      }
+
+      if (!existsSync(outputPath)) {
+        console.warn(`[ffmpeg] Estrategia "${strategy.label}" nao gerou arquivo de saida`);
+        continue;
+      }
+
+      const result = await readFile(outputPath);
+
+      if (!isValidOgg(result)) {
+        console.warn(`[ffmpeg] Estrategia "${strategy.label}" gerou arquivo invalido (${result.length} bytes, magic: ${result.subarray(0, 4).toString("hex")})`);
+        await unlink(outputPath).catch(() => {});
+        continue;
+      }
+
+      console.log(`[ffmpeg] Conversao OK via "${strategy.label}": ${inputBuffer.length} -> ${result.length} bytes`);
+      return result;
+    }
+
+    console.error("[audio-convert] Todas as estrategias de conversao falharam");
+    return null;
+  } catch (err) {
+    console.error("[audio-convert] FFmpeg conversion error:", err instanceof Error ? err.message : err);
+    return null;
+  } finally {
+    await unlink(inputPath).catch(() => {});
+    await unlink(outputPath).catch(() => {});
+  }
+}
+
+/**
+ * Convert any audio buffer to MP3 (audio/mpeg) via FFmpeg.
+ *
+ * Use case: download de áudios do chat sempre como `.mp3` — formato
+ * universal que abre em qualquer player desktop/mobile sem precisar
+ * de plugin (ao contrário de `.ogg`/`.opus`/`.webm` que vêm da
+ * Meta/WhatsApp e às vezes não tocam direto fora do navegador).
+ *
+ * Estratégia: transcode com `libmp3lame` (encoder MP3 padrão do
+ * ffmpeg). Bitrate 128kbps + canais mono — voz humana cabe
+ * confortavelmente nesse perfil e mantém arquivos pequenos
+ * (~1MB/min). Sample rate 44.1kHz para máxima compatibilidade.
+ *
+ * Retorna `null` se ffmpeg falhar (sem libmp3lame, input corrompido,
+ * timeout, etc) — caller deve cair pro arquivo original como fallback.
+ */
+export async function convertToMp3(
+  inputBuffer: Buffer,
+  inputExt = "webm",
+): Promise<Buffer | null> {
+  await mkdir(TMP_DIR, { recursive: true });
+
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 8);
+  const inputPath = path.join(TMP_DIR, `in-${ts}-${rand}.${inputExt}`);
+  const outputPath = path.join(TMP_DIR, `out-${ts}-${rand}.mp3`);
+
+  try {
+    await writeFile(inputPath, inputBuffer);
+
+    const bin = getFFmpeg();
+    const args = [
+      "-i", inputPath,
+      "-vn",
+      "-acodec", "libmp3lame",
+      "-ar", "44100",
+      "-ac", "1",
+      "-b:a", "128k",
+      "-y",
+      outputPath,
+    ];
+
+    console.log(`[ffmpeg] Convertendo pra MP3: ${bin} ${args.join(" ")}`);
+    const { ok, stderr } = await runFFmpeg(bin, args);
+
+    if (!ok) {
+      console.warn(`[ffmpeg] Conversao MP3 falhou: ${stderr.slice(-300)}`);
+      return null;
+    }
+
+    if (!existsSync(outputPath)) {
+      console.warn("[ffmpeg] MP3 nao foi gerado");
+      return null;
+    }
+
+    const result = await readFile(outputPath);
+    console.log(`[ffmpeg] Conversao MP3 OK: ${inputBuffer.length} -> ${result.length} bytes`);
+    return result;
+  } catch (err) {
+    console.error("[audio-convert] MP3 conversion error:", err instanceof Error ? err.message : err);
+    return null;
+  } finally {
+    await unlink(inputPath).catch(() => {});
+    await unlink(outputPath).catch(() => {});
+  }
+}
+
+/**
+ * Convert any audio buffer to WAV 16kHz mono — formato canônico
+ * exigido pelo Whisper (OpenAI) e a maioria dos modelos de ASR.
+ *
+ * Sem essa conversão, mandar `.ogg`/`.opus` direto pra Hugging Face
+ * Inference API funciona ÀS VEZES (depende do servidor decodificar
+ * Opus), mas WAV 16kHz mono é o "lingua franca" garantido — Whisper
+ * espera exatamente isso internamente, então economiza um decode
+ * server-side e melhora a estabilidade.
+ */
+export async function convertToWav16k(
+  inputBuffer: Buffer,
+  inputExt = "webm",
+): Promise<Buffer | null> {
+  await mkdir(TMP_DIR, { recursive: true });
+
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 8);
+  const inputPath = path.join(TMP_DIR, `in-${ts}-${rand}.${inputExt}`);
+  const outputPath = path.join(TMP_DIR, `out-${ts}-${rand}.wav`);
+
+  try {
+    await writeFile(inputPath, inputBuffer);
+    const bin = getFFmpeg();
+    const args = [
+      "-i", inputPath,
+      "-vn",
+      "-acodec", "pcm_s16le",
+      "-ar", "16000",
+      "-ac", "1",
+      "-y",
+      outputPath,
+    ];
+    const { ok, stderr } = await runFFmpeg(bin, args);
+    if (!ok) {
+      console.warn(`[ffmpeg] Conversao WAV16k falhou: ${stderr.slice(-300)}`);
+      return null;
+    }
+    if (!existsSync(outputPath)) return null;
+    return await readFile(outputPath);
+  } catch (err) {
+    console.error("[audio-convert] WAV16k conversion error:", err instanceof Error ? err.message : err);
+    return null;
+  } finally {
+    await unlink(inputPath).catch(() => {});
+    await unlink(outputPath).catch(() => {});
+  }
+}
+
+/**
+ * WhatsApp PTT (voice messages) REQUIRE audio/ogg with Opus codec.
+ * Only audio/ogg should skip conversion for voice messages.
+ */
+export function needsVoiceConversion(mimeBase: string): boolean {
+  const base = mimeBase.split(";")[0].trim();
+  return base !== "audio/ogg";
+}
+
+export function guessInputExt(mimeBase: string): string {
+  const base = mimeBase.split(";")[0].trim();
+  switch (base) {
+    case "audio/mp4":
+      return "m4a";
+    case "audio/webm":
+      return "webm";
+    case "audio/mpeg":
+      return "mp3";
+    case "audio/wav":
+      return "wav";
+    case "audio/aac":
+      return "aac";
+    default:
+      return "bin";
+  }
+}
+
+/**
+ * Resolve MIME from file extension — used as fallback when blob MIME is missing.
+ */
+export function mimeFromExtension(ext: string): string | null {
+  switch (ext.toLowerCase()) {
+    case "ogg":
+    case "opus":
+      return "audio/ogg";
+    case "mp4":
+    case "m4a":
+      return "audio/mp4";
+    case "mp3":
+      return "audio/mpeg";
+    case "aac":
+      return "audio/aac";
+    case "webm":
+      return "audio/webm";
+    case "wav":
+      return "audio/wav";
+    case "amr":
+      return "audio/amr";
+    default:
+      return null;
+  }
+}

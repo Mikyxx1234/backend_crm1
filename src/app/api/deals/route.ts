@@ -1,0 +1,161 @@
+import { NextResponse } from "next/server";
+
+import { authenticateApiRequest } from "@/lib/api-auth";
+import { getVisibilityFilter } from "@/lib/visibility";
+import { fireTrigger } from "@/services/automation-triggers";
+import { createDeal, createDealEvent, getDeals, isValidDealStatus } from "@/services/deals";
+
+function parseIntParam(v: string | null, fallback: number) {
+  if (v === null || v === "") return fallback;
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export async function GET(request: Request) {
+  try {
+    const authResult = await authenticateApiRequest(request);
+    if (!authResult.ok) return authResult.response;
+
+    const { searchParams } = new URL(request.url);
+    const pipelineId = searchParams.get("pipelineId") ?? undefined;
+    const stageId = searchParams.get("stageId") ?? undefined;
+    const statusRaw = searchParams.get("status");
+    const status =
+      statusRaw && isValidDealStatus(statusRaw) ? statusRaw : undefined;
+    const ownerId = searchParams.get("ownerId") ?? undefined;
+    const search = searchParams.get("search") ?? undefined;
+    const page = parseIntParam(searchParams.get("page"), 1);
+    const perPage = parseIntParam(searchParams.get("perPage"), 20);
+
+    const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
+    const visibility = await getVisibilityFilter(user);
+
+    const result = await getDeals({
+      pipelineId,
+      stageId,
+      status,
+      ownerId,
+      search,
+      page,
+      perPage,
+      visibilityWhere: visibility.dealWhere,
+    });
+
+    return NextResponse.json(result);
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ message: "Erro ao listar negócios." }, { status: 500 });
+  }
+}
+
+export async function POST(request: Request) {
+  try {
+    const authResult = await authenticateApiRequest(request);
+    if (!authResult.ok) return authResult.response;
+
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
+    }
+
+    if (!body || typeof body !== "object") {
+      return NextResponse.json({ message: "Corpo inválido." }, { status: 400 });
+    }
+
+    const b = body as Record<string, unknown>;
+
+    if (typeof b.title !== "string" || b.title.trim().length < 1) {
+      return NextResponse.json({ message: "Título é obrigatório." }, { status: 400 });
+    }
+    if (typeof b.stageId !== "string" || !b.stageId) {
+      return NextResponse.json({ message: "stageId é obrigatório." }, { status: 400 });
+    }
+
+    if (b.status !== undefined && b.status !== null) {
+      if (typeof b.status !== "string" || !isValidDealStatus(b.status)) {
+        return NextResponse.json({ message: "Status inválido." }, { status: 400 });
+      }
+    }
+
+    if (b.value !== undefined && b.value !== null) {
+      if (typeof b.value !== "number" || !Number.isFinite(b.value)) {
+        return NextResponse.json({ message: "value inválido." }, { status: 400 });
+      }
+    }
+
+    if (b.position !== undefined && b.position !== null) {
+      if (typeof b.position !== "number" || !Number.isInteger(b.position) || b.position < 0) {
+        return NextResponse.json({ message: "position inválido." }, { status: 400 });
+      }
+    }
+
+    let expectedClose: Date | string | null | undefined;
+    if (b.expectedClose === null) {
+      expectedClose = null;
+    } else if (typeof b.expectedClose === "string") {
+      const d = new Date(b.expectedClose);
+      if (Number.isNaN(d.getTime())) {
+        return NextResponse.json({ message: "expectedClose inválido." }, { status: 400 });
+      }
+      expectedClose = d;
+    } else if (b.expectedClose !== undefined) {
+      return NextResponse.json({ message: "expectedClose inválido." }, { status: 400 });
+    }
+
+    try {
+      const deal = await createDeal({
+        title: b.title,
+        stageId: b.stageId,
+        value: typeof b.value === "number" ? b.value : undefined,
+        status:
+          typeof b.status === "string" && isValidDealStatus(b.status) ? b.status : undefined,
+        expectedClose,
+        lostReason:
+          b.lostReason === null
+            ? null
+            : typeof b.lostReason === "string"
+              ? b.lostReason
+              : undefined,
+        position: typeof b.position === "number" ? b.position : undefined,
+        contactId:
+          b.contactId === null
+            ? null
+            : typeof b.contactId === "string"
+              ? b.contactId
+              : undefined,
+        ownerId:
+          b.ownerId === null
+            ? null
+            : typeof b.ownerId === "string"
+              ? b.ownerId
+              : undefined,
+      });
+
+      const uid = authResult.user.id;
+      createDealEvent(deal.id, uid, "CREATED", { stageId: b.stageId }).catch(() => {});
+      fireTrigger("deal_created", {
+        dealId: deal.id,
+        contactId: deal.contactId ?? undefined,
+        data: { stageId: b.stageId, toStageId: b.stageId },
+      }).catch(() => {});
+
+      return NextResponse.json(deal, { status: 201 });
+    } catch (err: unknown) {
+      if (err instanceof Error && err.message === "INVALID_TITLE") {
+        return NextResponse.json({ message: "Título inválido." }, { status: 400 });
+      }
+      throw err;
+    }
+  } catch (e: unknown) {
+    console.error(e);
+    if (typeof e === "object" && e !== null && "code" in e) {
+      const code = (e as { code: string }).code;
+      if (code === "P2003") {
+        return NextResponse.json({ message: "Referência inválida (estágio, contato ou responsável)." }, { status: 400 });
+      }
+    }
+    return NextResponse.json({ message: "Erro ao criar negócio." }, { status: 500 });
+  }
+}

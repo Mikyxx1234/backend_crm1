@@ -1,0 +1,1635 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ──────────────────────────────────────────────
+// Auth
+// ──────────────────────────────────────────────
+
+model User {
+  id             String    @id @default(cuid())
+  name           String
+  email          String    @unique
+  /// Senha com hash. Opcional porque usuários com `type = AI` não fazem login.
+  hashedPassword String?
+  /// Distingue operadores humanos de agentes de IA. Agentes IA são tratados
+  /// como "users virtuais" para reaproveitar Distribution, Conversation.assignedToId
+  /// e Deal.ownerId sem duplicar schema. A configuração do agente (prompt,
+  /// arquétipo, ferramentas, conhecimento) vive em AIAgentConfig (1:1).
+  type           UserType  @default(HUMAN)
+  role           UserRole  @default(MEMBER)
+  avatarUrl      String?
+  /// Telefone do agente (formato livre, usado no cartão de perfil).
+  phone          String?
+  /// Assinatura pessoal inserida automaticamente nas mensagens enviadas
+  /// pelo agente (ex.: "Marcelo · EduIT"). Vazio = usa o nome do usuário.
+  signature      String?
+  /// Mensagem de finalização de conversa personalizada do agente. Quando
+  /// presente, tem precedência sobre a mensagem de finalização
+  /// configurada no nível da organização.
+  closingMessage String?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  deals               Deal[]
+  activities          Activity[]
+  notes               Note[]
+  assignedLeads       Contact[]            @relation("AssignedTo")
+  distributionMembers DistributionMember[]
+  schedule            AgentSchedule?
+  agentStatus         AgentStatus?
+  presenceLogs        AgentPresenceLog[]
+  assignedConversations Conversation[] @relation("ConversationAssignedTo")
+  scheduledWhatsappCallsAssigned ScheduledWhatsappCall[] @relation("ScheduledWhatsappCallAssignee")
+  dealEvents          DealEvent[]
+  apiTokens           ApiToken[]
+  campaigns           Campaign[]
+  webPushSubscriptions WebPushSubscription[]
+  aiAgentConfig       AIAgentConfig?
+  aiAgentMessages     Message[]            @relation("MessageAIAgent")
+  scheduledMessagesCreated   ScheduledMessage[] @relation("ScheduledMessageCreatedBy")
+  scheduledMessagesCancelled ScheduledMessage[] @relation("ScheduledMessageCancelledBy")
+  dashboardLayouts    UserDashboardLayout[]
+
+  @@index([type])
+  @@map("users")
+}
+
+// ──────────────────────────────────────────────
+// Dashboard customizável (estilo Kommo)
+// ──────────────────────────────────────────────
+// Persiste o layout 2D de widgets do dashboard home. Um usuário pode ter
+// múltiplos layouts nomeados ("Meu dia", "War Room", etc.) e marcar um
+// como default. Cada layout guarda o grid (posições x/y/w/h por widget),
+// a lista de widgets visíveis, filtros e tema. O JSON é validado no
+// backend contra um schema zod antes de persistir.
+model UserDashboardLayout {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String   @default("Padrão")
+  /// Um registro com isDefault=true por usuário; default ao abrir /.
+  isDefault  Boolean  @default(false)
+  /// Preset de origem ("default" | "comercial" | "atendimento" | "equipe" |
+  /// "monitor" | "custom"). Usado pra sinalizar se o layout foi modificado
+  /// a partir de um template.
+  preset     String   @default("custom")
+  /// JSON serializado: { widgets: [{ id, x, y, w, h, minW, minH }], filters, theme }.
+  /// Formato livre pra evoluir sem migration — validado no runtime.
+  data       Json
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([userId, name])
+  @@index([userId, isDefault])
+  @@map("user_dashboard_layouts")
+}
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  MEMBER
+}
+
+enum UserType {
+  HUMAN
+  AI
+}
+
+// ──────────────────────────────────────────────
+// Contacts & Companies
+// ──────────────────────────────────────────────
+
+model Contact {
+  id               String           @id @default(cuid())
+  /// ID no sistema de origem (ex.: Kommo) — reimportação atualiza o mesmo registro.
+  externalId       String?          @unique @map("external_id")
+  name             String
+  email            String?
+  phone            String?
+  avatarUrl        String?
+  leadScore        Int              @default(0)
+  lifecycleStage   LifecycleStage   @default(SUBSCRIBER)
+  source           String?
+  whatsappJid      String?
+  /// Meta WhatsApp business-scoped user ID (BSUID), ex. US.xxx — ver doc Meta / usernames
+  whatsappBsuid    String?          @unique @map("whatsapp_bsuid")
+
+  companyId        String?
+  company          Company?         @relation(fields: [companyId], references: [id])
+  assignedToId     String?
+  assignedTo       User?            @relation("AssignedTo", fields: [assignedToId], references: [id])
+
+  deals              Deal[]
+  activities         Activity[]
+  conversations      Conversation[]
+  notes              Note[]
+  tags               TagOnContact[]
+  customFields       ContactCustomFieldValue[]
+  automationContexts AutomationContext[]
+  whatsappCallEvents WhatsappCallEvent[]
+  scheduledWhatsappCalls ScheduledWhatsappCall[]
+  campaignRecipients CampaignRecipient[]
+  phoneChanges       ContactPhoneChange[]
+
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([email])
+  @@index([phone])
+  @@index([whatsappJid])
+  @@index([lifecycleStage])
+  @@index([leadScore])
+  @@index([companyId])
+  @@index([assignedToId])
+  @@index([createdAt])
+  @@index([updatedAt])
+  @@index([assignedToId, lifecycleStage])
+  @@index([lifecycleStage, createdAt])
+  @@map("contacts")
+}
+
+enum LifecycleStage {
+  SUBSCRIBER
+  LEAD
+  MQL
+  SQL
+  OPPORTUNITY
+  CUSTOMER
+  EVANGELIST
+  OTHER
+}
+
+/// Histórico imutável de troca de número do cliente.
+///
+/// Origem principal: webhook Meta WhatsApp Cloud API dispara um evento
+/// `messages[].type = "system"` com `system.type = "user_changed_number"`
+/// (ou `customer_identity_changed`) quando o usuário ativa o WhatsApp em
+/// um número novo mantendo o mesmo BSUID. O contato preserva todo o
+/// histórico (mesma row em `contacts`); este log registra a transição
+/// pra (a) auditoria e (b) métricas agregadas (quantos clientes trocam
+/// de número por mês, por canal etc).
+///
+/// `MANUAL` cobre o caso do operador editar o telefone na tela de
+/// contato; `IMPORT` cobre reimportações em massa que sobrescrevem
+/// telefone via CSV/API externa.
+model ContactPhoneChange {
+  id                String                   @id @default(cuid())
+  contactId         String
+  contact           Contact                  @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  oldPhone          String?                  @map("old_phone")
+  newPhone          String?                  @map("new_phone")
+  oldBsuid          String?                  @map("old_bsuid")
+  newBsuid          String?                  @map("new_bsuid")
+  source            ContactPhoneChangeSource @default(WHATSAPP_SYSTEM)
+  /// Texto cru do `system.body` da Meta (ex.: "USER A CHANGED FROM
+  /// 5511982063029 TO 5511951624721") — útil pra debug/auditoria.
+  rawSystemBody     String?                  @map("raw_system_body")
+  /// `wamid` (waMessageId) da Message system relacionada, quando
+  /// originada via webhook. Permite cross-reference com a timeline.
+  /// `@unique` blinda contra reentrega/race do webhook: mesmo se duas
+  /// réplicas do servidor processarem o mesmo evento em paralelo, só um
+  /// log persiste (a segunda transação falha com violação de unicidade
+  /// e o handler trata como duplicata silenciosa).
+  messageExternalId String?                  @unique @map("message_external_id")
+  createdAt         DateTime                 @default(now()) @map("created_at")
+
+  @@index([contactId])
+  @@index([createdAt])
+  @@index([source])
+  @@index([source, createdAt])
+  @@map("contact_phone_changes")
+}
+
+enum ContactPhoneChangeSource {
+  WHATSAPP_SYSTEM
+  MANUAL
+  IMPORT
+}
+
+model Company {
+  id        String    @id @default(cuid())
+  name      String
+  domain    String?
+  industry  String?
+  size      String?
+  phone     String?
+  address   String?
+  notes     String?
+
+  contacts  Contact[]
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@map("companies")
+}
+
+model Tag {
+  id       String         @id @default(cuid())
+  name     String         @unique
+  color    String         @default("#6366f1")
+  contacts TagOnContact[]
+  deals    TagOnDeal[]
+
+  @@map("tags")
+}
+
+model TagOnContact {
+  contactId String
+  contact   Contact @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  tagId     String
+  tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([contactId, tagId])
+  @@index([tagId])
+  @@map("tags_on_contacts")
+}
+
+model TagOnDeal {
+  dealId String
+  deal   Deal @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  tagId  String
+  tag    Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([dealId, tagId])
+  @@index([tagId])
+  @@map("tags_on_deals")
+}
+
+model CustomField {
+  id        String          @id @default(cuid())
+  name      String
+  label     String
+  type      CustomFieldType
+  options   String[]
+  required  Boolean         @default(false)
+  entity    String          @default("contact")
+  /// Quando true (apenas entity=contact), o valor aparece no painel lateral Lead na Inbox.
+  showInInboxLeadPanel Boolean @default(false)
+  /// Ordem no painel (menor = mais acima). Nulo = depois dos que têm ordem.
+  inboxLeadPanelOrder  Int?
+
+  values        ContactCustomFieldValue[]
+  dealValues    DealCustomFieldValue[]
+  productValues ProductCustomFieldValue[]
+
+  @@unique([name, entity])
+  @@map("custom_fields")
+}
+
+enum CustomFieldType {
+  TEXT
+  NUMBER
+  DATE
+  SELECT
+  MULTI_SELECT
+  BOOLEAN
+  URL
+  EMAIL
+  PHONE
+}
+
+model ContactCustomFieldValue {
+  id            String      @id @default(cuid())
+  value         String
+  contactId     String
+  contact       Contact     @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  customFieldId String
+  customField   CustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
+
+  @@unique([contactId, customFieldId])
+  @@map("contact_custom_field_values")
+}
+
+model DealCustomFieldValue {
+  id            String      @id @default(cuid())
+  value         String
+  dealId        String
+  deal          Deal        @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  customFieldId String
+  customField   CustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
+
+  @@unique([dealId, customFieldId])
+  @@map("deal_custom_field_values")
+}
+
+// ──────────────────────────────────────────────
+// Pipeline & Deals
+// ──────────────────────────────────────────────
+
+model Pipeline {
+  id                String             @id @default(cuid())
+  name              String
+  isDefault         Boolean            @default(false)
+  stages            Stage[]
+  distributionRules DistributionRule[]
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  @@map("pipelines")
+}
+
+model Stage {
+  id             String   @id @default(cuid())
+  name           String
+  position       Int
+  color          String   @default("#6366f1")
+  winProbability Int      @default(0)
+  rottingDays    Int      @default(30)
+  isIncoming     Boolean  @default(false)
+
+  pipelineId     String
+  pipeline       Pipeline @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  deals          Deal[]
+
+  @@unique([pipelineId, position])
+  @@map("stages")
+}
+
+model Deal {
+  id            String     @id @default(cuid())
+  /// ID do lead no sistema de origem (ex.: Kommo) — reimportação atualiza o mesmo negócio.
+  externalId    String?    @unique @map("external_id")
+  number        Int        @unique @default(autoincrement())
+  title         String
+  value         Decimal    @default(0) @db.Decimal(12, 2)
+  status        DealStatus @default(OPEN)
+  expectedClose DateTime?
+  lostReason    String?
+  position      Int        @default(0)
+
+  contactId     String?
+  contact       Contact?   @relation(fields: [contactId], references: [id])
+  stageId       String
+  stage         Stage      @relation(fields: [stageId], references: [id])
+  ownerId       String?
+  owner         User?      @relation(fields: [ownerId], references: [id])
+
+  activities    Activity[]
+  notes         Note[]
+  customFields  DealCustomFieldValue[]
+  products      DealProduct[]
+  tags          TagOnDeal[]
+  events        DealEvent[]
+
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  closedAt      DateTime?
+
+  @@index([status])
+  @@index([stageId])
+  @@index([contactId])
+  @@index([ownerId])
+  @@index([createdAt])
+  @@index([stageId, status])
+  @@index([stageId, position])
+  @@index([contactId, status])
+  @@map("deals")
+}
+
+enum DealStatus {
+  OPEN
+  WON
+  LOST
+}
+
+// ──────────────────────────────────────────────
+// Products & Catalog
+// ──────────────────────────────────────────────
+
+model Product {
+  id          String        @id @default(cuid())
+  name        String
+  description String?
+  sku         String?       @unique
+  price       Decimal       @default(0) @db.Decimal(12, 2)
+  unit        String        @default("un")
+  type        String        @default("PRODUCT")
+  isActive    Boolean       @default(true)
+
+  dealProducts DealProduct[]
+  customValues ProductCustomFieldValue[]
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([isActive])
+  @@index([name])
+  @@index([type])
+  @@map("products")
+}
+
+model ProductCustomFieldValue {
+  id            String      @id @default(cuid())
+  productId     String
+  product       Product     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  customFieldId String
+  customField   CustomField @relation(fields: [customFieldId], references: [id], onDelete: Cascade)
+  value         String
+
+  @@unique([productId, customFieldId])
+  @@index([productId])
+  @@map("product_custom_field_values")
+}
+
+model DealProduct {
+  id        String  @id @default(cuid())
+  dealId    String
+  deal      Deal    @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  productId String
+  product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+  quantity  Decimal @default(1) @db.Decimal(12, 2)
+  unitPrice Decimal @default(0) @db.Decimal(12, 2)
+  discount  Decimal @default(0) @db.Decimal(5, 2)
+
+  createdAt DateTime @default(now())
+
+  @@index([dealId])
+  @@index([productId])
+  @@map("deal_products")
+}
+
+// ──────────────────────────────────────────────
+// Deal Events (Timeline / Audit Log)
+// ──────────────────────────────────────────────
+
+model DealEvent {
+  id        String   @id @default(cuid())
+  dealId    String
+  deal      Deal     @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  type      String
+  meta      Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([dealId, createdAt])
+  @@index([userId])
+  @@map("deal_events")
+}
+
+// ──────────────────────────────────────────────
+// Activities & Notes
+// ──────────────────────────────────────────────
+
+model Activity {
+  id          String       @id @default(cuid())
+  type        ActivityType
+  title       String
+  description String?
+  completed   Boolean      @default(false)
+  scheduledAt DateTime?
+  completedAt DateTime?
+
+  contactId   String?
+  contact     Contact?     @relation(fields: [contactId], references: [id])
+  dealId      String?
+  deal        Deal?        @relation(fields: [dealId], references: [id])
+  userId      String
+  user        User         @relation(fields: [userId], references: [id])
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([scheduledAt])
+  @@index([contactId])
+  @@index([dealId])
+  @@index([userId])
+  @@index([dealId, scheduledAt])
+  @@index([completed, scheduledAt])
+  @@map("activities")
+}
+
+enum ActivityType {
+  CALL
+  EMAIL
+  MEETING
+  TASK
+  NOTE
+  WHATSAPP
+  OTHER
+}
+
+model Note {
+  id        String   @id @default(cuid())
+  content   String
+  contactId String?
+  contact   Contact? @relation(fields: [contactId], references: [id])
+  dealId    String?
+  deal      Deal?    @relation(fields: [dealId], references: [id])
+  userId    String
+  user      User     @relation(fields: [userId], references: [id])
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([contactId])
+  @@index([dealId])
+  @@index([userId])
+  @@index([dealId, createdAt])
+  @@index([contactId, createdAt])
+  @@map("notes")
+}
+
+// ──────────────────────────────────────────────
+// Conversations & Messages
+// ──────────────────────────────────────────────
+
+model Conversation {
+  id                     String             @id @default(cuid())
+  externalId             String?            @unique
+  channel                String
+  status                 ConversationStatus @default(OPEN)
+  inboxName              String?
+  unreadCount            Int                @default(0)
+  lastReadAt             DateTime?
+  lastInboundAt          DateTime?
+  lastMessageDirection   String?
+  hasAgentReply          Boolean            @default(false)
+  hasError               Boolean            @default(false)
+  pinnedNoteId           String?
+  /// Timestamp da saudação disparada pelo agente IA na atribuição
+  /// ATUAL. Null quando o agente IA ainda não cumprimentou nesta
+  /// atribuição (ou quando a conversa acabou de ser reatribuída).
+  /// Usado pra garantir que a saudação dispare em cada novo ciclo
+  /// de atribuição ao agente, e não apenas na 1ª vida da conversa.
+  aiGreetedAt            DateTime?
+
+  contactId              String
+  contact                Contact            @relation(fields: [contactId], references: [id])
+
+  channelId              String?
+  channelRef             Channel?           @relation(fields: [channelId], references: [id], onDelete: SetNull)
+
+  /// JID original do WhatsApp (phone@s.whatsapp.net ou lid@lid) — usado para envio via Baileys.
+  waJid                  String?
+
+  /// Agente responsável pela conversa na inbox (null = ainda na fila / visível conforme regra de contato).
+  assignedToId           String?
+  assignedTo             User?              @relation("ConversationAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
+
+  messages               Message[]
+  whatsappCallEvents     WhatsappCallEvent[]
+  scheduledWhatsappCalls ScheduledWhatsappCall[]
+  scheduledMessages      ScheduledMessage[]
+
+  whatsappCallConsentStatus    WhatsappCallConsentStatus @default(NONE)
+  whatsappCallConsentUpdatedAt DateTime?
+  /// Tipo do opt-in quando `status = GRANTED`. Temporária → vale 7 dias a
+  /// partir de `whatsappCallConsentUpdatedAt`. Permanente → vale até o cliente
+  /// revogar manualmente no app (ou bloquear a empresa). Null para NONE/REQUESTED/EXPIRED.
+  whatsappCallConsentType      WhatsappCallConsentType?
+  /// Quando `whatsappCallConsentExpiresAt` não é null, o frontend faz countdown
+  /// a partir deste timestamp em vez de calcular a partir de `updatedAt + 7d`.
+  /// Null para permanente / não granted.
+  whatsappCallConsentExpiresAt DateTime?
+
+  closedAt               DateTime?
+
+  createdAt              DateTime           @default(now())
+  updatedAt              DateTime           @updatedAt
+
+  @@index([contactId])
+  @@index([assignedToId])
+  @@index([channelId])
+  @@index([status])
+  @@index([contactId, updatedAt])
+  @@index([contactId, status])
+  @@index([hasError])
+  @@index([lastMessageDirection, hasAgentReply])
+  @@index([whatsappCallConsentStatus])
+  @@index([status, updatedAt])
+  @@map("conversations")
+}
+
+/// Eventos da WhatsApp Cloud API Calling (webhook field `calls`).
+/// Ref: https://developers.facebook.com/docs/whatsapp/cloud-api/calling
+model WhatsappCallEvent {
+  id                String        @id @default(cuid())
+  metaCallId        String
+  phoneNumberId     String
+  direction         String
+  /// connect | terminate | signaling (RINGING/ACCEPTED/REJECTED via statuses)
+  eventKind         String
+  signalingStatus   String?
+  terminateStatus   String?
+  fromWa            String?
+  toWa              String?
+  durationSec       Int?
+  startTime         DateTime?
+  endTime           DateTime?
+  bizOpaque         String?
+  errorsJson        Json?
+
+  conversationId    String?
+  conversation      Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  contactId         String?
+  contact           Contact?      @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  createdAt         DateTime      @default(now())
+
+  @@index([metaCallId])
+  @@index([conversationId, createdAt])
+  @@index([contactId, createdAt])
+  @@index([createdAt])
+  @@map("whatsapp_call_events")
+}
+
+model Message {
+  id             String            @id @default(cuid())
+  conversationId String
+  conversation   Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  content        String
+  direction      String
+  messageType    String            @default("text")
+  /// Distingue quem autorou a mensagem: agente humano, automação/bot ou evento de sistema.
+  /// Usado no dashboard de supervisão (/monitor) para separar processamento humano vs automação.
+  authorType     MessageAuthorType @default(human)
+  isPrivate      Boolean           @default(false)
+  externalId     String?
+  senderName     String?
+  /// Quando a mensagem foi gerada por um agente de IA (authorType=bot),
+  /// aponta para o User virtual (type=AI). Permite filtrar trace/custo por agente.
+  aiAgentUserId  String?
+  aiAgentUser    User?             @relation("MessageAIAgent", fields: [aiAgentUserId], references: [id], onDelete: SetNull)
+  mediaUrl       String?
+  replyToId      String?
+  replyToPreview String?
+  reactions      Json              @default("[]")
+  sendStatus     String            @default("sent")
+  sendError      String?
+  createdAt      DateTime          @default(now())
+
+  @@index([conversationId, createdAt])
+  @@index([conversationId, authorType, createdAt])
+  @@index([externalId])
+  @@index([aiAgentUserId, createdAt])
+  // Index isolado em createdAt: o relatório /api/reports/messaging
+  // filtra mensagens por intervalo de datas em todo o sistema (sem
+  // conversationId), e o índice composto acima não é usado nesse caso.
+  // Sem este, vira sequential scan na tabela inteira em volumes grandes.
+  @@index([createdAt])
+  @@map("messages")
+}
+
+enum MessageAuthorType {
+  human
+  bot
+  system
+}
+
+enum ConversationStatus {
+  OPEN
+  RESOLVED
+  PENDING
+  SNOOZED
+}
+
+/// Opt-in de chamada de voz (WhatsApp Cloud API / Calling).
+/// `DENIED` cobre a recusa explícita pelo cliente (inclui revogar pós-GRANTED).
+/// A Meta bloqueia novo pedido por 24h após REJECT.
+enum WhatsappCallConsentStatus {
+  NONE
+  REQUESTED
+  GRANTED
+  EXPIRED
+  DENIED
+}
+
+/// Tipo da autorização concedida pelo cliente. A Meta define 2 variantes:
+/// - TEMPORARY: "Permitir ligações temporariamente" → 7 dias corridos.
+/// - PERMANENT: "Sempre permitir ligações" → vale até revogação manual.
+/// Ligações atendidas NÃO estendem o prazo em nenhum dos casos.
+enum WhatsappCallConsentType {
+  TEMPORARY
+  PERMANENT
+}
+
+// ──────────────────────────────────────────────
+// Automations
+// ──────────────────────────────────────────────
+
+model Automation {
+  id            String              @id @default(cuid())
+  name          String
+  description   String?
+  triggerType   String
+  triggerConfig Json
+  active        Boolean             @default(false)
+  steps         AutomationStep[]
+  contexts      AutomationContext[]
+  campaigns     Campaign[]
+
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([active])
+  @@index([active, triggerType])
+  @@map("automations")
+}
+
+model AutomationStep {
+  id           String     @id @default(cuid())
+  type         String
+  config       Json
+  position     Int
+  automationId String
+  automation   Automation @relation(fields: [automationId], references: [id], onDelete: Cascade)
+
+  @@index([automationId])
+  @@index([automationId, position])
+  @@map("automation_steps")
+}
+
+model AutomationLog {
+  id           String   @id @default(cuid())
+  automationId String
+  contactId    String?
+  dealId       String?
+  stepId       String?
+  stepType     String?
+  status       String
+  message      String?
+  payload      Json?
+  executedAt   DateTime @default(now())
+
+  @@index([automationId])
+  @@index([contactId])
+  @@index([dealId])
+  @@index([executedAt])
+  @@index([automationId, executedAt])
+  @@index([automationId, stepId])
+  @@map("automation_logs")
+}
+
+// ──────────────────────────────────────────────
+// Channels (WhatsApp, Instagram, etc.)
+// ──────────────────────────────────────────────
+
+model Channel {
+  id              String        @id @default(cuid())
+  name            String
+  type            ChannelType
+  provider        ChannelProvider
+  status          ChannelStatus @default(DISCONNECTED)
+  config          Json          @default("{}")
+  phoneNumber     String?
+  lastConnectedAt DateTime?
+  qrCode          String?       @db.Text
+  sessionData     Json?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  conversations   Conversation[]
+  baileysAuthKeys BaileysAuthKey[]
+  campaigns       Campaign[]
+
+  @@index([status])
+  @@index([type, status])
+  @@index([provider, status])
+  @@map("channels")
+}
+
+enum ChannelType {
+  WHATSAPP
+  INSTAGRAM
+  FACEBOOK
+  EMAIL
+  WEBCHAT
+}
+
+enum ChannelProvider {
+  META_CLOUD_API
+  BAILEYS_MD
+}
+
+enum ChannelStatus {
+  CONNECTED
+  DISCONNECTED
+  CONNECTING
+  QR_READY
+  FAILED
+}
+
+// ──────────────────────────────────────────────
+// Baileys Auth State (WhatsApp Multi-Device)
+// ──────────────────────────────────────────────
+
+model BaileysAuthKey {
+  id        String  @id @default(cuid())
+  channelId String
+  channel   Channel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+  keyType   String
+  keyId     String
+  value     Json
+
+  @@unique([channelId, keyType, keyId])
+  @@index([channelId])
+  @@map("baileys_auth_keys")
+}
+
+// ──────────────────────────────────────────────
+// Quick Replies & Message Templates
+// ──────────────────────────────────────────────
+
+model QuickReply {
+  id        String   @id @default(cuid())
+  title     String
+  content   String
+  category  String?
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("quick_replies")
+}
+
+model MessageTemplate {
+  id                  String         @id @default(cuid())
+  name                String
+  content             String
+  category            String?
+  language            String         @default("pt_BR")
+  status              TemplateStatus @default(DRAFT)
+  channelType         ChannelType?
+  createdAt           DateTime       @default(now())
+  updatedAt           DateTime       @updatedAt
+
+  @@map("message_templates")
+}
+
+/// Configuração local para cada template WABA (label customizado + liberação para agente).
+model WhatsAppTemplateConfig {
+  id               String   @id @default(cuid())
+  metaTemplateId   String   @unique @map("meta_template_id")
+  metaTemplateName String   @map("meta_template_name")
+  label            String   @default("")
+  agentEnabled     Boolean  @default(false) @map("agent_enabled")
+  language         String   @default("pt_BR")
+  category         String?
+  bodyPreview      String   @default("") @map("body_preview")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([agentEnabled])
+  @@map("whatsapp_template_configs")
+}
+
+enum TemplateStatus {
+  DRAFT
+  PENDING_APPROVAL
+  APPROVED
+  REJECTED
+}
+
+// ── Lead Distribution ─────────────────────────────
+
+model DistributionRule {
+  id         String             @id @default(cuid())
+  name       String
+  mode       DistributionMode   @default(ROUND_ROBIN)
+  pipelineId String?
+  pipeline   Pipeline?          @relation(fields: [pipelineId], references: [id], onDelete: SetNull)
+  config     Json               @default("{}")
+  isActive   Boolean            @default(true)
+  lastIndex  Int                @default(0)
+  members    DistributionMember[]
+  createdAt  DateTime           @default(now())
+  updatedAt  DateTime           @updatedAt
+
+  @@map("distribution_rules")
+}
+
+model DistributionMember {
+  id     String           @id @default(cuid())
+  ruleId String
+  rule   DistributionRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  userId String
+  user   User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleId, userId])
+  @@map("distribution_members")
+}
+
+enum DistributionMode {
+  ROUND_ROBIN
+  RULE_BASED
+  MANUAL
+}
+
+// ── Automation Context (Salesbot) ─────────────────
+
+model AutomationContext {
+  id            String              @id @default(cuid())
+  automationId  String
+  automation    Automation          @relation(fields: [automationId], references: [id], onDelete: Cascade)
+  contactId     String
+  contact       Contact             @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  currentStepId String?
+  variables     Json                @default("{}")
+  status        AutomationCtxStatus @default(RUNNING)
+  timeoutAt     DateTime?
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  @@index([automationId, contactId])
+  @@index([contactId, status])
+  @@index([status, timeoutAt])
+  @@map("automation_contexts")
+}
+
+enum AutomationCtxStatus {
+  RUNNING
+  PAUSED
+  COMPLETED
+  TIMED_OUT
+}
+
+// ──────────────────────────────────────────────
+// System Settings (key-value)
+// ──────────────────────────────────────────────
+
+model SystemSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+
+  @@map("system_settings")
+}
+
+// ──────────────────────────────────────────────
+// Agent Schedule & Status
+// ──────────────────────────────────────────────
+
+model AgentSchedule {
+  id         String   @id @default(cuid())
+  userId     String   @unique
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  startTime  String   @default("08:00")
+  lunchStart String   @default("12:00")
+  lunchEnd   String   @default("13:00")
+  endTime    String   @default("18:00")
+  timezone   String   @default("America/Sao_Paulo")
+  weekdays   Int[]    @default([1, 2, 3, 4, 5])
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("agent_schedules")
+}
+
+model AgentStatus {
+  id        String            @id @default(cuid())
+  userId    String            @unique
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status    AgentOnlineStatus @default(OFFLINE)
+  /// Quando true e ONLINE dentro do horário, o agente entra no pool para receber ligações WhatsApp (Calling API).
+  availableForVoiceCalls Boolean @default(false)
+  /// Alimentado pelo heartbeat do cliente (POST /api/agents/me/ping).
+  /// Usado pelo worker `presence-reaper` para rebaixar status ocioso a AWAY/OFFLINE.
+  lastActivityAt DateTime?
+  updatedAt DateTime          @updatedAt
+
+  @@index([status, lastActivityAt])
+  @@map("agent_statuses")
+}
+
+/// Histórico de transições de presença do agente. Cada linha representa um "bloco"
+/// no estado `status`. Enquanto `endedAt` é NULL, o bloco está em curso.
+/// Alimenta o dashboard de Active Time (acumulado por período).
+model AgentPresenceLog {
+  id        String            @id @default(cuid())
+  userId    String
+  user      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  status    AgentOnlineStatus
+  startedAt DateTime          @default(now())
+  endedAt   DateTime?
+  createdAt DateTime          @default(now())
+
+  @@index([userId, startedAt])
+  @@index([userId, endedAt])
+  @@index([userId, status, startedAt])
+  @@map("agent_presence_logs")
+}
+
+/// Callback de voz WhatsApp agendado (ex.: após template pós-chamada perdida).
+model ScheduledWhatsappCall {
+  id               String                    @id @default(cuid())
+  conversationId   String
+  conversation     Conversation              @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  contactId        String
+  contact          Contact                   @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  assigneeUserId   String?
+  assignee         User?                     @relation("ScheduledWhatsappCallAssignee", fields: [assigneeUserId], references: [id], onDelete: SetNull)
+  scheduledAt      DateTime
+  status           ScheduledWhatsappCallStatus @default(PENDING)
+  notes            String?
+  sourceMetaCallId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([conversationId, scheduledAt])
+  @@index([assigneeUserId, scheduledAt, status])
+  @@index([status, scheduledAt])
+  @@map("scheduled_whatsapp_calls")
+}
+
+enum ScheduledWhatsappCallStatus {
+  PENDING
+  DONE
+  CANCELLED
+}
+
+enum AgentOnlineStatus {
+  ONLINE
+  OFFLINE
+  AWAY
+}
+
+// ──────────────────────────────────────────────
+// Loss Reasons
+// ──────────────────────────────────────────────
+
+model LossReason {
+  id        String   @id @default(cuid())
+  label     String
+  position  Int      @default(0)
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  @@map("loss_reasons")
+}
+
+// ──────────────────────────────────────────────
+// API Tokens
+// ──────────────────────────────────────────────
+
+model ApiToken {
+  id          String    @id @default(cuid())
+  name        String
+  tokenHash   String    @unique
+  tokenPrefix String
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([tokenHash])
+  @@index([userId])
+  @@map("api_tokens")
+}
+
+// ──────────────────────────────────────────────
+// Campaigns & Segments
+// ──────────────────────────────────────────────
+
+model Segment {
+  id        String   @id @default(cuid())
+  name      String
+  filters   Json
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campaigns Campaign[]
+
+  @@map("segments")
+}
+
+model Campaign {
+  id                 String         @id @default(cuid())
+  name               String
+  status             CampaignStatus @default(DRAFT)
+  type               CampaignType
+
+  channelId          String
+  channel            Channel        @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  segmentId          String?
+  segment            Segment?       @relation(fields: [segmentId], references: [id], onDelete: SetNull)
+  /// Filtros ad-hoc (quando não usa segmento salvo)
+  filters            Json?
+
+  /// Tipo TEMPLATE: nome do template Meta
+  templateName       String?
+  templateLanguage   String?        @default("pt_BR")
+  templateComponents Json?
+
+  /// Tipo TEXT: conteúdo de texto livre (Baileys)
+  textContent        String?        @db.Text
+
+  /// Tipo AUTOMATION: automação a disparar
+  automationId       String?
+  automation         Automation?    @relation(fields: [automationId], references: [id], onDelete: SetNull)
+
+  /// Msgs por segundo (padrão 80 para Meta, 10 para Baileys)
+  sendRate           Int            @default(80)
+  scheduledAt        DateTime?
+  startedAt          DateTime?
+  completedAt        DateTime?
+
+  totalRecipients    Int            @default(0)
+  sentCount          Int            @default(0)
+  deliveredCount     Int            @default(0)
+  failedCount        Int            @default(0)
+  readCount          Int            @default(0)
+
+  createdById        String
+  createdBy          User           @relation(fields: [createdById], references: [id])
+
+  recipients         CampaignRecipient[]
+
+  createdAt          DateTime       @default(now())
+  updatedAt          DateTime       @updatedAt
+
+  @@index([status])
+  @@index([type])
+  @@index([channelId])
+  @@index([createdById])
+  @@index([scheduledAt])
+  @@index([status, scheduledAt])
+  @@map("campaigns")
+}
+
+model CampaignRecipient {
+  id            String          @id @default(cuid())
+  campaignId    String
+  campaign      Campaign        @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contactId     String
+  contact       Contact         @relation(fields: [contactId], references: [id], onDelete: Cascade)
+
+  status        RecipientStatus @default(PENDING)
+  errorMessage  String?
+  metaMessageId String?
+
+  sentAt        DateTime?
+  deliveredAt   DateTime?
+  readAt        DateTime?
+
+  createdAt     DateTime        @default(now())
+
+  @@unique([campaignId, contactId])
+  @@index([campaignId, status])
+  @@index([contactId])
+  @@index([metaMessageId])
+  @@map("campaign_recipients")
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  PROCESSING
+  SENDING
+  PAUSED
+  COMPLETED
+  CANCELLED
+  FAILED
+}
+
+enum CampaignType {
+  TEMPLATE
+  TEXT
+  AUTOMATION
+}
+
+enum RecipientStatus {
+  PENDING
+  SENDING
+  SENT
+  DELIVERED
+  READ
+  FAILED
+}
+
+// ──────────────────────────────────────────────
+// PWA Mobile Layout (configuracao de UI mobile)
+// ──────────────────────────────────────────────
+
+/// Configuracao do layout mobile (PWA) — quais modulos aparecem na
+/// bottom nav, ordem, e onde o app abre. Hoje e singleton (uma row
+/// global pra organizacao). Quando virarmos multi-tenant, basta
+/// trocar `id` por `organizationId` e adicionar a relacao — o
+/// codigo do front ja consome via /api/mobile-layout, isolando.
+///
+/// Decisoes:
+///  - `bottomNavModuleIds`: array ordenado, max 5 itens (limite UX
+///    pra bottom nav nao quebrar em telas pequenas). O resto cai
+///    no MobileMoreSheet automaticamente.
+///  - `enabledModuleIds`: subset de TODOS os modulos disponiveis.
+///    Modulos fora dessa lista NAO aparecem nem no bottom nav nem
+///    no MoreSheet (admin "esconde" features irrelevantes do app).
+///  - `startRoute`: rota inicial ao abrir o PWA (default /inbox).
+///  - `version`: incrementado a cada save — usado pra cache-bust no
+///    front (SWR/React Query refeed).
+model MobileLayoutConfig {
+  id                 String   @id @default(cuid())
+  /// Slugs separados por virgula. Mantemos string em vez de array
+  /// pra simplificar serializacao e evitar dependencia de extensoes
+  /// Postgres. Ex.: "inbox,pipeline,tasks,contacts,more".
+  bottomNavModuleIds String   @default("inbox,pipeline,tasks,contacts")
+  /// Slugs separados por virgula. Ex.: "inbox,pipeline,tasks,contacts,companies,settings,profile".
+  enabledModuleIds   String   @default("inbox,pipeline,tasks,contacts,companies,settings,profile")
+  startRoute         String   @default("/inbox")
+  /// Cor de marca opcional (override do navy padrao). Hex.
+  /// Quando null, usa o brand-navy global.
+  brandColor         String?
+  /// Versao incrementada a cada PUT — front faz refetch quando muda.
+  version            Int      @default(1)
+  updatedAt          DateTime @updatedAt
+  updatedBy          String?
+
+  @@map("mobile_layout_config")
+}
+
+// ──────────────────────────────────────────────
+// Web Push (PWA notifications)
+// ──────────────────────────────────────────────
+
+/// Subscription do Push API (W3C) por dispositivo do operador. Um
+/// usuario pode ter N subscriptions (mobile + desktop + outro
+/// browser). O `endpoint` e unico globalmente (incluindo a URL de
+/// FCM/Mozilla autopush) — fazemos UPSERT por endpoint pra lidar
+/// com reinstall de PWA / re-subscription.
+model WebPushSubscription {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// URL do push service (FCM, Mozilla autopush, Apple). Unica
+  /// globalmente — eh o "ID" da subscription pro browser.
+  endpoint  String   @unique
+  /// Chave publica P-256 do cliente (base64url). Usada pelo VAPID
+  /// pra criptografar o payload.
+  p256dh    String
+  /// Auth secret (base64url). Tambem usada na criptografia.
+  auth      String
+  /// User-Agent capturado no momento da subscription — facilita
+  /// "esquecer dispositivo X" no UI.
+  userAgent String?
+  createdAt DateTime @default(now())
+  /// Atualizado a cada disparo bem-sucedido. Permite limpar
+  /// subscriptions mortas (>30 dias sem entregar).
+  lastUsedAt DateTime?
+  /// Marcado quando o push service retorna 410 Gone — guardamos
+  /// pra auditoria antes de deletar definitivamente.
+  failedAt   DateTime?
+
+  @@index([userId])
+  @@index([failedAt])
+  @@map("web_push_subscriptions")
+}
+
+// ──────────────────────────────────────────────
+// Meta WhatsApp Pricing Analytics (cache local)
+// ──────────────────────────────────────────────
+// Cache do endpoint pricing_analytics da Graph API. Sincronizamos
+// diariamente (cron) + sob demanda (botao "Sincronizar Meta" no
+// /reports). A unica fonte de verdade do CUSTO é a Meta — aqui só
+// armazenamos pra evitar bater na Graph a cada page view e pra
+// permitir agregaçao/filtro rapido por periodo.
+//
+// Granularidade: DAILY. Dimensoes: COUNTRY, PHONE, TIER. Cada linha
+// é uma combinaçao unica (date, pricingType, pricingCategory,
+// country, phoneNumber, tier).
+model MetaPricingDailyMetric {
+  id              String   @id @default(cuid())
+  /// Dia em UTC (00:00:00). Granularity=DAILY na Meta.
+  date            DateTime
+  /// REGULAR | FREE_CUSTOMER_SERVICE | FREE_ENTRY_POINT | FREE_TIER
+  pricingType     String
+  /// MARKETING | UTILITY | AUTHENTICATION | SERVICE | AUTHENTICATION_INTERNATIONAL
+  pricingCategory String
+  /// ISO-2 (BR, US, ...) ou "UNKNOWN" quando a Meta nao retorna.
+  country         String   @default("UNKNOWN")
+  /// Telefone E.164 (sem '+'). Default '' quando agregado por WABA
+  /// (evita NULL distinto no unique composto).
+  phoneNumber     String   @default("")
+  /// Tier de volume (ex: "TIER_1K", "TIER_10K"). Default '' quando
+  /// nao retornado pela Meta.
+  tier            String   @default("")
+  /// Volume de mensagens nessa combinacao naquele dia.
+  volume          Int      @default(0)
+  /// Custo em USD (Meta retorna em cents, convertemos antes de salvar).
+  cost            Float    @default(0)
+  /// Quando esse registro foi atualizado pelo sync. Permite saber
+  /// "ultima sincronizacao" no header do relatorio.
+  syncedAt        DateTime @default(now()) @updatedAt
+
+  @@unique([date, pricingType, pricingCategory, country, phoneNumber, tier], map: "meta_pricing_unique_combo")
+  @@index([date])
+  @@index([pricingCategory])
+  @@map("meta_pricing_daily_metrics")
+}
+
+// ──────────────────────────────────────────────
+// AI Agents (operadores virtuais)
+// ──────────────────────────────────────────────
+// Configuração por agente fica em AIAgentConfig (1:1 com User).
+// O User.type=AI é o que aparece em seletores de responsável,
+// DistributionMember, Conversation.assignedToId etc. — assim
+// reutilizamos toda a infra de atribuição/distribuição.
+//
+// archetype: template de comportamento que preenche defaults de
+//   systemPromptTemplate/enabledTools. Pode ser customizado depois.
+// autonomyMode: AUTONOMOUS envia direto ao lead; DRAFT grava como
+//   sugestão que o operador humano aprova/edita antes de enviar.
+// dailyTokenCap: limite defensivo de custo (0 = sem limite).
+
+model AIAgentConfig {
+  id                   String            @id @default(cuid())
+  userId               String            @unique
+  user                 User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  archetype            AIAgentArchetype  @default(SDR)
+  model                String            @default("gpt-4o-mini")
+  temperature          Float             @default(0.7)
+  maxTokens            Int               @default(1024)
+  /// Prompt-template do arquétipo (renderizado em tempo de execução
+  /// com variáveis do contato/deal/conversa). Copiado do catálogo
+  /// no momento da criação — depois vive por conta própria.
+  systemPromptTemplate String            @db.Text
+  /// Overrides livres escritos pelo admin (adicionados ao final do
+  /// systemPromptTemplate). Ex.: tom específico, regras de produto.
+  systemPromptOverride String?           @db.Text
+  /// Política dedicada de apresentação de produtos. Injetada no system
+  /// prompt apenas quando a tool `search_products` está habilitada.
+  /// Dita quais campos do produto priorizar, formato de apresentação,
+  /// tom para tratar preço, etc. Formato: texto livre (markdown-like).
+  productPolicy        String?           @db.Text
+  tone                 String            @default("profissional e cordial")
+  language             String            @default("pt-BR")
+  autonomyMode         AIAgentAutonomy   @default(DRAFT)
+  /// Lista de tool ids habilitadas (ex.: ["create_deal","add_tag","transfer_to_human"]).
+  enabledTools         String[]          @default([])
+  /// Limite defensivo diário em tokens (input+output). 0 = ilimitado.
+  dailyTokenCap        Int               @default(0)
+  /// Pipeline preferencial para handoff / criação de deal. Se null,
+  /// usa o pipeline default do contato (primeiro pipeline ativo).
+  pipelineId           String?
+  /// Canal preferencial para envio de mensagens. Null = usa o canal
+  /// da conversa em que o agente está respondendo.
+  channelId            String?
+  active               Boolean           @default(true)
+
+  // ── Piloting (controles operacionais) ─────────────────────
+  /// Mensagem de saudação enviada UMA vez por conversa, antes da
+  /// primeira resposta do LLM. Null/empty = desativado. Suporta
+  /// variáveis simples: {{contact.firstName}}, {{deal.title}}, etc.
+  openingMessage           String?  @db.Text
+  /// Delay em ms antes de disparar a saudação (0 = imediato).
+  openingDelayMs           Int      @default(0)
+
+  /// Timer de inatividade em ms. Quando o agente respondeu por último
+  /// e o cliente não respondeu por N ms, dispara o handoff configurado.
+  /// 0 = desativado.
+  inactivityTimerMs        Int      @default(0)
+  /// Modo de handoff: "KEEP_OWNER" (volta pro dono do deal),
+  /// "SPECIFIC_USER" (atribui usuário fixo), "UNASSIGN" (deixa na fila).
+  inactivityHandoffMode    String   @default("KEEP_OWNER")
+  /// Quando mode=SPECIFIC_USER, qual user receber.
+  inactivityHandoffUserId  String?
+  /// Texto opcional enviado pelo agente antes do handoff.
+  inactivityFarewellMessage String? @db.Text
+
+  /// Lista de gatilhos textuais que forçam handoff imediato
+  /// (match case-insensitive por substring na mensagem do cliente).
+  keywordHandoffs          String[] @default([])
+
+  /// Lista de perguntas obrigatórias de qualificação que o agente
+  /// deve coletar antes de encerrar/transferir. Formato:
+  /// `[{ id, question }, ...]`. Injetado no system prompt.
+  qualificationQuestions   Json     @default("[]")
+
+  /// Configuração de horário de atendimento. Quando `enabled=true` e
+  /// o momento atual cai fora do horário, o agente NÃO responde e
+  /// envia `offHoursMessage` (ou só registra rascunho se null).
+  /// Formato: `{ enabled, timezone, weekdays: [{day,start,end}], offHoursMessage }`.
+  businessHours            Json?
+
+  /// Estilo de saída: "conversational" (default, proíbe bullets/ficha
+  /// técnica) ou "structured" (permite listas/markdown).
+  outputStyle              String   @default("conversational")
+
+  /// Simula comportamento humano: mostra "digitando…" no WhatsApp do
+  /// cliente antes de responder e aguarda tempo proporcional ao
+  /// tamanho da mensagem. API Meta entrega o indicador por até 25s.
+  simulateTyping           Boolean  @default(true)
+  /// ms por caractere gerado pra calcular o delay de "digitando".
+  /// Total = min(1500 + len * perChar, 25000).
+  typingPerCharMs          Int      @default(25)
+  /// Marca a mensagem recebida como lida (tracinhos azuis) antes de
+  /// responder. Se `simulateTyping=true`, a marcação de leitura já
+  /// acontece implicitamente na mesma chamada.
+  markMessagesRead         Boolean  @default(true)
+
+  createdAt            DateTime          @default(now())
+  updatedAt            DateTime          @updatedAt
+
+  knowledgeDocs        AIAgentKnowledgeDoc[]
+  runs                 AIAgentRun[]
+
+  @@index([archetype])
+  @@index([active])
+  @@map("ai_agent_configs")
+}
+
+enum AIAgentArchetype {
+  SDR
+  ATENDIMENTO
+  VENDEDOR
+  SUPORTE
+}
+
+enum AIAgentAutonomy {
+  AUTONOMOUS
+  DRAFT
+}
+
+model AIAgentKnowledgeDoc {
+  id            String                  @id @default(cuid())
+  agentId       String
+  agent         AIAgentConfig           @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  title         String
+  source        String                  @default("upload")
+  mimeType      String?
+  sizeBytes     Int                     @default(0)
+  storageUrl    String?
+  status        AIAgentKnowledgeStatus  @default(PENDING)
+  errorMessage  String?
+  chunkCount    Int                     @default(0)
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+
+  chunks        AIAgentKnowledgeChunk[]
+
+  @@index([agentId, status])
+  @@map("ai_agent_knowledge_docs")
+}
+
+enum AIAgentKnowledgeStatus {
+  PENDING
+  INDEXING
+  READY
+  FAILED
+}
+
+/// NOTA: a coluna `embedding` é criada via SQL cru na migration
+/// (`vector(1536)` do pgvector). O Prisma não tem suporte nativo,
+/// por isso o campo não aparece aqui — acessamos via `$queryRaw`
+/// para inserção e similarity search (operador `<=>`).
+model AIAgentKnowledgeChunk {
+  id         String               @id @default(cuid())
+  docId      String
+  doc        AIAgentKnowledgeDoc  @relation(fields: [docId], references: [id], onDelete: Cascade)
+  content    String               @db.Text
+  /// Offset em caracteres do documento original (para futura UI de
+  /// highlighting do trecho citado).
+  position   Int                  @default(0)
+  tokenCount Int                  @default(0)
+  createdAt  DateTime             @default(now())
+
+  @@index([docId])
+  @@map("ai_agent_knowledge_chunks")
+}
+
+/// Cada chamada ao runner (mensagem no inbox, playground ou step
+/// de automation) abre um Run. O trace detalhado fica em
+/// AIAgentMessage — útil para debug e faturamento.
+model AIAgentRun {
+  id             String            @id @default(cuid())
+  agentId        String
+  agent          AIAgentConfig     @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  /// Origem do run — "inbox" | "playground" | "automation" | "api".
+  source         String            @default("inbox")
+  conversationId String?
+  contactId      String?
+  /// Resposta final do assistant (truncada para preview). O trace
+  /// completo vive em AIAgentMessage.
+  responsePreview String?
+  inputTokens    Int               @default(0)
+  outputTokens   Int               @default(0)
+  /// Custo estimado em USD baseado em pricing.ts no momento do run.
+  costUsd        Float             @default(0)
+  status         AIAgentRunStatus  @default(RUNNING)
+  errorMessage   String?
+  createdAt      DateTime          @default(now())
+  finishedAt     DateTime?
+
+  messages       AIAgentMessage[]
+
+  @@index([agentId, createdAt])
+  @@index([conversationId])
+  @@index([status])
+  @@map("ai_agent_runs")
+}
+
+enum AIAgentRunStatus {
+  RUNNING
+  COMPLETED
+  FAILED
+  HANDOFF
+}
+
+model AIAgentMessage {
+  id        String              @id @default(cuid())
+  runId     String
+  run       AIAgentRun          @relation(fields: [runId], references: [id], onDelete: Cascade)
+  /// "system" | "user" | "assistant" | "tool".
+  role      String
+  content   String              @db.Text
+  /// Quando role="tool", qual tool foi chamada (ex.: "create_deal").
+  toolName  String?
+  /// JSON com args (call) ou result (retorno) serializados.
+  toolData  Json?
+  createdAt DateTime            @default(now())
+
+  @@index([runId, createdAt])
+  @@map("ai_agent_messages")
+}
+
+// ──────────────────────────────────────────────
+// Scheduled Messages
+// ──────────────────────────────────────────────
+/// Mensagem programada para envio futuro em uma conversa. O worker
+/// `scheduled-messages-worker` processa entradas com `status = PENDING`
+/// e `scheduledAt <= now()`, enviando pelo canal correto. Para canal
+/// WhatsApp (Meta), se a sessão de 24h estiver expirada no momento do
+/// envio, é usado o template `fallbackTemplateName` (obrigatório se o
+/// usuário optou por agendar em canal Meta com risco de expiração).
+///
+/// Cancelamento automático: sempre que uma nova mensagem chega ou é
+/// enviada (inbound ou outbound) na mesma conversa, todos os agendamentos
+/// `PENDING` são cancelados com `cancelReason = "client_reply"` ou
+/// `"agent_reply"`. Cancelamento manual via UI usa `cancelReason = "manual"`.
+model ScheduledMessage {
+  id             String                 @id @default(cuid())
+  conversationId String
+  conversation   Conversation           @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  /// Quem criou o agendamento.
+  createdById    String
+  createdBy      User                   @relation("ScheduledMessageCreatedBy", fields: [createdById], references: [id])
+
+  /// Texto livre a ser enviado.
+  content        String                 @db.Text
+
+  /// Quando enviar (UTC). Worker checa a cada 30s.
+  scheduledAt    DateTime
+
+  /// Anexo opcional (mantém o mesmo padrão das mensagens normais).
+  mediaUrl       String?
+  /// Tipo MIME do anexo (ex.: "image/png"). Null se `mediaUrl` null.
+  mediaType      String?
+  /// Nome original do arquivo (para exibição/ download).
+  mediaName      String?
+
+  /// Template oficial da Meta a ser usado como fallback se a sessão de
+  /// 24h estiver expirada no momento do envio. Null = envia texto livre
+  /// mesmo que expire (canal não-Meta ou usuário escolheu não definir).
+  fallbackTemplateName    String?
+  /// Variáveis para substituir no template, no formato definido pelo
+  /// `TemplatePicker` ({ header: [...], body: [...], buttons: [...] }).
+  fallbackTemplateParams  Json?
+  /// Locale do template (ex.: "pt_BR", "en_US").
+  fallbackTemplateLanguage String?
+
+  status         ScheduledMessageStatus @default(PENDING)
+
+  /// Preenchido quando status = SENT.
+  sentAt         DateTime?
+  /// ID da Message criada pelo worker ao enviar (para auditoria/UI).
+  sentMessageId  String?
+
+  /// Preenchido quando status = CANCELLED.
+  cancelledAt    DateTime?
+  /// User que cancelou manualmente (null quando o cancelamento foi automático).
+  cancelledById  String?
+  cancelledBy    User?                  @relation("ScheduledMessageCancelledBy", fields: [cancelledById], references: [id], onDelete: SetNull)
+  /// "client_reply" | "agent_reply" | "manual" | "conversation_closed".
+  cancelReason   String?
+
+  /// Preenchido quando status = FAILED.
+  failedAt       DateTime?
+  /// Mensagem técnica do erro (ex.: "Meta session expired and no fallback
+  /// template configured").
+  failureReason  String?
+
+  createdAt      DateTime               @default(now())
+  updatedAt      DateTime               @updatedAt
+
+  @@index([conversationId, status])
+  @@index([status, scheduledAt])
+  @@index([createdById])
+  @@map("scheduled_messages")
+}
+
+enum ScheduledMessageStatus {
+  PENDING
+  SENT
+  CANCELLED
+  FAILED
+}
+

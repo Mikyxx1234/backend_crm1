@@ -1,0 +1,13 @@
+-- Adiciona `DENIED` ao enum `WhatsappCallConsentStatus`.
+--
+-- Motivo: o webhook da Meta reporta rejeição do cliente (response=REJECT /
+-- REJECTED / DECLINED / DENIED), mas até então o backend só sabia virar
+-- consent para `GRANTED`. Sem um estado próprio para recusa, o chip de voz
+-- no header continuava mostrando a autorização anterior mesmo após o REJECT
+-- chegar — inclusive para revogações pós-GRANTED.
+--
+-- Nota: `ALTER TYPE ... ADD VALUE` no PostgreSQL exige que a statement rode
+-- FORA de uma transação explícita (Postgres < 12 bloqueia; 12+ funciona mas
+-- o novo valor só fica visível após COMMIT). O Prisma `migrate deploy` já
+-- executa cada statement isoladamente, então basta a linha abaixo.
+ALTER TYPE "WhatsappCallConsentStatus" ADD VALUE IF NOT EXISTS 'DENIED';
