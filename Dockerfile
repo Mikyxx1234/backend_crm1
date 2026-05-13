@@ -33,9 +33,14 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
-# CLI Prisma 6 + pacotes @prisma (hoist) — evita `npx prisma` puxar Prisma 7 incompatível.
+# Runtime: engines + client (standalone já traz parte do @prisma; isto completa).
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
-COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
+# CLI: não copiar só `node_modules/prisma` — `@prisma/config` exige `effect`, `c12`, … hoistados.
+ARG PRISMA_VERSION=6.19.3
+RUN mkdir -p /opt/prisma-cli \
+  && cd /opt/prisma-cli \
+  && npm install prisma@${PRISMA_VERSION} --omit=dev --no-audit --no-fund \
+  && chown -R nextjs:nodejs /opt/prisma-cli
 
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh \

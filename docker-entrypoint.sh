@@ -8,7 +8,7 @@ elif [ -z "${DATABASE_URL}" ]; then
   echo "[entrypoint] DATABASE_URL vazio — pulando migrate deploy."
 else
   echo "[entrypoint] prisma migrate deploy..."
-  node node_modules/prisma/build/index.js migrate deploy --schema=prisma/schema.prisma
+  node /opt/prisma-cli/node_modules/prisma/build/index.js migrate deploy --schema=prisma/schema.prisma
 fi
 
 exec node server.js
