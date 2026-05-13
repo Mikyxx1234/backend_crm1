@@ -134,4 +134,14 @@ function bootstrapBackgroundServices() {
       console.error("[sse-bus] failed to start ai-agent inactivity worker:", e),
     );
 }
-bootstrapBackgroundServices();
+
+/** Evita Prisma/Redis durante `next build` (workers importam DB antes das migrações). */
+function shouldBootstrapBackgroundServices(): boolean {
+  if (process.env.NEXT_PHASE === "phase-production-build") return false;
+  if (process.env.SKIP_BACKGROUND_WORKERS === "1") return false;
+  return true;
+}
+
+if (shouldBootstrapBackgroundServices()) {
+  bootstrapBackgroundServices();
+}
