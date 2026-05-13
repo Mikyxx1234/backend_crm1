@@ -21,6 +21,9 @@ ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
+# User `nextjs` sem HOME quebra `npx`/npm cache; Prisma CLI usa HOME em runtime.
+ENV HOME=/tmp
+ENV NPM_CONFIG_CACHE=/tmp/.npm
 
 RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
@@ -30,7 +33,15 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
+# CLI Prisma 6 + pacotes @prisma (hoist) — evita `npx prisma` puxar Prisma 7 incompatível.
+COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
+
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh \
+  && mkdir -p /tmp/.npm \
+  && chown -R nextjs:nodejs /tmp
 
 USER nextjs
 EXPOSE 3000
-CMD ["node", "server.js"]
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
