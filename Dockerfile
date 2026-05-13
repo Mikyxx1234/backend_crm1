@@ -9,6 +9,8 @@ COPY prisma ./prisma
 RUN npm install
 
 COPY . .
+# Pasta `public` pode não existir no clone (vazia não vai pro Git); o runner precisa dela.
+RUN mkdir -p public
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npx prisma generate
 RUN npm run build
