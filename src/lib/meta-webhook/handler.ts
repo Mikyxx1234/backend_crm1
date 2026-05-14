@@ -37,6 +37,11 @@ import { maybeReplyAsAIAgent } from "@/services/ai/inbox-handler";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { getLogger } from "@/lib/logger";
 
+// Marcador único de build — usado pra confirmar via `grep` no bundle se o
+// rebuild do Easypanel pegou esta versão do source. Não tem outra função.
+const META_WEBHOOK_BUILD_MARKER = "BUILD_2026_05_14_T_20_36_FLOW_FIX_ACTIVE";
+void META_WEBHOOK_BUILD_MARKER;
+
 const log = getLogger("meta-webhook");
 import { processMetaWhatsappCallsWebhook } from "@/services/meta-whatsapp-calls-webhook";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
