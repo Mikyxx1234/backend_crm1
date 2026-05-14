@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { getOrgSettingBool } from "@/lib/org-settings";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent, getDealById, markDealLost, markDealWon, reopenDeal } from "@/services/deals";
 
@@ -57,8 +57,8 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       if (b.status === "LOST") {
         const reason = typeof b.lostReason === "string" ? b.lostReason.trim() : "";
-        const requireSetting = await prisma.systemSetting.findUnique({ where: { key: "loss_reason_required" } }).catch(() => null);
-        if ((requireSetting?.value === "true" || !reason) && !reason) {
+        const required = await getOrgSettingBool("deals.loss_reason_required", false).catch(() => false);
+        if ((required || !reason) && !reason) {
           return NextResponse.json(
             { message: "lostReason é obrigatório quando status é LOST." },
             { status: 400 }

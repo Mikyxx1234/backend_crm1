@@ -113,6 +113,7 @@ export async function ensureAllDealsHaveConversations(
       title: true,
       contactId: true,
       ownerId: true,
+      organizationId: true,
       contact: {
         select: {
           id: true,
@@ -153,6 +154,7 @@ export async function ensureAllDealsHaveConversations(
     if (!conv) {
       const created = await prisma.conversation.create({
         data: {
+          organizationId: deal.organizationId,
           externalId: `${ENSURE_PREFIX}${deal.contactId}`,
           channel: "whatsapp",
           status: "OPEN",
@@ -191,6 +193,7 @@ export async function ensureAllDealsHaveConversations(
       for (const m of sorted) {
         await prisma.message.create({
           data: {
+            organizationId: deal.organizationId,
             conversationId: conv.id,
             content: m.content,
             direction: m.direction,

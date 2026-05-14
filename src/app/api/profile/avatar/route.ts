@@ -15,11 +15,11 @@
  *    auditoria e evitar colisões.
  */
 
-import { mkdir, writeFile } from "fs/promises";
 import { NextResponse } from "next/server";
 import path from "path";
 
 import { auth } from "@/lib/auth";
+import { generateFileName, saveFile } from "@/lib/storage/local";
 
 const MAX_AVATAR_SIZE = 4 * 1024 * 1024;
 
@@ -43,6 +43,13 @@ export async function POST(request: Request) {
     const session = await auth();
     if (!session?.user?.id) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+    }
+    const orgId = (session.user as { organizationId?: string | null }).organizationId ?? null;
+    if (!orgId) {
+      return NextResponse.json(
+        { message: "Avatar requer organização ativa." },
+        { status: 400 },
+      );
     }
 
     let form: FormData;
@@ -82,19 +89,22 @@ export async function POST(request: Request) {
       );
     }
 
-    const ext = path.extname(file.name ?? "") || mimeToExt(mime);
-    const safeName = `u_${session.user.id}_${Date.now()}_${Math.random()
-      .toString(36)
-      .slice(2, 8)}${ext}`;
-
-    const uploadsDir = path.join(process.cwd(), "public", "uploads", "avatars");
-    await mkdir(uploadsDir, { recursive: true });
+    const ext = (path.extname(file.name ?? "") || mimeToExt(mime)).replace(/^\./, "");
+    const safeName = generateFileName({
+      prefix: `u${session.user.id.slice(0, 8)}`,
+      ext,
+    });
 
     const buffer = Buffer.from(await file.arrayBuffer());
-    await writeFile(path.join(uploadsDir, safeName), buffer);
 
-    const url = `/uploads/avatars/${safeName}`;
-    return NextResponse.json({ url, mimeType: mime });
+    // PR 1.3: avatares passam a viver em `<STORAGE_ROOT>/<orgId>/avatars/`.
+    const saved = await saveFile({
+      orgId,
+      bucket: "avatars",
+      fileName: safeName,
+      buffer,
+    });
+    return NextResponse.json({ url: saved.url, mimeType: mime });
   } catch (error) {
     console.error("[profile/avatar] upload failed", error);
     return NextResponse.json(

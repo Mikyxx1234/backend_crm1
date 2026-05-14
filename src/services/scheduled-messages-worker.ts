@@ -25,7 +25,13 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+// prismaBase para check de concorrencia cross-org (antes de entrar no
+// withSystemContext da org do item).
+import { prismaBase } from "@/lib/prisma-base";
+import { withSystemContext } from "@/lib/webhook-context";
 import { metaClientFromConfig, metaWhatsApp } from "@/lib/meta-whatsapp/client";
+import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import {
@@ -80,16 +86,39 @@ export async function tickOnce() {
   let failed = 0;
 
   for (const item of due) {
+    const orgId = item.conversation?.organizationId;
+    if (!orgId) {
+      // ScheduledMessage orfao (conversa removida) — nao conseguimos
+      // montar contexto. markAsFailed precisa de org tambem; usamos
+      // prismaBase direto para registrar a falha sem scope.
+      await prismaBase.scheduledMessage
+        .update({
+          where: { id: item.id },
+          data: {
+            status: "FAILED",
+            failedAt: new Date(),
+            failureReason: "Conversa removida antes do envio",
+          },
+        })
+        .catch(() => {});
+      failed++;
+      continue;
+    }
+
     // Concorrência: confirma que ainda está PENDING antes de gastar
     // I/O externo. Outro worker pode ter processado neste intervalo.
-    const stillPending = await prisma.scheduledMessage.findUnique({
+    // Usa prismaBase para evitar exigir contexto e nao vazar scope.
+    const stillPending = await prismaBase.scheduledMessage.findUnique({
       where: { id: item.id },
       select: { status: true },
     });
     if (stillPending?.status !== "PENDING") continue;
 
     try {
-      await dispatchOne(item);
+      // Toda a pipeline de dispatch acessa models scoped (Message,
+      // Conversation, Contact, Channel, etc.) — precisa do contexto
+      // da org do item para o extension de org-scope injetar filtros.
+      await withSystemContext(orgId, () => dispatchOne(item));
       sent++;
     } catch (err) {
       failed++;
@@ -98,7 +127,9 @@ export async function tickOnce() {
         `[scheduled-messages] dispatch falhou id=${item.id}:`,
         msg,
       );
-      await markAsFailed(item.id, msg).catch(() => {});
+      await withSystemContext(orgId, () => markAsFailed(item.id, msg)).catch(
+        () => {},
+      );
     }
   }
 
@@ -182,13 +213,13 @@ async function sendViaText(
 ) {
   const conv = item.conversation!;
   const saved = await prisma.message.create({
-    data: {
+    data: withOrgFromCtx({
       conversationId: conv.id,
       content: item.content,
       direction: "out",
       messageType: "text",
       senderName,
-    },
+    }),
   });
 
   const result = await sendWhatsAppText({
@@ -266,11 +297,29 @@ async function sendViaMetaTemplate(
         (Array.isArray(item.fallbackTemplateParams) ? (item.fallbackTemplateParams as unknown[]) : undefined)
       : undefined;
 
+  let templateGraphId: string | null = null;
+  try {
+    const tc = await prisma.whatsAppTemplateConfig.findFirst({
+      where: { metaTemplateName: templateName },
+      select: { metaTemplateId: true },
+    });
+    templateGraphId = tc?.metaTemplateId?.trim() || null;
+  } catch {
+    /* ignore */
+  }
+
+  const enrichResult = await enrichTemplateComponentsForFlowSend(client, {
+    templateName,
+    languageCode,
+    components: components as unknown[] | undefined,
+    templateGraphId,
+  });
+
   const result = await client.sendTemplate(
     to,
     templateName,
     languageCode,
-    components as unknown[] | undefined,
+    enrichResult.components,
     recipient,
   );
   const externalId = result.messages?.[0]?.id ?? null;
@@ -296,14 +345,17 @@ async function sendViaMetaTemplate(
   );
 
   const saved = await prisma.message.create({
-    data: {
+    data: withOrgFromCtx({
       conversationId: conv.id,
       content: messageContent,
       direction: "out",
       messageType: "template",
       senderName,
       ...(externalId ? { externalId } : {}),
-    },
+      ...(typeof enrichResult.flowToken === "string" && enrichResult.flowToken.trim()
+        ? { flowToken: enrichResult.flowToken.trim() }
+        : {}),
+    }),
   });
 
   await prisma.conversation

@@ -1,75 +1,104 @@
-# Decisões Estruturais — CRM EduIT
+# Decisões Estruturais — CRM EduIT (Backend)
 
-Registro de decisões técnicas que afetam estrutura do projeto, conforme regra
-de governança em `.cursor/rules/`. Cada entrada documenta **por que** algo foi
-feito, não **o que**.
+Registro de decisões técnicas que afetam estrutura do projeto. Cada entrada
+documenta **por que** algo foi feito, não **o que**.
 
 ---
 
-### 2026-05-14 — Migration de baseline (`20240101000000_init`)
+### 2026-05-14 — Re-fork a partir do `main` multi-tenant (`pre-update-multitenant` → `multi-tenant`)
 
-**Decisão.** Adicionada a migration `prisma/migrations/20240101000000_init/migration.sql`
-contendo o `CREATE SCHEMA` + 27 enums + 53 `CREATE TABLE` do schema atual.
-Gerada via `npx prisma migrate diff --from-empty --to-schema-datamodel`.
+**Decisão.** Os repositórios `frontend_crm1` e `backend_crm1` foram **regenerados
+a partir do zero** usando como fonte o `main` atual do monólito original
+(`mfpi1209/crm`). O fork anterior (de `e78c979`, branch `split-frontend-backend`,
+tag `pre-update-multitenant` em ambos os repos) era um snapshot **single-tenant**,
+desatualizado em **248 commits** em relação ao `main` no momento da separação.
 
-**Contexto.** Ao separar o monólito em dois repos (`frontend_crm1` e
-`backend_crm1`) e subir o backend em um banco novo/vazio no Easypanel
-(`banco@187.127.27.39`), o `prisma migrate deploy` quebrava com `P3009` na
-primeira migration (`20260329_add_last_inbound_at`) porque ela tentava
-`ALTER TABLE "conversations" ADD COLUMN ...` numa tabela que nunca tinha
-sido criada. Causa raiz: o histórico em `prisma/migrations/` **nunca tinha
-uma baseline** — todas as 41 migrations eram evoluções (`ALTER`/`ADD COLUMN`/
-`CREATE INDEX`) que assumiam o schema inicial já existente. No banco antigo
-(`db_crm_dev`) isso funcionava porque o schema havia sido criado via
-`prisma db push` antes do histórico de migrations passar a ser versionado.
+**Contexto.** A separação inicial (anterior a 2026-05-14) foi feita a partir de
+`e78c979`, um ponto no monólito **antes** da implementação de multi-tenancy
+(`Organization` + `OrganizationFeatureFlag` + `OrganizationSubscription` + RLS),
+MFA, audit log, billing/Stripe, WhatsApp Flow Builder, AuthZ scope grants, e
+~240 outros commits de evolução. Como o produto comercial precisa rodar em
+multi-tenant (cada cliente = uma `Organization`), continuar evoluindo o fork
+single-tenant era inviável.
+
+Repos antes do re-fork (tagueados como `pre-update-multitenant`):
+- `backend_crm1@5ed72ce` — single-tenant baseline gerada em 2026-05-14.
+- `frontend_crm1@3b8a940` — Dockerfile inicial.
 
 **Alternativas descartadas.**
 
-- **`prisma db push --accept-data-loss` em produção.** Rápido mas é o mesmo
-  "fallback tóxico" que o comentário do `start.sh` (linhas 10–15) documenta
-  como removido em abril/26: mascarava bugs e deixava `_prisma_migrations`
-  fora de sincronia com o schema real. Adicionar de volta seria regressão.
+- **Merge `main` na `split-frontend-backend` do monólito.** Rebase de 248
+  commits em cima de um fork que **já removeu** partes do código geraria
+  conflito em centenas de arquivos. Cada commit do main toca paths que o
+  fork não tem mais (ou tem em outra forma), exigindo resolução manual
+  arquivo por arquivo. Custo alto, risco de regressão silenciosa.
 
-- **Reconstituir o schema antigo (pré-`20260329`) como baseline.** Exigiria
-  reverter mentalmente todas as 41 migrations para gerar o estado original,
-  o que é trabalhoso e pode introduzir bugs sutis. Em compensação preservaria
-  o histórico "narrativo" das migrations. Como o histórico só passou a ser
-  versionado em março/26 (já com schema maduro), o ganho narrativo é baixo.
+- **Continuar evoluindo o fork single-tenant.** Tecnicamente possível, mas
+  significa reescrever toda a multi-tenancy de novo dentro do fork — duplicação
+  de trabalho e provável divergência permanente do produto principal. O custo
+  de oportunidade é o de NÃO ter os features que já existem no main (MFA,
+  audit, billing, etc.).
+
+- **Manter o monólito como single-source e fazer separação via reverse-proxy.**
+  Não atende ao requisito de deploy independente em VPS diferentes para futuros
+  clientes. O usuário definiu que o produto final será multi-VPS.
+
+**Procedimento (idempotente; ver `fork-strategy.mjs` na raiz do workspace).**
+
+1. **Salvaguardas.** Tags `pre-update-multitenant` push'adas em
+   `backend_crm1` e `frontend_crm1`. Tag `pre-split-redo-2026-05-14` local no
+   monólito (na branch `split-frontend-backend` em `e78c979`).
+2. **Atualização do monólito local.** `git checkout main && git pull` para
+   trazer todos os 248 commits.
+3. **Wipe controlado.** Em cada repo destino, todo conteúdo é apagado
+   **exceto** os arquivos exclusivos da separação (Dockerfile,
+   `docker-entrypoint.sh`, `.env.example`, `package.json`, scripts de
+   manutenção, `src/lib/api.ts`, `src/lib/auth-public.ts`, etc.). A lista
+   completa fica no array `PRESERVE` do `fork-strategy.mjs`.
+4. **Copy whitelist.** Apenas os paths classificados como "backend" (ou
+   "frontend") são copiados do monólito atualizado. Lista no array
+   `COPY_FROM_MONOLITH`.
+5. **Limpeza no frontend.** Após copiar `src/lib/`, arquivos `server-only`
+   (`prisma.ts`, `queue.ts`, `auth.ts`, `audit/`, `billing/`, etc.) são
+   removidos do frontend (lista em `FRONTEND_LIB_BLACKLIST`).
+6. **`patch-api-urls.mjs`.** Roda no frontend para transformar
+   `fetch("/api/...")` em `fetch(apiUrl("/api/..."))`, garantindo que as
+   chamadas client-side cheguem ao backend mesmo quando ele está em outro
+   host (configurável via `NEXT_PUBLIC_API_BASE_URL`).
+7. **Baseline multi-tenant.** `prisma/migrations/20240101000000_init/`
+   regerada via `prisma migrate diff --from-empty --to-schema-datamodel`
+   (70 tabelas, 33 enums, ~250 índices — vs 53 tabelas / 27 enums da
+   versão single-tenant).
+8. **Banco staging.** Schema `public` dropado e recriado; baseline
+   aplicada; as 58 migrations posteriores marcadas como aplicadas
+   (`resolve --applied`).
 
 **Impacto.**
 
-1. Qualquer banco novo a partir de agora — staging, segundo cliente,
-   ambiente de teste — sobe com `migrate deploy` sem intervenção manual.
-2. As 41 migrations posteriores à baseline tornam-se historicamente
-   redundantes (a baseline já contém o estado final). Para bancos
-   pré-existentes ao baseline (qualquer instância criada antes de
-   `2026-05-14`), as 41 já estarão marcadas como aplicadas em
-   `_prisma_migrations`. Para bancos novos, o `migrate deploy` aplica a
-   baseline e em seguida pula as 41 (porque os objetos já existem) — mas
-   isso **falha** com `42701 column already exists`. Por isso, para bancos
-   pré-existentes ao baseline (caso desta correção em produção), foi
-   necessário marcar manualmente as 41 como aplicadas via
-   `prisma migrate resolve --applied <nome>` após criar a baseline.
-3. O fluxo padrão de criar nova migration (`prisma migrate dev`) **continua
-   funcionando normalmente** — qualquer `ALTER` futuro vira uma nova
-   migration após a baseline e roda em todos os ambientes.
+1. `frontend_crm1` e `backend_crm1` passam a ser **os únicos repositórios
+   ativos** do produto. O monólito `mfpi1209/crm` torna-se referência
+   histórica apenas (read-only, sem deploy).
+2. Qualquer cliente novo daqui pra frente sobe os dois containers (front
+   + back) em um Easypanel próprio + banco próprio, criando sua
+   `Organization` via wizard de signup público.
+3. Banco staging atual (`banco@187.127.27.39`) foi recriado do zero com
+   schema multi-tenant. **Contas anteriores foram perdidas no staging**
+   (eram fixtures de teste, sem dados reais). A produção
+   `crm.eduit.com.br` continua intocada — roda no monólito original.
+4. Próximos features são desenvolvidos diretamente em `backend_crm1` ou
+   `frontend_crm1`, sem voltar pro monólito.
 
-**Procedimento aplicado em produção (`banco@187.127.27.39`):**
+---
 
-```bash
-# 1. Limpar entradas falhadas em _prisma_migrations (banco estava vazio)
-node scripts/clean-failed-migrations.mjs
+### 2026-05-14 — Migration de baseline (`20240101000000_init`) [DEPRECADO — substituída pela versão multi-tenant]
 
-# 2. Aplicar baseline (cria 53 tabelas + 27 enums)
-npx prisma migrate deploy --schema=./prisma/schema.prisma
+**(Entrada original sobre a baseline single-tenant gerada no início do dia. Mantida
+para referência histórica. A baseline atual em `prisma/migrations/` é a
+multi-tenant gerada após o re-fork.)**
 
-# 3. Marcar as 41 evoluções como aplicadas (já contidas na baseline)
-node scripts/resolve-post-baseline.mjs
-
-# 4. Validar
-npx prisma migrate status --schema=./prisma/schema.prisma
-# > "Database schema is up to date!"
-```
-
-Scripts utilitários ficam em `scripts/` para uso futuro caso seja preciso
-recuperar outro banco que tenha caído em P3009.
+Decisão original: adicionada a migration `20240101000000_init/migration.sql`
+para destravar `P3009` em bancos novos vazios. A versão single-tenant tinha
+27 enums + 53 tabelas. A nova versão multi-tenant (após re-fork) tem 33 enums
++ 70 tabelas. Scripts utilitários (`scripts/clean-failed-migrations.mjs`,
+`scripts/resolve-post-baseline.mjs`, etc.) continuam válidos e ficam mantidos
+para recuperar futuros bancos que caiam em P3009.

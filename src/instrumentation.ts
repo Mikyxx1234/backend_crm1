@@ -7,8 +7,35 @@
  *
  * The timeout sweeper is started lazily from src/lib/sse-bus.ts instead,
  * which is only loaded by server-side API routes.
+ *
+ * Exception: o SDK do OpenTelemetry (PR 2.2) pode ser inicializado aqui
+ * via dynamic import condicional. Ele só roda quando:
+ *   - NEXT_RUNTIME === "nodejs"
+ *   - OTEL_EXPORTER_OTLP_ENDPOINT está setado
+ *
+ * Pacotes OTel já estão em `serverExternalPackages` no next.config.ts pra
+ * não serem bundleados pelo webpack/turbopack.
  */
 export async function register() {
   if (process.env.NEXT_RUNTIME !== "nodejs") return;
-  // Server-side init that doesn't depend on pg/ioredis goes here.
+
+  if (process.env.OTEL_EXPORTER_OTLP_ENDPOINT) {
+    try {
+      const { startOtel } = await import("@/lib/otel-sdk");
+      await startOtel();
+    } catch (err) {
+      console.warn("[instrumentation] OTel SDK falhou ao iniciar:", err);
+    }
+  }
+
+  // PR 3.3: Pre-warm secrets provider. Pra `env` provider e no-op.
+  // Pra Infisical/Doppler, baixa todos os secrets uma vez e cacheia.
+  // Falha aqui NAO derruba o boot — providers tem fallback pra
+  // process.env.
+  try {
+    const { secrets } = await import("@/lib/secrets");
+    await secrets.prefetch();
+  } catch (err) {
+    console.warn("[instrumentation] secrets.prefetch falhou:", err);
+  }
 }

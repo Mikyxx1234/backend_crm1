@@ -8,15 +8,17 @@ export const dynamic = "force-dynamic";
 /**
  * Stats do dia para o "painel do dia" no topo do Inbox.
  *
- * Retorna 3 métricas que importam para o consultor agora:
+ * Retorna métricas que importam para o consultor agora:
  *   - `pending`: conversas abertas que precisam da atenção dele (cliente
  *     mandou mensagem e ninguém respondeu ainda).
- *   - `messagesToday`: quantas mensagens ele já enviou hoje (sensação
- *     de progresso pessoal — "já bati 50 mensagens").
+ *   - `messagesToday`: mensagens de saída (não privadas) hoje nas conversas
+ *     atribuídas a ele (proxy de produtividade).
+ *   - `messagesReceivedToday`: mensagens de entrada do cliente hoje (mesmo
+ *     recorte de conversa para agente; fila inteira para gestores).
  *   - `slaCritical`: subset de `pending` com lastMessageAt > 1h (cliente
  *     esperando resposta há mais de 1h — alerta vermelho).
  *
- * É chamada com refetch a cada 30s; consulta leve (3 counts indexados).
+ * É chamada com refetch a cada 30s; consultas leves (counts indexados).
  */
 export async function GET() {
   const r = await requireAuth();
@@ -44,7 +46,11 @@ export async function GET() {
       : {}),
   };
 
-  const [pending, slaCritical, messagesToday] = await Promise.all([
+  const inboundConvWhere = isAgent
+    ? { OR: [{ assignedToId: userId }, { assignedToId: null }] }
+    : {};
+
+  const [pending, slaCritical, messagesToday, messagesReceivedToday] = await Promise.all([
     prisma.conversation.count({ where: pendingWhere }),
     prisma.conversation.count({
       where: {
@@ -67,11 +73,21 @@ export async function GET() {
         conversation: { assignedToId: userId },
       },
     }),
+    prisma.message.count({
+      where: {
+        direction: "in",
+        isPrivate: false,
+        messageType: { not: "note" },
+        createdAt: { gte: startOfDay },
+        ...(isAgent ? { conversation: inboundConvWhere } : {}),
+      },
+    }),
   ]);
 
   return NextResponse.json({
     pending,
     slaCritical,
     messagesToday,
+    messagesReceivedToday,
   });
 }

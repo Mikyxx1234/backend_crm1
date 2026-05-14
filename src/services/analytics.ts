@@ -1,6 +1,18 @@
 import { Prisma, type ActivityType } from "@prisma/client";
 
-import { prisma } from "@/lib/prisma";
+// PR 5.2: queries deste service sao read-only e toleram lag — vao
+// pra read replica quando configurada (`DATABASE_URL_REPLICA`). Em
+// dev/single-node, `analyticsClient()` retorna o primary, comportamento
+// inalterado.
+import { analyticsClient } from "@/lib/analytics";
+
+const prisma = analyticsClient();
+import { getOrgIdOrThrow } from "@/lib/request-context";
+
+// Todas as $queryRaw deste arquivo precisam de filtro explicito de
+// organizationId — a Prisma Extension nao intercepta SQL cru, e sem o
+// filtro um tenant veria agregados de outro. Padrao: capturar orgId no
+// topo de cada funcao publica e injetar em cada raw via parametro.
 
 function toNumber(v: unknown): number {
   if (v == null) return 0;
@@ -21,6 +33,7 @@ function round2(n: number): number {
 export type AnalyticsPeriod = { from: Date; to: Date };
 
 export async function getDashboardMetrics(period?: AnalyticsPeriod) {
+  const orgId = getOrgIdOrThrow();
   const createdFilter = period
     ? { createdAt: { gte: period.from, lte: period.to } }
     : undefined;
@@ -63,6 +76,7 @@ export async function getDashboardMetrics(period?: AnalyticsPeriod) {
       FROM deals d
       INNER JOIN stages s ON s.id = d."stageId"
       WHERE d.status = 'OPEN'::"DealStatus"
+        AND d."organizationId" = ${orgId}
     `,
     prisma.deal.findMany({
       where: { status: "WON", closedAt: { not: null }, ...closedFilter },
@@ -118,6 +132,7 @@ export async function getRevenueOverTime(
   period: AnalyticsPeriod,
   groupBy: "day" | "week" | "month"
 ) {
+  const orgId = getOrgIdOrThrow();
   const unit =
     groupBy === "day" ? "day" : groupBy === "week" ? "week" : "month";
 
@@ -133,6 +148,7 @@ export async function getRevenueOverTime(
       AND d."closedAt" IS NOT NULL
       AND d."closedAt" >= ${period.from}
       AND d."closedAt" <= ${period.to}
+      AND d."organizationId" = ${orgId}
     GROUP BY 1
     ORDER BY 1 ASC
   `);
@@ -153,6 +169,7 @@ export type FunnelStageRow = {
 };
 
 export async function getFunnelData(pipelineId: string): Promise<FunnelStageRow[]> {
+  const orgId = getOrgIdOrThrow();
   const stages = await prisma.stage.findMany({
     where: { pipelineId },
     orderBy: { position: "asc" },
@@ -170,6 +187,7 @@ export async function getFunnelData(pipelineId: string): Promise<FunnelStageRow[
     INNER JOIN stages s ON s.id = d."stageId"
     WHERE s."pipelineId" = ${pipelineId}
       AND d.status = 'OPEN'::"DealStatus"
+      AND d."organizationId" = ${orgId}
     GROUP BY d."stageId"
   `;
 
@@ -213,7 +231,12 @@ export type TeamPerformanceRow = {
 };
 
 export async function getTeamPerformance(period?: AnalyticsPeriod) {
+  const orgId = getOrgIdOrThrow();
+  // CORRECAO multi-tenant 24/abr/26: User NAO esta em SCOPED_MODELS,
+  // entao precisamos filtrar manualmente por organizationId. O comentario
+  // antigo aqui dizia que estava scoped pela extension — era um bug.
   const users = await prisma.user.findMany({
+    where: { organizationId: orgId },
     select: { id: true, name: true },
     orderBy: { name: "asc" },
   });
@@ -247,6 +270,7 @@ export async function getTeamPerformance(period?: AnalyticsPeriod) {
       AND d."closedAt" IS NOT NULL
       AND d."closedAt" >= ${closedFrom}
       AND d."closedAt" <= ${closedTo}
+      AND d."organizationId" = ${orgId}
     GROUP BY d."ownerId"
   `;
 
@@ -259,6 +283,7 @@ export async function getTeamPerformance(period?: AnalyticsPeriod) {
     WHERE a.completed = true
       AND COALESCE(a."completedAt", a."updatedAt") >= ${actFrom}
       AND COALESCE(a."completedAt", a."updatedAt") <= ${actTo}
+      AND a."organizationId" = ${orgId}
     GROUP BY a."userId"
   `;
 
@@ -294,17 +319,21 @@ export type LeadSourceRow = {
 };
 
 export async function getLeadSources(period?: AnalyticsPeriod) {
+  const orgId = getOrgIdOrThrow();
   const cohortFilter = period
-    ? Prisma.sql`c."createdAt" >= ${period.from} AND c."createdAt" <= ${period.to}`
-    : Prisma.sql`TRUE`;
+    ? Prisma.sql`c."createdAt" >= ${period.from} AND c."createdAt" <= ${period.to} AND c."organizationId" = ${orgId}`
+    : Prisma.sql`c."organizationId" = ${orgId}`;
 
+  // Tanto LEFT JOIN deals quanto EXISTS deals2 ja vem amarrados a contacts
+  // do cohort (que ja foi filtrado por org). Adicionamos d/d2."organizationId"
+  // como defesa em profundidade (paranoia + alinha com RLS quando ativarmos).
   const wonRevenueFilter = period
-    ? Prisma.sql`d.status = 'WON'::"DealStatus" AND d."closedAt" IS NOT NULL AND d."closedAt" >= ${period.from} AND d."closedAt" <= ${period.to}`
-    : Prisma.sql`d.status = 'WON'::"DealStatus" AND d."closedAt" IS NOT NULL`;
+    ? Prisma.sql`d.status = 'WON'::"DealStatus" AND d."closedAt" IS NOT NULL AND d."closedAt" >= ${period.from} AND d."closedAt" <= ${period.to} AND d."organizationId" = ${orgId}`
+    : Prisma.sql`d.status = 'WON'::"DealStatus" AND d."closedAt" IS NOT NULL AND d."organizationId" = ${orgId}`;
 
   const existsWonFilter = period
-    ? Prisma.sql`d2.status = 'WON'::"DealStatus" AND d2."closedAt" IS NOT NULL AND d2."closedAt" >= ${period.from} AND d2."closedAt" <= ${period.to}`
-    : Prisma.sql`d2.status = 'WON'::"DealStatus" AND d2."closedAt" IS NOT NULL`;
+    ? Prisma.sql`d2.status = 'WON'::"DealStatus" AND d2."closedAt" IS NOT NULL AND d2."closedAt" >= ${period.from} AND d2."closedAt" <= ${period.to} AND d2."organizationId" = ${orgId}`
+    : Prisma.sql`d2.status = 'WON'::"DealStatus" AND d2."closedAt" IS NOT NULL AND d2."organizationId" = ${orgId}`;
 
   const rows = await prisma.$queryRaw<
     {
@@ -365,6 +394,7 @@ export type SalesForecastResult = {
 export async function getSalesForecast(
   pipelineId?: string
 ): Promise<SalesForecastResult> {
+  const orgId = getOrgIdOrThrow();
   const pipelineCond = pipelineId
     ? Prisma.sql`AND s."pipelineId" = ${pipelineId}`
     : Prisma.empty;
@@ -374,6 +404,7 @@ export async function getSalesForecast(
     FROM deals d
     INNER JOIN stages s ON s.id = d."stageId"
     WHERE d.status = 'OPEN'::"DealStatus"
+      AND d."organizationId" = ${orgId}
     ${pipelineCond}
   `);
 
@@ -397,6 +428,7 @@ export async function getSalesForecast(
     INNER JOIN stages s ON s.id = d."stageId"
     WHERE d.status = 'OPEN'::"DealStatus"
       AND d."expectedClose" IS NOT NULL
+      AND d."organizationId" = ${orgId}
       ${pipelineCond}
     GROUP BY 1
   `);
@@ -514,6 +546,7 @@ export type InboxMetrics = {
 };
 
 export async function getInboxMetrics(period?: AnalyticsPeriod): Promise<InboxMetrics> {
+  const orgId = getOrgIdOrThrow();
   const from = period?.from ?? new Date(0);
   const to = period?.to ?? new Date(8640000000000000);
 
@@ -543,15 +576,18 @@ export async function getInboxMetrics(period?: AnalyticsPeriod): Promise<InboxMe
         ON m_out."conversationId" = m_in."conversationId"
         AND m_out.direction = 'out'
         AND m_out."createdAt" > m_in."createdAt"
+        AND m_out."organizationId" = ${orgId}
       WHERE m_in.direction = 'in'
         AND m_in."createdAt" >= ${from}
         AND m_in."createdAt" <= ${to}
+        AND m_in."organizationId" = ${orgId}
         AND NOT EXISTS (
           SELECT 1 FROM messages m_prev
           WHERE m_prev."conversationId" = m_in."conversationId"
             AND m_prev.direction = 'in'
             AND m_prev."createdAt" < m_in."createdAt"
             AND m_prev."createdAt" > m_in."createdAt" - INTERVAL '1 second'
+            AND m_prev."organizationId" = ${orgId}
         )
       GROUP BY m_in.id, m_in."conversationId", m_in."createdAt"
     )
@@ -570,6 +606,7 @@ export async function getInboxMetrics(period?: AnalyticsPeriod): Promise<InboxMe
     WHERE c.status = 'RESOLVED'::"ConversationStatus"
       AND c."updatedAt" >= ${from}
       AND c."updatedAt" <= ${to}
+      AND c."organizationId" = ${orgId}
   `;
   const avgResolutionHours = round2(toNumber(resolutionRows[0]?.avg_hours));
 
@@ -592,6 +629,7 @@ export async function getInboxMetrics(period?: AnalyticsPeriod): Promise<InboxMe
       INNER JOIN users u ON u.id = conv."assignedToId"
       WHERE conv."assignedToId" IS NOT NULL
         AND conv."createdAt" >= ${from} AND conv."createdAt" <= ${to}
+        AND conv."organizationId" = ${orgId}
     ),
     agent_msgs AS (
       SELECT
@@ -665,6 +703,7 @@ export async function getInboxMetrics(period?: AnalyticsPeriod): Promise<InboxMe
       COUNT(DISTINCT m."conversationId")::bigint AS convs
     FROM messages m
     WHERE m."createdAt" >= ${from} AND m."createdAt" <= ${to}
+      AND m."organizationId" = ${orgId}
     GROUP BY 1
     ORDER BY 1 ASC
   `;
@@ -682,6 +721,7 @@ export async function getInboxMetrics(period?: AnalyticsPeriod): Promise<InboxMe
     FROM messages m
     WHERE m.direction = 'in'
       AND m."createdAt" >= ${from} AND m."createdAt" <= ${to}
+      AND m."organizationId" = ${orgId}
     GROUP BY 1
     ORDER BY 1 ASC
   `;
@@ -715,6 +755,7 @@ export type StageMetric = {
 };
 
 export async function getStageMetrics(pipelineId: string): Promise<StageMetric[]> {
+  const orgId = getOrgIdOrThrow();
   const rows = await prisma.$queryRaw<
     { stageId: string; totalDeals: bigint; advancedDeals: bigint; avgDays: unknown }[]
   >`
@@ -732,6 +773,7 @@ export async function getStageMetrics(pipelineId: string): Promise<StageMetric[]
       FROM deals d
       INNER JOIN stages s ON s.id = d."stageId"
       WHERE s."pipelineId" = ${pipelineId}
+        AND d."organizationId" = ${orgId}
     ),
     stage_metrics AS (
       SELECT
@@ -739,7 +781,10 @@ export async function getStageMetrics(pipelineId: string): Promise<StageMetric[]
         COUNT(*)::bigint AS "totalDeals",
         COUNT(*) FILTER (
           WHERE deal_id IN (
-            SELECT id FROM deals WHERE status IN ('WON'::"DealStatus") AND "stageId" != deals."stageId"
+            SELECT id FROM deals
+            WHERE status IN ('WON'::"DealStatus")
+              AND "stageId" != deals."stageId"
+              AND "organizationId" = ${orgId}
           )
         )::bigint AS "advancedDeals",
         COALESCE(AVG(days_in_stage), 0) AS "avgDays"

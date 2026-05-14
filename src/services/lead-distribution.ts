@@ -1,4 +1,6 @@
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 
 /**
  * Check if an agent is currently available based on their online status
@@ -119,15 +121,16 @@ export async function createDistributionRule(data: {
   pipelineId?: string | null;
   memberUserIds: string[];
 }) {
+  const orgId = getOrgIdOrThrow();
   return prisma.distributionRule.create({
-    data: {
+    data: withOrgFromCtx({
       name: data.name,
       mode: data.mode,
       pipelineId: data.pipelineId ?? null,
       members: {
-        create: data.memberUserIds.map((userId) => ({ userId })),
+        create: data.memberUserIds.map((userId) => ({ userId, organizationId: orgId })),
       },
-    },
+    }),
     include: {
       pipeline: { select: { id: true, name: true } },
       members: {
@@ -151,8 +154,13 @@ export async function updateDistributionRule(
     if (data.memberUserIds) {
       await tx.distributionMember.deleteMany({ where: { ruleId: id } });
       if (data.memberUserIds.length > 0) {
+        const orgId = getOrgIdOrThrow();
         await tx.distributionMember.createMany({
-          data: data.memberUserIds.map((userId) => ({ ruleId: id, userId })),
+          data: data.memberUserIds.map((userId) => ({
+            ruleId: id,
+            userId,
+            organizationId: orgId,
+          })),
         });
       }
     }

@@ -217,7 +217,7 @@ export async function enqueueCampaignSend(payload: CampaignSendPayload) {
   return queue.add("send", payload, {
     removeOnComplete: true,
     removeOnFail: false,
-    attempts: 3,
-    backoff: { type: "exponential", delay: 2000 },
+    attempts: 6,
+    backoff: { type: "exponential", delay: 3000 },
   });
 }

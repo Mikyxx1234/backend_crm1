@@ -1,9 +1,11 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { parseCsv } from "@/lib/csv-parse";
 import { assertImportPermission } from "@/lib/import-guard";
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createDeal, isValidDealStatus, updateDeal } from "@/services/deals";
 
 function hasColumn(headers: string[], ...names: string[]) {
@@ -74,7 +76,11 @@ async function resolveContactIdForDeal(row: Record<string, string>): Promise<str
     row.contact_externalid?.trim() ||
     row.kommo_contact_id?.trim();
   if (ext) {
-    const c = await prisma.contact.findUnique({ where: { externalId: ext }, select: { id: true } });
+    const orgId = getOrgIdOrThrow();
+    const c = await prisma.contact.findUnique({
+      where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
+      select: { id: true },
+    });
     return c?.id;
   }
 
@@ -103,13 +109,17 @@ async function resolveDealUpsert(row: Record<string, string>): Promise<
     const d = await prisma.deal.findUnique({ where: { id }, select: { id: true } });
     if (d) candidates.push(d);
   }
+  const orgId = getOrgIdOrThrow();
   if (ext) {
-    const d = await prisma.deal.findUnique({ where: { externalId: ext }, select: { id: true } });
+    const d = await prisma.deal.findUnique({
+      where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
+      select: { id: true },
+    });
     if (d) candidates.push(d);
   }
   if (numRaw && /^\d+$/.test(numRaw)) {
     const d = await prisma.deal.findUnique({
-      where: { number: parseInt(numRaw, 10) },
+      where: { organizationId_number: { organizationId: orgId, number: parseInt(numRaw, 10) } },
       select: { id: true },
     });
     if (d) candidates.push(d);
@@ -148,6 +158,11 @@ export async function POST(request: Request) {
     const session = await auth();
     const denied = assertImportPermission(session);
     if (denied) return denied;
+    const permissionDenied = await requirePermissionForUser(
+      (session?.user ?? {}) as { id: string; organizationId: string | null; role?: string | null; isSuperAdmin?: boolean },
+      "deal:create",
+    );
+    if (permissionDenied) return permissionDenied;
 
     const formData = await request.formData();
     const file = formData.get("file");

@@ -22,7 +22,7 @@ export async function POST(
 
   const draft = await prisma.message.findUnique({
     where: { id: messageId },
-    select: { id: true, messageType: true, isPrivate: true, conversationId: true },
+    select: { id: true, messageType: true, isPrivate: true, conversationId: true, organizationId: true },
   });
   if (!draft || draft.messageType !== "ai_draft" || !draft.isPrivate) {
     return NextResponse.json(
@@ -32,6 +32,7 @@ export async function POST(
   }
   await prisma.message.delete({ where: { id: messageId } });
   sseBus.publish("message_deleted", {
+    organizationId: draft.organizationId,
     conversationId: draft.conversationId,
     messageId,
   });

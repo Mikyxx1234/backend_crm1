@@ -1,7 +1,8 @@
 import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { authenticateApiRequest } from "@/lib/api-auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { createPipeline, getPipelines } from "@/services/pipelines";
 
 /** Prisma nem sempre mantém `instanceof` após o bundle; usa também `code` e mensagem. */
@@ -44,8 +45,12 @@ export async function GET(request: Request) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "pipeline:view");
+    if (denied) return denied;
     const pipelines = await getPipelines();
     return NextResponse.json(pipelines);
+    });
   } catch (e) {
     console.error(e);
     const hint = prismaFailureMessage(e);
@@ -61,6 +66,9 @@ export async function POST(request: Request) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "pipeline:create");
+    if (denied) return denied;
     let body: unknown;
     try {
       body = await request.json();
@@ -86,6 +94,7 @@ export async function POST(request: Request) {
       }
       throw err;
     }
+    });
   } catch (e: unknown) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao criar pipeline." }, { status: 500 });

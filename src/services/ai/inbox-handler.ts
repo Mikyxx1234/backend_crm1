@@ -28,7 +28,7 @@
  * 200 pra Meta mesmo se o agente quebrar.
  */
 
-import { metaWhatsApp } from "@/lib/meta-whatsapp/client";
+import { metaClientFromConfig, type MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import {
   computeTypingDelayMs,
   isWithinBusinessHours,
@@ -38,6 +38,8 @@ import {
   type HandoffMode,
 } from "@/lib/ai-agents/piloting";
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrNull } from "@/lib/request-context";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
 import {
   executeAgentHandoff,
@@ -62,9 +64,19 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         id: true,
         assignedToId: true,
         contactId: true,
+        // Trazemos o canal pra resolver o cliente Meta correto desse tenant.
+        // Sem isso, o agente IA da DNA respondia via numero da Eduit (singleton
+        // global do env). Cross-tenant leak critico.
+        channelRef: { select: { id: true, config: true } },
       },
     });
     if (!conversation?.assignedToId) return;
+
+    const channelConfig = conversation.channelRef?.config as
+      | Record<string, unknown>
+      | null
+      | undefined;
+    const metaClient: MetaWhatsAppClient = metaClientFromConfig(channelConfig);
 
     const assignee = await prisma.user.findUnique({
       where: { id: conversation.assignedToId },
@@ -224,7 +236,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       if (result.text) {
         await prisma.message
           .create({
-            data: {
+            data: withOrgFromCtx({
               conversationId: args.conversationId,
               content: `[IA → humano] ${result.text}`,
               direction: "out",
@@ -234,7 +246,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               aiAgentUserId: assignee.id,
               senderName: "Agente IA",
               sendStatus: "sent",
-            },
+            }),
           })
           .catch(() => null);
       }
@@ -245,8 +257,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     if (!text) return;
 
     if (result.autonomyMode === "AUTONOMOUS" && args.channel === "meta") {
-      if (!metaWhatsApp.configured) {
-        console.warn("[ai-inbox] Meta não configurado; gravando como rascunho.");
+      if (!metaClient.configured) {
+        console.warn("[ai-inbox] Meta não configurado para este canal; gravando como rascunho.");
         await saveDraft(assignee.id, args.conversationId, text);
         return;
       }
@@ -267,11 +279,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         conversationId: args.conversationId,
         text,
         humanBehavior,
+        metaClient,
       });
 
       let externalId: string | null = null;
       try {
-        const send = await metaWhatsApp.sendText(contact.phone, text);
+        const send = await metaClient.sendText(contact.phone, text);
         externalId = send.messages?.[0]?.id ?? null;
       } catch (err) {
         console.error(
@@ -281,7 +294,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         return;
       }
       const saved = await prisma.message.create({
-        data: {
+        data: withOrgFromCtx({
           conversationId: args.conversationId,
           content: text,
           direction: "out",
@@ -291,7 +304,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           senderName: "Agente IA",
           externalId,
           sendStatus: "sent",
-        },
+        }),
       });
       await prisma.conversation
         .update({
@@ -304,6 +317,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         })
         .catch(() => null);
       sseBus.publish("new_message", {
+        organizationId: getOrgIdOrNull(),
         conversationId: args.conversationId,
         contactId: args.contactId,
         direction: "out",
@@ -325,7 +339,7 @@ async function saveDraft(
   text: string,
 ) {
   const saved = await prisma.message.create({
-    data: {
+    data: withOrgFromCtx({
       conversationId,
       content: text,
       direction: "out",
@@ -335,9 +349,10 @@ async function saveDraft(
       aiAgentUserId: agentUserId,
       senderName: "Agente IA (rascunho)",
       sendStatus: "draft",
-    },
+    }),
   });
   sseBus.publish("new_message", {
+    organizationId: getOrgIdOrNull(),
     conversationId,
     direction: "out",
     messageType: "ai_draft",
@@ -364,6 +379,7 @@ async function applyHumanBehaviorBeforeSend(args: {
     typingPerCharMs: number;
     markMessagesRead: boolean;
   };
+  metaClient: MetaWhatsAppClient;
 }): Promise<void> {
   const { simulateTyping, typingPerCharMs, markMessagesRead } =
     args.humanBehavior;
@@ -383,7 +399,7 @@ async function applyHumanBehaviorBeforeSend(args: {
 
   if (simulateTyping) {
     // sendTypingIndicator já marca como lida no mesmo request.
-    await metaWhatsApp.sendTypingIndicator(wamid);
+    await args.metaClient.sendTypingIndicator(wamid);
     const delayMs = computeTypingDelayMs(args.text.length, typingPerCharMs);
     await delay(delayMs);
     return;
@@ -391,7 +407,7 @@ async function applyHumanBehaviorBeforeSend(args: {
 
   if (markMessagesRead) {
     try {
-      await metaWhatsApp.markAsRead(wamid);
+      await args.metaClient.markAsRead(wamid);
     } catch (err) {
       console.warn(
         "[ai-inbox] markAsRead falhou:",

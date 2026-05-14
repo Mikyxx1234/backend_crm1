@@ -8,6 +8,7 @@ import {
   BAILEYS_OUTBOUND_QUEUE_NAME,
   type BaileysOutboundPayload,
 } from "@/lib/queue";
+import { parseStoragePath, readStoredFile } from "@/lib/storage/local";
 import type { BaileysManager } from "./baileys-manager";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
 
@@ -38,12 +39,17 @@ export function startOutboundConsumer(
       let waContent: AnyMessageContent;
 
       if (mediaUrl && messageType !== "text") {
-        const localPath = mediaUrl.startsWith("/uploads/")
-          ? path.join(process.cwd(), "public", mediaUrl)
-          : null;
-
+        // PR 1.3: storage tenant-scoped passou a usar `/api/storage/...`.
+        // Mantemos compatibilidade com `/uploads/...` legacy enquanto
+        // mídias antigas existirem no FS.
         let buffer: Buffer | undefined;
-        if (localPath) {
+
+        const parsed = parseStoragePath(mediaUrl);
+        if (parsed) {
+          const stored = await readStoredFile(parsed.orgId, parsed.bucket, parsed.fileName);
+          if (stored) buffer = stored.buffer;
+        } else if (mediaUrl.startsWith("/uploads/")) {
+          const localPath = path.join(process.cwd(), "public", mediaUrl);
           try {
             buffer = await fs.readFile(localPath);
           } catch {

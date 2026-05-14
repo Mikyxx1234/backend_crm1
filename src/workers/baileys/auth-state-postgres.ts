@@ -7,6 +7,7 @@ import type {
 } from "@whiskeysockets/baileys";
 import { initAuthCreds, BufferJSON } from "@whiskeysockets/baileys";
 import { prisma } from "@/lib/prisma";
+import { prismaBase } from "@/lib/prisma-base";
 
 /**
  * Implements Baileys AuthenticationState backed by the `baileys_auth_keys`
@@ -17,6 +18,12 @@ export async function usePostgresAuthState(
 ): Promise<{ state: AuthenticationState; saveCreds: () => Promise<void> }> {
   const writeData = (value: unknown) => JSON.stringify(value, BufferJSON.replacer);
   const readData = (raw: unknown) => JSON.parse(JSON.stringify(raw), BufferJSON.reviver);
+
+  const channelRow = await prismaBase.channel.findUnique({
+    where: { id: channelId },
+    select: { organizationId: true },
+  });
+  const organizationId = channelRow?.organizationId ?? "";
 
   const readCreds = async (): Promise<AuthenticationCreds> => {
     const row = await prisma.baileysAuthKey.findUnique({
@@ -31,7 +38,7 @@ export async function usePostgresAuthState(
     await prisma.baileysAuthKey.upsert({
       where: { channelId_keyType_keyId: { channelId, keyType: "creds", keyId: "creds" } },
       update: { value: JSON.parse(writeData(creds)) },
-      create: { channelId, keyType: "creds", keyId: "creds", value: JSON.parse(writeData(creds)) },
+      create: { organizationId, channelId, keyType: "creds", keyId: "creds", value: JSON.parse(writeData(creds)) },
     });
   };
 
@@ -69,7 +76,7 @@ export async function usePostgresAuthState(
               prisma.baileysAuthKey.upsert({
                 where: { channelId_keyType_keyId: { channelId, keyType: type, keyId } },
                 update: { value: serialized },
-                create: { channelId, keyType: type, keyId, value: serialized },
+                create: { organizationId, channelId, keyType: type, keyId, value: serialized },
               }),
             );
           }

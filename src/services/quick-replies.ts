@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 export async function getQuickReplies() {
   return prisma.quickReply.findMany({ orderBy: { position: "asc" } });
@@ -15,12 +16,12 @@ export async function createQuickReply(data: {
 }) {
   const maxPos = await prisma.quickReply.aggregate({ _max: { position: true } });
   return prisma.quickReply.create({
-    data: {
+    data: withOrgFromCtx({
       title: data.title,
       content: data.content,
       category: data.category ?? null,
       position: (maxPos._max.position ?? -1) + 1,
-    },
+    }),
   });
 }
 

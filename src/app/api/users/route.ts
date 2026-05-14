@@ -1,17 +1,13 @@
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 
-import { requireAdmin, requireAuth } from "@/lib/auth-helpers";
+import { requireAdmin, requireAuth, userOrgFilter } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 
 const VALID_ROLES = ["ADMIN", "MANAGER", "MEMBER"] as const;
 
 export async function GET() {
   try {
-    // Listagem de usuários é OK para qualquer usuário logado — vários
-    // componentes (assignar conversa, dropdown de owner, etc.) precisam
-    // dessa lista. O que NÃO pode acontecer é qualquer um criar/editar
-    // usuários: isso é restrito a ADMIN no POST/PUT/DELETE.
     const r = await requireAuth();
     if (!r.ok) return r.response;
 
@@ -19,7 +15,10 @@ export async function GET() {
       // Apenas operadores humanos aparecem aqui. Agentes de IA
       // (User.type=AI) têm tela própria em /ai-agents e não fazem
       // sentido em seletores de "assinar conversa para mim" etc.
-      where: { type: "HUMAN" },
+      // userOrgFilter blinda o vazamento entre tenants — User nao esta
+      // no SCOPED_MODELS da Prisma Extension (precisamos de auth sem ctx),
+      // entao filtragem aqui e MANUAL e OBRIGATORIA.
+      where: { type: "HUMAN", ...userOrgFilter(r.session) },
       orderBy: { name: "asc" },
       select: {
         id: true,
@@ -46,9 +45,6 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    // Criar usuário (especialmente com role ADMIN/MANAGER) só pode ser
-    // feito por outro ADMIN. Antes qualquer sessão autenticada conseguia
-    // se promover a ADMIN via POST aqui — escalada de privilégio direta.
     const r = await requireAdmin();
     if (!r.ok) return r.response;
 
@@ -70,8 +66,24 @@ export async function POST(request: Request) {
 
     const hashedPassword = await bcrypt.hash(password, 10);
 
+    // Critico: novo user precisa nascer dentro da org de quem criou.
+    // Super-admin sem org ainda assim nao pode criar user orfao — bloqueia.
+    const orgId = r.session.user.organizationId;
+    if (!orgId) {
+      return NextResponse.json(
+        { message: "Super-admin precisa criar usuario via /admin/organizations." },
+        { status: 400 },
+      );
+    }
+
     const user = await prisma.user.create({
-      data: { name, email, hashedPassword, role: validRole },
+      data: {
+        name,
+        email,
+        hashedPassword,
+        role: validRole,
+        organization: { connect: { id: orgId } },
+      },
       select: { id: true, name: true, email: true, role: true },
     });
 

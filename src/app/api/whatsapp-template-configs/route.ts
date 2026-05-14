@@ -1,61 +1,121 @@
 import { NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 
+// Bug 27/abr/26: usavamos `auth()` direto. A rota chama `withOrgFromCtx`
+// (direto ou via service), avaliado ANTES da Prisma extension popular
+// o ctx. Migrado para withOrgContext.
 export async function GET() {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+  return withOrgContext(async () => {
+    try {
+      const configs = await prisma.whatsAppTemplateConfig.findMany({
+        orderBy: { metaTemplateName: "asc" },
+      });
+      return NextResponse.json(configs);
+    } catch (e) {
+      return NextResponse.json(
+        { message: e instanceof Error ? e.message : "Erro." },
+        { status: 500 },
+      );
     }
-    const configs = await prisma.whatsAppTemplateConfig.findMany({
-      orderBy: { metaTemplateName: "asc" },
-    });
-    return NextResponse.json(configs);
-  } catch (e) {
-    return NextResponse.json(
-      { message: e instanceof Error ? e.message : "Erro." },
-      { status: 500 },
-    );
-  }
+  });
 }
 
 export async function PUT(request: Request) {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+  return withOrgContext(async (session) => {
+    try {
+      const role = (session.user as { role?: string }).role;
+      if (role !== "ADMIN" && role !== "MANAGER") {
+        return NextResponse.json({ message: "Apenas administrador ou gestor." }, { status: 403 });
+      }
+
+      const body = (await request.json()) as Record<string, unknown>;
+      const metaTemplateId = typeof body.metaTemplateId === "string" ? body.metaTemplateId.trim() : "";
+      const metaTemplateName = typeof body.metaTemplateName === "string" ? body.metaTemplateName.trim() : "";
+      if (!metaTemplateId || !metaTemplateName) {
+        return NextResponse.json({ message: "metaTemplateId e metaTemplateName obrigatórios." }, { status: 400 });
+      }
+
+      const label = typeof body.label === "string" ? body.label.trim() : "";
+      const agentEnabled = body.agentEnabled === true;
+      const language = typeof body.language === "string" ? body.language.trim() || "pt_BR" : "pt_BR";
+      const category = typeof body.category === "string" ? body.category.trim() || null : null;
+      const bodyPreview = typeof body.bodyPreview === "string" ? body.bodyPreview.slice(0, 500) : "";
+
+      const hasButtons = body.hasButtons === true;
+      const hasVariables = body.hasVariables === true;
+      const buttonTypes = Array.isArray(body.buttonTypes)
+        ? (body.buttonTypes as unknown[]).filter((x): x is string => typeof x === "string")
+        : [];
+      const flowAction =
+        typeof body.flowAction === "string" && body.flowAction.trim() ? body.flowAction.trim() : null;
+      const flowId = typeof body.flowId === "string" && body.flowId.trim() ? body.flowId.trim() : null;
+
+      let operatorVariables: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined;
+      if (Object.prototype.hasOwnProperty.call(body, "operatorVariables")) {
+        const raw = body.operatorVariables;
+        if (raw === null) {
+          operatorVariables = Prisma.JsonNull;
+        } else if (Array.isArray(raw)) {
+          const cleaned = raw
+            .map((row) => {
+              if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+              const o = row as Record<string, unknown>;
+              const key = typeof o.key === "string" ? o.key.trim() : "";
+              const label = typeof o.label === "string" ? o.label.trim() : "";
+              if (!key) return null;
+              const example = typeof o.example === "string" && o.example.trim() ? o.example.trim() : undefined;
+              return { key, label: label || key, ...(example ? { example } : {}) };
+            })
+            .filter((x): x is { key: string; label: string; example?: string } => x != null);
+          operatorVariables = cleaned as unknown as Prisma.InputJsonValue;
+        }
+      }
+
+      const orgId = getOrgIdOrThrow();
+      const config = await prisma.whatsAppTemplateConfig.upsert({
+        where: { organizationId_metaTemplateId: { organizationId: orgId, metaTemplateId } },
+        create: withOrgFromCtx({
+          metaTemplateId,
+          metaTemplateName,
+          label,
+          agentEnabled,
+          language,
+          category,
+          bodyPreview,
+          hasButtons,
+          hasVariables,
+          buttonTypes,
+          flowAction,
+          flowId,
+          ...(operatorVariables !== undefined ? { operatorVariables } : {}),
+        }),
+        update: {
+          metaTemplateName,
+          label,
+          agentEnabled,
+          language,
+          category,
+          bodyPreview,
+          hasButtons,
+          hasVariables,
+          buttonTypes,
+          flowAction,
+          flowId,
+          ...(operatorVariables !== undefined ? { operatorVariables } : {}),
+        },
+      });
+
+      return NextResponse.json(config);
+    } catch (e) {
+      return NextResponse.json(
+        { message: e instanceof Error ? e.message : "Erro." },
+        { status: 500 },
+      );
     }
-    const role = (session.user as { role?: string }).role;
-    if (role !== "ADMIN" && role !== "MANAGER") {
-      return NextResponse.json({ message: "Apenas administrador ou gestor." }, { status: 403 });
-    }
-
-    const body = (await request.json()) as Record<string, unknown>;
-    const metaTemplateId = typeof body.metaTemplateId === "string" ? body.metaTemplateId.trim() : "";
-    const metaTemplateName = typeof body.metaTemplateName === "string" ? body.metaTemplateName.trim() : "";
-    if (!metaTemplateId || !metaTemplateName) {
-      return NextResponse.json({ message: "metaTemplateId e metaTemplateName obrigatórios." }, { status: 400 });
-    }
-
-    const label = typeof body.label === "string" ? body.label.trim() : "";
-    const agentEnabled = body.agentEnabled === true;
-    const language = typeof body.language === "string" ? body.language.trim() || "pt_BR" : "pt_BR";
-    const category = typeof body.category === "string" ? body.category.trim() || null : null;
-    const bodyPreview = typeof body.bodyPreview === "string" ? body.bodyPreview.slice(0, 500) : "";
-
-    const config = await prisma.whatsAppTemplateConfig.upsert({
-      where: { metaTemplateId },
-      create: { metaTemplateId, metaTemplateName, label, agentEnabled, language, category, bodyPreview },
-      update: { metaTemplateName, label, agentEnabled, language, category, bodyPreview },
-    });
-
-    return NextResponse.json(config);
-  } catch (e) {
-    return NextResponse.json(
-      { message: e instanceof Error ? e.message : "Erro." },
-      { status: 500 },
-    );
-  }
+  });
 }

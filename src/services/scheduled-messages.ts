@@ -22,6 +22,9 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+// prismaBase (sem scope) usado apenas por helpers de worker cross-tenant.
+import { prismaBase } from "@/lib/prisma-base";
 import { ScheduledMessageStatus } from "@prisma/client";
 import { createDealEvent } from "@/services/deals";
 
@@ -152,7 +155,7 @@ export async function createScheduledMessage(input: CreateScheduledMessageInput)
   // marca o item como FAILED com mensagem clara no histórico.
 
   const created = await prisma.scheduledMessage.create({
-    data: {
+    data: withOrgFromCtx({
       conversationId: input.conversationId,
       createdById: input.createdById,
       content,
@@ -168,7 +171,7 @@ export async function createScheduledMessage(input: CreateScheduledMessageInput)
           : (input.fallbackTemplate.params as object),
       fallbackTemplateLanguage: input.fallbackTemplate?.language ?? null,
       status: ScheduledMessageStatus.PENDING,
-    },
+    }),
   });
 
   await logScheduledMessageEventOnDeals({
@@ -306,9 +309,14 @@ export async function cancelScheduledMessage(
 /**
  * Worker helper: busca agendamentos vencidos prontos para envio.
  * Limit protege contra backlog gigante emperrar um tick.
+ *
+ * IMPORTANTE: usa `prismaBase` (sem org-scope) porque o worker roda
+ * cross-tenant — precisa achar agendamentos de TODAS as orgs e despachar
+ * cada um dentro de `withSystemContext(organizationId)`.
+ * O `organizationId` vem no select para o caller poder montar o contexto.
  */
 export async function listDueScheduledMessages(limit = 25) {
-  return prisma.scheduledMessage.findMany({
+  return prismaBase.scheduledMessage.findMany({
     where: {
       status: ScheduledMessageStatus.PENDING,
       scheduledAt: { lte: new Date() },
@@ -326,6 +334,7 @@ export async function listDueScheduledMessages(limit = 25) {
           waJid: true,
           lastInboundAt: true,
           hasAgentReply: true,
+          organizationId: true,
         },
       },
       createdBy: { select: { id: true, name: true } },

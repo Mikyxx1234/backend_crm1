@@ -16,6 +16,13 @@ export async function GET(
   if (!session?.user) {
     return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
   }
+  const orgIdFilter = session.user.organizationId;
+  if (!orgIdFilter) {
+    return NextResponse.json(
+      { message: "Sem organizacao no contexto." },
+      { status: 403 },
+    );
+  }
   const { id } = await params;
   const url = new URL(request.url);
   const days = Math.min(Math.max(Number(url.searchParams.get("days")) || 7, 1), 30);
@@ -36,6 +43,9 @@ export async function GET(
         where: { agentId: id, createdAt: { gte: since } },
         _count: { _all: true },
       }),
+      // Defesa em profundidade: agentId vem do path; embora o caller
+      // tipicamente carregue o agente com prisma scoped antes, esse raw
+      // nao passa pela extension. Filtramos organizationId pra alinhar.
       prisma.$queryRaw<
         Array<{ day: Date; runs: bigint; tokens: bigint; cost: number }>
       >`
@@ -46,6 +56,7 @@ export async function GET(
           FROM "ai_agent_runs"
          WHERE "agentId" = ${id}
            AND "createdAt" >= ${since}
+           AND "organizationId" = ${orgIdFilter}
          GROUP BY DATE_TRUNC('day', "createdAt")
          ORDER BY day ASC
       `,

@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
+import bcrypt from "bcryptjs";
 
 import { UserRole } from "@prisma/client";
 
-import { requireAdmin } from "@/lib/auth-helpers";
+import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
+
+const MIN_PASSWORD_LENGTH = 6;
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -48,7 +51,12 @@ export async function PUT(request: Request, context: RouteContext) {
     }
 
     const b = body as Record<string, unknown>;
-    const data: { name?: string; email?: string; role?: UserRole } = {};
+    const data: {
+      name?: string;
+      email?: string;
+      role?: UserRole;
+      hashedPassword?: string;
+    } = {};
 
     if (b.name !== undefined) {
       if (typeof b.name !== "string" || b.name.trim().length < 1) {
@@ -69,6 +77,40 @@ export async function PUT(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "Função inválida." }, { status: 400 });
       }
       data.role = b.role;
+    }
+
+    // Troca de senha pelo ADMIN — não exige senha atual (é reset
+    // administrativo, não troca via perfil próprio). O /api/profile é
+    // quem cuida da troca em self-service e exige `currentPassword`.
+    //
+    // Agentes de IA (`type=AI`) não têm credencial de login, então
+    // recusamos alterar senha pra evitar criar estado inválido.
+    if (b.password !== undefined) {
+      if (typeof b.password !== "string" || b.password.length < MIN_PASSWORD_LENGTH) {
+        return NextResponse.json(
+          {
+            message: `A senha precisa ter pelo menos ${MIN_PASSWORD_LENGTH} caracteres.`,
+          },
+          { status: 400 },
+        );
+      }
+      const target = await prisma.user.findUnique({
+        where: { id },
+        select: { type: true },
+      });
+      if (!target) {
+        return NextResponse.json(
+          { message: "Usuário não encontrado." },
+          { status: 404 },
+        );
+      }
+      if (target.type !== "HUMAN") {
+        return NextResponse.json(
+          { message: "Agentes de IA não possuem senha de acesso." },
+          { status: 400 },
+        );
+      }
+      data.hashedPassword = await bcrypt.hash(b.password, 10);
     }
 
     if (Object.keys(data).length === 0) {
@@ -107,8 +149,30 @@ export async function DELETE(_request: Request, context: RouteContext) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }
 
+    const target = await prisma.user.findFirst({
+      where: { id, type: "HUMAN", ...userOrgFilter(r.session) },
+      select: { id: true, role: true },
+    });
+    if (!target) {
+      return NextResponse.json({ message: "Usuário não encontrado." }, { status: 404 });
+    }
+    if (target.id === r.session.user.id) {
+      return NextResponse.json({ message: "Você não pode excluir seu próprio usuário." }, { status: 400 });
+    }
+    if (target.role === "ADMIN") {
+      const adminCount = await prisma.user.count({
+        where: { type: "HUMAN", role: "ADMIN", ...userOrgFilter(r.session) },
+      });
+      if (adminCount <= 1) {
+        return NextResponse.json(
+          { message: "Não é possível excluir o último administrador da organização." },
+          { status: 400 },
+        );
+      }
+    }
+
     try {
-      await prisma.user.delete({ where: { id } });
+      await prisma.user.delete({ where: { id: target.id } });
       return NextResponse.json({ ok: true });
     } catch (e) {
       if (isP2025(e)) {

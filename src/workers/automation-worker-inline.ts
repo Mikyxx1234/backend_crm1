@@ -1,16 +1,43 @@
 import { Worker, type Job } from "bullmq";
 import IORedis from "ioredis";
 
+import { prismaBase } from "@/lib/prisma-base";
 import { runAutomationInline } from "@/services/automation-executor";
+import { withSystemContext } from "@/lib/webhook-context";
 import type { AutomationJobPayload } from "@/lib/queue";
 
 const AUTOMATION_QUEUE_NAME = "automation-jobs";
 const redisUrl = process.env.REDIS_URL;
 
+/**
+ * Resolve a organizationId da automação (sem scope) e roda
+ * `runAutomationInline` dentro de `withSystemContext`. Sem isso, o
+ * worker tenta usar `prisma` (com extensao de scope) sem
+ * RequestContext e quebra com "[prisma] ... chamado fora de
+ * RequestContext" — ou pior, executa sem o filtro de tenant.
+ */
 async function processAutomationJob(job: Job<AutomationJobPayload>) {
   const { automationId, context } = job.data;
-  console.info(`[automation-worker] Processando job ${job.id} para automação ${automationId} (evento: ${context.event})`);
-  await runAutomationInline(job.data);
+
+  const automation = await prismaBase.automation.findUnique({
+    where: { id: automationId },
+    select: { organizationId: true },
+  });
+
+  if (!automation) {
+    console.warn(
+      `[automation-worker] Automação ${automationId} não encontrada — pulando job ${job.id}`,
+    );
+    return;
+  }
+
+  console.info(
+    `[automation-worker] Processando job ${job.id} automation=${automationId} org=${automation.organizationId} event=${context.event}`,
+  );
+
+  await withSystemContext(automation.organizationId, async () => {
+    await runAutomationInline(job.data);
+  });
 }
 
 let workerStarted = false;

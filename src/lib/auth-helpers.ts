@@ -1,7 +1,24 @@
 import { NextResponse } from "next/server";
 import { UserRole } from "@prisma/client";
 
+import {
+  logApiAccessCompleted,
+  logApiAccessRequireAuthFail,
+  readApiAccessHeaders,
+  resolveResponseStatus,
+} from "@/lib/api-access-audit";
 import { auth } from "./auth";
+import {
+  loadAuthzContext,
+  can,
+  type AuthzContext,
+  type PermissionKey,
+} from "./authz";
+import {
+  enterRequestContext,
+  runWithContext,
+  type RequestContext,
+} from "./request-context";
 
 /**
  * Resultado padronizado das checagens. Quando `ok=false`, devolve
@@ -25,6 +42,10 @@ type Session = {
     name?: string | null;
     email?: string | null;
     role?: UserRole;
+    /// Id da organizacao resolvida no JWT. Null APENAS para super-admin EduIT.
+    organizationId: string | null;
+    /// Habilita bypass da RLS e acesso a /admin/organizations.
+    isSuperAdmin: boolean;
     image?: string | null;
   };
 };
@@ -45,6 +66,7 @@ type Session = {
 export async function requireAuth(): Promise<AuthResult<Session>> {
   const session = (await auth()) as Session | null;
   if (!session?.user) {
+    await logApiAccessRequireAuthFail("no_session");
     return {
       ok: false,
       response: NextResponse.json(
@@ -53,6 +75,37 @@ export async function requireAuth(): Promise<AuthResult<Session>> {
       ),
     };
   }
+  // Bloqueio defensivo: user nao-super-admin sem organizationId e
+  // um estado corrompido (provavelmente migration manual incompleta).
+  // Logar e rejeitar em vez de confiar no JWT.
+  if (!session.user.isSuperAdmin && !session.user.organizationId) {
+    await logApiAccessRequireAuthFail("session_missing_organization");
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { message: "Sessão sem organização — contate o suporte." },
+        { status: 401 },
+      ),
+    };
+  }
+
+  // Ativa o RequestContext logo apos resolver a session. enterWith()
+  // propaga o store pra continuation atual E pra todas as continuations
+  // descendentes geradas pelos awaits subsequentes do caller — incluindo
+  // o handler que recebe `await requireAuth()`. Isso elimina a
+  // necessidade de envolver cada handler em runWithContext/withOrgContext
+  // explicito, fazendo getOrgIdOrThrow() / Prisma extension funcionarem
+  // em qualquer rota que chame requireAuth() (direto ou via requireRole/
+  // requireAdmin/requireManager). O comentario antigo em request-context.ts
+  // dizia que NAO funcionava — testes empiricos confirmam que funciona
+  // sim (Node v18+, AsyncLocalStorage.enterWith propaga pro caller via
+  // promise resolution).
+  enterRequestContext({
+    organizationId: session.user.organizationId,
+    userId: session.user.id,
+    isSuperAdmin: session.user.isSuperAdmin,
+  });
+
   return { ok: true, session };
 }
 
@@ -96,6 +149,26 @@ export function requireManager() {
   return requireRole([UserRole.ADMIN, UserRole.MANAGER]);
 }
 
+/**
+ * Exige super-admin EduIT (`isSuperAdmin=true`). Responde 403 pra qualquer
+ * outra sessao. Use em rotas `/api/admin/*` e paginas `/admin/*` renderizadas
+ * do servidor.
+ */
+export async function requireSuperAdmin(): Promise<AuthResult<Session>> {
+  const r = await requireAuth();
+  if (!r.ok) return r;
+  if (!r.session.user.isSuperAdmin) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { message: "Acesso restrito a administradores da plataforma." },
+        { status: 403 },
+      ),
+    };
+  }
+  return r;
+}
+
 /** Helper síncrono pra uso em código já com session em mãos. */
 export function isAdmin(session: Session | null | undefined): boolean {
   if (!session?.user) return false;
@@ -106,4 +179,171 @@ export function isManagerOrAdmin(session: Session | null | undefined): boolean {
   if (!session?.user) return false;
   const role = getRole(session);
   return role === UserRole.ADMIN || role === UserRole.MANAGER;
+}
+
+export function isSuperAdmin(session: Session | null | undefined): boolean {
+  return Boolean(session?.user?.isSuperAdmin);
+}
+
+/**
+ * Helper de filtro multi-tenancy para o model `User`.
+ *
+ * O model `User` NAO esta no SCOPED_MODELS da Prisma Extension porque o
+ * login (NextAuth authorize) precisa achar User por email sem contexto.
+ * Em troca, TODA rota que lista users via prisma.user.* precisa filtrar
+ * manualmente pela org da sessao. Este helper centraliza essa logica:
+ *
+ *   - Super-admin (organizationId=null) -> filtro vazio (ve tudo).
+ *   - User normal -> { organizationId: <org> }.
+ *
+ * Uso:
+ *   const where = { type: "HUMAN", ...userOrgFilter(session) };
+ *   await prisma.user.findMany({ where, ... });
+ *
+ * Fix de regressao 24/abr/26: GET /api/users vazava lista global de users
+ * entre tenants porque o filtro estava faltando.
+ */
+export function userOrgFilter(
+  session: Session | { user: { organizationId: string | null; isSuperAdmin: boolean } },
+): { organizationId?: string } {
+  if (session.user.isSuperAdmin) return {};
+  if (!session.user.organizationId) return { organizationId: "__none__" };
+  return { organizationId: session.user.organizationId };
+}
+
+/**
+ * Alto nivel: valida auth + cria o AsyncLocalStorage ja embrulhando o
+ * handler. A unica forma sanitaria de garantir que a Prisma Extension
+ * tenha orgId/isSuperAdmin eh passando por aqui. Use assim em route
+ * handlers que precisam de tenant scoped access:
+ *
+ * ```ts
+ * export async function GET() {
+ *   return withOrgContext(async (session) => {
+ *     // prisma.contact.findMany() ja filtra por session.user.organizationId
+ *     const contacts = await prisma.contact.findMany();
+ *     return NextResponse.json(contacts);
+ *   });
+ * }
+ * ```
+ *
+ * O handler interno pode retornar NextResponse ou dado serializavel; em
+ * ambos os casos o callback principal devolve o Response final.
+ */
+export async function withOrgContext<T>(
+  handler: (session: Session) => Promise<T> | T,
+): Promise<NextResponse | T> {
+  const r = await requireAuth();
+  if (!r.ok) return r.response as unknown as NextResponse;
+  const ctx: RequestContext = {
+    organizationId: r.session.user.organizationId,
+    userId: r.session.user.id,
+    isSuperAdmin: r.session.user.isSuperAdmin,
+  };
+  const meta = await readApiAccessHeaders();
+  const method = meta.method ?? "GET";
+  const path = meta.path ?? "";
+  const t0 = Date.now();
+  try {
+    const out = (await runWithContext(ctx, () => handler(r.session))) as T;
+    const durationMs = Date.now() - t0;
+    const status = resolveResponseStatus(out);
+    void logApiAccessCompleted({
+      method,
+      path,
+      status,
+      durationMs,
+      userId: r.session.user.id,
+      organizationId: r.session.user.organizationId,
+    });
+    return out;
+  } catch (err) {
+    const durationMs = Date.now() - t0;
+    void logApiAccessCompleted({
+      method,
+      path,
+      status: 500,
+      durationMs,
+      userId: r.session.user.id,
+      organizationId: r.session.user.organizationId,
+    });
+    throw err;
+  }
+}
+
+/**
+ * Variante que roda o handler dentro do contexto SEM exigir auth — util
+ * pra webhooks, cron jobs e consumers de fila onde o orgId eh resolvido
+ * a partir de outra fonte (Channel.organizationId, ApiToken.user.orgId,
+ * job payload). Deixa o caller responsavel por preencher o ctx.
+ */
+export function withResolvedContext<T>(
+  ctx: RequestContext,
+  handler: () => Promise<T> | T,
+): Promise<T> | T {
+  return runWithContext(ctx, handler);
+}
+
+// ──────────────────────────────────────────────
+// Authz (Fase 1) — helpers compostos
+// ──────────────────────────────────────────────
+//
+// `requireCan(key)` valida auth + carrega AuthzContext + checa permission.
+// Retorna a session normalmente em caso de sucesso, com o contexto de
+// authz anexado pra evitar reload no handler (passe `result.ctx` em
+// chains de checagens subsequentes).
+
+type AuthResultWithCtx<T> =
+  | { ok: true; session: T; ctx: AuthzContext }
+  | { ok: false; response: NextResponse };
+
+/**
+ * Atalho idiomatico pra rotas que exigem uma permission especifica.
+ *
+ * @example
+ *   const r = await requireCan("pipeline:edit");
+ *   if (!r.ok) return r.response;
+ *   const { session, ctx } = r;
+ *   // ctx ja e o AuthzContext do user — reaproveite em can(ctx, ...)
+ *   if (!can(ctx, "pipeline:delete")) return forbiddenResponse;
+ */
+export async function requireCan(
+  key: PermissionKey,
+): Promise<AuthResultWithCtx<Session>> {
+  const r = await requireAuth();
+  if (!r.ok) return r;
+
+  const ctx = await loadAuthzContext({
+    userId: r.session.user.id,
+    organizationId: r.session.user.organizationId,
+    isSuperAdmin: r.session.user.isSuperAdmin,
+  });
+
+  if (!can(ctx, key)) {
+    return {
+      ok: false,
+      response: NextResponse.json(
+        { message: "Acesso negado.", required: key },
+        { status: 403 },
+      ),
+    };
+  }
+
+  return { ok: true, session: r.session, ctx };
+}
+
+/**
+ * Atalho que carrega o contexto sem checar permission. Util quando voce
+ * precisa do `ctx` pra fazer checagens condicionais (ex.: filtrar campos
+ * do payload baseado no que o user pode ver).
+ */
+export async function requireAuthWithCtx(): Promise<AuthResultWithCtx<Session>> {
+  const r = await requireAuth();
+  if (!r.ok) return r;
+  const ctx = await loadAuthzContext({
+    userId: r.session.user.id,
+    organizationId: r.session.user.organizationId,
+    isSuperAdmin: r.session.user.isSuperAdmin,
+  });
+  return { ok: true, session: r.session, ctx };
 }

@@ -3,7 +3,7 @@
  * (Chat ⇄ Sales Hub ⇄ Kanban ⇄ List).
  *
  * Toda surface do produto deve consumir estes tokens. Não inventar
- * `rounded-3xl`, `text-[15px]`, `border-slate-200` etc. Se o token
+ * `rounded-3xl`, `text-[15px]`, `border-border` etc. Se o token
  * não existir, adicione um aqui antes de usar.
  *
  * Para tokens específicos dos dashboards (Bento, métricas), veja
@@ -126,10 +126,10 @@ export const ds = {
   chip: {
     /** Chip neutro padrão (counts, etapas, status genérico). */
     soft:
-      "inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2 py-0.5 text-[12px] font-medium text-slate-600",
+      "inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-2 py-0.5 text-[12px] font-medium text-[var(--color-ink-soft)]",
     /** Chip muito sutil (slate-50) — para metadata sem peso. */
     softer:
-      "inline-flex items-center gap-1.5 rounded-full bg-slate-50 px-2 py-0.5 text-[12px] font-medium text-slate-600",
+      "inline-flex items-center gap-1.5 rounded-full bg-[var(--color-bg-subtle)] px-2 py-0.5 text-[12px] font-medium text-[var(--color-ink-soft)]",
     /** Chip primário (azul) — para etapa/responsável ativo. */
     info:
       "inline-flex items-center gap-1.5 rounded-full bg-blue-50 px-2 py-0.5 text-[12px] font-medium text-blue-700",
@@ -146,43 +146,33 @@ export const ds = {
     dot: "size-1.5 shrink-0 rounded-full",
   },
 
-  /** ── Tags (lead/deal labels) ──
-   *  Chip arredondado (`rounded-lg` = ~8px) com a cor da tag em
-   *  `style.backgroundColor` e texto branco. Tipografia "label
-   *  uppercase micro" — DNA único pra Chat ⇄ Kanban ⇄ Sales Hub ⇄
-   *  Lista ⇄ Header do chat. Aplique via:
+  /** ── Tags (lead/deal labels) — legado branco-no-hex ──
+   *  Preferir **padrão F** em telas novas: `dt.pill.base` / `dt.pill.sm`
+   *  (`design-tokens`) + `tagPillStyle` / `tagStyle` (`utils.ts`) —
+   *  fundo 8% + borda 30% + texto na cor, radius 4px.
    *
-   *    <span className={ds.tag.solid} style={{ backgroundColor: tag.color }}>
-   *      {tag.name}
-   *    </span>
-   *
-   *  Use `solid` em cards/listas (compacto, 9px) e `solidLg` em headers
-   *  com tipografia maior (10px, px-2). Ambos compartilham forma
-   *  (`rounded-lg`) e peso (`font-black uppercase tracking-widest`).
-   *
-   *  Não usar contraste dinâmico (`getContrastColor`) — quebra a
-   *  identidade visual; cores hexadecimais escolhidas pelos usuários
-   *  já são suficientemente escuras pra contrastarem com texto branco.
+   *  Variantes `solid` / `solidLg` abaixo = chip antigo (texto branco
+   *  sobre `backgroundColor`); mantidas onde ainda não migrado.
    */
   tag: {
     /** Chip principal de tag — compacto (Chat = source of truth). */
     solid:
-      "inline-flex max-w-[88px] items-center truncate rounded-lg px-1.5 py-0.5 text-[9px] font-black uppercase tracking-widest text-white",
+      "inline-flex max-w-[88px] items-center truncate rounded-lg px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-widest text-white",
     /** Chip principal de tag — variante maior, pra contextos com
      *  tipografia destacada (header do chat, contact-info-panel). */
     solidLg:
-      "inline-flex items-center truncate rounded-lg px-2 py-0.5 text-[10px] font-black uppercase tracking-widest text-white",
+      "inline-flex items-center truncate rounded-lg px-2 py-0.5 text-[10px] font-semibold uppercase tracking-widest text-white",
     /** Chip "+N" (mais tags ocultas). */
     more:
-      "inline-flex items-center rounded-lg bg-slate-100 px-1.5 py-0.5 text-[9px] font-black text-slate-500",
+      "inline-flex items-center rounded-lg bg-slate-100 px-1.5 py-0.5 text-[9px] font-bold text-slate-500",
     /** Chip "+N" — variante maior (pareada com `solidLg`). */
     moreLg:
-      "inline-flex items-center rounded-lg bg-slate-100 px-2 py-0.5 text-[10px] font-black text-slate-500",
+      "inline-flex items-center rounded-lg bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-500",
     /** Botão "+" para adicionar tag (Kanban). */
     add:
-      "inline-flex items-center rounded-lg px-1.5 py-0.5 text-[9px] font-black text-slate-400 transition-colors hover:bg-slate-50 hover:text-slate-600",
+      "inline-flex items-center rounded-lg px-1.5 py-0.5 text-[9px] font-bold text-[var(--color-ink-muted)] transition-colors hover:bg-[var(--color-bg-subtle)] hover:text-[var(--color-ink-soft)]",
     /** Ícone TagIcon que precede o grupo (size 11). */
-    icon: "shrink-0 text-slate-400",
+    icon: "shrink-0 text-[var(--color-ink-muted)]",
     /**
      * Variante editável (com botão de remover X) — mesmo DNA do
      * `solid` mas sem `max-w-[88px]` (precisa caber nome + ação) e
@@ -190,7 +180,7 @@ export const ds = {
      * de detalhe (sidebar do deal, lead, contato).
      */
     solidEditable:
-      "group inline-flex items-center gap-1.5 rounded-lg px-2 py-0.5 text-[9px] font-black uppercase tracking-widest text-white",
+      "group inline-flex items-center gap-1.5 rounded-lg px-2 py-0.5 text-[9px] font-semibold uppercase tracking-widest text-white",
   },
 
   /** ── Inputs ──
@@ -200,10 +190,10 @@ export const ds = {
   input: {
     /** Input padrão (busca, texto). */
     base:
-      "h-9 w-full rounded-lg bg-slate-50/80 px-3 text-[13px] text-slate-700 placeholder:text-slate-400 outline-none transition-colors focus:bg-white focus:shadow-[inset_0_0_0_1px_rgba(15,23,42,0.1)]",
+      "h-9 w-full rounded-lg bg-[var(--color-bg-subtle)]/80 px-3 text-[13px] text-foreground placeholder:text-[var(--color-ink-muted)] outline-none transition-colors focus:bg-white focus:shadow-[inset_0_0_0_1px_rgba(15,23,42,0.1)]",
     /** Input compacto (filtros, popovers). */
     compact:
-      "h-7 w-full rounded-md bg-white px-2 text-[12px] text-slate-700 placeholder:text-slate-400 outline-none focus:ring-2 focus:ring-blue-500/30",
+      "h-7 w-full rounded-md bg-white px-2 text-[12px] text-foreground placeholder:text-[var(--color-ink-muted)] outline-none focus:ring-2 focus:ring-blue-500/30",
   },
 
   /** ── Buttons ── */
@@ -216,13 +206,13 @@ export const ds = {
       "inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 text-[13px] font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50",
     /** Soft (ação secundária — slate-100 fundo). */
     soft:
-      "inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-slate-100 px-3 text-[13px] font-medium text-slate-700 transition-colors hover:bg-slate-200 disabled:opacity-50",
+      "inline-flex h-9 items-center justify-center gap-1.5 rounded-lg bg-slate-100 px-3 text-[13px] font-medium text-foreground transition-colors hover:bg-slate-200 disabled:opacity-50",
     /** Ghost (sem fundo, hover slate-50). */
     ghost:
-      "inline-flex h-9 items-center justify-center gap-1.5 rounded-lg px-3 text-[13px] font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900",
+      "inline-flex h-9 items-center justify-center gap-1.5 rounded-lg px-3 text-[13px] font-medium text-[var(--color-ink-soft)] transition-colors hover:bg-[var(--color-bg-subtle)] hover:text-slate-900",
     /** Icon-only button compacto (28px). */
     icon:
-      "inline-flex size-7 items-center justify-center rounded-lg text-slate-400 transition-colors hover:bg-slate-50 hover:text-slate-700",
+      "inline-flex size-7 items-center justify-center rounded-lg text-[var(--color-ink-muted)] transition-colors hover:bg-[var(--color-bg-subtle)] hover:text-foreground",
   },
 
   /** ── Popovers ──
@@ -233,7 +223,7 @@ export const ds = {
       "overflow-hidden rounded-2xl border border-black/5 bg-white shadow-[0_12px_32px_-12px_rgba(15,23,42,0.18)]",
     /** Item dentro de popover (lista de seleção). */
     item:
-      "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-slate-700 transition-colors hover:bg-slate-50",
+      "flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] text-foreground transition-colors hover:bg-[var(--color-bg-subtle)]",
     /** Item ativo / selecionado. */
     itemActive: "bg-blue-50/60 text-blue-700",
   },
@@ -248,7 +238,7 @@ export const ds = {
     md: "flex size-10 shrink-0 items-center justify-center rounded-full bg-slate-900 text-[13px] font-semibold uppercase tracking-tight text-white",
     /** Slot vazio (dashed circle). */
     empty:
-      "flex shrink-0 items-center justify-center rounded-full border border-dashed border-slate-300 text-slate-400",
+      "flex shrink-0 items-center justify-center rounded-full border border-dashed border-slate-300 text-[var(--color-ink-muted)]",
   },
 
   /** ── Tipografia ── */
@@ -256,16 +246,16 @@ export const ds = {
     /** Title 16px semibold — títulos de cards, seções. */
     title: "text-[16px] font-semibold leading-tight tracking-tight text-slate-900",
     /** Body 13px medium — texto comum em UI densa. */
-    body: "text-[13px] font-medium text-slate-700",
+    body: "text-[13px] font-medium text-foreground",
     /** Body normal — parágrafos, descrições. */
-    bodyNormal: "text-[13px] text-slate-600",
+    bodyNormal: "text-[13px] text-[var(--color-ink-soft)]",
     /** Meta 12px regular — timestamps, contadores, hints. */
     meta: "text-[12px] text-slate-500",
     /** Meta sutil 12px — em estados secundários. */
-    metaSubtle: "text-[12px] text-slate-400",
+    metaSubtle: "text-[12px] text-[var(--color-ink-muted)]",
     /** Label uppercase 11px — section labels, tabs. */
     label:
-      "text-[11px] font-medium uppercase tracking-wide text-slate-400",
+      "text-[11px] font-medium uppercase tracking-wide text-[var(--color-ink-muted)]",
     /** Mono tabular numérico (#id, contagens). */
     mono: "font-mono text-[12px] tabular-nums text-slate-500",
   },

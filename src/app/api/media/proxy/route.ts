@@ -1,6 +1,4 @@
-import { mkdir, writeFile } from "fs/promises";
 import { NextResponse } from "next/server";
-import path from "path";
 
 import { auth } from "@/lib/auth";
 
@@ -48,12 +46,8 @@ export async function GET(request: Request) {
     const buffer = Buffer.from(await res.arrayBuffer());
     const contentType = res.headers.get("content-type") || "application/octet-stream";
 
-    const ext = contentType.split("/").pop()?.split(";")[0] ?? "bin";
-    const fileName = `proxy-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-    const uploadsDir = path.join(process.cwd(), "public", "uploads");
-    await mkdir(uploadsDir, { recursive: true });
-    await writeFile(path.join(uploadsDir, fileName), buffer);
-
+    // PR 1.3: removido cache lateral em public/uploads (vazava mídia
+    // entre orgs e não era reutilizado). Streaming direto para o cliente.
     return new Response(buffer, {
       status: 200,
       headers: {

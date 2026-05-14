@@ -1,64 +1,104 @@
 import { NextResponse } from "next/server";
 
-import { requireAdmin, requireAuth } from "@/lib/auth-helpers";
-import { prisma } from "@/lib/prisma";
+import { requireSuperAdmin } from "@/lib/auth-helpers";
+import { prismaBase } from "@/lib/prisma-base";
 
 /**
- * `system_settings` guarda configurações sensíveis (ex.: tokens de
- * integração, flags de roteamento, segredos de provedores externos).
- * Antes qualquer usuário autenticado podia ler e gravar — agora:
- *  - GET: ADMIN/MANAGER (operadores comuns não veem chaves de API).
- *  - PUT: ADMIN apenas (gravar é estritamente operação de dono).
+ * `/api/settings/system` — chaves GLOBAIS da plataforma EduIT.
+ *
+ * Multi-tenancy v0: este endpoint era usado para gravar config genérica
+ * (visibility, selfAssign, loss_reason_required), mas como
+ * `system_settings` não tem `organizationId`, essas chaves vazavam
+ * entre tenants. Foram migradas para `OrganizationSetting` em
+ * `20260601000000_authz_foundation` + `20260601000003_org_settings_loss_reason_cutover`.
+ *
+ * Hoje este endpoint serve **apenas chaves cross-tenant** (license keys
+ * EduIT, feature flags da plataforma) e exige super-admin EduIT.
+ *
+ * Para chaves per-tenant, use `/api/settings/org`.
  */
 
+const ORG_SCOPED_KEY_PATTERNS = [
+  /^visibility\./i,
+  /^selfAssign\./i,
+  /^deals\./i,
+  /^ai\./i,
+  /^onboarding\./i,
+  /^branding\./i,
+  /^loss_reason_required$/i,
+];
+
+function isOrgScopedKey(key: string): boolean {
+  return ORG_SCOPED_KEY_PATTERNS.some((re) => re.test(key));
+}
+
 export async function GET(request: Request) {
+  const r = await requireSuperAdmin();
+  if (!r.ok) return r.response;
+
+  const url = new URL(request.url);
+  const key = url.searchParams.get("key");
+
   try {
-    // Apenas operadores autorizados (admin/manager) leem o painel.
-    // Membros normais não precisam ver chaves de integração.
-    const r = await requireAuth();
-    if (!r.ok) return r.response;
-    const role = r.session.user.role;
-    if (role !== "ADMIN" && role !== "MANAGER") {
-      return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
-    }
-
-    const url = new URL(request.url);
-    const key = url.searchParams.get("key");
-
     if (key) {
-      const setting = await prisma.systemSetting.findUnique({ where: { key } });
+      const setting = await prismaBase.systemSetting.findUnique({
+        where: { key },
+      });
       return NextResponse.json({ key, value: setting?.value ?? null });
     }
-
-    const settings = await prisma.systemSetting.findMany();
+    const settings = await prismaBase.systemSetting.findMany();
     const map: Record<string, string> = {};
     for (const s of settings) map[s.key] = s.value;
     return NextResponse.json(map);
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json({ message: "Erro ao buscar configuração." }, { status: 500 });
+  } catch (err) {
+    console.error("[settings/system] GET falhou:", err);
+    return NextResponse.json(
+      { message: "Erro ao buscar configuração." },
+      { status: 500 },
+    );
   }
 }
 
 export async function PUT(request: Request) {
+  const r = await requireSuperAdmin();
+  if (!r.ok) return r.response;
+
+  let body: unknown;
   try {
-    const r = await requireAdmin();
-    if (!r.ok) return r.response;
+    body = await request.json();
+  } catch {
+    return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
+  }
+  const b = body as { key?: unknown; value?: unknown };
+  const key = typeof b.key === "string" ? b.key.trim() : "";
+  const value = typeof b.value === "string" ? b.value : "";
+  if (!key) {
+    return NextResponse.json({ message: "key é obrigatório." }, { status: 400 });
+  }
 
-    const body = (await request.json()) as Record<string, unknown>;
-    const key = typeof body.key === "string" ? body.key.trim() : "";
-    const value = typeof body.value === "string" ? body.value : "";
+  if (isOrgScopedKey(key)) {
+    return NextResponse.json(
+      {
+        message:
+          "Esta chave é per-organização. Use POST /api/settings/org no contexto de uma org.",
+        key,
+      },
+      { status: 400 },
+    );
+  }
 
-    if (!key) return NextResponse.json({ message: "key é obrigatório." }, { status: 400 });
-
-    const setting = await prisma.systemSetting.upsert({
+  try {
+    const setting = await prismaBase.systemSetting.upsert({
       where: { key },
       update: { value },
       create: { key, value },
     });
     return NextResponse.json(setting);
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json({ message: "Erro ao salvar configuração." }, { status: 500 });
+  } catch (err) {
+    console.error("[settings/system] PUT falhou:", err);
+    return NextResponse.json(
+      { message: "Erro ao salvar configuração." },
+      { status: 500 },
+    );
   }
 }

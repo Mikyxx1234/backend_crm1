@@ -125,7 +125,7 @@ export class BaileysSession {
     try {
       const msg = await prisma.message.findFirst({
         where: { externalId: wamid },
-        select: { id: true, sendStatus: true, conversationId: true },
+        select: { id: true, sendStatus: true, conversationId: true, organizationId: true },
       });
       if (!msg) return;
 
@@ -139,6 +139,7 @@ export class BaileysSession {
 
       try {
         sseBus.publish("message_status", {
+          organizationId: msg.organizationId,
           conversationId: msg.conversationId,
           messageId: msg.id,
           status: s,

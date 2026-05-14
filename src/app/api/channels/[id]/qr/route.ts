@@ -5,7 +5,7 @@ import { auth } from "@/lib/auth";
 import { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import {
   getChannelById,
-  parseChannelConfig,
+  parseChannelConfigDecrypted,
   updateChannel,
 } from "@/services/channels";
 
@@ -75,7 +75,10 @@ export async function GET(request: Request, context: RouteContext) {
       );
     }
 
-    const cfg = parseChannelConfig(channel.config);
+    const cfg = parseChannelConfigDecrypted({
+      provider: channel.provider,
+      config: channel.config,
+    });
     const accessToken = str(cfg, "accessToken");
     const phoneNumberId = str(cfg, "phoneNumberId") ?? channel.phoneNumber ?? undefined;
     const businessAccountId = str(cfg, "businessAccountId");

@@ -1,6 +1,12 @@
 import { createHash, randomBytes } from "crypto";
 
-import { prisma } from "@/lib/prisma";
+// validateToken resolve orgId a partir do token ANTES de qualquer
+// contexto existir — usa o client base. Dentro de routes autenticadas
+// (listTokens/revokeToken) ja tem contexto, mas mantemos prismaBase pra
+// consistencia e porque a extension exigiria contexto tambem nessas
+// operacoes (o filtro por organizationId ja e feito explicitamente).
+import { prismaBase as prisma } from "@/lib/prisma-base";
+import { logAudit } from "@/lib/audit/log";
 
 const TOKEN_PREFIX = "eduit_";
 
@@ -10,6 +16,7 @@ function hashToken(raw: string): string {
 
 export async function generateToken(
   userId: string,
+  organizationId: string,
   name: string,
   expiresAt?: Date | null
 ): Promise<{ id: string; token: string; prefix: string }> {
@@ -23,9 +30,24 @@ export async function generateToken(
       tokenHash,
       tokenPrefix,
       userId,
+      organizationId,
       expiresAt: expiresAt ?? null,
     },
     select: { id: true },
+  });
+
+  await logAudit({
+    entity: "api_token",
+    action: "token_create",
+    entityId: record.id,
+    organizationId,
+    actorId: userId,
+    after: {
+      id: record.id,
+      name: name.trim(),
+      tokenPrefix,
+      expiresAt: expiresAt ?? null,
+    },
   });
 
   return { id: record.id, token: raw, prefix: tokenPrefix };
@@ -39,14 +61,35 @@ export async function validateToken(rawToken: string) {
     select: {
       id: true,
       userId: true,
+      organizationId: true,
       expiresAt: true,
-      user: { select: { id: true, name: true, email: true, role: true } },
+      user: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          role: true,
+          organizationId: true,
+          isSuperAdmin: true,
+          organization: { select: { status: true } },
+        },
+      },
     },
   });
 
   if (!record) return null;
 
   if (record.expiresAt && record.expiresAt < new Date()) return null;
+
+  // Bloqueio se a organizacao do token nao estiver ATIVA. Super-admin
+  // ignora o check — token dele nao depende de org.
+  if (
+    record.user.organization &&
+    record.user.organization.status !== "ACTIVE" &&
+    !record.user.isSuperAdmin
+  ) {
+    return null;
+  }
 
   prisma.apiToken
     .update({ where: { id: record.id }, data: { lastUsedAt: new Date() } })
@@ -55,13 +98,14 @@ export async function validateToken(rawToken: string) {
   return {
     tokenId: record.id,
     tokenHash,
+    organizationId: record.organizationId,
     user: record.user,
   };
 }
 
-export async function listTokens(userId: string) {
+export async function listTokens(userId: string, organizationId: string) {
   return prisma.apiToken.findMany({
-    where: { userId },
+    where: { userId, organizationId },
     select: {
       id: true,
       name: true,
@@ -74,8 +118,27 @@ export async function listTokens(userId: string) {
   });
 }
 
-export async function revokeToken(tokenId: string, userId: string) {
-  return prisma.apiToken.deleteMany({
-    where: { id: tokenId, userId },
+export async function revokeToken(
+  tokenId: string,
+  userId: string,
+  organizationId: string,
+) {
+  const existing = await prisma.apiToken.findFirst({
+    where: { id: tokenId, userId, organizationId },
+    select: { id: true, name: true, tokenPrefix: true, createdAt: true },
   });
+  const result = await prisma.apiToken.deleteMany({
+    where: { id: tokenId, userId, organizationId },
+  });
+  if (existing) {
+    await logAudit({
+      entity: "api_token",
+      action: "token_revoke",
+      entityId: tokenId,
+      organizationId,
+      actorId: userId,
+      before: existing,
+    });
+  }
+  return result;
 }

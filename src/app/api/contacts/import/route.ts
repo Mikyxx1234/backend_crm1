@@ -4,6 +4,7 @@ import { auth } from "@/lib/auth";
 import { parseCsv } from "@/lib/csv-parse";
 import { assertImportPermission } from "@/lib/import-guard";
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createContact, isValidLifecycleStage, updateContact } from "@/services/contacts";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -82,9 +83,13 @@ async function resolveContactUpsert(row: Record<string, string>): Promise<
     row.contact_external_id?.trim();
 
   if (id && ext) {
+    const orgId = getOrgIdOrThrow();
     const [byId, byExt] = await Promise.all([
       prisma.contact.findUnique({ where: { id }, select: { id: true } }),
-      prisma.contact.findUnique({ where: { externalId: ext }, select: { id: true } }),
+      prisma.contact.findUnique({
+        where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
+        select: { id: true },
+      }),
     ]);
     if (byId && byExt && byId.id !== byExt.id) {
       return { ok: false, message: "id e external_id referem contatos diferentes." };
@@ -101,7 +106,11 @@ async function resolveContactUpsert(row: Record<string, string>): Promise<
   }
 
   if (ext) {
-    const c = await prisma.contact.findUnique({ where: { externalId: ext }, select: { id: true } });
+    const orgId = getOrgIdOrThrow();
+    const c = await prisma.contact.findUnique({
+      where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
+      select: { id: true },
+    });
     if (c) return { ok: true, target: { mode: "update", id: c.id } };
     return { ok: true, target: { mode: "create", externalId: ext } };
   }

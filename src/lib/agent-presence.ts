@@ -1,6 +1,8 @@
 import type { AgentOnlineStatus } from "@prisma/client";
 
-import { prisma } from "@/lib/prisma";
+import { prismaBase } from "@/lib/prisma-base";
+import { getOrgIdOrNull } from "@/lib/request-context";
+import { withSystemContext } from "@/lib/webhook-context";
 
 /**
  * Registra uma transição de presença no histórico `agent_presence_logs`.
@@ -14,6 +16,14 @@ import { prisma } from "@/lib/prisma";
  * ONLINE não inflacionem o histórico.
  *
  * Idempotente: chamar duas vezes seguidas com o mesmo `nextStatus` não duplica linhas.
+ *
+ * Multi-tenancy: chamada por dois caminhos:
+ *   1. Rota de ping (`/api/agents/me/ping`) — dentro de RequestContext do user.
+ *   2. Presence reaper (setInterval global) — SEM RequestContext.
+ *
+ * Para funcionar nos dois casos, descobrimos o `organizationId` do user via
+ * `prismaBase` (cross-tenant) e embrulhamos em `withSystemContext` quando
+ * estamos fora de ctx. Se ja houver ctx (caso 1), reaproveitamos.
  */
 export async function recordPresenceTransition(params: {
   userId: string;
@@ -24,26 +34,59 @@ export async function recordPresenceTransition(params: {
   const at = params.at ?? new Date();
 
   try {
-    const open = await prisma.agentPresenceLog.findFirst({
-      where: { userId, endedAt: null },
-      orderBy: { startedAt: "desc" },
-    });
-
-    if (open && open.status === nextStatus) {
-      return;
+    const ctxOrg = getOrgIdOrNull();
+    let orgId = ctxOrg;
+    if (!orgId) {
+      // Reaper / boot: descobre o orgId do user (cross-tenant via prismaBase)
+      // e embrulha o resto em withSystemContext pra prisma scoped funcionar.
+      const u = await prismaBase.user.findUnique({
+        where: { id: userId },
+        select: { organizationId: true },
+      });
+      orgId = u?.organizationId ?? null;
+      if (!orgId) {
+        // User sem org (super-admin EduIT) nao tem presenca por org. Skip.
+        return;
+      }
     }
 
-    await prisma.$transaction(async (tx) => {
-      if (open) {
-        await tx.agentPresenceLog.update({
-          where: { id: open.id },
-          data: { endedAt: at },
-        });
-      }
-      await tx.agentPresenceLog.create({
-        data: { userId, status: nextStatus, startedAt: at },
+    const run = async () => {
+      // Usamos prismaBase aqui porque fizemos o ctx-aware lookup acima e
+      // a transacao precisa rodar com orgId garantido — withSystemContext
+      // ja seta o ctx, mas pra reduzir overhead da extension, prismaBase
+      // + organizationId explicito e mais previsivel.
+      const open = await prismaBase.agentPresenceLog.findFirst({
+        where: { userId, organizationId: orgId, endedAt: null },
+        orderBy: { startedAt: "desc" },
       });
-    });
+
+      if (open && open.status === nextStatus) {
+        return;
+      }
+
+      await prismaBase.$transaction(async (tx) => {
+        if (open) {
+          await tx.agentPresenceLog.update({
+            where: { id: open.id },
+            data: { endedAt: at },
+          });
+        }
+        await tx.agentPresenceLog.create({
+          data: {
+            userId,
+            organizationId: orgId,
+            status: nextStatus,
+            startedAt: at,
+          },
+        });
+      });
+    };
+
+    if (ctxOrg) {
+      await run();
+    } else {
+      await withSystemContext(orgId, run);
+    }
   } catch (err) {
     // Migration ainda não aplicada em produção: registrar warning e seguir.
     // Não queremos que falha aqui bloqueie ping/status PUT.
@@ -60,13 +103,18 @@ export async function recordPresenceTransition(params: {
  * com fim em `min(to, now())`.
  *
  * Retorno: Map<userId, { online: number; away: number; offline: number }>.
+ *
+ * Multi-tenancy: usa `prismaBase` + `organizationId` explicito porque pode
+ * ser chamado de relatorios super-admin (cross-org). O caller passa orgId
+ * via `userIds` ja filtrados ou explicitamente.
  */
 export async function computeActiveTimeByUser(params: {
   from: Date;
   to: Date;
   userIds?: string[];
+  organizationId?: string;
 }): Promise<Map<string, { online: number; away: number; offline: number }>> {
-  const { from, to, userIds } = params;
+  const { from, to, userIds, organizationId } = params;
   const now = new Date();
   const effectiveTo = to > now ? now : to;
 
@@ -76,8 +124,18 @@ export async function computeActiveTimeByUser(params: {
   >();
 
   try {
-    const logs = await prisma.agentPresenceLog.findMany({
+    // Quando organizationId explicito vem, usamos prismaBase pra cross-org.
+    // Quando nao vem, caimos no prisma scoped via getOrgIdOrNull do ctx.
+    const orgId = organizationId ?? getOrgIdOrNull();
+    if (!orgId) {
+      // Super-admin sem org especifica: precisa passar `organizationId` no
+      // params; nao queremos vazar dados global.
+      return result;
+    }
+
+    const logs = await prismaBase.agentPresenceLog.findMany({
       where: {
+        organizationId: orgId,
         ...(userIds && userIds.length > 0 ? { userId: { in: userIds } } : {}),
         OR: [{ endedAt: null }, { endedAt: { gte: from } }],
         startedAt: { lte: effectiveTo },

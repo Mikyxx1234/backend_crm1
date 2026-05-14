@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { loadAuthzContext, can } from "@/lib/authz";
+import { requirePipelineScope } from "@/lib/authz/resource-policy";
 import { createStage, getPipelineMeta, reorderStages } from "@/services/pipelines";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -10,6 +12,14 @@ export async function POST(request: Request, context: RouteContext) {
     const session = await auth();
     if (!session?.user) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+    }
+    const ctxAuth = await loadAuthzContext({
+      userId: session.user.id,
+      organizationId: (session.user as { organizationId?: string | null }).organizationId ?? null,
+      isSuperAdmin: Boolean((session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
+    });
+    if (!can(ctxAuth, "pipeline:manage_stages")) {
+      return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
 
     const { id: pipelineId } = await context.params;
@@ -21,6 +31,12 @@ export async function POST(request: Request, context: RouteContext) {
     if (!meta) {
       return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
     }
+    const scoped = await requirePipelineScope(
+      session.user as { id: string; role?: string | null; organizationId: string | null; isSuperAdmin?: boolean },
+      "edit",
+      pipelineId,
+    );
+    if (scoped) return scoped;
 
     let body: unknown;
     try {
@@ -87,6 +103,14 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!session?.user) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
     }
+    const ctxAuth = await loadAuthzContext({
+      userId: session.user.id,
+      organizationId: (session.user as { organizationId?: string | null }).organizationId ?? null,
+      isSuperAdmin: Boolean((session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
+    });
+    if (!can(ctxAuth, "pipeline:manage_stages")) {
+      return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
+    }
 
     const { id: pipelineId } = await context.params;
     if (!pipelineId) {
@@ -97,6 +121,12 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!meta) {
       return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
     }
+    const scoped = await requirePipelineScope(
+      session.user as { id: string; role?: string | null; organizationId: string | null; isSuperAdmin?: boolean },
+      "edit",
+      pipelineId,
+    );
+    if (scoped) return scoped;
 
     let body: unknown;
     try {

@@ -5,6 +5,7 @@ import type {
 } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import type { SegmentFilters } from "./segments";
 
 export type GetCampaignsParams = {
@@ -71,7 +72,7 @@ export type CreateCampaignInput = {
 
 export async function createCampaign(input: CreateCampaignInput) {
   return prisma.campaign.create({
-    data: {
+    data: withOrgFromCtx({
       name: input.name,
       type: input.type,
       channelId: input.channelId,
@@ -89,7 +90,7 @@ export async function createCampaign(input: CreateCampaignInput) {
       sendRate: input.sendRate ?? 80,
       scheduledAt: input.scheduledAt ?? null,
       createdById: input.createdById,
-    },
+    }),
   });
 }
 

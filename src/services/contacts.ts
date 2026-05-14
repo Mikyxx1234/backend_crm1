@@ -1,6 +1,8 @@
 import type { LifecycleStage, Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { getLogger } from "@/lib/logger";
 
@@ -123,6 +125,7 @@ export async function getContacts(params: GetContactsParams = {}) {
   >();
 
   if (contactIds.length > 0) {
+    const orgId = getOrgIdOrThrow();
     const dealAggs = await prisma.$queryRaw<
       { contactId: string; totalValue: string; dealCount: bigint; lastDealAt: Date | null; firstDealAt: Date | null }[]
     >`
@@ -135,6 +138,7 @@ export async function getContacts(params: GetContactsParams = {}) {
       FROM deals d
       WHERE d."contactId" = ANY(${contactIds})
         AND d.status = 'WON'
+        AND d."organizationId" = ${orgId}
       GROUP BY d."contactId"
     `;
 
@@ -463,11 +467,6 @@ export async function getContactById(id: string) {
             updatedAt: true,
             assignedToId: true,
             assignedTo: { select: { id: true, name: true, email: true } },
-            tags: {
-              select: {
-                tag: { select: { id: true, name: true, color: true } },
-              },
-            },
           },
         }),
       [] as Awaited<
@@ -483,11 +482,6 @@ export async function getContactById(id: string) {
               updatedAt: true;
               assignedToId: true;
               assignedTo: { select: { id: true; name: true; email: true } };
-              tags: {
-                select: {
-                  tag: { select: { id: true; name: true; color: true } };
-                };
-              };
             };
           }>
         >
@@ -528,7 +522,7 @@ export async function getContactById(id: string) {
 
 export async function createContact(data: CreateContactInput) {
   return prisma.contact.create({
-    data: {
+    data: withOrgFromCtx({
       ...(data.id ? { id: data.id } : {}),
       name: data.name,
       externalId: data.externalId === undefined ? undefined : data.externalId,
@@ -540,7 +534,7 @@ export async function createContact(data: CreateContactInput) {
       source: data.source ?? undefined,
       companyId: data.companyId ?? undefined,
       assignedToId: data.assignedToId ?? undefined,
-    },
+    }),
     include: {
       company: { select: { id: true, name: true, domain: true } },
       tags: { include: { tag: { select: { id: true, name: true, color: true } } } },

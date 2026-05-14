@@ -2,6 +2,12 @@ import type { Prisma } from "@prisma/client";
 
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+// prismaBase + withSystemContext usados apenas em sweepExpiredTimeouts
+// (cross-tenant). Os outros helpers deste arquivo sao chamados de
+// API routes / webhooks que ja tem contexto montado.
+import { prismaBase } from "@/lib/prisma-base";
+import { withSystemContext } from "@/lib/webhook-context";
 
 const log = getLogger("automation-context");
 
@@ -47,14 +53,14 @@ export async function createContext(
   timeoutMs?: number,
 ) {
   return prisma.automationContext.create({
-    data: {
+    data: withOrgFromCtx({
       automationId,
       contactId,
       currentStepId: firstStepId,
       variables: {},
-      status: "RUNNING",
+      status: "RUNNING" as const,
       timeoutAt: timeoutMs && timeoutMs > 0 ? new Date(Date.now() + timeoutMs) : null,
-    },
+    }),
   });
 }
 
@@ -142,6 +148,10 @@ export async function processIncomingMessage(contactId: string, messageContent: 
     let variables = { ...(ctx.variables as Record<string, unknown>) };
 
     if (currentStep.type === "wait_for_reply") {
+      const varName = String(config.saveToVariable ?? "lastResponse").trim();
+      if (varName) {
+        variables = { ...variables, [varName]: messageContent };
+      }
       const receivedGoto =
         typeof config.receivedGotoStepId === "string" && config.receivedGotoStepId !== ""
           ? (config.receivedGotoStepId as string)
@@ -152,14 +162,12 @@ export async function processIncomingMessage(contactId: string, messageContent: 
           `wait_for_reply resolvido — auto=${ctx.automation.name} contato=${contactId} → step=${nextStepId} (via receivedGotoStepId)`,
         );
       } else {
-        // Sem receivedGotoStepId configurado: cair no próximo da array é
-        // arriscado (pode pegar passo de OUTRO ramo). Em vez disso, fecha
-        // o contexto pra não disparar nada esquisito e loga aviso.
-        log.warn(
-          `wait_for_reply sem receivedGotoStepId — auto=${ctx.automation.name} step=${currentStep.id} → fechando contexto (configure o ramo "Até a mensagem recebida")`,
+        // Fallback: avança linearmente para o próximo step
+        const stepIndex = ctx.automation.steps.findIndex((s) => s.id === ctx.currentStepId);
+        nextStepId = ctx.automation.steps[stepIndex + 1]?.id ?? null;
+        log.info(
+          `wait_for_reply sem receivedGotoStepId — auto=${ctx.automation.name} → fallback linear step=${nextStepId ?? "(fim)"}`,
         );
-        await advanceContext(ctx.id, null, variables);
-        return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
       }
     } else {
       const varName = String(config.saveToVariable ?? "lastResponse");
@@ -240,11 +248,17 @@ export async function processIncomingMessage(contactId: string, messageContent: 
               ? (cfg.receivedGotoStepId as string)
               : null;
           if (!receivedGoto) {
-            log.warn(
-              `wait_for_reply (cascata) sem receivedGotoStepId — auto=${ctx.automation.name} step=${targetStep.id} → fechando contexto (configure o ramo "Até a mensagem recebida")`,
+            // Fallback: avança linearmente para o próximo step na cascata
+            const stepIdx = ctx.automation.steps.findIndex((s) => s.id === targetStep.id);
+            currentTargetId = ctx.automation.steps[stepIdx + 1]?.id ?? "";
+            if (!currentTargetId) {
+              await advanceContext(ctx.id, null, variables);
+              return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+            }
+            log.info(
+              `wait_for_reply (cascata) sem receivedGotoStepId — auto=${ctx.automation.name} → fallback linear step=${currentTargetId}`,
             );
-            await advanceContext(ctx.id, null, variables);
-            return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+            continue;
           }
           log.info(
             `wait_for_reply resolvido em cascata — auto=${ctx.automation.name} contato=${contactId} step=${targetStep.id} → step=${receivedGoto}`,
@@ -263,19 +277,18 @@ export async function processIncomingMessage(contactId: string, messageContent: 
 
         await advanceContext(ctx.id, currentTargetId, variables, targetTimeoutMs);
 
-        if (!PAUSING_STEP_TYPES.has(targetStep.type)) {
-          try {
-            const { continueFromStep } = await import("@/services/automation-executor");
-            await continueFromStep(ctx.automationId, contactId, currentTargetId, variables);
-          } catch (err) {
-            log.error(
-              `continueFromStep error — auto=${ctx.automation.name} step=${currentTargetId}:`,
-              err,
+        try {
+          const { continueFromStep } = await import("@/services/automation-executor");
+          await continueFromStep(ctx.automationId, contactId, currentTargetId, variables);
+          if (PAUSING_STEP_TYPES.has(targetStep.type)) {
+            log.info(
+              `próximo step (${targetStep.type}) executado e pausou o fluxo — auto=${ctx.automation.name} timeoutMs=${targetTimeoutMs ?? "—"}`,
             );
           }
-        } else {
-          log.info(
-            `próximo step (${targetStep.type}) pausa o fluxo — auto=${ctx.automation.name} timeoutMs=${targetTimeoutMs ?? "—"}`,
+        } catch (err) {
+          log.error(
+            `continueFromStep error — auto=${ctx.automation.name} step=${currentTargetId}:`,
+            err,
           );
         }
         break;
@@ -334,10 +347,15 @@ async function dispatchToNextStep(
 
   await advanceContext(ctx.id, nextStepId, variables, targetTimeoutMs);
 
-  if (!PAUSING_STEP_TYPES.has(targetStep.type) && ctx.contactId) {
+  if (ctx.contactId) {
     try {
       const { continueFromStep } = await import("@/services/automation-executor");
       await continueFromStep(ctx.automationId, ctx.contactId, nextStepId, variables);
+      if (PAUSING_STEP_TYPES.has(targetStep.type)) {
+        log.info(
+          `próximo step pausa (${targetStep.type}, ${reason}) e foi executado — auto=${ctx.automation.name ?? ctx.automationId} timeoutMs=${targetTimeoutMs ?? "—"}`,
+        );
+      }
     } catch (err) {
       log.error(
         `continueFromStep error (${reason}) — auto=${ctx.automation.name ?? ctx.automationId} step=${nextStepId}:`,
@@ -346,7 +364,7 @@ async function dispatchToNextStep(
     }
   } else if (PAUSING_STEP_TYPES.has(targetStep.type)) {
     log.info(
-      `próximo step pausa (${targetStep.type}, ${reason}) — auto=${ctx.automation.name ?? ctx.automationId} timeoutMs=${targetTimeoutMs ?? "—"}`,
+      `próximo step pausa (${targetStep.type}, ${reason}) sem contactId — auto=${ctx.automation.name ?? ctx.automationId} timeoutMs=${targetTimeoutMs ?? "—"}`,
     );
   }
 }
@@ -422,26 +440,45 @@ export async function processTimeout(contextId: string) {
   await dispatchToNextStep(ctxForDispatch, nextStepId, variables, `${step.type} timeout`);
 }
 
+function applyVariableTransform(raw: unknown, transform?: string): string {
+  const value = raw == null ? "" : String(raw);
+  if (!transform) return value;
+  const t = transform.trim().toLowerCase();
+  if (t === "first" || t === "first_name" || t === "primeiro_nome") {
+    return value.trim().split(/\s+/)[0] ?? "";
+  }
+  return value;
+}
+
 export function interpolateVariables(template: string, variables: Record<string, unknown>): string {
-  return template.replace(/\{\{(\w+)\}\}/g, (_, key) => {
-    const val = variables[key];
-    return val != null ? String(val) : `{{${key}}}`;
-  });
+  return template.replace(
+    /\{\{\s*([a-zA-Z0-9_]+)(?:\s*\|\s*([a-zA-Z0-9_]+))?\s*\}\}/g,
+    (_, key: string, transform?: string) => {
+      const val = variables[key];
+      if (val == null) {
+        return transform ? `{{${key}|${transform}}}` : `{{${key}}}`;
+      }
+      return applyVariableTransform(val, transform);
+    },
+  );
 }
 
 export async function sweepExpiredTimeouts(): Promise<number> {
-  const expired = await prisma.automationContext.findMany({
+  // Worker cross-tenant: lista contextos expirados de TODAS as orgs
+  // usando prismaBase (sem scope). Cada processamento entra em seu
+  // proprio withSystemContext.
+  const expired = await prismaBase.automationContext.findMany({
     where: {
       status: "RUNNING",
       timeoutAt: { not: null, lte: new Date() },
     },
-    select: { id: true },
+    select: { id: true, organizationId: true },
     take: 50,
   });
   let processed = 0;
   for (const ctx of expired) {
     try {
-      await processTimeout(ctx.id);
+      await withSystemContext(ctx.organizationId, () => processTimeout(ctx.id));
       processed++;
     } catch (err) {
       console.error(`[automation-context] sweepExpiredTimeouts error for ${ctx.id}:`, err);

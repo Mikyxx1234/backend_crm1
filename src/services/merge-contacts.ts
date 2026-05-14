@@ -19,8 +19,7 @@
  *     contato meio-mesclado.
  */
 
-import { prisma } from "@/lib/prisma";
-import type { Prisma } from "@prisma/client";
+import { prisma, type ScopedTx } from "@/lib/prisma";
 
 export type MergeContactsResult = {
   keptId: string;
@@ -62,7 +61,7 @@ export async function mergeContacts(
   if (!remove) return { ok: false, error: { kind: "remove_not_found" } };
 
   const result = await prisma.$transaction(
-    async (tx: Prisma.TransactionClient) => {
+    async (tx: ScopedTx) => {
       // ── Tags: chave composta (contactId, tagId). Se o keep já tem a
       // mesma tag, descartamos a do remove; senão, repointamos.
       const removeTags = await tx.tagOnContact.findMany({

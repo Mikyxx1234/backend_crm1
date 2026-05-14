@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { authenticateApiRequest } from "@/lib/api-auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { requirePermissionForUser, requirePipelineScope, requireStageScope } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, getDeals, isValidDealStatus } from "@/services/deals";
@@ -16,6 +17,9 @@ export async function GET(request: Request) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "deal:view");
+    if (denied) return denied;
     const { searchParams } = new URL(request.url);
     const pipelineId = searchParams.get("pipelineId") ?? undefined;
     const stageId = searchParams.get("stageId") ?? undefined;
@@ -41,7 +45,17 @@ export async function GET(request: Request) {
       visibilityWhere: visibility.dealWhere,
     });
 
-    return NextResponse.json(result);
+    const items = await Promise.all(
+      result.items.map(async (deal) => {
+        const stageDenied = await requireStageScope(authResult.user, "view", deal.stageId);
+        if (stageDenied) return null;
+        const pipelineDenied = await requirePipelineScope(authResult.user, "view", deal.stage.pipelineId);
+        if (pipelineDenied) return null;
+        return deal;
+      }),
+    );
+    return NextResponse.json({ ...result, items: items.filter(Boolean) });
+    });
   } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao listar negócios." }, { status: 500 });
@@ -53,6 +67,9 @@ export async function POST(request: Request) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "deal:create");
+    if (denied) return denied;
     let body: unknown;
     try {
       body = await request.json();
@@ -105,6 +122,8 @@ export async function POST(request: Request) {
     }
 
     try {
+      const stageScope = await requireStageScope(authResult.user, "move", b.stageId);
+      if (stageScope) return stageScope;
       const deal = await createDeal({
         title: b.title,
         stageId: b.stageId,
@@ -148,6 +167,7 @@ export async function POST(request: Request) {
       }
       throw err;
     }
+    });
   } catch (e: unknown) {
     console.error(e);
     if (typeof e === "object" && e !== null && "code" in e) {

@@ -1,7 +1,7 @@
 import { Prisma } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
-import { prisma } from "@/lib/prisma";
+import { getOrgSettingsByPrefix } from "@/lib/org-settings";
 
 export type VisibilityMode = "all" | "own";
 
@@ -19,29 +19,16 @@ const DEFAULTS: Record<AppUserRole, VisibilityMode> = {
   MEMBER: "own",
 };
 
-let settingsCache: Map<string, string> | null = null;
-let cacheTime = 0;
-const CACHE_TTL = 60_000;
-
-async function loadSettings(): Promise<Map<string, string>> {
-  const now = Date.now();
-  if (settingsCache && now - cacheTime < CACHE_TTL) return settingsCache;
-
-  const rows = await prisma.systemSetting.findMany({
-    where: { key: { startsWith: "visibility." } },
-  });
-
-  const map = new Map<string, string>();
-  for (const r of rows) map.set(r.key, r.value);
-
-  settingsCache = map;
-  cacheTime = now;
-  return map;
-}
-
-export function clearVisibilityCache() {
-  settingsCache = null;
-  cacheTime = 0;
+/**
+ * Lê settings da org corrente.
+ *
+ * Multi-tenancy v0 cutover: antes lia de `SystemSetting` (global, vazava
+ * config entre tenants). Agora le de `OrganizationSetting` via
+ * `getOrgSettingsByPrefix`, que é cacheado por (orgId, prefixo) e
+ * invalidado em `setVisibilityForRole`.
+ */
+async function loadVisibilityMap(): Promise<Map<string, string>> {
+  return getOrgSettingsByPrefix("visibility.");
 }
 
 function getModeForRole(
@@ -63,7 +50,7 @@ export async function getVisibilityFilter(
     return { canSeeAll: true, dealWhere: {}, conversationWhere: {} };
   }
 
-  const settings = await loadSettings();
+  const settings = await loadVisibilityMap();
   const mode = getModeForRole(settings, role);
 
   if (mode === "all") {
@@ -101,7 +88,7 @@ export async function getVisibilityFilter(
 export async function getVisibilitySettings(): Promise<
   Record<string, VisibilityMode>
 > {
-  const settings = await loadSettings();
+  const settings = await loadVisibilityMap();
   return {
     ADMIN: "all",
     MANAGER: getModeForRole(settings, "MANAGER"),
@@ -113,10 +100,17 @@ export async function setVisibilityForRole(
   role: "MANAGER" | "MEMBER",
   mode: VisibilityMode
 ) {
-  await prisma.systemSetting.upsert({
-    where: { key: `visibility.${role}` },
-    update: { value: mode },
-    create: { key: `visibility.${role}`, value: mode },
-  });
-  clearVisibilityCache();
+  // setOrgSetting já invalida o cache (chave + prefixo) automaticamente.
+  const { setOrgSetting } = await import("@/lib/org-settings");
+  await setOrgSetting(`visibility.${role}`, mode);
+}
+
+/**
+ * @deprecated O cache agora é gerenciado em `lib/org-settings.ts` via
+ * Redis + invalidação automática em `setOrgSetting`. Esta função
+ * permanece como no-op para manter compatibilidade com chamadas
+ * antigas (ex.: testes).
+ */
+export function clearVisibilityCache() {
+  // no-op — cache movido para `lib/cache` org-aware.
 }

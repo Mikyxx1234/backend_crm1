@@ -1,0 +1,477 @@
+import { UserRole } from "@prisma/client";
+import { hash } from "bcryptjs";
+import crypto from "node:crypto";
+
+import { prismaBase } from "@/lib/prisma-base";
+import { logAudit } from "@/lib/audit/log";
+import {
+  PIPELINE_TEMPLATES,
+  type PipelineTemplateId,
+} from "@/lib/onboarding-templates";
+
+/**
+ * Logica do wizard de onboarding. Opera com `prismaBase` porque:
+ *   1. Alguns passos rodam ANTES do user existir (validate / createUser).
+ *   2. O usuario criado durante o wizard so vira session no proximo request,
+ *      entao o AsyncLocalStorage pode nao ter orgId pra alguns handlers.
+ *   3. Todas as operacoes sao gatteadas por um token de convite valido.
+ *
+ * Cada helper valida o token e a org ANTES de tocar no db, e todas as
+ * entidades criadas levam `organizationId` explicito.
+ */
+
+export type InviteLookup = {
+  invite: {
+    id: string;
+    email: string;
+    role: UserRole;
+    expiresAt: Date;
+    acceptedAt: Date | null;
+  };
+  organization: {
+    id: string;
+    name: string;
+    slug: string;
+    industry: string | null;
+    size: string | null;
+    phone: string | null;
+    logoUrl: string | null;
+    primaryColor: string | null;
+    status: "ACTIVE" | "SUSPENDED" | "ARCHIVED";
+    onboardingCompletedAt: Date | null;
+  };
+};
+
+async function loadInvite(token: string): Promise<InviteLookup> {
+  if (!token || typeof token !== "string") {
+    throw new Error("Token ausente.");
+  }
+  const invite = await prismaBase.organizationInvite.findUnique({
+    where: { token },
+    include: { organization: true },
+  });
+  if (!invite) throw new Error("Convite inválido.");
+  if (invite.acceptedAt) throw new Error("Convite já utilizado.");
+  if (invite.expiresAt.getTime() < Date.now()) {
+    throw new Error("Convite expirado.");
+  }
+  if (invite.organization.status !== "ACTIVE") {
+    throw new Error("Organização inativa.");
+  }
+  return {
+    invite: {
+      id: invite.id,
+      email: invite.email,
+      role: invite.role,
+      expiresAt: invite.expiresAt,
+      acceptedAt: invite.acceptedAt,
+    },
+    organization: {
+      id: invite.organization.id,
+      name: invite.organization.name,
+      slug: invite.organization.slug,
+      industry: invite.organization.industry,
+      size: invite.organization.size,
+      phone: invite.organization.phone,
+      logoUrl: invite.organization.logoUrl,
+      primaryColor: invite.organization.primaryColor,
+      status: invite.organization.status,
+      onboardingCompletedAt: invite.organization.onboardingCompletedAt,
+    },
+  };
+}
+
+export async function validateOnboardingToken(token: string) {
+  return loadInvite(token);
+}
+
+export async function updateOrganizationBasics(
+  organizationId: string,
+  input: {
+    name?: string;
+    industry?: string | null;
+    size?: string | null;
+    phone?: string | null;
+  },
+): Promise<void> {
+  const org = await prismaBase.organization.findUnique({
+    where: { id: organizationId },
+    select: { name: true },
+  });
+  if (!org) throw new Error("Organização não encontrada.");
+  await prismaBase.organization.update({
+    where: { id: organizationId },
+    data: {
+      name: input.name?.trim() || org.name,
+      industry: input.industry?.trim() || null,
+      size: input.size?.trim() || null,
+      phone: input.phone?.trim() || null,
+    },
+  });
+}
+
+export async function createAdminFromInvite(
+  token: string,
+  input: { name: string; email: string; password: string },
+): Promise<{ userId: string; organizationId: string; email: string }> {
+  const { invite, organization } = await loadInvite(token);
+  if (invite.role !== UserRole.ADMIN) {
+    throw new Error("Este convite não é pra admin inicial.");
+  }
+
+  const name = input.name.trim();
+  const email = input.email.trim().toLowerCase();
+  const password = input.password;
+  if (name.length < 2) throw new Error("Informe um nome válido.");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    throw new Error("Email inválido.");
+  }
+  if (invite.email.toLowerCase() !== email) {
+    throw new Error("Use o mesmo email do convite.");
+  }
+  if (password.length < 8) {
+    throw new Error("A senha precisa ter pelo menos 8 caracteres.");
+  }
+
+  const existing = await prismaBase.user.findUnique({
+    where: { email },
+    select: { id: true },
+  });
+  if (existing) throw new Error("Já existe uma conta com este email.");
+
+  const hashedPassword = await hash(password, 12);
+
+  const result = await prismaBase.$transaction(async (tx) => {
+    const user = await tx.user.create({
+      data: {
+        name,
+        email,
+        hashedPassword,
+        role: UserRole.ADMIN,
+        organizationId: organization.id,
+      },
+      select: { id: true },
+    });
+    await tx.organizationInvite.update({
+      where: { id: invite.id },
+      data: { acceptedAt: new Date(), acceptedById: user.id },
+    });
+    return user;
+  });
+
+  return { userId: result.id, organizationId: organization.id, email };
+}
+
+export async function updateBranding(
+  organizationId: string,
+  input: { logoUrl?: string | null; primaryColor?: string | null },
+): Promise<void> {
+  await prismaBase.organization.update({
+    where: { id: organizationId },
+    data: {
+      logoUrl: input.logoUrl ?? null,
+      primaryColor: input.primaryColor?.trim() || "#1e3a8a",
+    },
+  });
+}
+
+export async function applyPipelineTemplate(
+  organizationId: string,
+  templateId: PipelineTemplateId,
+): Promise<{ pipelineId: string }> {
+  const template = PIPELINE_TEMPLATES[templateId];
+  if (!template) throw new Error("Template inválido.");
+
+  const result = await prismaBase.$transaction(async (tx) => {
+    // Se a org ja tem um default, nao sobrescreve — o wizard pode ser
+    // re-executado em cenarios de recuperacao.
+    const existingDefault = await tx.pipeline.findFirst({
+      where: { organizationId, isDefault: true },
+      select: { id: true },
+    });
+    if (existingDefault) return existingDefault;
+
+    const pipeline = await tx.pipeline.create({
+      data: {
+        organizationId,
+        name: template.pipelineName,
+        isDefault: true,
+        stages: {
+          create: template.stages.map((s) => ({
+            organizationId,
+            name: s.name,
+            position: s.position,
+            color: s.color,
+            winProbability: s.winProbability,
+            rottingDays: s.rottingDays,
+            isIncoming: s.isIncoming ?? false,
+          })),
+        },
+      },
+      select: { id: true },
+    });
+
+    if (template.lossReasons.length) {
+      await tx.lossReason.createMany({
+        data: template.lossReasons.map((lr) => ({
+          organizationId,
+          label: lr.label,
+          position: lr.position,
+        })),
+      });
+    }
+
+    if (template.customFields.length) {
+      await tx.customField.createMany({
+        data: template.customFields.map((cf) => ({
+          organizationId,
+          name: cf.name,
+          label: cf.label,
+          type: cf.type,
+          options: cf.options ?? [],
+          required: cf.required ?? false,
+          entity: cf.entity,
+          showInInboxLeadPanel: cf.showInInboxLeadPanel ?? false,
+          inboxLeadPanelOrder: cf.inboxLeadPanelOrder ?? null,
+        })),
+      });
+    }
+
+    if (template.quickReplies.length) {
+      await tx.quickReply.createMany({
+        data: template.quickReplies.map((qr) => ({
+          organizationId,
+          title: qr.title,
+          content: qr.content,
+          category: qr.category ?? null,
+          position: qr.position,
+        })),
+      });
+    }
+
+    return pipeline;
+  });
+
+  return { pipelineId: result.id };
+}
+
+export async function inviteTeamMembers(
+  organizationId: string,
+  createdById: string,
+  members: { email: string; role: UserRole }[],
+): Promise<{ created: number; tokens: string[] }> {
+  const validated: { email: string; role: UserRole; token: string; expiresAt: Date }[] = [];
+  for (const m of members) {
+    const email = m.email.trim().toLowerCase();
+    if (!email) continue;
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) continue;
+    if (m.role === UserRole.ADMIN) continue; // wizard so convida MANAGER/MEMBER
+    validated.push({
+      email,
+      role: m.role,
+      token: crypto.randomBytes(32).toString("base64url"),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+    });
+  }
+  if (!validated.length) return { created: 0, tokens: [] };
+
+  await prismaBase.organizationInvite.createMany({
+    data: validated.map((v) => ({
+      organizationId,
+      email: v.email,
+      role: v.role,
+      token: v.token,
+      expiresAt: v.expiresAt,
+      createdById,
+    })),
+  });
+  return { created: validated.length, tokens: validated.map((v) => v.token) };
+}
+
+export async function completeOnboarding(organizationId: string): Promise<void> {
+  await prismaBase.organization.update({
+    where: { id: organizationId },
+    data: { onboardingCompletedAt: new Date() },
+  });
+}
+
+/**
+ * Signup self-service (sem convite). Cria Organization + User(ADMIN)
+ * numa unica transacao. Chamado pelo endpoint publico POST /api/signup.
+ *
+ * O user criado vira ADMIN da org e NAO super-admin. `createdById` da
+ * org e preenchido com o id do user recem criado (self-created).
+ *
+ * Depois desse call, o caller deve dar signIn() client-side pra iniciar
+ * a session e continuar o wizard nos passos 3-6.
+ */
+export async function signupOrganizationWithAdmin(input: {
+  organizationName: string;
+  slug: string;
+  adminName: string;
+  adminEmail: string;
+  password: string;
+}): Promise<{
+  organizationId: string;
+  organizationSlug: string;
+  userId: string;
+  email: string;
+}> {
+  const SLUG_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
+
+  const organizationName = input.organizationName.trim();
+  const slug = input.slug.trim().toLowerCase();
+  const adminName = input.adminName.trim();
+  const adminEmail = input.adminEmail.trim().toLowerCase();
+  const password = input.password;
+
+  if (organizationName.length < 2) {
+    throw new Error("Nome da empresa inválido.");
+  }
+  if (!SLUG_RE.test(slug)) {
+    throw new Error(
+      "Slug inválido: use letras minúsculas, números e hífens (2-40 caracteres).",
+    );
+  }
+  if (adminName.length < 2) throw new Error("Informe um nome válido.");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(adminEmail)) {
+    throw new Error("Email inválido.");
+  }
+  if (password.length < 8) {
+    throw new Error("A senha precisa ter pelo menos 8 caracteres.");
+  }
+
+  // Checagens fora da transacao pra dar erro amigavel antes do
+  // trabalho pesado. A transacao abaixo cobre a condicao de corrida.
+  const [existingSlug, existingUser] = await Promise.all([
+    prismaBase.organization.findUnique({
+      where: { slug },
+      select: { id: true },
+    }),
+    prismaBase.user.findUnique({
+      where: { email: adminEmail },
+      select: { id: true },
+    }),
+  ]);
+  if (existingSlug) throw new Error("Slug já em uso por outra organização.");
+  if (existingUser) throw new Error("Já existe uma conta com este email.");
+
+  const hashedPassword = await hash(password, 12);
+
+  try {
+    const result = await prismaBase.$transaction(async (tx) => {
+      const org = await tx.organization.create({
+        data: {
+          name: organizationName,
+          slug,
+          status: "ACTIVE",
+        },
+        select: { id: true, slug: true },
+      });
+
+      const user = await tx.user.create({
+        data: {
+          name: adminName,
+          email: adminEmail,
+          hashedPassword,
+          role: UserRole.ADMIN,
+          organizationId: org.id,
+        },
+        select: { id: true },
+      });
+
+      await tx.organization.update({
+        where: { id: org.id },
+        data: { createdById: user.id },
+      });
+
+      return { org, user };
+    });
+
+    await logAudit({
+      entity: "organization",
+      action: "create",
+      entityId: result.org.id,
+      organizationId: result.org.id,
+      actorId: result.user.id,
+      actorEmail: adminEmail,
+      after: {
+        id: result.org.id,
+        name: organizationName,
+        slug: result.org.slug,
+        status: "ACTIVE",
+      },
+      metadata: { source: "registration" },
+    });
+
+    return {
+      organizationId: result.org.id,
+      organizationSlug: result.org.slug,
+      userId: result.user.id,
+      email: adminEmail,
+    };
+  } catch (e) {
+    if (
+      e &&
+      typeof e === "object" &&
+      "code" in e &&
+      (e as { code: string }).code === "P2002"
+    ) {
+      // Unique violation — mensagem amigavel em vez de vazar o erro do
+      // Prisma. Pode ser slug ou email caindo em race condition.
+      throw new Error("Slug ou email já em uso.");
+    }
+    throw e;
+  }
+}
+
+export async function acceptMemberInvite(input: {
+  token: string;
+  name: string;
+  password: string;
+}): Promise<{ userId: string; email: string }> {
+  const { invite, organization } = await loadInvite(input.token);
+  if (invite.role === UserRole.ADMIN) {
+    throw new Error("Use o link de onboarding para admin inicial.");
+  }
+  const name = input.name.trim();
+  if (name.length < 2) throw new Error("Informe um nome válido.");
+  if (input.password.length < 8) {
+    throw new Error("A senha precisa ter pelo menos 8 caracteres.");
+  }
+  const email = invite.email.toLowerCase();
+  const existing = await prismaBase.user.findUnique({
+    where: { email },
+    select: { id: true },
+  });
+  if (existing) throw new Error("Já existe uma conta com este email.");
+
+  const hashedPassword = await hash(input.password, 12);
+  const result = await prismaBase.$transaction(async (tx) => {
+    const user = await tx.user.create({
+      data: {
+        name,
+        email,
+        hashedPassword,
+        role: invite.role,
+        organizationId: organization.id,
+      },
+      select: { id: true },
+    });
+    await tx.organizationInvite.update({
+      where: { id: invite.id },
+      data: { acceptedAt: new Date(), acceptedById: user.id },
+    });
+    return user;
+  });
+  await logAudit({
+    entity: "organization",
+    action: "invite_accept",
+    entityId: invite.id,
+    organizationId: organization.id,
+    actorId: result.id,
+    actorEmail: email,
+    after: { userId: result.id, role: invite.role },
+  });
+  return { userId: result.id, email };
+}

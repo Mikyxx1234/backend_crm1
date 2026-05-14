@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { authenticateApiRequest } from "@/lib/api-auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { getLogger } from "@/lib/logger";
 import {
   type UpdateContactInput,
@@ -24,6 +24,7 @@ export async function GET(request: Request, context: RouteContext) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }
@@ -43,6 +44,7 @@ export async function GET(request: Request, context: RouteContext) {
     }
 
     return NextResponse.json(contact);
+    });
   } catch (e) {
     log.error(`GET /api/contacts/${id} falhou:`, e);
     const errMsg =
@@ -59,6 +61,7 @@ export async function PUT(request: Request, context: RouteContext) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
     const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
@@ -152,6 +155,7 @@ export async function PUT(request: Request, context: RouteContext) {
     const contact = await updateContact(id, payload);
 
     return NextResponse.json(contact);
+    });
   } catch (e: unknown) {
     console.error(e);
     if (typeof e === "object" && e !== null && "code" in e) {
@@ -176,6 +180,7 @@ export async function DELETE(request: Request, context: RouteContext) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }
@@ -196,6 +201,7 @@ export async function DELETE(request: Request, context: RouteContext) {
     await deleteContact(id);
     log.info(`contato ${id} excluído com sucesso`);
     return NextResponse.json({ ok: true });
+    });
   } catch (e: unknown) {
     log.error(`falha ao excluir contato ${id}:`, e);
 

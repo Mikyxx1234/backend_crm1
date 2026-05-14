@@ -16,8 +16,11 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 
-import { metaWhatsApp } from "@/lib/meta-whatsapp/client";
+import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { createActivity } from "@/services/activities";
 import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
@@ -182,7 +185,7 @@ function addTagTool(ctx: RunContext) {
         });
         if (!tag) {
           tag = await prisma.tag.create({
-            data: { name, color: "#64748b" },
+            data: withOrgFromCtx({ name, color: "#64748b" }),
             select: { id: true, name: true },
           });
         }
@@ -261,50 +264,98 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
     }),
     execute: async ({ templateName, languageCode, bodyVariables }) => {
       try {
-        if (!metaWhatsApp.configured) return fail("Meta WhatsApp não configurado.");
         if (!ctx.contactId) return fail("Sem contato.");
+        // Multi-tenancy: resolve o cliente Meta a partir do canal da
+        // conversa atual em vez do singleton global. Sem isso, o LLM da
+        // org B chamaria sendTemplate pelo numero da Eduit (env vars).
+        if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        const conv = await prisma.conversation.findUnique({
+          where: { id: ctx.conversationId },
+          select: {
+            organizationId: true,
+            channelRef: { select: { config: true } },
+          },
+        });
+        if (!conv) return fail("Conversa não encontrada.");
+        const channelConfig = conv.channelRef?.config as
+          | Record<string, unknown>
+          | null
+          | undefined;
+        const metaClient = metaClientFromConfig(channelConfig);
+        if (!metaClient.configured) return fail("Canal Meta não configurado.");
         const contact = await prisma.contact.findUnique({
           where: { id: ctx.contactId },
           select: { phone: true },
         });
         if (!contact?.phone) return fail("Contato sem telefone.");
-        const res = await metaWhatsApp.sendTemplate(
+        const lc = languageCode ?? "pt_BR";
+        let templateGraphId: string | null = null;
+        try {
+          const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
+            where: { metaTemplateName: templateName },
+            select: { metaTemplateId: true },
+          });
+          templateGraphId = gidRow?.metaTemplateId?.trim() || null;
+        } catch {
+          /* ignore */
+        }
+        const baseComponents =
+          Array.isArray(bodyVariables) && bodyVariables.length > 0
+            ? [
+                {
+                  type: "body",
+                  parameters: bodyVariables.map((text) => ({
+                    type: "text" as const,
+                    text,
+                  })),
+                },
+              ]
+            : undefined;
+        const enrichSend = await enrichTemplateComponentsForFlowSend(metaClient, {
+          templateName,
+          languageCode: lc,
+          components: baseComponents,
+          templateGraphId,
+        });
+        const res = await metaClient.sendTemplate(
           contact.phone,
           templateName,
-          languageCode ?? "pt_BR",
-          bodyVariables ?? [],
+          lc,
+          enrichSend.components,
         );
         const externalId = res?.messages?.[0]?.id ?? null;
-        if (ctx.conversationId) {
-          const saved = await prisma.message.create({
-            data: {
-              conversationId: ctx.conversationId,
-              content: `[Template: ${templateName}]`,
-              direction: "out",
-              messageType: "template",
-              senderName: "Agente IA",
-              externalId,
-              aiAgentUserId: ctx.agentUserId,
-            },
-          });
-          await prisma.conversation
-            .update({
-              where: { id: ctx.conversationId },
-              data: {
-                lastMessageDirection: "out",
-                hasAgentReply: true,
-                updatedAt: new Date(),
-              },
-            })
-            .catch(() => null);
-          sseBus.publish("new_message", {
+        const saved = await prisma.message.create({
+          data: withOrgFromCtx({
             conversationId: ctx.conversationId,
-            contactId: ctx.contactId,
+            content: `[Template: ${templateName}]`,
             direction: "out",
-            content: saved.content,
-            timestamp: saved.createdAt,
-          });
-        }
+            messageType: "template",
+            senderName: "Agente IA",
+            externalId,
+            aiAgentUserId: ctx.agentUserId,
+            ...(typeof enrichSend.flowToken === "string" && enrichSend.flowToken.trim()
+              ? { flowToken: enrichSend.flowToken.trim() }
+              : {}),
+          }),
+        });
+        await prisma.conversation
+          .update({
+            where: { id: ctx.conversationId },
+            data: {
+              lastMessageDirection: "out",
+              hasAgentReply: true,
+              updatedAt: new Date(),
+            },
+          })
+          .catch(() => null);
+        sseBus.publish("new_message", {
+          organizationId: conv.organizationId,
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          direction: "out",
+          content: saved.content,
+          timestamp: saved.createdAt,
+        });
         return ok({ externalId, templateName });
       } catch (err) {
         return fail(err instanceof Error ? err.message : "Falha ao enviar template.");
@@ -520,6 +571,7 @@ function transferToHumanTool(ctx: RunContext) {
           }).catch(() => null);
         }
         sseBus.publish("conversation_unassigned", {
+          organizationId: getOrgIdOrNull(),
           conversationId: ctx.conversationId,
           contactId: ctx.contactId,
           reason,

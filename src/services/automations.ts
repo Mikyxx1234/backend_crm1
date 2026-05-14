@@ -4,6 +4,7 @@ import { enqueueAutomationJob, type AutomationJobContext } from "@/lib/queue";
 
 export type { AutomationJobContext } from "@/lib/queue";
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 
 export const AUTOMATION_TRIGGER_TYPES = [
   "stage_changed",
@@ -44,6 +45,40 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
     return Number.isFinite(n) ? n : undefined;
   }
   return undefined;
+}
+
+const STEP_ID_REF_KEYS = new Set([
+  "nextStepId",
+  "elseGotoStepId",
+  "timeoutGotoStepId",
+  "receivedGotoStepId",
+  "targetStepId",
+  "gotoStepId",
+  "elseStepId",
+  "_nextStepId",
+  "_trueGotoStepId",
+  "_falseGotoStepId",
+  "_answeredGotoStepId",
+]);
+
+function remapStepRefsInValue(value: unknown, remap: Map<string, string>): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) => remapStepRefsInValue(entry, remap));
+  }
+  if (!value || typeof value !== "object") return value;
+
+  const obj = value as Record<string, unknown>;
+  const next: Record<string, unknown> = {};
+
+  for (const [key, raw] of Object.entries(obj)) {
+    if (typeof raw === "string" && STEP_ID_REF_KEYS.has(key) && remap.has(raw)) {
+      next[key] = remap.get(raw);
+      continue;
+    }
+    next[key] = remapStepRefsInValue(raw, remap);
+  }
+
+  return next;
 }
 
 export function evaluateTrigger(
@@ -215,15 +250,19 @@ export type CreateAutomationInput = {
   steps: CreateAutomationStepInput[];
 };
 
-export async function createAutomation(data: CreateAutomationInput) {
+export async function createAutomation(
+  data: CreateAutomationInput,
+): Promise<Prisma.AutomationGetPayload<{ include: { steps: true } }>> {
   const name = data.name?.trim();
   if (!name) {
     throw new Error("INVALID_NAME");
   }
 
+  const organizationId = getOrgIdOrThrow();
   return prisma.automation.create({
     data: {
       name,
+      organizationId,
       description: data.description?.trim() || null,
       triggerType: data.triggerType,
       triggerConfig: data.triggerConfig,
@@ -234,11 +273,12 @@ export async function createAutomation(data: CreateAutomationInput) {
           type: s.type,
           config: s.config,
           position: index,
+          organizationId,
         })),
       },
     },
     include: { steps: { orderBy: { position: "asc" } } },
-  });
+  }) as unknown as Prisma.AutomationGetPayload<{ include: { steps: true } }>;
 }
 
 export type UpdateAutomationInput = {
@@ -277,22 +317,7 @@ export async function updateAutomation(id: string, data: UpdateAutomationInput) 
         }
         data.steps = data.steps.map((s) => {
           const newId = s.id ? remap.get(s.id) : undefined;
-          const cfg = s.config && typeof s.config === "object" && !Array.isArray(s.config)
-            ? { ...(s.config as Record<string, unknown>) }
-            : s.config;
-          if (cfg && typeof cfg === "object" && !Array.isArray(cfg)) {
-            const c = cfg as Record<string, unknown>;
-            if (typeof c.nextStepId === "string" && remap.has(c.nextStepId)) c.nextStepId = remap.get(c.nextStepId);
-            if (typeof c.elseGotoStepId === "string" && remap.has(c.elseGotoStepId)) c.elseGotoStepId = remap.get(c.elseGotoStepId);
-            if (typeof c.timeoutGotoStepId === "string" && remap.has(c.timeoutGotoStepId)) c.timeoutGotoStepId = remap.get(c.timeoutGotoStepId);
-            if (typeof c.receivedGotoStepId === "string" && remap.has(c.receivedGotoStepId)) c.receivedGotoStepId = remap.get(c.receivedGotoStepId);
-            if (Array.isArray(c.buttons)) {
-              c.buttons = (c.buttons as Record<string, unknown>[]).map((b) => {
-                if (typeof b.gotoStepId === "string" && remap.has(b.gotoStepId)) return { ...b, gotoStepId: remap.get(b.gotoStepId) };
-                return b;
-              });
-            }
-          }
+          const cfg = remapStepRefsInValue(s.config, remap);
           return { ...s, id: newId ?? s.id, config: cfg as Prisma.InputJsonValue };
         });
       }
@@ -317,12 +342,14 @@ export async function updateAutomation(id: string, data: UpdateAutomationInput) 
       updateData.active = data.active;
     }
     if (data.steps) {
+      const organizationId = getOrgIdOrThrow();
       updateData.steps = {
         create: data.steps.map((s, index) => ({
           ...(s.id ? { id: s.id } : {}),
           type: s.type,
           config: s.config,
           position: index,
+          organizationId,
         })),
       };
     }

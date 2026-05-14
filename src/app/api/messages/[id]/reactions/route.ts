@@ -4,7 +4,7 @@ import { auth } from "@/lib/auth";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
-import { metaWhatsApp } from "@/lib/meta-whatsapp/client";
+import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -35,7 +35,12 @@ export async function POST(request: Request, ctx: Ctx) {
         conversationId: true,
         direction: true,
         externalId: true,
-        conversation: { select: { contactId: true } },
+        conversation: {
+          select: {
+            contactId: true,
+            channelRef: { select: { config: true, provider: true } },
+          },
+        },
       },
     });
 
@@ -72,18 +77,25 @@ export async function POST(request: Request, ctx: Ctx) {
     });
 
     if (
-      metaWhatsApp.configured &&
       message.direction === "in" &&
       message.externalId &&
-      message.conversation?.contactId
+      message.conversation?.contactId &&
+      message.conversation?.channelRef?.provider === "META_CLOUD_API"
     ) {
-      const targets = await getContactWhatsAppTargets(message.conversation.contactId);
-      if (targets) {
-        metaWhatsApp
-          .sendReaction(targets.to, message.externalId, metaEmoji, targets.recipient)
-          .catch((e) =>
-            console.warn("[meta-reaction]", e instanceof Error ? e.message : e)
-          );
+      const channelConfig = message.conversation.channelRef.config as
+        | Record<string, unknown>
+        | null
+        | undefined;
+      const metaClient = metaClientFromConfig(channelConfig);
+      if (metaClient.configured) {
+        const targets = await getContactWhatsAppTargets(message.conversation.contactId);
+        if (targets) {
+          metaClient
+            .sendReaction(targets.to, message.externalId, metaEmoji, targets.recipient)
+            .catch((e) =>
+              console.warn("[meta-reaction]", e instanceof Error ? e.message : e)
+            );
+        }
       }
     }
 

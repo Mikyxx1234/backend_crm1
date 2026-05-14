@@ -1,4 +1,9 @@
-import "server-only";
+// NOTA: `import "server-only"` foi removido em 2026-04-24 porque o worker
+// `src/workers/baileys` executa via tsx (sem bundler Next) e importa
+// `notifyInboundMessage` daqui. O `server-only` e um pacote-bomba que da
+// throw em runtime fora do bundler Next. A protecao era redundante: este
+// modulo ja depende de `web-push` (server-side only) e so e invocado de
+// API routes e workers — nunca seria bundled em Client Component.
 import webpush from "web-push";
 
 import { prisma } from "@/lib/prisma";
@@ -160,7 +165,11 @@ export async function notifyInboundMessage(params: {
   try {
     const conversation = await prisma.conversation.findUnique({
       where: { id: params.conversationId },
-      select: { assignedToId: true, contact: { select: { assignedToId: true } } },
+      select: {
+        assignedToId: true,
+        organizationId: true,
+        contact: { select: { assignedToId: true } },
+      },
     });
 
     // Quem notificar:
@@ -173,8 +182,16 @@ export async function notifyInboundMessage(params: {
       targets.add(conversation.contact.assignedToId);
 
     if (targets.size === 0) {
+      // CRITICO multi-tenant: filtrar pelos admins DA org da conversa.
+      // Sem esse filtro, leads novos sem owner notificavam supervisores
+      // de TODAS as orgs (vazamento alto-volume entre tenants).
       const supervisors = await prisma.user.findMany({
-        where: { role: { in: ["ADMIN", "MANAGER"] } },
+        where: {
+          role: { in: ["ADMIN", "MANAGER"] },
+          ...(conversation?.organizationId
+            ? { organizationId: conversation.organizationId }
+            : { id: "__none__" }),
+        },
         select: { id: true },
         take: 10,
       });

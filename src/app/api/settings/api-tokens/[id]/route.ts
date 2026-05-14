@@ -8,7 +8,10 @@ type RouteContext = { params: Promise<{ id: string }> };
 export async function DELETE(_request: Request, context: RouteContext) {
   try {
     const session = await auth();
-    if (!session?.user?.id) {
+    const user = session?.user as
+      | { id?: string; organizationId?: string | null }
+      | undefined;
+    if (!user?.id || !user.organizationId) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
     }
 
@@ -17,7 +20,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }
 
-    await revokeToken(id, session.user.id);
+    await revokeToken(id, user.id, user.organizationId);
     return NextResponse.json({ ok: true });
   } catch (e) {
     console.error(e);

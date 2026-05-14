@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { getCallPermissionTemplateName } from "@/lib/call-permission-env";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
@@ -155,13 +155,12 @@ function buildCompactCallTimeline(events: CallEvRow[]): {
   return rows;
 }
 
+// Bug 27/abr/26: usavamos `auth()` direto. Consultas em conversation/
+// whatsappCallEvent/whatsAppTemplateConfig dependem da Prisma extension
+// multi-tenant, que exige RequestContext ativo. Migrado para withOrgContext.
 export async function GET(_request: Request, context: RouteContext) {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
-
+  return withOrgContext(async (session) => {
+   try {
     const { id } = await context.params;
     const denied = await requireConversationAccess(session, id);
     if (denied) return denied;
@@ -179,15 +178,19 @@ export async function GET(_request: Request, context: RouteContext) {
     }
 
     // Raw query para colunas novas (migration pode ainda não ter sido aplicada em todos os envs).
+    // Defesa em profundidade: requireConversationAccess ja validou o id contra a org,
+    // mas adicionamos organizationId aqui pra alinhar com RLS quando ativarmos.
     let consentType: "TEMPORARY" | "PERMANENT" | null = null;
     let consentExpiresAt: Date | null = null;
     try {
+      const orgIdFilter = session.user.organizationId ?? "__no_org__";
       const rows = (await prisma.$queryRaw`
         SELECT
           "whatsappCallConsentType"::text AS "consentType",
           "whatsappCallConsentExpiresAt" AS "consentExpiresAt"
         FROM "conversations"
         WHERE "id" = ${id}
+          AND "organizationId" = ${orgIdFilter}
       `) as Array<{ consentType: string | null; consentExpiresAt: Date | string | null }>;
       const row = rows[0];
       if (row) {
@@ -287,8 +290,9 @@ export async function GET(_request: Request, context: RouteContext) {
         conv.whatsappCallConsentStatus === "NONE" && suggestFromText(lastInbound?.content),
       timeline,
     });
-  } catch (e) {
+   } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao carregar contexto de chamada." }, { status: 500 });
-  }
+   }
+  });
 }

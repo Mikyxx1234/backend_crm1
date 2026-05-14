@@ -5,21 +5,35 @@ import { userHasConversationAccess } from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 
-export type InboxTab =
-  | "entrada"
-  | "esperando"
-  | "respondidas"
-  | "automacao"
-  | "finalizados"
-  | "erro";
+/** Abas de categoria (filtro OR em "Todos" para membros com escopo limitado). */
+export const INBOX_CATEGORY_TABS = [
+  "entrada",
+  "esperando",
+  "respondidas",
+  "automacao",
+  "finalizados",
+  "erro",
+] as const;
+
+export type InboxCategoryTab = (typeof INBOX_CATEGORY_TABS)[number];
+export type InboxTab = InboxCategoryTab | "todos";
 
 export type GetConversationsParams = {
   contactId?: string;
   status?: ConversationStatus;
   channel?: string;
   tab?: InboxTab;
+  /**
+   * Com `tab: "todos"` e papel MEMBER: OR destas categorias (só o que o
+   * utilizador pode ver). Omitir para ADMIN/MANAGER (todas as conversas
+   * visíveis, só `visibilityWhere`).
+   */
+  todosCategoryTabs?: InboxCategoryTab[];
+  /** Busca global: nome/telefone do contato, inboxName, responsável. Ignora filtro de aba. */
+  search?: string;
   page?: number;
   perPage?: number;
   visibilityWhere?: Prisma.ConversationWhereInput;
@@ -102,6 +116,7 @@ export type ConversationListItem = Prisma.ConversationGetPayload<{
   select: typeof listSelect;
 }> & {
   lastMessagePreview: ConversationLastMessagePreview | null;
+  lastMessageAt: Date | null;
   tags: ConversationTag[];
 };
 
@@ -109,11 +124,13 @@ async function lastInboundBatch(
   conversationIds: string[]
 ): Promise<Map<string, Date>> {
   if (conversationIds.length === 0) return new Map();
+  const orgId = getOrgIdOrThrow();
   const rows = await prisma.$queryRaw<{ conversationId: string; lastIn: Date }[]>`
     SELECT "conversationId", MAX("createdAt") AS "lastIn"
     FROM "messages"
     WHERE "conversationId" = ANY(${conversationIds})
       AND "direction" = 'in'
+      AND "organizationId" = ${orgId}
     GROUP BY "conversationId"
   `;
   const map = new Map<string, Date>();
@@ -125,8 +142,9 @@ async function lastInboundBatch(
 
 async function lastMessagePreviewsBatch(
   conversationIds: string[]
-): Promise<Map<string, ConversationLastMessagePreview>> {
+): Promise<Map<string, { preview: ConversationLastMessagePreview; createdAt: Date }>> {
   if (conversationIds.length === 0) return new Map();
+  const orgId = getOrgIdOrThrow();
 
   const rows = await prisma.$queryRaw<{
     conversationId: string;
@@ -134,28 +152,33 @@ async function lastMessagePreviewsBatch(
     messageType: string;
     mediaUrl: string | null;
     direction: string;
+    createdAt: Date;
   }[]>`
     SELECT DISTINCT ON ("conversationId")
-      "conversationId", "content", "messageType", "mediaUrl", "direction"
+      "conversationId", "content", "messageType", "mediaUrl", "direction", "createdAt"
     FROM "messages"
     WHERE "conversationId" = ANY(${conversationIds})
+      AND "organizationId" = ${orgId}
     ORDER BY "conversationId", "createdAt" DESC
   `;
 
-  const map = new Map<string, ConversationLastMessagePreview>();
+  const map = new Map<string, { preview: ConversationLastMessagePreview; createdAt: Date }>();
   for (const r of rows) {
     const text = prettifyChatMessageBody(r.content ?? "").trim();
     map.set(r.conversationId, {
-      content: text.length > 140 ? `${text.slice(0, 137)}…` : text,
-      messageType: r.messageType || "text",
-      mediaUrl: r.mediaUrl ?? null,
-      direction: r.direction || "in",
+      preview: {
+        content: text.length > 140 ? `${text.slice(0, 137)}…` : text,
+        messageType: r.messageType || "text",
+        mediaUrl: r.mediaUrl ?? null,
+        direction: r.direction || "in",
+      },
+      createdAt: r.createdAt,
     });
   }
   return map;
 }
 
-function tabToWhere(tab: InboxTab): Prisma.ConversationWhereInput {
+function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
   switch (tab) {
     case "entrada":
       return { status: "OPEN", hasAgentReply: false, hasError: false };
@@ -174,8 +197,6 @@ function tabToWhere(tab: InboxTab): Prisma.ConversationWhereInput {
       return { status: "RESOLVED" };
     case "erro":
       return { hasError: true };
-    default:
-      return {};
   }
 }
 
@@ -196,8 +217,27 @@ export async function getConversations(
   if (params.visibilityWhere && Object.keys(params.visibilityWhere).length > 0) {
     conditions.push(params.visibilityWhere);
   }
-  if (params.tab) {
-    conditions.push(tabToWhere(params.tab));
+
+  const q = params.search?.trim() ?? "";
+  if (q.length > 0) {
+    conditions.push({
+      OR: [
+        { contact: { name: { contains: q, mode: "insensitive" } } },
+        { contact: { phone: { contains: q, mode: "insensitive" } } },
+        { inboxName: { contains: q, mode: "insensitive" } },
+        { assignedTo: { name: { contains: q, mode: "insensitive" } } },
+        { assignedTo: { email: { contains: q, mode: "insensitive" } } },
+      ],
+    });
+  } else if (params.tab) {
+    if (params.tab === "todos") {
+      const orTabs = params.todosCategoryTabs;
+      if (orTabs && orTabs.length > 0) {
+        conditions.push({ OR: orTabs.map((t) => tabToWhere(t)) });
+      }
+    } else {
+      conditions.push(tabToWhere(params.tab));
+    }
   }
   if (params.contactId) conditions.push({ contactId: params.contactId });
   if (params.status && !params.tab) conditions.push({ status: params.status });
@@ -270,7 +310,8 @@ export async function getConversations(
     return {
       ...row,
       lastInboundAt: lastInboundMap.get(row.id) ?? row.lastInboundAt,
-      lastMessagePreview: previewMap.get(row.id) ?? null,
+      lastMessagePreview: previewMap.get(row.id)?.preview ?? null,
+      lastMessageAt: previewMap.get(row.id)?.createdAt ?? null,
       tags: Array.from(tagMap.values()),
     };
   });
@@ -278,12 +319,32 @@ export async function getConversations(
   return { items, total, page, perPage };
 }
 
-const TAB_LIST: InboxTab[] = [
-  "entrada", "esperando", "respondidas", "automacao", "finalizados", "erro",
-];
+/** Lista só categorias (exclui "todos") — contagens por aba e grants. */
+export const INBOX_TAB_LIST: readonly InboxCategoryTab[] = INBOX_CATEGORY_TABS;
+
+/** @deprecated use INBOX_TAB_LIST */
+const TAB_LIST = INBOX_TAB_LIST;
+
+async function countTodosTab(
+  visibilityWhere: Prisma.ConversationWhereInput | undefined,
+  memberOrTabs: InboxCategoryTab[] | null,
+): Promise<number> {
+  const conditions: Prisma.ConversationWhereInput[] = [];
+  if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
+    conditions.push(visibilityWhere);
+  }
+  if (memberOrTabs && memberOrTabs.length > 0) {
+    conditions.push({ OR: memberOrTabs.map((t) => tabToWhere(t)) });
+  }
+  const where: Prisma.ConversationWhereInput =
+    conditions.length > 0 ? { AND: conditions } : {};
+  return prisma.conversation.count({ where });
+}
 
 export async function getTabCounts(
-  visibilityWhere?: Prisma.ConversationWhereInput
+  visibilityWhere?: Prisma.ConversationWhereInput,
+  /** `null` = ADMIN/MANAGER (todas as conversas visíveis). Array = MEMBER (OR das categorias). */
+  todosMemberCategoryTabs?: InboxCategoryTab[] | null,
 ): Promise<Record<InboxTab, number>> {
   const results = await Promise.all(
     TAB_LIST.map(async (tab) => {
@@ -296,9 +357,11 @@ export async function getTabCounts(
         conditions.length > 0 ? { AND: conditions } : {};
       const count = await prisma.conversation.count({ where });
       return [tab, count] as const;
-    })
+    }),
   );
-  return Object.fromEntries(results) as Record<InboxTab, number>;
+  const record = Object.fromEntries(results) as Record<InboxTab, number>;
+  record.todos = await countTodosTab(visibilityWhere, todosMemberCategoryTabs ?? null);
+  return record;
 }
 
 export async function linkContactToConversation(conversationId: string, contactId: string) {
@@ -399,7 +462,7 @@ export async function getConversationLite(id: string) {
     where: { id },
     select: {
       id: true, externalId: true, contactId: true, status: true,
-      channelId: true, waJid: true,
+      channelId: true, waJid: true, organizationId: true,
       channelRef: { select: { id: true, provider: true, config: true } },
     },
   });

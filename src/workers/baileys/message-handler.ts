@@ -1,11 +1,11 @@
 import type { WAMessage, WASocket } from "@whiskeysockets/baileys";
 import { downloadMediaMessage, getContentType } from "@whiskeysockets/baileys";
-import path from "path";
-import fs from "fs/promises";
 import crypto from "crypto";
 import IORedis from "ioredis";
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { generateFileName, saveFile } from "@/lib/storage/local";
 import { fireTrigger } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
@@ -51,6 +51,7 @@ type CrmContact = {
   name: string;
   phone: string | null;
   avatarUrl: string | null;
+  organizationId: string;
   /// Quando atualizamos foto de perfil pela ultima vez (atualizadoAt
   /// do contato e impreciso porque qualquer edicao manual zera o
   /// throttle). Persistido em `Contact.avatarUrl` mesmo — o `?v=`
@@ -63,7 +64,7 @@ async function resolveContact(jid: string, pushName: string | null | undefined):
 
   const existing = await prisma.contact.findFirst({
     where: { phone },
-    select: { id: true, name: true, phone: true, avatarUrl: true },
+    select: { id: true, name: true, phone: true, avatarUrl: true, organizationId: true },
   });
 
   if (existing) {
@@ -89,13 +90,13 @@ async function resolveContact(jid: string, pushName: string | null | undefined):
 
   const name = pushName || `Lead ${phone}`;
   const created = await prisma.contact.create({
-    data: {
+    data: withOrgFromCtx({
       name,
       phone,
-      lifecycleStage: "LEAD",
+      lifecycleStage: "LEAD" as const,
       source: "WhatsApp QR",
-    },
-    select: { id: true, name: true, phone: true, avatarUrl: true },
+    }),
+    select: { id: true, name: true, phone: true, avatarUrl: true, organizationId: true },
   });
 
   // Dispara automações com trigger "contact_created" antes do auto-deal,
@@ -190,12 +191,15 @@ async function syncContactAvatar(
     const buffer = Buffer.from(arrayBuf);
     if (buffer.length === 0 || buffer.length > 5 * 1024 * 1024) return;
 
-    const avatarsDir = path.join(process.cwd(), "public", "uploads", "avatars");
-    await fs.mkdir(avatarsDir, { recursive: true });
+    // PR 1.3: storage tenant-scoped. Antes: shared `public/uploads/avatars/`.
     const filename = `${contact.id}.jpg`;
-    await fs.writeFile(path.join(avatarsDir, filename), buffer);
-
-    const newUrl = `/uploads/avatars/${filename}?v=${Date.now()}`;
+    const saved = await saveFile({
+      orgId: contact.organizationId,
+      bucket: "avatars",
+      fileName: filename,
+      buffer,
+    });
+    const newUrl = `${saved.url}?v=${Date.now()}`;
 
     await prisma.contact.update({
       where: { id: contact.id },
@@ -244,14 +248,14 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
   });
 
   return prisma.conversation.create({
-    data: {
+    data: withOrgFromCtx({
       contactId,
       channel: "whatsapp",
       channelId,
       waJid: rawJid,
-      status: "OPEN",
+      status: "OPEN" as const,
       ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
-    },
+    }),
     select: { id: true, status: true, channelId: true, waJid: true },
   });
 }
@@ -308,7 +312,11 @@ function unwrapViewOnce(msgContent: AnyMsg): { inner: AnyMsg; isViewOnce: boolea
   return { inner: msgContent, isViewOnce: false };
 }
 
-async function parseMessage(msg: WAMessage, sock: WASocket): Promise<ParsedMsg | null> {
+async function parseMessage(
+  msg: WAMessage,
+  sock: WASocket,
+  organizationId: string,
+): Promise<ParsedMsg | null> {
   const rawContent = msg.message;
   if (!rawContent) return null;
 
@@ -350,7 +358,13 @@ async function parseMessage(msg: WAMessage, sock: WASocket): Promise<ParsedMsg |
     if (crmType === "audio" && isPtt) crmType = "ptt";
 
     const ext = resolveExtension(crmType, mimetype, fileName);
-    const mediaUrl = await downloadAndSave(msg, sock, ext, isViewOnce ? inner : undefined);
+    const mediaUrl = await downloadAndSave(
+      msg,
+      sock,
+      ext,
+      organizationId,
+      isViewOnce ? inner : undefined,
+    );
 
     const viewOnceLabel = isViewOnce ? " 👁" : "";
     let displayText: string;
@@ -417,6 +431,7 @@ async function downloadAndSave(
   msg: WAMessage,
   sock: WASocket,
   ext: string,
+  organizationId: string,
   viewOnceInner?: AnyMsg,
 ): Promise<string | null> {
   try {
@@ -426,11 +441,15 @@ async function downloadAndSave(
     const buffer = await downloadMediaMessage(downloadTarget, "buffer", {});
     if (!buffer) return null;
 
-    const filename = `${crypto.randomUUID()}.${ext}`;
-    const uploadsDir = path.join(process.cwd(), "public", "uploads");
-    await fs.mkdir(uploadsDir, { recursive: true });
-    await fs.writeFile(path.join(uploadsDir, filename), buffer as Buffer);
-    return `/uploads/${filename}`;
+    // PR 1.3: storage tenant-scoped. Antes: shared `public/uploads/`.
+    const filename = generateFileName({ prefix: "wa", ext });
+    const saved = await saveFile({
+      orgId: organizationId,
+      bucket: "inbound-media",
+      fileName: filename,
+      buffer: buffer as Buffer,
+    });
+    return saved.url;
   } catch (e) {
     log.warn("Falha ao baixar mídia do WhatsApp:", e);
     return null;
@@ -458,7 +477,18 @@ export async function handleBaileysMessage(
       }
     }
 
-    const parsed = await parseMessage(msg, sock);
+    // PR 1.3: precisamos do organizationId ANTES de parsear, pois
+    // mídia inbound é gravada em storage tenant-scoped.
+    const channelOwner = await prisma.channel.findUnique({
+      where: { id: channelId },
+      select: { organizationId: true },
+    });
+    if (!channelOwner) {
+      log.warn(`Channel ${channelId} não encontrado, descartando mensagem.`);
+      return;
+    }
+
+    const parsed = await parseMessage(msg, sock, channelOwner.organizationId);
     if (!parsed) return;
 
     const existingMsg = await prisma.message.findFirst({
@@ -484,7 +514,7 @@ export async function handleBaileysMessage(
       if (dup) return;
 
       await tx.message.create({
-        data: {
+        data: withOrgFromCtx({
           conversationId: conversation.id,
           content: parsed.text,
           direction: "in",
@@ -492,7 +522,7 @@ export async function handleBaileysMessage(
           externalId: parsed.externalId,
           senderName: msg.pushName ?? contact.name,
           mediaUrl: parsed.mediaUrl,
-        },
+        }),
       });
     });
 

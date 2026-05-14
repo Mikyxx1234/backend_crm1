@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { loadAuthzContext, can } from "@/lib/authz";
+import { requireStageScope } from "@/lib/authz/resource-policy";
 import { deleteStage, getStageInPipeline, updateStage } from "@/services/pipelines";
 
 type RouteContext = { params: Promise<{ id: string; stageId: string }> };
@@ -10,6 +12,14 @@ export async function PUT(request: Request, context: RouteContext) {
     const session = await auth();
     if (!session?.user) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+    }
+    const ctxAuth = await loadAuthzContext({
+      userId: session.user.id,
+      organizationId: (session.user as { organizationId?: string | null }).organizationId ?? null,
+      isSuperAdmin: Boolean((session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
+    });
+    if (!can(ctxAuth, "pipeline:manage_stages")) {
+      return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
 
     const { id: pipelineId, stageId } = await context.params;
@@ -21,6 +31,12 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!stageRow) {
       return NextResponse.json({ message: "Estágio não encontrado." }, { status: 404 });
     }
+    const scoped = await requireStageScope(
+      session.user as { id: string; role?: string | null; organizationId: string | null; isSuperAdmin?: boolean },
+      "edit",
+      stageId,
+    );
+    if (scoped) return scoped;
 
     let body: unknown;
     try {
@@ -117,6 +133,14 @@ export async function DELETE(_request: Request, context: RouteContext) {
     if (!session?.user) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
     }
+    const ctxAuth = await loadAuthzContext({
+      userId: session.user.id,
+      organizationId: (session.user as { organizationId?: string | null }).organizationId ?? null,
+      isSuperAdmin: Boolean((session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
+    });
+    if (!can(ctxAuth, "pipeline:manage_stages")) {
+      return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
+    }
 
     const { id: pipelineId, stageId } = await context.params;
     if (!pipelineId || !stageId) {
@@ -127,6 +151,12 @@ export async function DELETE(_request: Request, context: RouteContext) {
     if (!stageRow) {
       return NextResponse.json({ message: "Estágio não encontrado." }, { status: 404 });
     }
+    const scoped = await requireStageScope(
+      session.user as { id: string; role?: string | null; organizationId: string | null; isSuperAdmin?: boolean },
+      "edit",
+      stageId,
+    );
+    if (scoped) return scoped;
 
     try {
       await deleteStage(stageId);

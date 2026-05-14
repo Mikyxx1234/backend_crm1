@@ -31,15 +31,15 @@ export const fadeInUp = {
 };
 
 /**
- * Classe-base de card premium para dashboards (tema claro). Usa `shadow-premium`,
+ * Classe-base de card premium para dashboards (tema claro). Usa `shadow-[var(--shadow-lg)]`,
  * borda sutil, radius 2xl. Hover leve. Reutilizar com `cn(dashboardCardClass, "…")`.
  */
 export const dashboardCardClass =
-  "rounded-2xl border border-border/70 bg-card p-5 shadow-premium transition-shadow duration-300 hover:shadow-float";
+  "rounded-2xl border border-border/70 bg-card p-5 shadow-[var(--shadow-lg)] transition-shadow duration-300 hover:shadow-[var(--shadow-sm)]";
 
 /** Variante compacta do card (pra KPIs menores). */
 export const dashboardCardClassCompact =
-  "rounded-xl border border-border/70 bg-card p-4 shadow-premium transition-shadow duration-300 hover:shadow-float";
+  "rounded-xl border border-border/70 bg-card p-4 shadow-[var(--shadow-lg)] transition-shadow duration-300 hover:shadow-[var(--shadow-sm)]";
 
 /** Classe-base de card premium no modo War Room (fundo dark). */
 export const dashboardCardClassDark =
@@ -58,7 +58,7 @@ export const dashboardPageTitleClass =
 
 /** Label em caixa alta (sections, eixos, KPIs). */
 export const dashboardLabelClass =
-  "text-[10px] font-black uppercase tracking-[0.14em] text-muted-foreground";
+  "text-[10px] font-semibold uppercase tracking-[0.14em] text-muted-foreground";
 
 /** Grid de 4 colunas responsivo (sm:2, lg:4). */
 export const kpiGridClass =
@@ -78,7 +78,7 @@ export const bentoCardLargeClass =
 
 /** Label minúsculo em caixa alta, "ar" Linear/Stripe. */
 export const bentoLabelClass =
-  "text-[10px] font-black uppercase tracking-widest text-slate-400";
+  "text-[10px] font-semibold uppercase tracking-widest text-[var(--color-ink-muted)]";
 
 /** Título secundário dos widgets (abaixo do label). */
 export const bentoSubtitleClass =
@@ -103,14 +103,14 @@ export type BentoAccent =
   | "slate";
 
 export const bentoAccentMap: Record<BentoAccent, { bg: string; text: string; solid: string }> = {
-  blue: { bg: "bg-blue-50", text: "text-brand-blue", solid: "#507df1" },
+  blue: { bg: "bg-blue-50", text: "text-primary", solid: "var(--color-primary)" },
   emerald: { bg: "bg-emerald-50", text: "text-emerald-600", solid: "#10b981" },
   amber: { bg: "bg-amber-50", text: "text-amber-600", solid: "#f59e0b" },
   violet: { bg: "bg-violet-50", text: "text-violet-600", solid: "#8b5cf6" },
   rose: { bg: "bg-rose-50", text: "text-rose-600", solid: "#f43f5e" },
   indigo: { bg: "bg-indigo-50", text: "text-indigo-600", solid: "#6366f1" },
   cyan: { bg: "bg-cyan-50", text: "text-cyan-600", solid: "#06b6d4" },
-  slate: { bg: "bg-slate-100", text: "text-slate-700", solid: "#475569" },
+  slate: { bg: "bg-slate-100", text: "text-foreground", solid: "#475569" },
 };
 
 /** Grid bento mais denso (6 colunas) usado em dashboards com 6+ KPIs. */

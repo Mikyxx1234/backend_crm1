@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
@@ -137,4 +138,61 @@ export function pipelineDealMatchesSearch(
   const phoneDigits = onlyDigits(parts.contactPhone ?? "");
   if (qDigits.length >= 3 && phoneDigits && phoneDigits.includes(qDigits)) return true;
   return false;
+}
+
+/** Tags sem cor / fallback — padrão F neutro (slate). */
+export const TAG_STYLE_NEUTRAL: CSSProperties = {
+  background: "#f8fafc",
+  border: "1px solid #e2e8f0",
+  color: "#475569",
+  borderRadius: "4px",
+};
+
+const TAG_STYLE_VIP: CSSProperties = {
+  background: "#fefce8",
+  border: "1px solid #fde047",
+  color: "#854d0e",
+  borderRadius: "4px",
+};
+
+/** Normaliza para `#RRGGBB` ou `null` se não for hex utilizável. */
+function toTagHex6(color: string): string | null {
+  const raw = color.trim();
+  if (!raw) return null;
+  let h = raw.startsWith("#") ? raw.slice(1) : raw;
+  if (h.length === 3 && /^[0-9a-fA-F]{3}$/u.test(h)) {
+    h = `${h[0]}${h[0]}${h[1]}${h[1]}${h[2]}${h[2]}`;
+  }
+  if (h.length === 6 && /^[0-9a-fA-F]{6}$/u.test(h)) {
+    return `#${h}`;
+  }
+  if (h.length === 8 && /^[0-9a-fA-F]{8}$/u.test(h)) {
+    return `#${h.slice(0, 6)}`;
+  }
+  return null;
+}
+
+/**
+ * Padrão F: fundo ~8% (`14`), borda ~30% (`4D`), texto na cor base, radius 4px.
+ * Cor inválida ou vazia → neutro slate.
+ */
+export function tagStyle(color: string | null | undefined): CSSProperties {
+  const hex6 = color ? toTagHex6(color) : null;
+  if (!hex6) {
+    return { ...TAG_STYLE_NEUTRAL };
+  }
+  return {
+    background: `${hex6}14`,
+    border: `1px solid ${hex6}4D`,
+    color: hex6,
+    borderRadius: "4px",
+  };
+}
+
+/** Como `tagStyle`, mas força estilo VIP pelo nome da etiqueta. */
+export function tagPillStyle(tagName: string, color: string | null | undefined): CSSProperties {
+  if (tagName.trim().toUpperCase() === "VIP") {
+    return { ...TAG_STYLE_VIP };
+  }
+  return tagStyle(color);
 }

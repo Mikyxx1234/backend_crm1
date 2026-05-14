@@ -1,6 +1,9 @@
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
-import { metaWhatsApp } from "@/lib/meta-whatsapp/client";
+import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -37,8 +40,21 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
   const name = templateName();
   if (!name) return;
 
-  if (!metaWhatsApp.configured) {
-    console.warn("[missed-call-schedule] Meta API não configurada — template não enviado.");
+  // Resolve cliente Meta pelo canal da conversa (per-tenant). Sem isso,
+  // o template "agendar retorno" saia pelo numero da primeira org configurada
+  // no env -> cross-tenant leak.
+  const conv = await prisma.conversation.findUnique({
+    where: { id: params.conversationId },
+    select: { channelRef: { select: { id: true, config: true } } },
+  });
+  const channelConfig = conv?.channelRef?.config as
+    | Record<string, unknown>
+    | null
+    | undefined;
+  const metaClient = metaClientFromConfig(channelConfig);
+
+  if (!metaClient.configured) {
+    console.warn("[missed-call-schedule] Canal sem credenciais Meta — template não enviado.");
     return;
   }
 
@@ -58,12 +74,34 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
   const lang = templateLang();
   const components = templateComponents();
 
+  let templateGraphId: string | null = null;
   try {
-    await metaWhatsApp.sendTemplate(
+    const cfg = await prisma.whatsAppTemplateConfig.findFirst({
+      where: { metaTemplateName: name },
+      select: { metaTemplateId: true },
+    });
+    templateGraphId = cfg?.metaTemplateId?.trim() || null;
+  } catch {
+    /* ignore */
+  }
+  if (!templateGraphId) {
+    console.warn(`[meta-flow-enrich] template config não encontrada para nome=${name}`);
+  }
+
+  let resolvedFlowToken: string | null = null;
+  try {
+    const enrichResult = await enrichTemplateComponentsForFlowSend(metaClient, {
+      templateName: name,
+      languageCode: lang,
+      components,
+      templateGraphId,
+    });
+    resolvedFlowToken = enrichResult.flowToken;
+    await metaClient.sendTemplate(
       waTarget.to,
       name,
       lang,
-      components,
+      enrichResult.components,
       waTarget.recipient
     );
   } catch (e) {
@@ -73,14 +111,17 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
 
   const content = buildOutboundTemplateMessageContent(name, "generic");
   await prisma.message.create({
-    data: {
+    data: withOrgFromCtx({
       conversationId: params.conversationId,
       content,
       direction: "out",
       messageType: "template",
       senderName: "Sistema",
       externalId: extId,
-    },
+      ...(typeof resolvedFlowToken === "string" && resolvedFlowToken.trim()
+        ? { flowToken: resolvedFlowToken.trim() }
+        : {}),
+    }),
   });
 
   await prisma.conversation
@@ -99,6 +140,7 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
   }).catch(() => {});
 
   sseBus.publish("new_message", {
+    organizationId: getOrgIdOrNull(),
     conversationId: params.conversationId,
     contactId: params.contactId,
     direction: "out",

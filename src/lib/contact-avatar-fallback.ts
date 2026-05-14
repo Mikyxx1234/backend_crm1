@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { getRequestContext } from "@/lib/request-context";
 
 /**
  * Fallback inteligente: quando o `Contact.avatarUrl` é `null` (caso
@@ -40,13 +41,21 @@ export async function enrichContactsWithUserAvatarFallback<
   // do Prisma resolve case na própria query — mas como `name` no
   // schema não tem índice insensitive, fazemos o filtro final em JS
   // após a query (com IN no nome cru pra reduzir o universo).
+  //
+  // Multi-tenant: User NAO esta no SCOPED_MODELS, entao o filtro por
+  // organizationId precisa ser MANUAL — caso contrario um homonimo entre
+  // tenants vazaria avatar de outra org. Super-admin (sem orgId no ctx)
+  // ve todos.
+  const ctx = getRequestContext();
+  const orgFilter =
+    ctx && !ctx.isSuperAdmin && ctx.organizationId
+      ? { organizationId: ctx.organizationId }
+      : {};
+
   const users = await prisma.user.findMany({
     where: {
       avatarUrl: { not: null },
-      // Sem `OR` com lista de nomes (variações de case difíceis no
-      // banco) — pegamos todos os ativos com avatar e filtramos em JS.
-      // Em produção raramente passa de algumas dezenas de agentes,
-      // então é barato.
+      ...orgFilter,
     },
     select: { name: true, avatarUrl: true },
   });

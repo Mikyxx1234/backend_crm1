@@ -1,4 +1,8 @@
 import { prisma } from "@/lib/prisma";
+// prismaBase sem org-scope: worker precisa listar canais cross-tenant no
+// bootstrap. Cada canal depois executa sob seu proprio withSystemContext.
+import { prismaBase } from "@/lib/prisma-base";
+import { withSystemContext } from "@/lib/webhook-context";
 import { BaileysSession } from "./baileys-session";
 
 /**
@@ -9,18 +13,18 @@ export class BaileysManager {
   private sessions = new Map<string, BaileysSession>();
 
   async startAll(): Promise<void> {
-    const channels = await prisma.channel.findMany({
+    const channels = await prismaBase.channel.findMany({
       where: {
         provider: "BAILEYS_MD",
         status: { in: ["CONNECTED", "CONNECTING"] },
       },
-      select: { id: true },
+      select: { id: true, organizationId: true },
     });
 
     console.info(`[baileys-manager] ${channels.length} canal(is) BAILEYS_MD para reconectar`);
 
     for (const ch of channels) {
-      await this.connect(ch.id);
+      await withSystemContext(ch.organizationId, () => this.connect(ch.id));
     }
   }
 

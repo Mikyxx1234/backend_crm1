@@ -21,7 +21,11 @@
  * o destinatário está offline.
  */
 
-import { prisma } from "@/lib/prisma";
+// Sweeper roda cross-tenant (varre mensagens "sent" stale de TODAS as
+// orgs). Usa prismaBase (sem org-scope) porque o worker nao tem
+// RequestContext e nao deve filtrar por organization — a seguranca ja
+// esta garantida pelo filtro de `direction=out` + `sendStatus=sent`.
+import { prismaBase as prisma } from "@/lib/prisma-base";
 import { getLogger } from "@/lib/logger";
 import { sseBus } from "@/lib/sse-bus";
 import { refreshWhatsAppHealth } from "@/services/whatsapp-health";
@@ -45,6 +49,20 @@ const BATCH_SIZE = 100;
 const STALE_ERROR_MESSAGE =
   "Timeout: a Meta não confirmou entrega (nenhum webhook recebido). O número WhatsApp Business pode estar pausado, flagged ou com qualidade rebaixada. Verifique o status do canal.";
 
+// Tipos de mensagem que NÃO passam pela Cloud API da Meta — são
+// eventos/artefatos gerados pelo próprio CRM (gravação de chamada feita
+// no browser do agente, evento de terminate da call, nota interna,
+// rascunho de IA). Elas recebem `externalId` interno (ex.:
+// `call_timeline:{callId}`) que não é wamid, e nunca terão webhook de
+// delivery. Incluí-las no sweep as marcava incorretamente como
+// "Timeout" depois de 15 min.
+const INTERNAL_MESSAGE_TYPES = [
+  "whatsapp_call",
+  "whatsapp_call_recording",
+  "note",
+  "ai_draft",
+];
+
 export async function sweepStaleOutbound(
   timeoutMs = getTimeoutMs(),
 ): Promise<number> {
@@ -59,8 +77,14 @@ export async function sweepStaleOutbound(
       // Uma nota interna sem externalId é legítimamente "sent" e não
       // deve ser marcada como falha.
       externalId: { not: null },
+      // Exclui tipos internos (gravação de chamada, evento de call,
+      // nota, rascunho de IA) que não são enviados pela Cloud API.
+      messageType: { notIn: INTERNAL_MESSAGE_TYPES },
+      // Mensagens privadas (notas internas) também ficam de fora
+      // mesmo que por algum motivo tenham recebido externalId.
+      isPrivate: false,
     },
-    select: { id: true, conversationId: true, createdAt: true },
+    select: { id: true, conversationId: true, createdAt: true, organizationId: true },
     take: BATCH_SIZE,
   });
 
@@ -86,6 +110,7 @@ export async function sweepStaleOutbound(
 
       try {
         sseBus.publish("message_status", {
+          organizationId: msg.organizationId,
           conversationId: msg.conversationId,
           messageId: msg.id,
           status: "failed",
@@ -127,11 +152,49 @@ function getIntervalMs(): number {
   return Number.isFinite(n) && n > 0 ? n : DEFAULT_INTERVAL_MS;
 }
 
+/**
+ * Auto-healing one-shot: corrige mensagens internas (gravação de
+ * chamada, evento de call, notas, rascunho de IA) que foram
+ * erroneamente marcadas como `failed` pelo sweeper antes do fix que
+ * adicionou o filtro `messageType notIn INTERNAL_MESSAGE_TYPES`.
+ *
+ * Roda no boot uma única vez. Idempotente — só toca linhas com o
+ * `sendError` exato do sweeper.
+ */
+export async function healWronglyFailedInternalMessages(): Promise<number> {
+  try {
+    const result = await prisma.message.updateMany({
+      where: {
+        sendStatus: "failed",
+        sendError: STALE_ERROR_MESSAGE,
+        messageType: { in: INTERNAL_MESSAGE_TYPES },
+      },
+      data: {
+        sendStatus: "delivered",
+        sendError: null,
+      },
+    });
+    if (result.count > 0) {
+      log.info(
+        `Auto-healing: ${result.count} mensagem(ns) interna(s) marcada(s) indevidamente como stale foram restauradas.`,
+      );
+    }
+    return result.count;
+  } catch (err) {
+    log.warn("Falha no auto-healing de mensagens internas:", err);
+    return 0;
+  }
+}
+
 let _interval: ReturnType<typeof setInterval> | null = null;
 
 export function startStaleOutboundSweeper(intervalMs = getIntervalMs()) {
   if (_interval) return;
   const timeoutMs = getTimeoutMs();
+  // One-shot no boot: corrige vítimas do filtro antigo (mensagens
+  // `whatsapp_call_recording` marcadas como falha mesmo sem terem
+  // passado pela Meta). Não bloqueia o start do sweeper.
+  healWronglyFailedInternalMessages().catch(() => {});
   _interval = setInterval(() => {
     sweepStaleOutbound(timeoutMs).catch((err) =>
       log.error("Falha no sweeper de mensagens stale:", err),

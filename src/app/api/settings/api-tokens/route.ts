@@ -6,11 +6,14 @@ import { generateToken, listTokens } from "@/services/api-tokens";
 export async function GET() {
   try {
     const session = await auth();
-    if (!session?.user?.id) {
+    const user = session?.user as
+      | { id?: string; organizationId?: string | null }
+      | undefined;
+    if (!user?.id || !user.organizationId) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
     }
 
-    const tokens = await listTokens(session.user.id);
+    const tokens = await listTokens(user.id, user.organizationId);
     return NextResponse.json(tokens);
   } catch (e) {
     console.error(e);
@@ -21,7 +24,10 @@ export async function GET() {
 export async function POST(request: Request) {
   try {
     const session = await auth();
-    if (!session?.user?.id) {
+    const user = session?.user as
+      | { id?: string; organizationId?: string | null }
+      | undefined;
+    if (!user?.id || !user.organizationId) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
     }
 
@@ -46,7 +52,12 @@ export async function POST(request: Request) {
       }
     }
 
-    const result = await generateToken(session.user.id, name, expiresAt);
+    const result = await generateToken(
+      user.id,
+      user.organizationId,
+      name,
+      expiresAt,
+    );
 
     return NextResponse.json(
       {

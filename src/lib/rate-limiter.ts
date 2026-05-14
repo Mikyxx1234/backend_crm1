@@ -1,9 +1,12 @@
 const DEFAULT_LIMIT = 400;
-const WINDOW_MS = 60_000;
+const DEFAULT_WINDOW_MS = 60_000;
 const CLEANUP_INTERVAL = 120_000;
 
 type BucketEntry = {
   timestamps: number[];
+  // janela usada na ultima escrita; cleanup precisa do max das janelas
+  // pra nao deletar timestamps que ainda contam pra alguem.
+  windowMs: number;
 };
 
 const buckets = new Map<string, BucketEntry>();
@@ -14,8 +17,8 @@ function cleanup() {
   const now = Date.now();
   if (now - lastCleanup < CLEANUP_INTERVAL) return;
   lastCleanup = now;
-  const cutoff = now - WINDOW_MS;
   for (const [key, entry] of buckets) {
+    const cutoff = now - entry.windowMs;
     entry.timestamps = entry.timestamps.filter((t) => t > cutoff);
     if (entry.timestamps.length === 0) buckets.delete(key);
   }
@@ -28,26 +31,37 @@ export type RateLimitResult = {
   resetInSeconds: number;
 };
 
+/**
+ * Rate limit em memoria por processo. NAO funciona em N replicas — em prod
+ * com 2+ instancias do app, o limite efetivo e N*limit. Aceitavel pra
+ * signup self-service (proteger contra abuse simples) mas nao pra cobranca
+ * ou fluxos sensiveis. Pra distribuido, use Upstash Redis no futuro.
+ *
+ * @param windowMs Janela em ms; default 60s.
+ */
 export function checkRateLimit(
   key: string,
-  limit: number = DEFAULT_LIMIT
+  limit: number = DEFAULT_LIMIT,
+  windowMs: number = DEFAULT_WINDOW_MS,
 ): RateLimitResult {
   cleanup();
 
   const now = Date.now();
-  const cutoff = now - WINDOW_MS;
+  const cutoff = now - windowMs;
 
   let entry = buckets.get(key);
   if (!entry) {
-    entry = { timestamps: [] };
+    entry = { timestamps: [], windowMs };
     buckets.set(key, entry);
+  } else {
+    entry.windowMs = windowMs;
   }
 
   entry.timestamps = entry.timestamps.filter((t) => t > cutoff);
 
   const remaining = Math.max(0, limit - entry.timestamps.length);
   const oldestInWindow = entry.timestamps[0] ?? now;
-  const resetInSeconds = Math.ceil((oldestInWindow + WINDOW_MS - now) / 1000);
+  const resetInSeconds = Math.ceil((oldestInWindow + windowMs - now) / 1000);
 
   if (entry.timestamps.length >= limit) {
     return { allowed: false, limit, remaining: 0, resetInSeconds };

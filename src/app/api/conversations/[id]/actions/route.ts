@@ -1,7 +1,7 @@
 import type { ConversationStatus } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import {
@@ -52,123 +52,123 @@ function actionToDbStatus(action: string, rawStatus?: string): ConversationStatu
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
-
-    const { id } = await context.params;
-
-    let body: unknown;
+  return withOrgContext(async (session) => {
     try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
-    }
 
-    const b = body as Record<string, unknown>;
-    const action = typeof b.action === "string" ? b.action : "";
+      const { id } = await context.params;
 
-    if (!VALID_ACTIONS.has(action)) {
-      return NextResponse.json(
-        { message: "action inválida (resolve, reopen, toggle_status, assign)." },
-        { status: 400 }
-      );
-    }
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
+      }
 
-    if (action === "assign") {
-      const gate = await requireConversationAccess(session, id);
-      if (gate) return gate;
-      if (!("assignedToId" in b)) {
+      const b = body as Record<string, unknown>;
+      const action = typeof b.action === "string" ? b.action : "";
+
+      if (!VALID_ACTIONS.has(action)) {
         return NextResponse.json(
-          { message: "Informe assignedToId (id do usuário ou null para desatribuir)." },
+          { message: "action inválida (resolve, reopen, toggle_status, assign)." },
           { status: 400 }
         );
       }
-      const raw = b.assignedToId;
-      let newAssigneeId: string | null;
-      if (raw === null) {
-        newAssigneeId = null;
-      } else if (typeof raw === "string" && raw.trim() !== "") {
-        newAssigneeId = raw.trim();
-      } else {
-        return NextResponse.json({ message: "assignedToId inválido." }, { status: 400 });
+
+      if (action === "assign") {
+        const gate = await requireConversationAccess(session, id);
+        if (gate) return gate;
+        if (!("assignedToId" in b)) {
+          return NextResponse.json(
+            { message: "Informe assignedToId (id do usuário ou null para desatribuir)." },
+            { status: 400 }
+          );
+        }
+        const raw = b.assignedToId;
+        let newAssigneeId: string | null;
+        if (raw === null) {
+          newAssigneeId = null;
+        } else if (typeof raw === "string" && raw.trim() !== "") {
+          newAssigneeId = raw.trim();
+        } else {
+          return NextResponse.json({ message: "assignedToId inválido." }, { status: 400 });
+        }
+        const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
+        const prev = await prisma.conversation.findUnique({
+          where: { id },
+          select: { assignedToId: true, assignedTo: { select: { id: true, name: true } } },
+        });
+        const result = await assignConversationAssignedTo(id, newAssigneeId, user);
+        if (!result.ok) {
+          const status =
+            result.code === "NOT_FOUND" ? 404 : result.code === "USER_NOT_FOUND" ? 400 : 403;
+          const msg =
+            result.code === "USER_NOT_FOUND"
+              ? "Usuário não encontrado."
+              : result.code === "NOT_FOUND"
+                ? "Conversa não encontrada."
+                : "Sem permissão para esta atribuição.";
+          return NextResponse.json({ message: msg }, { status });
+        }
+        if ((prev?.assignedToId ?? null) !== (result.conversation.assignedToId ?? null)) {
+          await logDealEventsForConversationContact(id, user.id, "ASSIGNEE_CHANGED", {
+            from: prev?.assignedTo ?? null,
+            to: result.conversation.assignedTo ?? null,
+          });
+        }
+
+        return NextResponse.json(
+          {
+            conversation: {
+              id: result.conversation.id,
+              status: result.conversation.status,
+              externalId: result.conversation.externalId,
+              assignedToId: result.conversation.assignedToId,
+              assignedTo: result.conversation.assignedTo,
+            },
+          }
+        );
       }
-      const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
-      const prev = await prisma.conversation.findUnique({
-        where: { id },
-        select: { assignedToId: true, assignedTo: { select: { id: true, name: true } } },
-      });
-      const result = await assignConversationAssignedTo(id, newAssigneeId, user);
-      if (!result.ok) {
-        const status =
-          result.code === "NOT_FOUND" ? 404 : result.code === "USER_NOT_FOUND" ? 400 : 403;
-        const msg =
-          result.code === "USER_NOT_FOUND"
-            ? "Usuário não encontrado."
-            : result.code === "NOT_FOUND"
-              ? "Conversa não encontrada."
-              : "Sem permissão para esta atribuição.";
-        return NextResponse.json({ message: msg }, { status });
+
+      const gate = await requireConversationAccess(session, id);
+      if (gate) return gate;
+
+      const conv = await getConversationById(id);
+      if (!conv) {
+        return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
       }
-      if ((prev?.assignedToId ?? null) !== (result.conversation.assignedToId ?? null)) {
-        await logDealEventsForConversationContact(id, user.id, "ASSIGNEE_CHANGED", {
-          from: prev?.assignedTo ?? null,
-          to: result.conversation.assignedTo ?? null,
+
+      const rawStatus = typeof b.status === "string" ? b.status : undefined;
+      const dbStatus = actionToDbStatus(action, rawStatus);
+
+      if (!dbStatus) {
+        return NextResponse.json(
+          { message: "status inválido (OPEN, RESOLVED, PENDING, SNOOZED)." },
+          { status: 400 }
+        );
+      }
+
+      const updated = await updateConversationStatusInDb(id, dbStatus);
+
+      if (conv.status !== updated.status) {
+        const uid = (session.user as { id: string }).id;
+        await logDealEventsForConversationContact(id, uid, "CONVERSATION_STATUS_CHANGED", {
+          from: conv.status,
+          to: updated.status,
+          action,
         });
       }
 
       return NextResponse.json({
         conversation: {
-          id: result.conversation.id,
-          status: result.conversation.status,
-          externalId: result.conversation.externalId,
-          assignedToId: result.conversation.assignedToId,
-          assignedTo: result.conversation.assignedTo,
+          id: updated.id,
+          status: updated.status,
+          externalId: updated.externalId,
         },
       });
+    } catch (e: unknown) {
+      console.error(e);
+      const msg = e instanceof Error ? e.message : "Erro ao atualizar conversa.";
+      return NextResponse.json({ message: msg }, { status: 500 });
     }
-
-    const gate = await requireConversationAccess(session, id);
-    if (gate) return gate;
-
-    const conv = await getConversationById(id);
-    if (!conv) {
-      return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
-    }
-
-    const rawStatus = typeof b.status === "string" ? b.status : undefined;
-    const dbStatus = actionToDbStatus(action, rawStatus);
-
-    if (!dbStatus) {
-      return NextResponse.json(
-        { message: "status inválido (OPEN, RESOLVED, PENDING, SNOOZED)." },
-        { status: 400 }
-      );
-    }
-
-    const updated = await updateConversationStatusInDb(id, dbStatus);
-
-    if (conv.status !== updated.status) {
-      const uid = (session.user as { id: string }).id;
-      await logDealEventsForConversationContact(id, uid, "CONVERSATION_STATUS_CHANGED", {
-        from: conv.status,
-        to: updated.status,
-        action,
-      });
-    }
-
-    return NextResponse.json({
-      conversation: {
-        id: updated.id,
-        status: updated.status,
-        externalId: updated.externalId,
-      },
-    });
-  } catch (e: unknown) {
-    console.error(e);
-    const msg = e instanceof Error ? e.message : "Erro ao atualizar conversa.";
-    return NextResponse.json({ message: msg }, { status: 500 });
-  }
+  });
 }

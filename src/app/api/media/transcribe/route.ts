@@ -1,4 +1,3 @@
-import { readFile } from "fs/promises";
 import { NextResponse } from "next/server";
 import path from "path";
 
@@ -60,14 +59,10 @@ async function fetchAudioBuffer(
 ): Promise<{ buffer: Buffer; contentType: string }> {
   const decoded = decodeURIComponent(rawUrl);
 
-  if (decoded.startsWith("/uploads/")) {
-    const safe = decoded.replace(/\.\.+/g, "");
-    const filePath = path.join(process.cwd(), "public", safe);
-    const buffer = await readFile(filePath);
-    const ext = path.extname(safe).slice(1).toLowerCase() || "bin";
-    return { buffer, contentType: `audio/${ext}` };
-  }
-
+  // PR 1.3: paths internos (`/uploads/...`, `/api/storage/...`) são
+  // resolvidos via fetch HTTP com cookies de sessão pra que o
+  // middleware/gateway aplique auth + checagem de tenant. NÃO ler do
+  // FS direto — bypassaria a validação multi-tenant.
   if (isMetaUrl(decoded)) {
     const token = process.env.META_WHATSAPP_ACCESS_TOKEN?.trim();
     if (!token) throw new Error("Token Meta não configurado.");
@@ -94,6 +89,27 @@ async function fetchAudioBuffer(
       buffer: Buffer.from(await res.arrayBuffer()),
       contentType: res.headers.get("content-type") || "audio/ogg",
     };
+  }
+
+  // Permite URL absoluta do próprio app (mesmo origin) — a UI às vezes
+  // passa `https://.../api/...` ou `https://.../uploads/...`.
+  try {
+    const origin = new URL(request.url).origin;
+    const u = new URL(decoded);
+    if (u.origin === origin && u.pathname.startsWith("/")) {
+      const cookie = request.headers.get("cookie") ?? "";
+      const res = await fetch(`${origin}${u.pathname}${u.search}`, {
+        headers: { cookie },
+        cache: "no-store",
+      });
+      if (!res.ok) throw new Error(`Origem retornou ${res.status}.`);
+      return {
+        buffer: Buffer.from(await res.arrayBuffer()),
+        contentType: res.headers.get("content-type") || "audio/ogg",
+      };
+    }
+  } catch {
+    // ignore parse errors; keep unauthorized below
   }
 
   throw new Error("URL não autorizada.");

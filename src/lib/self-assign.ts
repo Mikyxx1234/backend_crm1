@@ -1,11 +1,17 @@
 import type { AppUserRole } from "@/lib/auth-types";
-import { prisma } from "@/lib/prisma";
+import {
+  getOrgSettingsByPrefix,
+  setOrgSettingBool,
+} from "@/lib/org-settings";
 
 /**
  * Configuração administrativa que controla se usuários não-ADMIN podem se
  * auto-atribuir conversas sem responsável na caixa de entrada. O ADMIN sempre
  * pode atribuir. Os defaults espelham o comportamento atual (agentes podem
  * pegar conversas livres), mas agora o admin pode desabilitar.
+ *
+ * Multi-tenancy v0 cutover: antes lia de `SystemSetting` (global, vazava
+ * entre tenants). Agora le de `OrganizationSetting` org-scoped + cache.
  */
 
 type SelfAssignRole = "MANAGER" | "MEMBER";
@@ -15,29 +21,8 @@ const DEFAULTS: Record<SelfAssignRole, boolean> = {
   MEMBER: true,
 };
 
-let cache: Map<string, string> | null = null;
-let cacheTime = 0;
-const CACHE_TTL = 60_000;
-
-async function loadSettings(): Promise<Map<string, string>> {
-  const now = Date.now();
-  if (cache && now - cacheTime < CACHE_TTL) return cache;
-
-  const rows = await prisma.systemSetting.findMany({
-    where: { key: { startsWith: "selfAssign." } },
-  });
-
-  const map = new Map<string, string>();
-  for (const r of rows) map.set(r.key, r.value);
-
-  cache = map;
-  cacheTime = now;
-  return map;
-}
-
-export function clearSelfAssignCache() {
-  cache = null;
-  cacheTime = 0;
+async function loadSelfAssignMap(): Promise<Map<string, string>> {
+  return getOrgSettingsByPrefix("selfAssign.");
 }
 
 function getFlagForRole(settings: Map<string, string>, role: SelfAssignRole): boolean {
@@ -50,12 +35,12 @@ function getFlagForRole(settings: Map<string, string>, role: SelfAssignRole): bo
 export async function canRoleSelfAssign(role: AppUserRole | undefined | null): Promise<boolean> {
   if (!role) return false;
   if (role === "ADMIN") return true;
-  const settings = await loadSettings();
+  const settings = await loadSelfAssignMap();
   return getFlagForRole(settings, role);
 }
 
 export async function getSelfAssignSettings(): Promise<Record<string, boolean>> {
-  const settings = await loadSettings();
+  const settings = await loadSelfAssignMap();
   return {
     ADMIN: true,
     MANAGER: getFlagForRole(settings, "MANAGER"),
@@ -64,10 +49,14 @@ export async function getSelfAssignSettings(): Promise<Record<string, boolean>> 
 }
 
 export async function setSelfAssignForRole(role: SelfAssignRole, enabled: boolean) {
-  await prisma.systemSetting.upsert({
-    where: { key: `selfAssign.${role}` },
-    update: { value: enabled ? "true" : "false" },
-    create: { key: `selfAssign.${role}`, value: enabled ? "true" : "false" },
-  });
-  clearSelfAssignCache();
+  // setOrgSettingBool ja invalida cache da chave + prefixo.
+  await setOrgSettingBool(`selfAssign.${role}`, enabled);
+}
+
+/**
+ * @deprecated O cache agora é gerenciado em `lib/org-settings.ts`.
+ * Mantido como no-op para compatibilidade com chamadas antigas.
+ */
+export function clearSelfAssignCache() {
+  // no-op
 }

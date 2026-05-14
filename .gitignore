@@ -1,16 +1,92 @@
-node_modules
-.next
-out
-dist
-build
-.turbo
-.env
-.env.*
-!.env.example
-logs
-*.log
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+
+# deploy artifacts (tarballs criados por scripts/deploy.ps1 e ad-hoc)
+/crm-deploy.tar.gz
+/prod-preflight.dump
+/scripts/*.local.*
+
+# next.js
+/.next/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+Thumbs.db
+
+# debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-pnpm-debug.log*
-.DS_Store
+.pnpm-debug.log*
+# Local logs gerados em dev/build (não devem entrar no repositório)
+build.log
+dev.log
+*.log
+
+# env files
+.env
+.env*.local
+
+# vercel
+.vercel
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+
+# uploads / media
+/public/uploads/
+/uploads/
+
+# prisma local db
+*.db
+*.db-journal
+
+# IDE
+.vscode/
+.idea/
+.uix/
+
+# diagnostico local (saida de tsc/lint)
+tsc-out.txt
+tsc-after.txt
+lint-out.txt
+eslint-report.json
+
+# OS
+Desktop.ini
+
+# Playwright MCP runtime artifacts
+.playwright-mcp/
+
+# PWA service worker (gerado pelo Serwist em build)
+/public/sw.js
+/public/sw.js.map
+/public/swe-worker-*.js
+
+# External design reference (Studio AI Vite app — not part of CRM build)
+Studioia/
+
+# Exports .dc do Digisac (dados de cliente). Consumidos pelo script
+# src/scripts/import-bots-dc.ts apenas em máquina local — o resultado
+# gerado (src/lib/automation-templates-imported.ts) é commitado.
+/Bots/
+
+arquivos_modificados/
+
+*.tsx.bak

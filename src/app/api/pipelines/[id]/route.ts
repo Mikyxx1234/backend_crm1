@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { loadAuthzContext, can } from "@/lib/authz";
+import { requirePipelineScope } from "@/lib/authz/resource-policy";
 import { deletePipeline, getPipelineById, updatePipeline } from "@/services/pipelines";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -10,6 +12,14 @@ export async function GET(_request: Request, context: RouteContext) {
     const session = await auth();
     if (!session?.user) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+    }
+    const ctxAuth = await loadAuthzContext({
+      userId: session.user.id,
+      organizationId: (session.user as { organizationId?: string | null }).organizationId ?? null,
+      isSuperAdmin: Boolean((session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
+    });
+    if (!can(ctxAuth, "pipeline:view")) {
+      return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
 
     const { id } = await context.params;
@@ -21,6 +31,12 @@ export async function GET(_request: Request, context: RouteContext) {
     if (!pipeline) {
       return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
     }
+    const scoped = await requirePipelineScope(
+      session.user as { id: string; role?: string | null; organizationId: string | null; isSuperAdmin?: boolean },
+      "view",
+      pipeline.id,
+    );
+    if (scoped) return scoped;
 
     return NextResponse.json(pipeline);
   } catch (e) {
@@ -34,6 +50,14 @@ export async function PUT(request: Request, context: RouteContext) {
     const session = await auth();
     if (!session?.user) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+    }
+    const ctxAuth = await loadAuthzContext({
+      userId: session.user.id,
+      organizationId: (session.user as { organizationId?: string | null }).organizationId ?? null,
+      isSuperAdmin: Boolean((session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
+    });
+    if (!can(ctxAuth, "pipeline:edit")) {
+      return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
 
     const { id } = await context.params;
@@ -57,6 +81,12 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!existing) {
       return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
     }
+    const scoped = await requirePipelineScope(
+      session.user as { id: string; role?: string | null; organizationId: string | null; isSuperAdmin?: boolean },
+      "edit",
+      existing.id,
+    );
+    if (scoped) return scoped;
 
     if (b.name !== undefined && (typeof b.name !== "string" || b.name.trim().length < 1)) {
       return NextResponse.json({ message: "Nome inválido." }, { status: 400 });
@@ -104,6 +134,14 @@ export async function DELETE(_request: Request, context: RouteContext) {
     if (!session?.user) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
     }
+    const ctxAuth = await loadAuthzContext({
+      userId: session.user.id,
+      organizationId: (session.user as { organizationId?: string | null }).organizationId ?? null,
+      isSuperAdmin: Boolean((session.user as { isSuperAdmin?: boolean }).isSuperAdmin),
+    });
+    if (!can(ctxAuth, "pipeline:delete")) {
+      return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
+    }
 
     const { id } = await context.params;
     if (!id) {
@@ -114,6 +152,12 @@ export async function DELETE(_request: Request, context: RouteContext) {
     if (!existing) {
       return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
     }
+    const scoped = await requirePipelineScope(
+      session.user as { id: string; role?: string | null; organizationId: string | null; isSuperAdmin?: boolean },
+      "edit",
+      existing.id,
+    );
+    if (scoped) return scoped;
 
     try {
       await deletePipeline(id);

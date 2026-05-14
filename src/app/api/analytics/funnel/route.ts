@@ -1,31 +1,33 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { getFunnelData } from "@/services/analytics";
 
+// Bug 24/abr/26: usávamos `auth()` direto e o handler chamava
+// `getFunnelData` que depende de `getOrgIdOrThrow()` — sem o
+// AsyncLocalStorage scope ativo, getOrgIdOrThrow() explodia. Trocamos
+// por `withOrgContext` que envolve a lambda em runWithContext,
+// garantindo que tudo dentro veja o tenant scope.
 export async function GET(request: Request) {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
+  return withOrgContext(async () => {
+    try {
+      const { searchParams } = new URL(request.url);
+      const pipelineId = searchParams.get("pipelineId");
+      if (!pipelineId?.trim()) {
+        return NextResponse.json(
+          { message: "pipelineId é obrigatório." },
+          { status: 400 }
+        );
+      }
 
-    const { searchParams } = new URL(request.url);
-    const pipelineId = searchParams.get("pipelineId");
-    if (!pipelineId?.trim()) {
+      const data = await getFunnelData(pipelineId);
+      return NextResponse.json(data);
+    } catch (e) {
+      console.error(e);
       return NextResponse.json(
-        { message: "pipelineId é obrigatório." },
-        { status: 400 }
+        { message: "Erro ao carregar dados do funil." },
+        { status: 500 }
       );
     }
-
-    const data = await getFunnelData(pipelineId);
-    return NextResponse.json(data);
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json(
-      { message: "Erro ao carregar dados do funil." },
-      { status: 500 }
-    );
-  }
+  });
 }

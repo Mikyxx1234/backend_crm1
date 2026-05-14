@@ -1,6 +1,38 @@
 import IORedis from "ioredis";
 
-type Listener = (event: string, data: unknown) => void;
+import { metrics, safeLabel } from "@/lib/metrics";
+
+/**
+ * Multi-tenancy do SSE Bus
+ * ───────────────────────
+ * Cada evento precisa carregar `organizationId` no envelope. Antes (24/abr/26)
+ * o bus broadcasted pra todos os listeners sem filtro — operador da org A
+ * recebia metadados (conversationId, contactId, content preview) de eventos
+ * da org B no stream SSE. Tecnicamente nao havia leak de DADOS porque os
+ * GETs subsequentes ja sao tenant-scoped, mas era um leak de METADADOS e
+ * um side-channel de timing (da pra detectar atividade em outras orgs).
+ *
+ * Agora cada listener registra com `{ organizationId, isSuperAdmin }` e o
+ * dispatcher so chama o listener se:
+ *   - super-admin (vê tudo, pra debugger / painel /admin)
+ *   - listener.organizationId === event.organizationId
+ *
+ * Eventos sem organizationId no envelope (caminho legado) sao DROPADOS
+ * com warning — fail-closed.
+ */
+
+export type SseEventEnvelope = {
+  organizationId: string | null;
+  data: unknown;
+};
+
+type Listener = (event: string, envelope: SseEventEnvelope) => void;
+
+type ListenerEntry = {
+  organizationId: string | null;
+  isSuperAdmin: boolean;
+  fn: Listener;
+};
 
 const REDIS_CHANNEL = "crm:sse:events";
 
@@ -9,12 +41,13 @@ function sseRedisPubSubEnabled(): boolean {
 }
 
 /**
- * Fan-out de eventos para clientes SSE.
- * - Modo default (sem Redis): só processo local (uma réplica Next).
- * - Com SSE_ENABLE_REDIS_PUBSUB=1 e REDIS_URL: publica no Redis; cada réplica subscreve e notifica os seus listeners (várias instâncias).
+ * Fan-out de eventos para clientes SSE com isolamento por org.
+ * - Modo default (sem Redis): so processo local (uma replica Next).
+ * - Com SSE_ENABLE_REDIS_PUBSUB=1 e REDIS_URL: publica no Redis; cada
+ *   replica subscreve e notifica os seus listeners (varias instancias).
  */
 class SseBus {
-  private listeners = new Set<Listener>();
+  private listeners = new Set<ListenerEntry>();
   private redisPub: IORedis | null = null;
   private redisSub: IORedis | null = null;
   private redisReady = false;
@@ -32,15 +65,18 @@ class SseBus {
       await this.redisSub.subscribe(REDIS_CHANNEL);
       this.redisSub.on("message", (_ch, msg) => {
         try {
-          const parsed = JSON.parse(msg) as { event?: string; data?: unknown };
+          const parsed = JSON.parse(msg) as {
+            event?: string;
+            organizationId?: string | null;
+            data?: unknown;
+          };
           if (typeof parsed.event !== "string") return;
-          for (const listener of this.listeners) {
-            try {
-              listener(parsed.event, parsed.data);
-            } catch {
-              /* ignore */
-            }
-          }
+          const envelope: SseEventEnvelope = {
+            organizationId:
+              typeof parsed.organizationId === "string" ? parsed.organizationId : null,
+            data: parsed.data,
+          };
+          this.dispatch(parsed.event, envelope);
         } catch {
           /* ignore malformed */
         }
@@ -62,25 +98,83 @@ class SseBus {
     }
   }
 
-  subscribe(listener: Listener) {
+  /**
+   * Inscreve um listener com filtro por org. Chamada por
+   * /api/sse/messages com a sessao do usuario corrente.
+   *
+   * @param ctx.organizationId - tenant a filtrar. Se null + isSuperAdmin
+   *                              false, o listener nao recebe NADA
+   *                              (fail-closed para sessao sem org).
+   * @param ctx.isSuperAdmin   - true => recebe todos os eventos sem filtro.
+   */
+  subscribe(
+    ctx: { organizationId: string | null; isSuperAdmin: boolean },
+    listener: Listener,
+  ) {
     if (sseRedisPubSubEnabled()) {
       void this.ensureRedis().catch(() => {
         /* já logado */
       });
     }
-    this.listeners.add(listener);
+    const entry: ListenerEntry = {
+      organizationId: ctx.organizationId,
+      isSuperAdmin: ctx.isSuperAdmin,
+      fn: listener,
+    };
+    this.listeners.add(entry);
+    metrics.sse.subscribers.inc({
+      organization: safeLabel(ctx.organizationId, ctx.isSuperAdmin ? "super-admin" : "anon"),
+      channel: "messages",
+    });
     return () => {
-      this.listeners.delete(listener);
+      this.listeners.delete(entry);
+      metrics.sse.subscribers.dec({
+        organization: safeLabel(ctx.organizationId, ctx.isSuperAdmin ? "super-admin" : "anon"),
+        channel: "messages",
+      });
     };
   }
 
+  /**
+   * Publica evento. `organizationId` eh OBRIGATORIO no envelope —
+   * publishers que ainda nao foram migrados emitem warning e o evento
+   * cai no chao (fail-closed pra evitar leak).
+   *
+   * Ex.: sseBus.publish("new_message", { organizationId: conv.organizationId, conversationId, ... })
+   */
   publish(event: string, data: unknown) {
+    const orgId =
+      data && typeof data === "object" && "organizationId" in data
+        ? ((data as Record<string, unknown>).organizationId as string | null | undefined) ?? null
+        : null;
+
+    if (!orgId) {
+      // fail-closed: sem org, ninguem recebe (exceto super-admin se for
+      // intencional — nesses casos o publisher passa { organizationId: null,
+      // _broadcast: true } e a flag _broadcast pode ser respeitada no
+      // futuro). Por ora, dropamos e logamos pra detectar publishers
+      // legados.
+      if (process.env.NODE_ENV !== "production") {
+        console.warn(
+          `[sse-bus] publish "${event}" SEM organizationId no payload — evento dropado (multi-tenancy fail-closed).`,
+        );
+      }
+      return;
+    }
+
+    const envelope: SseEventEnvelope = { organizationId: orgId, data };
+
+    metrics.sse.messages.inc({
+      event: safeLabel(event),
+      organization: safeLabel(orgId),
+    });
+
     if (sseRedisPubSubEnabled()) {
       void (async () => {
         try {
           await this.ensureRedis();
           if (!this.redisPub) return;
-          const payload = JSON.stringify({ event, data });
+          const payload = JSON.stringify({ event, organizationId: orgId, data });
           await this.redisPub.publish(REDIS_CHANNEL, payload);
         } catch (e) {
           console.error("[sse-bus] publish Redis:", e);
@@ -89,9 +183,21 @@ class SseBus {
       return;
     }
 
-    for (const listener of this.listeners) {
+    this.dispatch(event, envelope);
+  }
+
+  private dispatch(event: string, envelope: SseEventEnvelope) {
+    for (const entry of this.listeners) {
+      // super-admin recebe tudo (debug/admin panel)
+      // demais listeners: filtro estrito por org
+      if (
+        !entry.isSuperAdmin &&
+        entry.organizationId !== envelope.organizationId
+      ) {
+        continue;
+      }
       try {
-        listener(event, data);
+        entry.fn(event, envelope);
       } catch {
         /* ignore */
       }
@@ -104,9 +210,22 @@ export const sseBus = new SseBus();
 // Lazily start background services on first module load.
 // This runs server-side only (sse-bus is never imported by client components).
 let _bootstrapped = false;
+
+/** Durante `next build`, o Next define NEXT_PHASE=phase-production-build; não há DB real no container de build. */
+function shouldSkipBackgroundServices(): boolean {
+  return (
+    process.env.NEXT_PHASE === "phase-production-build" ||
+    process.env.CRM_SKIP_BACKGROUND_SERVERS === "1"
+  );
+}
+
 function bootstrapBackgroundServices() {
   if (_bootstrapped) return;
   _bootstrapped = true;
+
+  if (shouldSkipBackgroundServices()) {
+    return;
+  }
 
   import("@/services/automation-context")
     .then(({ startTimeoutSweeper }) => startTimeoutSweeper())
@@ -134,14 +253,4 @@ function bootstrapBackgroundServices() {
       console.error("[sse-bus] failed to start ai-agent inactivity worker:", e),
     );
 }
-
-/** Evita Prisma/Redis durante `next build` (workers importam DB antes das migrações). */
-function shouldBootstrapBackgroundServices(): boolean {
-  if (process.env.NEXT_PHASE === "phase-production-build") return false;
-  if (process.env.SKIP_BACKGROUND_WORKERS === "1") return false;
-  return true;
-}
-
-if (shouldBootstrapBackgroundServices()) {
-  bootstrapBackgroundServices();
-}
+bootstrapBackgroundServices();

@@ -23,6 +23,10 @@
  */
 
 import { prisma } from "@/lib/prisma";
+// prismaBase para o $queryRaw cross-tenant da listagem; dispatchOne
+// acessa models scoped e precisa rodar em withSystemContext.
+import { prismaBase } from "@/lib/prisma-base";
+import { withSystemContext } from "@/lib/webhook-context";
 import {
   normalizeBusinessHours,
   renderTemplate,
@@ -80,17 +84,20 @@ type ExpiredRow = {
   farewell_message: string | null;
   business_hours: unknown;
   updated_at: Date;
+  organization_id: string;
 };
 
 export async function tickOnce(now: Date = new Date()) {
-  // Listamos conversas cujo updatedAt é menor que (now - timer).
-  // O filtro do timer específico por agente é feito no WHERE usando
-  // subtração de intervalo dinâmica via make_interval.
-  const rows = await prisma.$queryRaw<ExpiredRow[]>`
+  // Worker cross-tenant: varre TODAS as orgs. Usa prismaBase para que
+  // o extension nao tente escopar ou exigir RequestContext. O JOIN
+  // traz conversations.organizationId para montar withSystemContext
+  // por linha.
+  const rows = await prismaBase.$queryRaw<ExpiredRow[]>`
     SELECT
       c.id AS conversation_id,
       c."contactId" AS contact_id,
       c."assignedToId" AS assigned_to_id,
+      c."organizationId" AS organization_id,
       a.id AS agent_id,
       a."autonomyMode" AS autonomy_mode,
       a."inactivityTimerMs" AS inactivity_timer_ms,
@@ -118,7 +125,7 @@ export async function tickOnce(now: Date = new Date()) {
   let handed = 0;
   for (const row of rows) {
     try {
-      await dispatchOne(row);
+      await withSystemContext(row.organization_id, () => dispatchOne(row));
       handed++;
     } catch (err) {
       console.error(

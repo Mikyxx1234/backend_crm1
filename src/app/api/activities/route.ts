@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { authenticateApiRequest } from "@/lib/api-auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { createActivity, getActivities, isValidActivityType } from "@/services/activities";
 import { createDealEvent } from "@/services/deals";
 
@@ -15,6 +15,7 @@ export async function GET(request: Request) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
     const { searchParams } = new URL(request.url);
     const dealId = searchParams.get("dealId") ?? undefined;
     const contactId = searchParams.get("contactId") ?? undefined;
@@ -39,6 +40,7 @@ export async function GET(request: Request) {
     });
 
     return NextResponse.json(result);
+    });
   } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao listar atividades." }, { status: 500 });
@@ -50,6 +52,7 @@ export async function POST(request: Request) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
     let body: unknown;
     try {
       body = await request.json();
@@ -141,6 +144,7 @@ export async function POST(request: Request) {
       }
       throw err;
     }
+    });
   } catch (e: unknown) {
     console.error(e);
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2003") {

@@ -22,6 +22,7 @@
 import type { AIAgentAutonomy, Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { estimateCost } from "@/lib/ai-agents/pricing";
 import {
   normalizeOutputStyle,
@@ -90,13 +91,13 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
   }
 
   const run = await prisma.aIAgentRun.create({
-    data: {
+    data: withOrgFromCtx({
       agentId: agent.id,
       source: args.source,
       conversationId: args.conversationId ?? null,
       contactId: args.contactId ?? null,
-      status: "RUNNING",
-    },
+      status: "RUNNING" as const,
+    }),
   });
 
   try {
@@ -176,10 +177,10 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     ];
 
     await prisma.aIAgentMessage.create({
-      data: { runId: run.id, role: "system", content: systemPrompt },
+      data: withOrgFromCtx({ runId: run.id, role: "system", content: systemPrompt }),
     });
     await prisma.aIAgentMessage.create({
-      data: { runId: run.id, role: "user", content: args.userMessage },
+      data: withOrgFromCtx({ runId: run.id, role: "user", content: args.userMessage }),
     });
 
     const result = await generateWithTools({
@@ -194,7 +195,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
 
     for (const call of result.toolCalls) {
       await prisma.aIAgentMessage.create({
-        data: {
+        data: withOrgFromCtx({
           runId: run.id,
           role: "tool",
           toolName: call.toolName,
@@ -203,12 +204,12 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
             args: call.args ?? null,
             result: call.result ?? null,
           } as Prisma.InputJsonValue,
-        },
+        }),
       });
     }
     if (result.text) {
       await prisma.aIAgentMessage.create({
-        data: { runId: run.id, role: "assistant", content: result.text },
+        data: withOrgFromCtx({ runId: run.id, role: "assistant", content: result.text }),
       });
     }
 

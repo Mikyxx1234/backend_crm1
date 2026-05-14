@@ -1,6 +1,7 @@
 import type { ChannelType, TemplateStatus } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 export async function getTemplates() {
   return prisma.messageTemplate.findMany({ orderBy: { name: "asc" } });
@@ -18,13 +19,13 @@ export async function createTemplate(data: {
   channelType?: ChannelType;
 }) {
   return prisma.messageTemplate.create({
-    data: {
+    data: withOrgFromCtx({
       name: data.name,
       content: data.content,
       category: data.category ?? null,
       language: data.language ?? "pt_BR",
       channelType: data.channelType ?? null,
-    },
+    }),
   });
 }
 

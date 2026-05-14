@@ -1,6 +1,7 @@
 import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 const assignedToSelect = {
   id: true,
@@ -83,7 +84,7 @@ export async function getCompanyById(id: string) {
 
 export async function createCompany(data: CreateCompanyInput) {
   return prisma.company.create({
-    data: {
+    data: withOrgFromCtx({
       name: data.name,
       domain: data.domain ?? undefined,
       industry: data.industry ?? undefined,
@@ -91,7 +92,7 @@ export async function createCompany(data: CreateCompanyInput) {
       phone: data.phone ?? undefined,
       address: data.address ?? undefined,
       notes: data.notes ?? undefined,
-    },
+    }),
     include: {
       _count: { select: { contacts: true } },
     },

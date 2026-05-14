@@ -2,6 +2,8 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { sseBus } from "@/lib/sse-bus";
+import { getOrgIdOrNull } from "@/lib/request-context";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { maybeSendMissedCallScheduleTemplate } from "@/services/missed-call-schedule-offer";
 import {
   buildConnectChatLine,
@@ -102,7 +104,7 @@ export async function processMetaWhatsappCallsWebhook(
       );
       const conv = await deps.findOrCreateConversation(contact.id);
       await prisma.whatsappCallEvent.create({
-        data: {
+        data: withOrgFromCtx({
           metaCallId: callId,
           phoneNumberId,
           direction: "BUSINESS_INITIATED",
@@ -111,9 +113,10 @@ export async function processMetaWhatsappCallsWebhook(
           toWa: recipient || null,
           conversationId: conv.id,
           contactId: contact.id,
-        },
+        }),
       });
       sseBus.publish("whatsapp_call", {
+        organizationId: getOrgIdOrNull(),
         conversationId: conv.id,
         contactId: contact.id,
         callId,
@@ -182,7 +185,7 @@ export async function processMetaWhatsappCallsWebhook(
       sdpType && sdpBody ? ({ sdp_type: sdpType, sdp: sdpBody } as const) : undefined;
 
     await prisma.whatsappCallEvent.create({
-      data: {
+      data: withOrgFromCtx({
         metaCallId: callId,
         phoneNumberId,
         direction: direction || "UNKNOWN",
@@ -197,7 +200,7 @@ export async function processMetaWhatsappCallsWebhook(
         errorsJson: errorsPayload === undefined ? undefined : (errorsPayload as Prisma.InputJsonValue),
         conversationId: conv.id,
         contactId: contact.id,
-      },
+      }),
     });
 
     if (event === "connect" && direction === "USER_INITIATED") {
@@ -257,7 +260,7 @@ export async function processMetaWhatsappCallsWebhook(
 
     if (chatLine && !already) {
       await prisma.message.create({
-        data: {
+        data: withOrgFromCtx({
           conversationId: conv.id,
           content: chatLine,
           direction: callMessageDirection,
@@ -265,7 +268,11 @@ export async function processMetaWhatsappCallsWebhook(
           senderName,
           externalId: dedupeKey,
           createdAt: eventTime,
-        },
+          // Evento de call do webhook da Meta: não é mensagem outbound
+          // passível de delivery pela Cloud API. Marcamos como delivered
+          // pra não cair no sweeper de stale.
+          sendStatus: "delivered",
+        }),
       });
 
       try {
@@ -284,6 +291,7 @@ export async function processMetaWhatsappCallsWebhook(
       }
 
       sseBus.publish("new_message", {
+        organizationId: getOrgIdOrNull(),
         conversationId: conv.id,
         contactId: contact.id,
         direction: callMessageDirection,
@@ -322,7 +330,7 @@ export async function processMetaWhatsappCallsWebhook(
             : "WhatsApp · chamada";
         try {
           await prisma.message.create({
-            data: {
+            data: withOrgFromCtx({
               conversationId: conv.id,
               content: timelineBody,
               // Gravação acompanha o lado de quem iniciou: chamada
@@ -334,7 +342,9 @@ export async function processMetaWhatsappCallsWebhook(
               externalId: timelineExtId,
               mediaUrl: recordingUrl || null,
               createdAt: endDate,
-            },
+              // Artefato interno de call — não passa pela Cloud API.
+              sendStatus: "delivered",
+            }),
           });
           await prisma.conversation
             .update({
@@ -343,6 +353,7 @@ export async function processMetaWhatsappCallsWebhook(
             })
             .catch(() => {});
           sseBus.publish("new_message", {
+            organizationId: getOrgIdOrNull(),
             conversationId: conv.id,
             contactId: contact.id,
             direction: callMessageDirection,
@@ -360,6 +371,7 @@ export async function processMetaWhatsappCallsWebhook(
     }
 
     sseBus.publish("whatsapp_call", {
+      organizationId: getOrgIdOrNull(),
       conversationId: conv.id,
       contactId: contact.id,
       callId,

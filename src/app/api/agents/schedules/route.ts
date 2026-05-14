@@ -1,13 +1,13 @@
 import { NextResponse } from "next/server";
-import { auth } from "@/lib/auth";
+import { requireAuth, userOrgFilter } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 
 export async function GET() {
-  const session = await auth();
-  if (!session?.user) return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
 
   const users = await prisma.user.findMany({
-    where: { type: "HUMAN" },
+    where: { type: "HUMAN", ...userOrgFilter(r.session) },
     select: {
       id: true,
       name: true,

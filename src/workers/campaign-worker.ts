@@ -1,7 +1,9 @@
-import { Worker } from "bullmq";
+import { Worker, type Job } from "bullmq";
 import IORedis from "ioredis";
 
 import { prisma } from "@/lib/prisma";
+import { prismaBase } from "@/lib/prisma-base";
+import { withSystemContext } from "@/lib/webhook-context";
 import {
   CAMPAIGN_DISPATCH_QUEUE_NAME,
   CAMPAIGN_SEND_QUEUE_NAME,
@@ -11,10 +13,20 @@ import {
   enqueueAutomationJob,
   enqueueBaileysOutbound,
 } from "@/lib/queue";
-import { MetaWhatsAppClient, formatMetaSendError } from "@/lib/meta-whatsapp/client";
+import { metaClientFromConfig, formatMetaSendError } from "@/lib/meta-whatsapp/client";
+import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
+import { getDecryptedChannelConfig } from "@/lib/channels/config";
 import { buildContactWhere, type SegmentFilters } from "@/services/segments";
+import { metrics, safeLabel } from "@/lib/metrics";
+import {
+  extractMetaRetryCode,
+  isInside24hWindow,
+  shouldRetryCampaignSendError,
+  isWindowExpiredError,
+} from "@/services/campaign-builder/meta-compliance";
 
 const BATCH_SIZE = 500;
+const globalWorker = globalThis as unknown as { campaignThrottleRedis?: IORedis };
 
 function getRedisUrl(): string {
   const url = process.env.REDIS_URL;
@@ -22,14 +34,54 @@ function getRedisUrl(): string {
   return url;
 }
 
-/**
- * Build a per-channel MetaWhatsAppClient from stored channel config.
- */
-function buildMetaClient(config: Record<string, unknown>): MetaWhatsAppClient {
-  const token = String(config.accessToken ?? process.env.META_WHATSAPP_ACCESS_TOKEN ?? "");
-  const phoneId = String(config.phoneNumberId ?? process.env.META_WHATSAPP_PHONE_NUMBER_ID ?? "");
-  const wabaId = String(config.businessAccountId ?? process.env.META_WHATSAPP_BUSINESS_ACCOUNT_ID ?? "");
-  return new MetaWhatsAppClient(token, phoneId, wabaId);
+function getThrottleRedis(): IORedis {
+  if (!globalWorker.campaignThrottleRedis) {
+    globalWorker.campaignThrottleRedis = new IORedis(getRedisUrl(), {
+      maxRetriesPerRequest: null,
+    });
+  }
+  return globalWorker.campaignThrottleRedis;
+}
+
+async function waitForMetaThrottle(phoneNumberId: string, sendRate: number) {
+  const redis = getThrottleRedis();
+  const rate = Math.max(1, Math.min(80, sendRate));
+  const intervalMs = Math.max(1, Math.ceil(1000 / rate));
+  const now = Date.now();
+  const key = `campaign:meta:throttle:${phoneNumberId}`;
+  const slot = await redis.eval(
+    `
+      local key = KEYS[1]
+      local now = tonumber(ARGV[1])
+      local interval = tonumber(ARGV[2])
+      local ttl = tonumber(ARGV[3])
+      local nextTs = tonumber(redis.call("GET", key) or "0")
+      if nextTs < now then nextTs = now end
+      redis.call("SET", key, tostring(nextTs + interval), "PX", ttl)
+      return nextTs
+    `,
+    1,
+    key,
+    String(now),
+    String(intervalMs),
+    String(Math.max(60_000, intervalMs * 5)),
+  );
+  const waitMs = Math.max(0, Number(slot) - now);
+  if (waitMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+}
+
+async function isWithinMetaWindow(contactId: string, channelId: string): Promise<boolean> {
+  const latestInbound = await prisma.message.findFirst({
+    where: {
+      conversation: { contactId, channelId },
+      direction: "in",
+    },
+    select: { createdAt: true },
+    orderBy: { createdAt: "desc" },
+  });
+  return isInside24hWindow(latestInbound?.createdAt ?? null);
 }
 
 // ── Dispatch worker ──────────────────────────────────────
@@ -38,7 +90,7 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
   const { campaignId } = payload;
   console.info(`[campaign-dispatch] Processing campaign ${campaignId}`);
 
-  const campaign = await prisma.campaign.findUnique({
+  const campaign = await prismaBase.campaign.findUnique({
     where: { id: campaignId },
     include: { segment: true },
   });
@@ -47,6 +99,7 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
     console.error(`[campaign-dispatch] Campaign ${campaignId} not found`);
     return;
   }
+  const organizationId = campaign.organizationId;
 
   if (!["PROCESSING", "SCHEDULED"].includes(campaign.status)) {
     console.warn(`[campaign-dispatch] Campaign ${campaignId} status is ${campaign.status}, skipping`);
@@ -84,6 +137,7 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
       const batch = contacts.slice(i, i + BATCH_SIZE);
       await prisma.campaignRecipient.createMany({
         data: batch.map((c) => ({
+          organizationId,
           campaignId,
           contactId: c.id,
           status: "PENDING" as const,
@@ -129,7 +183,10 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
 
 // ── Send worker ──────────────────────────────────────────
 
-async function handleSend(payload: CampaignSendPayload) {
+async function handleSend(
+  payload: CampaignSendPayload,
+  job: Job<CampaignSendPayload>,
+) {
   const { campaignId, recipientId, contactId, contactPhone, contactBsuid } = payload;
 
   const campaign = await prisma.campaign.findUnique({
@@ -153,7 +210,10 @@ async function handleSend(payload: CampaignSendPayload) {
 
   try {
     const provider = campaign.channel.provider;
-    const config = (campaign.channel.config ?? {}) as Record<string, unknown>;
+    const config = getDecryptedChannelConfig({
+      provider: campaign.channel.provider,
+      config: campaign.channel.config,
+    });
 
     if (campaign.type === "AUTOMATION") {
       if (campaign.automationId) {
@@ -171,46 +231,101 @@ async function handleSend(payload: CampaignSendPayload) {
     }
 
     if (provider === "META_CLOUD_API") {
-      await sendViaMetaCloudApi(campaign, config, contactPhone, contactBsuid, recipientId, campaignId);
+      await sendViaMetaCloudApi(campaign, config, contactPhone, contactBsuid, recipientId, campaignId, contactId);
     } else if (provider === "BAILEYS_MD") {
       await sendViaBaileys(campaign, contactPhone, contactId, recipientId, campaignId);
     } else {
       throw new Error(`Provider ${provider} não suportado para campanhas.`);
     }
+    metrics.messages.outbound.inc({
+      channel_provider: provider,
+      status: "accepted",
+      organization: safeLabel(campaign.organizationId),
+    });
   } catch (err) {
     const errorMsg = formatMetaSendError(err);
     console.error(`[campaign-send] Error for recipient ${recipientId}:`, errorMsg);
+    const metaCode = extractMetaRetryCode(errorMsg);
+    const maxAttempts = Math.max(1, Number(job.opts.attempts ?? 1));
+    const shouldRetry = shouldRetryCampaignSendError(
+      errorMsg,
+      job.attemptsMade,
+      maxAttempts,
+    );
+    const windowExpired = isWindowExpiredError(errorMsg);
+
+    if (shouldRetry) {
+      await prisma.campaignRecipient.update({
+        where: { id: recipientId },
+        data: { status: "PENDING", errorMessage: `Retryable Meta error (${metaCode})` },
+      });
+      metrics.messages.outbound.inc({
+        channel_provider: "META_CLOUD_API",
+        status: "retryable_failed",
+        organization: safeLabel(campaign.organizationId),
+      });
+      metrics.errors.inc({
+        scope: "campaign.meta.retryable",
+        kind: String(metaCode),
+      });
+      console.warn(
+        `[campaign-send][ALERTA] Retryable Meta error code=${metaCode} campaign=${campaignId} recipient=${recipientId}`,
+      );
+      throw err;
+    }
 
     await prisma.campaignRecipient.update({
       where: { id: recipientId },
-      data: { status: "FAILED", errorMessage: errorMsg },
+      data: {
+        status: "FAILED",
+        errorMessage: windowExpired
+          ? "Fora da janela de 24h da Meta. Use template aprovado."
+          : errorMsg,
+      },
     });
     await prisma.campaign.update({
       where: { id: campaignId },
       data: { failedCount: { increment: 1 } },
     });
+    metrics.messages.outbound.inc({
+      channel_provider: campaign.channel.provider,
+      status: "failed",
+      organization: safeLabel(campaign.organizationId),
+    });
 
     await checkCampaignCompletion(campaignId);
-
-    if (isRateLimitError(errorMsg)) {
-      throw err;
-    }
   }
 }
 
 async function sendViaMetaCloudApi(
-  campaign: { type: string; templateName: string | null; templateLanguage: string | null; templateComponents: unknown; textContent: string | null },
+  campaign: {
+    type: string;
+    templateName: string | null;
+    templateLanguage: string | null;
+    templateComponents: unknown;
+    textContent: string | null;
+    sendRate: number;
+    channel: { id: string };
+  },
   config: Record<string, unknown>,
   phone: string,
   bsuid: string | undefined,
   recipientId: string,
   campaignId: string,
+  contactId: string,
 ) {
-  const client = buildMetaClient(config);
+  // Nunca montar cliente Meta manualmente via `config.accessToken`; usar
+  // metaClientFromConfig para garantir decrypt/back-compat centralizados.
+  const client = metaClientFromConfig(config);
 
   if (!client.configured) {
     throw new Error("Canal Meta Cloud API não configurado (token ou phone number ID ausente).");
   }
+  const phoneNumberId =
+    typeof config.phoneNumberId === "string" && config.phoneNumberId.trim().length > 0
+      ? config.phoneNumberId.trim()
+      : "unknown";
+  await waitForMetaThrottle(phoneNumberId, campaign.sendRate);
 
   let metaMessageId: string | null = null;
 
@@ -219,16 +334,38 @@ async function sendViaMetaCloudApi(
     const components = campaign.templateComponents
       ? (campaign.templateComponents as unknown[])
       : undefined;
+    let templateGraphId: string | null = null;
+    try {
+      const row = await prisma.whatsAppTemplateConfig.findFirst({
+        where: { metaTemplateName: campaign.templateName },
+        select: { metaTemplateId: true },
+      });
+      templateGraphId = row?.metaTemplateId?.trim() || null;
+    } catch {
+      /* ignore */
+    }
+    const { components: sendComponents, flowToken: campaignFlowToken } =
+      await enrichTemplateComponentsForFlowSend(client, {
+        templateName: campaign.templateName,
+        languageCode: campaign.templateLanguage ?? "pt_BR",
+        components,
+        templateGraphId,
+      });
+    void campaignFlowToken; // Campanhas não criam `Message`; token só no payload Cloud API (ver logs [meta-flow-enrich]).
     const result = await client.sendTemplate(
       phone,
       campaign.templateName,
       campaign.templateLanguage ?? "pt_BR",
-      components,
+      sendComponents,
       bsuid,
     );
     metaMessageId = result.messages?.[0]?.id ?? null;
   } else if (campaign.type === "TEXT") {
     if (!campaign.textContent) throw new Error("Conteúdo de texto não definido na campanha.");
+    const withinWindow = await isWithinMetaWindow(contactId, campaign.channel.id);
+    if (!withinWindow) {
+      throw new Error("META_WINDOW_EXPIRED_24H");
+    }
     const result = await client.sendText(phone, campaign.textContent, bsuid);
     metaMessageId = result.messages?.[0]?.id ?? null;
   }
@@ -241,7 +378,6 @@ async function sendViaMetaCloudApi(
     where: { id: campaignId },
     data: { sentCount: { increment: 1 } },
   });
-
   await checkCampaignCompletion(campaignId);
 }
 
@@ -301,25 +437,50 @@ async function checkCampaignCompletion(campaignId: string) {
   }
 }
 
-function isRateLimitError(msg: string): boolean {
-  return msg.includes("130429") || msg.includes("rate") || msg.includes("throttl");
-}
-
 // ── Bootstrap ────────────────────────────────────────────
 
 export function startCampaignWorkers() {
   const redisUrl = getRedisUrl();
   const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
 
+  /**
+   * Workers BullMQ rodam fora de qualquer request handler — sem session
+   * NextAuth e sem AsyncLocalStorage. A `prisma` com a extensao de scope
+   * exige RequestContext, entao precisamos resolver a org do job (sem
+   * scope, via prismaBase) e wrappear a execucao em `withSystemContext`.
+   * Sem isso, todas as queries `prisma.*` dentro do handler quebram com
+   * "chamado fora de RequestContext" — ou, pior, em ambientes legados,
+   * rodam sem filtro de tenant.
+   */
   const dispatchWorker = new Worker<CampaignDispatchPayload>(
     CAMPAIGN_DISPATCH_QUEUE_NAME,
-    async (job) => handleDispatch(job.data),
+    async (job) => {
+      const camp = await prismaBase.campaign.findUnique({
+        where: { id: job.data.campaignId },
+        select: { organizationId: true },
+      });
+      if (!camp) {
+        console.warn(`[campaign-dispatch] Campaign ${job.data.campaignId} não encontrada`);
+        return;
+      }
+      await withSystemContext(camp.organizationId, () => handleDispatch(job.data));
+    },
     { connection, concurrency: 2 },
   );
 
   const sendWorker = new Worker<CampaignSendPayload>(
     CAMPAIGN_SEND_QUEUE_NAME,
-    async (job) => handleSend(job.data),
+    async (job: Job<CampaignSendPayload>) => {
+      const camp = await prismaBase.campaign.findUnique({
+        where: { id: job.data.campaignId },
+        select: { organizationId: true },
+      });
+      if (!camp) {
+        console.warn(`[campaign-send] Campaign ${job.data.campaignId} não encontrada`);
+        return;
+      }
+      await withSystemContext(camp.organizationId, () => handleSend(job.data, job));
+    },
     {
       connection: connection.duplicate(),
       concurrency: 10,

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { getRevenueOverTime, type AnalyticsPeriod } from "@/services/analytics";
 
 function parseRequiredPeriod(
@@ -22,37 +22,39 @@ function parseGroupBy(
   return null;
 }
 
+// Bug 24/abr/26: usavamos `auth()` direto e o handler chamava
+// `getRevenueOverTime` que depende de `getOrgIdOrThrow()` — sem o
+// AsyncLocalStorage scope ativo, getOrgIdOrThrow() explodia. Trocamos
+// por `withOrgContext` que envolve a lambda em runWithContext,
+// garantindo que tudo dentro veja o tenant scope.
 export async function GET(request: Request) {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
+  return withOrgContext(async () => {
+    try {
+      const { searchParams } = new URL(request.url);
+      const period = parseRequiredPeriod(searchParams);
+      if (!period) {
+        return NextResponse.json(
+          { message: "Parâmetros obrigatórios: from, to (ISO)." },
+          { status: 400 }
+        );
+      }
 
-    const { searchParams } = new URL(request.url);
-    const period = parseRequiredPeriod(searchParams);
-    if (!period) {
+      const groupBy = parseGroupBy(searchParams.get("groupBy"));
+      if (!groupBy) {
+        return NextResponse.json(
+          { message: "groupBy deve ser day, week ou month." },
+          { status: 400 }
+        );
+      }
+
+      const data = await getRevenueOverTime(period, groupBy);
+      return NextResponse.json(data);
+    } catch (e) {
+      console.error(e);
       return NextResponse.json(
-        { message: "Parâmetros obrigatórios: from, to (ISO)." },
-        { status: 400 }
+        { message: "Erro ao carregar receita ao longo do tempo." },
+        { status: 500 }
       );
     }
-
-    const groupBy = parseGroupBy(searchParams.get("groupBy"));
-    if (!groupBy) {
-      return NextResponse.json(
-        { message: "groupBy deve ser day, week ou month." },
-        { status: 400 }
-      );
-    }
-
-    const data = await getRevenueOverTime(period, groupBy);
-    return NextResponse.json(data);
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json(
-      { message: "Erro ao carregar receita ao longo do tempo." },
-      { status: 500 }
-    );
-  }
+  });
 }

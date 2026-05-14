@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { fireTrigger } from "@/services/automation-triggers";
 import { assignDealOwner, createDealEvent } from "@/services/deals";
@@ -12,6 +14,12 @@ export async function POST(request: Request) {
   try {
     const session = await auth();
     if (!session?.user) return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+    const userLike = session.user as {
+      id: string;
+      organizationId: string | null;
+      role?: string | null;
+      isSuperAdmin?: boolean;
+    };
 
     const body = (await request.json()) as Record<string, unknown>;
     const dealIds = Array.isArray(body.dealIds) ? (body.dealIds as string[]).filter((id) => typeof id === "string") : [];
@@ -19,6 +27,15 @@ export async function POST(request: Request) {
 
     if (dealIds.length === 0) return NextResponse.json({ message: "Nenhum deal selecionado." }, { status: 400 });
     if (!VALID_ACTIONS.includes(action)) return NextResponse.json({ message: "Ação inválida." }, { status: 400 });
+    const actionPermission: Record<BulkAction, string> = {
+      move_stage: "deal:change_stage",
+      change_owner: "deal:transfer_owner",
+      mark_won: "deal:set_won",
+      mark_lost: "deal:set_lost",
+      delete: "deal:delete",
+    };
+    const denied = await requirePermissionForUser(userLike, actionPermission[action]);
+    if (denied) return denied;
 
     const uid = (session.user as { id: string }).id;
     let affected = 0;
@@ -93,8 +110,8 @@ export async function POST(request: Request) {
     if (action === "mark_lost") {
       const lostReason = typeof body.lostReason === "string" ? body.lostReason.trim() : "";
 
-      const requireSetting = await prisma.systemSetting.findUnique({ where: { key: "loss_reason_required" } });
-      if (requireSetting?.value === "true" && !lostReason) {
+      const required = await getOrgSettingBool("deals.loss_reason_required", false);
+      if (required && !lostReason) {
         return NextResponse.json({ message: "Motivo da perda é obrigatório." }, { status: 400 });
       }
 

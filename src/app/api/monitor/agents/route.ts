@@ -26,6 +26,11 @@ type AgentRow = {
  *
  * Fallback: se a coluna ainda não existe no banco (migration pendente),
  * retorna lista sem lastActivityAt (tratado como null no UI).
+ *
+ * Multi-tenancy: super-admin v\u00ea agentes de todas as orgs (uso EduIT
+ * para suporte). Tenants veem apenas a pr\u00f3pria org. O filtro \u00e9
+ * aplicado tanto no $queryRawUnsafe quanto no fallback (prisma.user usa
+ * a extension scoped automaticamente quando tem orgId no ctx).
  */
 export async function GET() {
   const session = await auth();
@@ -33,29 +38,67 @@ export async function GET() {
     return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
   }
 
+  const isSuperAdmin = Boolean(session.user.isSuperAdmin);
+  const orgId = session.user.organizationId;
+  if (!isSuperAdmin && !orgId) {
+    return NextResponse.json(
+      { message: "Sem organizacao no contexto." },
+      { status: 403 },
+    );
+  }
+
   try {
-    const rows = await prisma.$queryRawUnsafe<AgentRow[]>(`
-      SELECT
-        u.id                               AS "userId",
-        u.name                             AS name,
-        u.email                            AS email,
-        u.role                             AS role,
-        u."avatarUrl"                      AS "avatarUrl",
-        COALESCE(a.status, 'OFFLINE')      AS status,
-        COALESCE(a."availableForVoiceCalls", false) AS "availableForVoiceCalls",
-        to_char(a."lastActivityAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "lastActivityAt",
-        to_char(a."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "statusUpdatedAt"
-      FROM users u
-      LEFT JOIN agent_statuses a ON a."userId" = u.id
-      WHERE u."type" = 'HUMAN'
-      ORDER BY
-        CASE COALESCE(a.status, 'OFFLINE')
-          WHEN 'ONLINE'  THEN 0
-          WHEN 'AWAY'    THEN 1
-          WHEN 'OFFLINE' THEN 2
-        END,
-        u.name ASC
-    `);
+    // Quando \u00e9 super-admin, n\u00e3o injetamos filtro (ve todas as orgs).
+    // Caso contr\u00e1rio, filtra por u."organizationId" = $1.
+    const rows = isSuperAdmin
+      ? await prisma.$queryRawUnsafe<AgentRow[]>(`
+          SELECT
+            u.id                               AS "userId",
+            u.name                             AS name,
+            u.email                            AS email,
+            u.role                             AS role,
+            u."avatarUrl"                      AS "avatarUrl",
+            COALESCE(a.status, 'OFFLINE')      AS status,
+            COALESCE(a."availableForVoiceCalls", false) AS "availableForVoiceCalls",
+            to_char(a."lastActivityAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "lastActivityAt",
+            to_char(a."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "statusUpdatedAt"
+          FROM users u
+          LEFT JOIN agent_statuses a ON a."userId" = u.id
+          WHERE u."type" = 'HUMAN'
+          ORDER BY
+            CASE COALESCE(a.status, 'OFFLINE')
+              WHEN 'ONLINE'  THEN 0
+              WHEN 'AWAY'    THEN 1
+              WHEN 'OFFLINE' THEN 2
+            END,
+            u.name ASC
+        `)
+      : await prisma.$queryRawUnsafe<AgentRow[]>(
+          `
+            SELECT
+              u.id                               AS "userId",
+              u.name                             AS name,
+              u.email                            AS email,
+              u.role                             AS role,
+              u."avatarUrl"                      AS "avatarUrl",
+              COALESCE(a.status, 'OFFLINE')      AS status,
+              COALESCE(a."availableForVoiceCalls", false) AS "availableForVoiceCalls",
+              to_char(a."lastActivityAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "lastActivityAt",
+              to_char(a."updatedAt" AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS "statusUpdatedAt"
+            FROM users u
+            LEFT JOIN agent_statuses a ON a."userId" = u.id
+            WHERE u."type" = 'HUMAN'
+              AND u."organizationId" = $1
+            ORDER BY
+              CASE COALESCE(a.status, 'OFFLINE')
+                WHEN 'ONLINE'  THEN 0
+                WHEN 'AWAY'    THEN 1
+                WHEN 'OFFLINE' THEN 2
+              END,
+              u.name ASC
+          `,
+          orgId,
+        );
 
     return NextResponse.json(rows);
   } catch (err) {
@@ -65,8 +108,13 @@ export async function GET() {
     );
 
     // Fallback sem lastActivityAt (coluna ainda não existe em prod).
+    // CORRECAO 24/abr/26: User NAO esta no SCOPED_MODELS, filtro precisa
+    // ser MANUAL pra evitar leak entre tenants no fallback.
     const users = await prisma.user.findMany({
-      where: { type: "HUMAN" },
+      where: {
+        type: "HUMAN",
+        ...(isSuperAdmin ? {} : { organizationId: orgId! }),
+      },
       select: {
         id: true,
         name: true,

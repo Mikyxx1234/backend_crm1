@@ -5,7 +5,7 @@ import { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import { enqueueBaileysControl } from "@/lib/queue";
 import {
   getChannelById,
-  parseChannelConfig,
+  parseChannelConfigDecrypted,
   updateChannel,
   updateChannelStatus,
 } from "@/services/channels";
@@ -30,7 +30,10 @@ export async function POST(_request: Request, context: RouteContext) {
       return NextResponse.json({ message: "Canal não encontrado." }, { status: 404 });
     }
 
-    const cfg = parseChannelConfig(channel.config);
+    const cfg = parseChannelConfigDecrypted({
+      provider: channel.provider,
+      config: channel.config,
+    });
 
     await updateChannelStatus(id, "CONNECTING");
 

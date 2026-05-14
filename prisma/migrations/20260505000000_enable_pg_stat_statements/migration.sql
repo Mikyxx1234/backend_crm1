@@ -1,0 +1,17 @@
+-- Habilita pg_stat_statements (PR 5.3).
+--
+-- Extension nativa do Postgres que registra plano + tempo agregado
+-- de cada query normalizada. Necessario para:
+--   - identificar slow queries (top-N por mean/total time);
+--   - validar que mudancas de schema/indice realmente reduziram
+--     latencia;
+--   - detectar regressoes apos deploy (drift de plano).
+--
+-- Em postgres 16 a extension precisa ser carregada via
+-- `shared_preload_libraries` no postgresql.conf — fazer isso a parte
+-- (manualmente ou via init container do Docker). O CREATE EXTENSION
+-- aqui so funciona apos o reload do server.
+--
+-- migration-safety: ignore (extension creation e idempotente; nao
+-- bloqueia rolling deploy).
+CREATE EXTENSION IF NOT EXISTS pg_stat_statements;

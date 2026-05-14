@@ -1,11 +1,11 @@
-import { mkdir, writeFile } from "fs/promises";
 import { NextResponse } from "next/server";
-import path from "path";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
+import { generateFileName, saveFile } from "@/lib/storage/local";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -57,195 +57,204 @@ function extFromMime(mime: string): string {
  * mesmo padrão `call_timeline:{callId}` que o webhook da Meta usaria —
  * mantém compat caso algum dia a Meta passe a enviar recording_url.
  */
+// Bug 27/abr/26: usavamos `auth()` direto. A rota chama `withOrgFromCtx`
+// (direto ou via service), avaliado ANTES da Prisma extension popular
+// o ctx. Migrado para withOrgContext.
 export async function POST(request: Request, context: RouteContext) {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
-
-    const { id } = await context.params;
-    const denied = await requireConversationAccess(session, id);
-    if (denied) return denied;
-
-    const conv = await prisma.conversation.findUnique({
-      where: { id },
-      select: { id: true, contactId: true },
-    });
-    if (!conv) {
-      return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
-    }
-
-    let form: FormData;
+  return withOrgContext(async (session) => {
     try {
-      form = await request.formData();
-    } catch (err) {
-      console.error("[call-recording] formData parse error:", err);
-      return NextResponse.json({ message: "Upload inválido." }, { status: 400 });
-    }
+      const { id } = await context.params;
+      const denied = await requireConversationAccess(session, id);
+      if (denied) return denied;
 
-    const raw = form.get("file");
-    if (!raw || !isFileLike(raw) || raw.size === 0) {
-      return NextResponse.json({ message: "Gravação vazia." }, { status: 400 });
-    }
-    if (raw.size > MAX_RECORDING_BYTES) {
-      return NextResponse.json(
-        { message: "Gravação excede 64 MB." },
-        { status: 413 },
-      );
-    }
-
-    const rawMime = (raw.type || "").toLowerCase();
-    // MediaRecorder eventualmente serializa sem MIME — aceita se o nome
-    // indica áudio; caso contrário rejeita (evita upload acidental).
-    if (rawMime && !rawMime.startsWith(ALLOWED_MIME_PREFIX)) {
-      return NextResponse.json(
-        { message: `MIME não suportado: ${rawMime}` },
-        { status: 400 },
-      );
-    }
-
-    const callId = safeStr(form.get("callId")) || null;
-    const directionRaw = safeStr(form.get("direction"));
-    const direction =
-      directionRaw === "BUSINESS_INITIATED" || directionRaw === "USER_INITIATED"
-        ? directionRaw
-        : "BUSINESS_INITIATED";
-    const startedAt = parseDate(safeStr(form.get("startedAt"))) ?? new Date();
-    const endedAt = parseDate(safeStr(form.get("endedAt"))) ?? new Date();
-    const durationSec = Math.max(
-      0,
-      Math.round((endedAt.getTime() - startedAt.getTime()) / 1000),
-    );
-
-    const ext = extFromMime(rawMime);
-    const timestamp = Date.now();
-    const rand = Math.random().toString(36).slice(2, 8);
-    const safeFileName = `call-${timestamp}-${rand}.${ext}`;
-
-    let buffer: Buffer;
-    try {
-      buffer = await blobToBuffer(raw);
-    } catch (err) {
-      console.error("[call-recording] buffer read error:", err);
-      return NextResponse.json(
-        { message: "Falha ao ler arquivo." },
-        { status: 500 },
-      );
-    }
-
-    const dir = path.join(process.cwd(), "public", "uploads", "call-recordings");
-    await mkdir(dir, { recursive: true });
-    await writeFile(path.join(dir, safeFileName), buffer);
-    const publicUrl = `/uploads/call-recordings/${safeFileName}`;
-
-    const agentName = session.user.name ?? session.user.email ?? "Agente";
-    const senderName =
-      direction === "BUSINESS_INITIATED"
-        ? `WhatsApp · chamada · ${agentName}`
-        : "WhatsApp · chamada";
-
-    // Legenda enxuta (não confundir com o bloco verboso antigo do webhook).
-    const hmS = new Intl.DateTimeFormat("pt-BR", {
-      timeZone: process.env.DEFAULT_TIMEZONE ?? "America/Sao_Paulo",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).format(startedAt);
-    const hmE = new Intl.DateTimeFormat("pt-BR", {
-      timeZone: process.env.DEFAULT_TIMEZONE ?? "America/Sao_Paulo",
-      hour: "2-digit",
-      minute: "2-digit",
-    }).format(endedAt);
-    const durStr =
-      durationSec >= 60
-        ? `${Math.floor(durationSec / 60)}m${String(durationSec % 60).padStart(2, "0")}s`
-        : `${durationSec}s`;
-    const content = `Gravação da chamada · ${hmS}–${hmE} · ${durStr}`;
-
-    const externalId = callId ? `call_timeline:${callId}` : null;
-
-    // Lateralização da gravação acompanha o lado de quem iniciou a
-    // chamada — se foi o agente (BUSINESS_INITIATED), bolha vai pra
-    // direita. Antes era hardcoded `"in"` e a gravação aparecia à
-    // esquerda mesmo pra chamadas outbound feitas pelo próprio agente.
-    const recordingDirection: "in" | "out" =
-      direction === "BUSINESS_INITIATED" ? "out" : "in";
-
-    let msg;
-    if (externalId) {
-      const existing = await prisma.message.findFirst({
-        where: { conversationId: conv.id, externalId },
-        select: { id: true },
+      const conv = await prisma.conversation.findUnique({
+        where: { id },
+        select: { id: true, contactId: true, organizationId: true },
       });
-      if (existing) {
-        msg = await prisma.message.update({
-          where: { id: existing.id },
-          data: {
-            content,
-            mediaUrl: publicUrl,
-            messageType: "whatsapp_call_recording",
-            senderName,
-            direction: recordingDirection,
-          },
+      if (!conv) {
+        return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
+      }
+
+      let form: FormData;
+      try {
+        form = await request.formData();
+      } catch (err) {
+        console.error("[call-recording] formData parse error:", err);
+        return NextResponse.json({ message: "Upload inválido." }, { status: 400 });
+      }
+
+      const raw = form.get("file");
+      if (!raw || !isFileLike(raw) || raw.size === 0) {
+        return NextResponse.json({ message: "Gravação vazia." }, { status: 400 });
+      }
+      if (raw.size > MAX_RECORDING_BYTES) {
+        return NextResponse.json(
+          { message: "Gravação excede 64 MB." },
+          { status: 413 },
+        );
+      }
+
+      const rawMime = (raw.type || "").toLowerCase();
+      // MediaRecorder eventualmente serializa sem MIME — aceita se o nome
+      // indica áudio; caso contrário rejeita (evita upload acidental).
+      if (rawMime && !rawMime.startsWith(ALLOWED_MIME_PREFIX)) {
+        return NextResponse.json(
+          { message: `MIME não suportado: ${rawMime}` },
+          { status: 400 },
+        );
+      }
+
+      const callId = safeStr(form.get("callId")) || null;
+      const directionRaw = safeStr(form.get("direction"));
+      const direction =
+        directionRaw === "BUSINESS_INITIATED" || directionRaw === "USER_INITIATED"
+          ? directionRaw
+          : "BUSINESS_INITIATED";
+      const startedAt = parseDate(safeStr(form.get("startedAt"))) ?? new Date();
+      const endedAt = parseDate(safeStr(form.get("endedAt"))) ?? new Date();
+      const durationSec = Math.max(
+        0,
+        Math.round((endedAt.getTime() - startedAt.getTime()) / 1000),
+      );
+
+      const ext = extFromMime(rawMime);
+      const safeFileName = generateFileName({ prefix: "call", ext });
+
+      let buffer: Buffer;
+      try {
+        buffer = await blobToBuffer(raw);
+      } catch (err) {
+        console.error("[call-recording] buffer read error:", err);
+        return NextResponse.json(
+          { message: "Falha ao ler arquivo." },
+          { status: 500 },
+        );
+      }
+
+      // PR 1.3: storage tenant-scoped (antes: `public/uploads/call-recordings/`).
+      const saved = await saveFile({
+        orgId: conv.organizationId,
+        bucket: "recordings",
+        fileName: safeFileName,
+        buffer,
+      });
+      const publicUrl = saved.url;
+
+      const agentName = session.user.name ?? session.user.email ?? "Agente";
+      const senderName =
+        direction === "BUSINESS_INITIATED"
+          ? `WhatsApp · chamada · ${agentName}`
+          : "WhatsApp · chamada";
+
+      // Legenda enxuta (não confundir com o bloco verboso antigo do webhook).
+      const hmS = new Intl.DateTimeFormat("pt-BR", {
+        timeZone: process.env.DEFAULT_TIMEZONE ?? "America/Sao_Paulo",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(startedAt);
+      const hmE = new Intl.DateTimeFormat("pt-BR", {
+        timeZone: process.env.DEFAULT_TIMEZONE ?? "America/Sao_Paulo",
+        hour: "2-digit",
+        minute: "2-digit",
+      }).format(endedAt);
+      const durStr =
+        durationSec >= 60
+          ? `${Math.floor(durationSec / 60)}m${String(durationSec % 60).padStart(2, "0")}s`
+          : `${durationSec}s`;
+      const content = `Gravação da chamada · ${hmS}–${hmE} · ${durStr}`;
+
+      const externalId = callId ? `call_timeline:${callId}` : null;
+
+      // Lateralização da gravação acompanha o lado de quem iniciou a
+      // chamada — se foi o agente (BUSINESS_INITIATED), bolha vai pra
+      // direita. Antes era hardcoded `"in"` e a gravação aparecia à
+      // esquerda mesmo pra chamadas outbound feitas pelo próprio agente.
+      const recordingDirection: "in" | "out" =
+        direction === "BUSINESS_INITIATED" ? "out" : "in";
+
+      let msg;
+      if (externalId) {
+        const existing = await prisma.message.findFirst({
+          where: { conversationId: conv.id, externalId },
+          select: { id: true },
         });
+        if (existing) {
+          msg = await prisma.message.update({
+            where: { id: existing.id },
+            data: {
+              content,
+              mediaUrl: publicUrl,
+              messageType: "whatsapp_call_recording",
+              senderName,
+              direction: recordingDirection,
+              // Garante que não vai ser pega pelo sweeper de mensagens
+              // stale: gravação é artefato interno, nunca passa pela Meta.
+              sendStatus: "delivered",
+              sendError: null,
+            },
+          });
+        } else {
+          msg = await prisma.message.create({
+            data: withOrgFromCtx({
+              conversationId: conv.id,
+              content,
+              direction: recordingDirection,
+              messageType: "whatsapp_call_recording",
+              senderName,
+              externalId,
+              mediaUrl: publicUrl,
+              createdAt: endedAt,
+              sendStatus: "delivered",
+            }),
+          });
+        }
       } else {
         msg = await prisma.message.create({
-          data: {
+          data: withOrgFromCtx({
             conversationId: conv.id,
             content,
             direction: recordingDirection,
             messageType: "whatsapp_call_recording",
             senderName,
-            externalId,
             mediaUrl: publicUrl,
             createdAt: endedAt,
-          },
+            sendStatus: "delivered",
+          }),
         });
       }
-    } else {
-      msg = await prisma.message.create({
-        data: {
-          conversationId: conv.id,
-          content,
-          direction: recordingDirection,
-          messageType: "whatsapp_call_recording",
-          senderName,
-          mediaUrl: publicUrl,
-          createdAt: endedAt,
-        },
+
+      try {
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: { updatedAt: new Date(), lastMessageDirection: recordingDirection },
+        });
+      } catch {
+        /* ignore */
+      }
+
+      sseBus.publish("new_message", {
+        organizationId: conv.organizationId,
+        conversationId: conv.id,
+        contactId: conv.contactId,
+        direction: recordingDirection,
+        content,
+        mediaUrl: publicUrl,
+        messageType: "whatsapp_call_recording",
+        timestamp: endedAt,
       });
-    }
 
-    try {
-      await prisma.conversation.update({
-        where: { id: conv.id },
-        data: { updatedAt: new Date(), lastMessageDirection: recordingDirection },
+      return NextResponse.json({
+        ok: true,
+        messageId: msg.id,
+        mediaUrl: publicUrl,
+        durationSec,
       });
-    } catch {
-      /* ignore */
+    } catch (err) {
+      console.error("[call-recording] fatal:", err);
+      return NextResponse.json(
+        { message: "Erro ao salvar gravação." },
+        { status: 500 },
+      );
     }
-
-    sseBus.publish("new_message", {
-      conversationId: conv.id,
-      contactId: conv.contactId,
-      direction: recordingDirection,
-      content,
-      mediaUrl: publicUrl,
-      messageType: "whatsapp_call_recording",
-      timestamp: endedAt,
-    });
-
-    return NextResponse.json({
-      ok: true,
-      messageId: msg.id,
-      mediaUrl: publicUrl,
-      durationSec,
-    });
-  } catch (err) {
-    console.error("[call-recording] fatal:", err);
-    return NextResponse.json(
-      { message: "Erro ao salvar gravação." },
-      { status: 500 },
-    );
-  }
+  });
 }

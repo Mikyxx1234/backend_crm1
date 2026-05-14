@@ -3,7 +3,10 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { mapMetaWhatsappCallGraphError } from "@/lib/meta-whatsapp-call-errors";
-import { metaWhatsApp, type WhatsAppCallSession } from "@/lib/meta-whatsapp/client";
+import {
+  metaClientFromConfig,
+  type WhatsAppCallSession,
+} from "@/lib/meta-whatsapp/client";
 import { buildCallBizOpaquePayload } from "@/lib/whatsapp-call-chat";
 import { prisma } from "@/lib/prisma";
 
@@ -111,6 +114,7 @@ export async function POST(request: Request, context: RouteContext) {
         contactId: true,
         channel: true,
         whatsappCallConsentStatus: true,
+        channelRef: { select: { config: true, provider: true } },
       },
     });
     if (!conv) {
@@ -120,11 +124,20 @@ export async function POST(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "Chamadas WhatsApp só se aplicam a conversas WhatsApp." }, { status: 400 });
     }
 
-    if (!metaWhatsApp.configured) {
+    if (conv.channelRef?.provider !== "META_CLOUD_API") {
+      return NextResponse.json(
+        { message: "Chamadas só são suportadas em canais Meta Cloud API." },
+        { status: 400 },
+      );
+    }
+    const metaClient = metaClientFromConfig(
+      conv.channelRef.config as Record<string, unknown> | null | undefined,
+    );
+    if (!metaClient.configured) {
       return NextResponse.json(
         {
           message:
-            "Meta WhatsApp API não configurada. Defina META_WHATSAPP_ACCESS_TOKEN e META_WHATSAPP_PHONE_NUMBER_ID.",
+            "Canal Meta Cloud API desta conversa está sem credenciais (accessToken/phoneNumberId).",
         },
         { status: 503 },
       );
@@ -195,7 +208,7 @@ export async function POST(request: Request, context: RouteContext) {
           : (session.user.email ?? "Agente");
       const bizOpaque = buildCallBizOpaquePayload(uid, display);
       try {
-        const result = await metaWhatsApp.initiateVoiceCall(toDigits, sessionSdp, bizOpaque);
+        const result = await metaClient.initiateVoiceCall(toDigits, sessionSdp, bizOpaque);
         return NextResponse.json(result);
       } catch (err) {
         const raw = err instanceof Error ? err.message : String(err);
@@ -213,12 +226,12 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     if (action === "reject") {
-      const result = await metaWhatsApp.rejectCall(callId);
+      const result = await metaClient.rejectCall(callId);
       return NextResponse.json(result);
     }
 
     if (action === "terminate") {
-      const result = await metaWhatsApp.terminateCall(callId);
+      const result = await metaClient.terminateCall(callId);
       return NextResponse.json(result);
     }
 
@@ -231,7 +244,7 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     if (action === "pre_accept") {
-      const result = await metaWhatsApp.preAcceptCall(callId, sessionSdp);
+      const result = await metaClient.preAcceptCall(callId, sessionSdp);
       return NextResponse.json(result);
     }
 
@@ -240,7 +253,7 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     const bizOpaque = str(b.biz_opaque_callback_data) || undefined;
-    const result = await metaWhatsApp.acceptCall(callId, sessionSdp, bizOpaque);
+    const result = await metaClient.acceptCall(callId, sessionSdp, bizOpaque);
     return NextResponse.json(result);
   } catch (e) {
     console.error(e);

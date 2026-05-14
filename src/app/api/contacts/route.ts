@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { authenticateApiRequest } from "@/lib/api-auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import {
   createContact,
   getContacts,
@@ -18,6 +18,8 @@ export async function GET(request: Request) {
   try {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
+
+    return await runWithApiUserContext(authResult.user, async () => {
 
     const { searchParams } = new URL(request.url);
     const search = searchParams.get("search") ?? undefined;
@@ -56,6 +58,7 @@ export async function GET(request: Request) {
     });
 
     return NextResponse.json(result);
+    });
   } catch (e) {
     console.error(e);
     return NextResponse.json(
@@ -69,6 +72,8 @@ export async function POST(request: Request) {
   try {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
+
+    return await runWithApiUserContext(authResult.user, async () => {
 
     let body: unknown;
     try {
@@ -145,6 +150,7 @@ export async function POST(request: Request) {
     });
 
     return NextResponse.json(contact, { status: 201 });
+    });
   } catch (e: unknown) {
     console.error(e);
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2002") {

@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import {
   getCallPermissionAcceptButtonIds,
   getCallPermissionAcceptButtonTitlesFromEnv,
@@ -198,6 +199,9 @@ async function applyGrant(
   });
 
   try {
+    // Defesa em profundidade: WHERE id ja e PK unica, mas adicionamos
+    // organizationId pra alinhar com RLS quando ativarmos.
+    const orgId = getOrgIdOrThrow();
     if (expiresAt) {
       await prisma.$executeRaw`
         UPDATE "conversations"
@@ -205,6 +209,7 @@ async function applyGrant(
           "whatsappCallConsentType" = ${type}::"WhatsappCallConsentType",
           "whatsappCallConsentExpiresAt" = ${expiresAt}
         WHERE "id" = ${conversationId}
+          AND "organizationId" = ${orgId}
       `;
     } else {
       await prisma.$executeRaw`
@@ -213,6 +218,7 @@ async function applyGrant(
           "whatsappCallConsentType" = ${type}::"WhatsappCallConsentType",
           "whatsappCallConsentExpiresAt" = NULL
         WHERE "id" = ${conversationId}
+          AND "organizationId" = ${orgId}
       `;
     }
   } catch (err) {
@@ -256,12 +262,14 @@ export async function maybeDenyWhatsappCallConsent(
   });
 
   try {
+    const orgId = getOrgIdOrThrow();
     await prisma.$executeRaw`
       UPDATE "conversations"
       SET
         "whatsappCallConsentType" = NULL,
         "whatsappCallConsentExpiresAt" = NULL
       WHERE "id" = ${conversationId}
+        AND "organizationId" = ${orgId}
     `;
   } catch (err) {
     console.warn(

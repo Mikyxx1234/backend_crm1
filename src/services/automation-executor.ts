@@ -9,15 +9,25 @@ import {
 
 import { normalizeConditionConfig } from "@/lib/automation-condition";
 import { getLogger } from "@/lib/logger";
-import { metaWhatsApp, formatMetaSendError } from "@/lib/meta-whatsapp/client";
+import {
+  metaWhatsApp,
+  metaClientFromConfig,
+  formatMetaSendError,
+  type MetaWhatsAppClient,
+} from "@/lib/meta-whatsapp/client";
+import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import type { AutomationJobPayload } from "@/lib/queue";
 import { sseBus } from "@/lib/sse-bus";
 import {
   assignDealOwner,
   createDealEvent,
+  nextDealNumber,
   propagateOwnerToContactAndChat,
 } from "@/services/deals";
+import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { updateContactScore } from "@/services/lead-scoring";
 import {
   createContext,
@@ -27,6 +37,106 @@ import {
 } from "@/services/automation-context";
 
 const log = getLogger("automation");
+
+/**
+ * Resolve o cliente Meta WhatsApp correto para uma automação multi-tenant.
+ *
+ * Estrategia:
+ *   1. Se ja temos um `conversationId`, puxa `channelRef.config` da
+ *      conversa — este eh o caminho preferencial pq garante 100% que o
+ *      envio sai pelo canal certo da org corrente.
+ *   2. Caso contrario (sem conv pra esse contato), procura o primeiro
+ *      canal META_CLOUD_API ativo da org (via getOrgIdOrNull) — fallback
+ *      pra triggers que disparam ANTES de existir conversa.
+ *   3. Como ultimo recurso, usa o singleton global `metaWhatsApp` (env).
+ *      Isso so deveria acontecer em ambientes legados sem canal cadastrado;
+ *      logamos um warning para detectar.
+ *
+ * Antes (24/abr/26) o executor SEMPRE usava o singleton — automacoes da
+ * org B saiam pelo numero da Eduit (env vars de uma org especifica). Bug
+ * critico de multi-tenancy fixado aqui junto com o resto da Fase 1.
+ */
+async function resolveAutomationMetaClient(opts: {
+  automationId?: string | null;
+  conversationId?: string | null;
+  contactId?: string | null;
+  dealId?: string | null;
+}): Promise<MetaWhatsAppClient> {
+  let resolvedOrgId: string | null = null;
+
+  if (opts.conversationId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: opts.conversationId },
+      select: {
+        organizationId: true,
+        channelRef: { select: { config: true, provider: true } },
+      },
+    });
+    resolvedOrgId = conv?.organizationId ?? null;
+    const provider = conv?.channelRef?.provider;
+    if (provider === "META_CLOUD_API") {
+      const cfg = conv?.channelRef?.config as
+        | Record<string, unknown>
+        | null
+        | undefined;
+      const client = metaClientFromConfig(cfg);
+      if (client.configured) return client;
+    }
+  }
+
+  // Ordem de resolução do tenant quando não há RequestContext:
+  // 1) ALS atual (rotas HTTP)
+  // 2) deal -> org
+  // 3) contact -> org
+  // 4) automation -> org
+  if (!resolvedOrgId) {
+    resolvedOrgId = getOrgIdOrNull();
+  }
+  if (!resolvedOrgId && opts.dealId) {
+    const deal = await prisma.deal.findUnique({
+      where: { id: opts.dealId },
+      select: { organizationId: true },
+    });
+    resolvedOrgId = deal?.organizationId ?? null;
+  }
+  if (!resolvedOrgId && opts.contactId) {
+    const contact = await prisma.contact.findUnique({
+      where: { id: opts.contactId },
+      select: { organizationId: true },
+    });
+    resolvedOrgId = contact?.organizationId ?? null;
+  }
+  if (!resolvedOrgId && opts.automationId) {
+    const automation = await prisma.automation.findUnique({
+      where: { id: opts.automationId },
+      select: { organizationId: true },
+    });
+    resolvedOrgId = automation?.organizationId ?? null;
+  }
+
+  if (resolvedOrgId) {
+    const channel = await prisma.channel.findFirst({
+      where: {
+        organizationId: resolvedOrgId,
+        provider: "META_CLOUD_API",
+        status: "CONNECTED",
+      },
+      select: { config: true },
+      orderBy: { createdAt: "asc" },
+    });
+    if (channel?.config) {
+      const client = metaClientFromConfig(
+        channel.config as Record<string, unknown>,
+      );
+      if (client.configured) return client;
+    }
+  }
+
+  log.warn(
+    `Nenhum canal META_CLOUD_API encontrado (automation=${opts.automationId ?? "—"}, conv=${opts.conversationId ?? "—"}, org=${resolvedOrgId ?? "—"}) — caindo para singleton (env vars). MULTI-TENANCY EM RISCO!`,
+  );
+  return metaWhatsApp;
+}
 
 const ACTIVITY_TYPES: ActivityType[] = ["CALL", "EMAIL", "MEETING", "TASK", "NOTE", "WHATSAPP", "OTHER"];
 const LIFECYCLE_STAGES: LifecycleStage[] = ["SUBSCRIBER", "LEAD", "MQL", "SQL", "OPPORTUNITY", "CUSTOMER", "EVANGELIST", "OTHER"];
@@ -89,23 +199,37 @@ async function logStep(args: {
 
   try {
     await prisma.automationLog.create({
-      data: {
+      data: withOrgFromCtx({
         ...base,
         stepId: (args.stepId as string) ?? null,
         stepType: (args.stepType as string) ?? null,
         ...(payloadJson !== undefined ? { payload: payloadJson } : {}),
-      },
+      }),
     });
   } catch (firstErr) {
     try {
       await prisma.automationLog.create({
-        data: { ...base, ...(payloadJson !== undefined ? { payload: payloadJson } : {}) },
+        data: withOrgFromCtx({
+          ...base,
+          ...(payloadJson !== undefined ? { payload: payloadJson } : {}),
+        }),
       });
     } catch (secondErr) {
       try {
+        // Apos a migration multi-tenancy, "organizationId" e NOT NULL em
+        // automation_logs. O fallback de fallback precisa injetar o orgId
+        // do ctx; se nao houver ctx, melhor desistir e logar do que estourar
+        // erro 500 numa rota que ja estava degradada.
+        const orgId = getOrgIdOrNull();
+        if (!orgId) {
+          throw new Error(
+            "logStep raw fallback sem organizationId no contexto",
+          );
+        }
         await prisma.$executeRawUnsafe(
-          `INSERT INTO "automation_logs" ("id", "automationId", "contactId", "dealId", "status", "message", "executedAt")
-           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, NOW())`,
+          `INSERT INTO "automation_logs" ("id", "organizationId", "automationId", "contactId", "dealId", "status", "message", "executedAt")
+           VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())`,
+          orgId,
           args.automationId,
           args.contactId ?? null,
           args.dealId ?? null,
@@ -448,12 +572,20 @@ async function executeStep(
       }
 
       const target = readString(cfg, "target") ?? (rt.dealId ? "deal" : "contact");
+      let contactForOpening: string | null = null;
       if (target === "deal") {
         const targetDealId = rt.dealId ?? readString(cfg, "dealId");
         if (!targetDealId) {
           throw new Error("transfer_to_ai_agent: dealId ausente");
         }
         await assignDealOwner(targetDealId, agentUserId);
+        // Resolve o contact do deal pra poder disparar a saudação
+        // proativa (precisa do contactId, não do dealId).
+        const deal = await prisma.deal.findUnique({
+          where: { id: targetDealId },
+          select: { contactId: true },
+        });
+        contactForOpening = deal?.contactId ?? null;
       } else {
         const targetContactId = rt.contactId ?? readString(cfg, "contactId");
         if (!targetContactId) {
@@ -462,6 +594,39 @@ async function executeStep(
         await prisma.$transaction((tx) =>
           propagateOwnerToContactAndChat(tx, targetContactId, agentUserId),
         );
+        contactForOpening = targetContactId;
+      }
+
+      // Saudação proativa: dispara imediatamente após a atribuição,
+      // sem esperar o cliente mandar mensagem. Isso resolve o caso de
+      // automações cujo trigger é "Negócio criado" / etc. — antes, o
+      // agente ficava mudo porque `maybeReplyAsAIAgent` só roda em
+      // inbound. Idempotente via `Conversation.aiGreetedAt`, então
+      // se o cliente mandar algo depois, a saudação não repete.
+      //
+      // Falhas aqui não podem derrubar o passo da automação: o log do
+      // passo já registrou "transfer_to_ai_agent OK". A saudação é
+      // efeito colateral; se falhar, o agente ainda responderá ao
+      // próximo inbound normalmente.
+      if (contactForOpening) {
+        try {
+          const opening = await triggerAgentOpeningForContact({
+            contactId: contactForOpening,
+            agentUserId,
+            channel: "meta",
+          });
+          if (opening.status === "skipped") {
+            log.info(
+              `transfer_to_ai_agent: saudação proativa pulada (${opening.reason})`,
+            );
+          } else {
+            log.info(
+              `transfer_to_ai_agent: saudação proativa ${opening.status} (conv=${opening.conversationId})`,
+            );
+          }
+        } catch (err) {
+          log.warn("transfer_to_ai_agent: falha na saudação proativa:", err);
+        }
       }
       return {};
     }
@@ -473,7 +638,13 @@ async function executeStep(
       const tagName = readString(cfg, "tagName");
       let resolvedTagId = tagId;
       if (!resolvedTagId && tagName) {
-        const tag = await prisma.tag.upsert({ where: { name: tagName }, create: { name: tagName }, update: {} });
+        const orgId = getOrgIdOrNull();
+        if (!orgId) throw new Error("add_tag: organizationId ausente do contexto");
+        const tag = await prisma.tag.upsert({
+          where: { organizationId_name: { organizationId: orgId, name: tagName } },
+          create: withOrgFromCtx({ name: tagName }),
+          update: {},
+        });
         resolvedTagId = tag.id;
       }
       if (!resolvedTagId) throw new Error("add_tag: tagId ou tagName obrigatório");
@@ -492,8 +663,13 @@ async function executeStep(
       const tagName = readString(cfg, "tagName");
       let resolvedTagId = tagId;
       if (!resolvedTagId && tagName) {
-        const tag = await prisma.tag.findUnique({ where: { name: tagName } });
-        if (tag) resolvedTagId = tag.id;
+        const orgId = getOrgIdOrNull();
+        if (orgId) {
+          const tag = await prisma.tag.findUnique({
+            where: { organizationId_name: { organizationId: orgId, name: tagName } },
+          });
+          if (tag) resolvedTagId = tag.id;
+        }
       }
       if (resolvedTagId) {
         await prisma.tagOnContact.deleteMany({
@@ -518,8 +694,31 @@ async function executeStep(
           data.value = typeof value === "number" ? value : new Prisma.Decimal(String(value));
         } else if (field === "status" && typeof value === "string" && isDealStatus(value)) data.status = value;
         else if (field === "stageId" && typeof value === "string") data.stageId = value;
-        else throw new Error(`update_field: campo de negócio não suportado: ${field}`);
-        if (Object.keys(data).length > 0) await prisma.deal.update({ where: { id: targetDealId }, data });
+        if (Object.keys(data).length > 0) {
+          await prisma.deal.update({ where: { id: targetDealId }, data });
+        } else {
+          const customField = await prisma.customField.findFirst({
+            where: { entity: "deal", name: field },
+            select: { id: true },
+          });
+          if (!customField) {
+            throw new Error(`update_field: campo de negócio não suportado: ${field}`);
+          }
+          await prisma.dealCustomFieldValue.upsert({
+            where: {
+              dealId_customFieldId: {
+                dealId: targetDealId,
+                customFieldId: customField.id,
+              },
+            },
+            update: { value: value == null ? "" : String(value) },
+            create: withOrgFromCtx({
+              dealId: targetDealId,
+              customFieldId: customField.id,
+              value: value == null ? "" : String(value),
+            }),
+          });
+        }
       } else {
         const targetContactId = rt.contactId ?? readString(cfg, "contactId");
         if (!targetContactId) throw new Error("update_field: contactId ausente");
@@ -530,8 +729,31 @@ async function executeStep(
         else if (field === "source" && (typeof value === "string" || value === null)) data.source = value as string | null;
         else if (field === "lifecycleStage" && typeof value === "string" && isLifecycleStage(value)) data.lifecycleStage = value;
         else if (field === "assignedToId" && (typeof value === "string" || value === null)) data.assignedToId = value as string | null;
-        else throw new Error(`update_field: campo de contato não suportado: ${field}`);
-        await prisma.contact.update({ where: { id: targetContactId }, data });
+        if (Object.keys(data).length > 0) {
+          await prisma.contact.update({ where: { id: targetContactId }, data });
+        } else {
+          const customField = await prisma.customField.findFirst({
+            where: { entity: "contact", name: field },
+            select: { id: true },
+          });
+          if (!customField) {
+            throw new Error(`update_field: campo de contato não suportado: ${field}`);
+          }
+          await prisma.contactCustomFieldValue.upsert({
+            where: {
+              contactId_customFieldId: {
+                contactId: targetContactId,
+                customFieldId: customField.id,
+              },
+            },
+            update: { value: value == null ? "" : String(value) },
+            create: withOrgFromCtx({
+              contactId: targetContactId,
+              customFieldId: customField.id,
+              value: value == null ? "" : String(value),
+            }),
+          });
+        }
       }
       return {};
     }
@@ -545,25 +767,20 @@ async function executeStep(
       const title = readString(cfg, "title");
       if (!title) throw new Error("create_activity: title obrigatório");
       await prisma.activity.create({
-        data: {
-          type: typeRaw, title,
+        data: withOrgFromCtx({
+          type: typeRaw,
+          title,
           description: readString(cfg, "description") ?? null,
           userId,
           contactId: rt.contactId ?? null,
           dealId: rt.dealId ?? null,
           completed: readBoolean(cfg, "completed") ?? false,
-        },
+        }),
       });
       return {};
     }
 
     case "send_whatsapp_message": {
-      if (!metaWhatsApp.configured) {
-        throw new Error(
-          "send_whatsapp_message: Meta WhatsApp API não configurada (META_WHATSAPP_ACCESS_TOKEN / META_WHATSAPP_PHONE_NUMBER_ID ausentes)"
-        );
-      }
-
       const cfgPhone = readString(cfg, "phone")?.trim() || "";
       const phoneRaw = cfgPhone || rt.contact?.phone || "";
       const digits = phoneRaw.replace(/\D/g, "");
@@ -571,7 +788,9 @@ async function executeStep(
       const cfgRecipient = readString(cfg, "recipient")?.trim() || "";
       const recipient =
         cfgRecipient || rt.contact?.whatsappBsuid?.trim() || undefined;
-      const content = readString(cfg, "content");
+      const contentRaw = readString(cfg, "content");
+      const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
+      const content = contentRaw && vars ? interpolateVariables(contentRaw, vars) : contentRaw;
 
       log.debug(`Enviando WhatsApp: contato=${rt.contactId ?? "—"} destino=${to ?? recipient ?? "—"} texto="${content?.slice(0, 60) ?? "(vazio)"}"`);
 
@@ -594,13 +813,26 @@ async function executeStep(
         if (!conv) log.warn(`Nenhuma conversa WhatsApp encontrada para o contato ${rt.contactId}`);
       }
 
+      const metaClient = await resolveAutomationMetaClient({
+        automationId: rt.automationId,
+        conversationId,
+        contactId: rt.contactId ?? null,
+        dealId: rt.dealId ?? null,
+      });
+      if (!metaClient.configured) {
+        throw new Error(
+          "send_whatsapp_message: nenhum canal META_CLOUD_API configurado para esta organização."
+        );
+      }
+
       let externalId: string | null = null;
       let sentContent = content;
       let msgType = "text";
+      let outFlowToken: string | null = null;
 
       let hardFailure: Error | null = null;
       try {
-        const result = await metaWhatsApp.sendText(to, content, recipient);
+        const result = await metaClient.sendText(to, content, recipient);
         externalId = result.messages?.[0]?.id ?? null;
       } catch (sendErr) {
         const errMsg = sendErr instanceof Error ? sendErr.message : String(sendErr);
@@ -611,7 +843,30 @@ async function executeStep(
           log.info(`Sessão de 24h expirada — caindo para template "${fallbackTemplate}"`);
           const langCode = readString(cfg, "fallbackLanguageCode") ?? "pt_BR";
           try {
-            const tplResult = await metaWhatsApp.sendTemplate(to, fallbackTemplate, langCode, undefined, recipient);
+            let fbGid: string | null = null;
+            try {
+              const r = await prisma.whatsAppTemplateConfig.findFirst({
+                where: { metaTemplateName: fallbackTemplate },
+                select: { metaTemplateId: true },
+              });
+              fbGid = r?.metaTemplateId?.trim() || null;
+            } catch {
+              /* ignore */
+            }
+            const fbEnrich = await enrichTemplateComponentsForFlowSend(metaClient, {
+              templateName: fallbackTemplate,
+              languageCode: langCode,
+              components: undefined,
+              templateGraphId: fbGid,
+            });
+            outFlowToken = fbEnrich.flowToken;
+            const tplResult = await metaClient.sendTemplate(
+              to,
+              fallbackTemplate,
+              langCode,
+              fbEnrich.components,
+              recipient,
+            );
             externalId = tplResult?.messages?.[0]?.id ?? null;
             sentContent = `[Template fallback: ${fallbackTemplate}]`;
             msgType = "template";
@@ -632,7 +887,7 @@ async function executeStep(
         if (conversationId) {
           await prisma.message
             .create({
-              data: {
+              data: withOrgFromCtx({
                 conversationId,
                 content,
                 direction: "out",
@@ -640,7 +895,7 @@ async function executeStep(
                 senderName: "Automação",
                 sendStatus: "failed",
                 sendError: formatMetaSendError(hardFailure).slice(0, 500),
-              },
+              }),
             })
             .catch((err) => log.warn("Falha ao persistir mensagem de erro:", err));
 
@@ -657,14 +912,17 @@ async function executeStep(
 
       if (conversationId) {
         const saved = await prisma.message.create({
-          data: {
+          data: withOrgFromCtx({
             conversationId,
             content: sentContent,
             direction: "out",
             messageType: msgType,
             senderName: "Automação",
             externalId,
-          },
+            ...(typeof outFlowToken === "string" && outFlowToken.trim()
+              ? { flowToken: outFlowToken.trim() }
+              : {}),
+          }),
         });
 
         await prisma.conversation.update({
@@ -673,6 +931,7 @@ async function executeStep(
         }).catch(() => {});
 
         sseBus.publish("new_message", {
+          organizationId: getOrgIdOrNull(),
           conversationId,
           contactId: rt.contactId,
           direction: "out",
@@ -685,9 +944,6 @@ async function executeStep(
     }
 
     case "send_whatsapp_template": {
-      if (!metaWhatsApp.configured) {
-        throw new Error("send_whatsapp_template: Meta WhatsApp API não configurada");
-      }
       const cfgPhone = readString(cfg, "phone")?.trim() || "";
       const phoneRaw = cfgPhone || rt.contact?.phone || "";
       const digits = phoneRaw.replace(/\D/g, "");
@@ -701,8 +957,61 @@ async function executeStep(
       if ((!to && !recipient) || !templateName) {
         throw new Error(`send_whatsapp_template: templateName obrigatório; to=${to ?? "—"} bsuid=${recipient ?? "—"} templateName=${templateName ?? "(vazio)"}`);
       }
-      const components = cfg["components"] as unknown[] | undefined;
-      const tplResult = await metaWhatsApp.sendTemplate(to, templateName, langCode, components, recipient);
+
+      let preTplConversationId: string | undefined;
+      if (rt.contactId) {
+        const conv = await prisma.conversation.findFirst({
+          where: { contactId: rt.contactId, channel: "whatsapp" },
+          select: { id: true },
+        });
+        preTplConversationId = conv?.id;
+      }
+      const tplMetaClient = await resolveAutomationMetaClient({
+        automationId: rt.automationId,
+        conversationId: preTplConversationId,
+        contactId: rt.contactId ?? null,
+        dealId: rt.dealId ?? null,
+      });
+      if (!tplMetaClient.configured) {
+        throw new Error(
+          "send_whatsapp_template: nenhum canal META_CLOUD_API configurado para esta organização."
+        );
+      }
+
+      const rawComponents = Array.isArray(cfg["components"])
+        ? (cfg["components"] as unknown[])
+        : undefined;
+      const flowToken = readString(cfg, "flowToken") ?? null;
+      const fad = cfg["flowActionData"];
+      const flowActionData =
+        fad && typeof fad === "object" && !Array.isArray(fad)
+          ? (fad as Record<string, unknown>)
+          : null;
+      let templateGraphId: string | null = null;
+      try {
+        const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
+          where: { metaTemplateName: templateName },
+          select: { metaTemplateId: true },
+        });
+        templateGraphId = gidRow?.metaTemplateId?.trim() || null;
+      } catch {
+        /* ignore */
+      }
+      const enrichTpl = await enrichTemplateComponentsForFlowSend(tplMetaClient, {
+        templateName,
+        languageCode: langCode,
+        components: rawComponents,
+        flowToken,
+        flowActionData,
+        templateGraphId,
+      });
+      const tplResult = await tplMetaClient.sendTemplate(
+        to,
+        templateName,
+        langCode,
+        enrichTpl.components,
+        recipient,
+      );
       const tplExternalId = tplResult?.messages?.[0]?.id ?? null;
 
       let tplConversationId: string | undefined;
@@ -728,14 +1037,17 @@ async function executeStep(
           : `[Template: ${templateName}]`;
 
         const saved = await prisma.message.create({
-          data: {
+          data: withOrgFromCtx({
             conversationId: tplConversationId,
             content: tplContent,
             direction: "out",
             messageType: "template",
             senderName: "Automação",
             externalId: tplExternalId,
-          },
+            ...(typeof enrichTpl.flowToken === "string" && enrichTpl.flowToken.trim()
+              ? { flowToken: enrichTpl.flowToken.trim() }
+              : {}),
+          }),
         });
 
         await prisma.conversation.update({
@@ -744,6 +1056,7 @@ async function executeStep(
         }).catch(() => {});
 
         sseBus.publish("new_message", {
+          organizationId: getOrgIdOrNull(),
           conversationId: tplConversationId,
           contactId: rt.contactId,
           direction: "out",
@@ -756,7 +1069,6 @@ async function executeStep(
     }
 
     case "send_whatsapp_media": {
-      if (!metaWhatsApp.configured) throw new Error("send_whatsapp_media: Meta WhatsApp API não configurada");
       const phoneRaw = readString(cfg, "phone")?.trim() || rt.contact?.phone || "";
       const digits = phoneRaw.replace(/\D/g, "");
       const to = digits.length >= 8 ? digits : undefined;
@@ -769,46 +1081,86 @@ async function executeStep(
       const caption = readString(cfg, "caption") ?? "";
       const filename = readString(cfg, "filename") ?? "";
 
+      let preMediaConversationId: string | undefined;
+      if (rt.contactId) {
+        const conv = await prisma.conversation.findFirst({
+          where: { contactId: rt.contactId, channel: "whatsapp" },
+          select: { id: true },
+        });
+        preMediaConversationId = conv?.id;
+      }
+      const mediaMetaClient = await resolveAutomationMetaClient({
+        automationId: rt.automationId,
+        conversationId: preMediaConversationId,
+        contactId: rt.contactId ?? null,
+        dealId: rt.dealId ?? null,
+      });
+      if (!mediaMetaClient.configured) {
+        throw new Error(
+          "send_whatsapp_media: nenhum canal META_CLOUD_API configurado para esta organização."
+        );
+      }
+
       let sendResult: { messages: Array<{ id: string }> };
       let displayContent: string;
 
-      const isLocalFile = mediaUrl.startsWith("/uploads/");
+      // PR 1.3: aceita tanto URLs novas (`/api/storage/...` tenant-scoped)
+      // quanto legacy (`/uploads/...`). Se conseguirmos resolver localmente,
+      // fazemos upload pra Meta via media id (evita expor URL pública).
+      const { parseStoragePath, readStoredFile, mimeFromFilename } = await import(
+        "@/lib/storage/local"
+      );
+      const parsedStorage = parseStoragePath(mediaUrl);
+      const isLegacyLocal = !parsedStorage && mediaUrl.startsWith("/uploads/");
+      const isLocalFile = Boolean(parsedStorage) || isLegacyLocal;
 
       if (isLocalFile) {
-        const { readFile } = await import("fs/promises");
-        const { join, extname, basename } = await import("path");
-        const filePath = join(process.cwd(), "public", mediaUrl);
-        const buffer = await readFile(filePath);
-        const ext = extname(mediaUrl).toLowerCase();
-        const mimeMap: Record<string, string> = {
-          ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
-          ".webp": "image/webp", ".gif": "image/gif",
-          ".mp4": "video/mp4", ".webm": "video/webm",
-          ".ogg": "audio/ogg", ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
-          ".pdf": "application/pdf", ".doc": "application/msword",
-        };
-        const mimeType = mimeMap[ext] ?? "application/octet-stream";
-        const fName = filename || basename(mediaUrl);
-        const metaMediaId = await metaWhatsApp.uploadMedia(buffer, mimeType, fName);
+        let buffer: Buffer | null = null;
+        let resolvedFileName: string;
+        let mimeType: string;
+
+        if (parsedStorage) {
+          const stored = await readStoredFile(
+            parsedStorage.orgId,
+            parsedStorage.bucket,
+            parsedStorage.fileName,
+          );
+          if (!stored) {
+            throw new Error(`send_whatsapp_media: arquivo nao encontrado em storage (${mediaUrl})`);
+          }
+          buffer = stored.buffer;
+          mimeType = stored.mimeType;
+          resolvedFileName = parsedStorage.fileName;
+        } else {
+          const { readFile } = await import("fs/promises");
+          const { join, basename } = await import("path");
+          const filePath = join(process.cwd(), "public", mediaUrl);
+          buffer = await readFile(filePath);
+          resolvedFileName = basename(mediaUrl);
+          mimeType = mimeFromFilename(resolvedFileName);
+        }
+
+        const fName = filename || resolvedFileName;
+        const metaMediaId = await mediaMetaClient.uploadMedia(buffer, mimeType, fName);
         const mType = mediaType as "image" | "audio" | "video" | "document";
-        sendResult = await metaWhatsApp.sendMediaById(to, metaMediaId, mType, caption || undefined, fName, false, recipient);
+        sendResult = await mediaMetaClient.sendMediaById(to, metaMediaId, mType, caption || undefined, fName, false, recipient);
         displayContent = caption || fName || `[${mediaType}]`;
       } else {
         switch (mediaType) {
           case "video":
-            sendResult = await metaWhatsApp.sendVideo(to, mediaUrl, caption || undefined, recipient);
+            sendResult = await mediaMetaClient.sendVideo(to, mediaUrl, caption || undefined, recipient);
             displayContent = caption || "[Vídeo]";
             break;
           case "audio":
-            sendResult = await metaWhatsApp.sendAudio(to, mediaUrl, recipient);
+            sendResult = await mediaMetaClient.sendAudio(to, mediaUrl, recipient);
             displayContent = "[Áudio]";
             break;
           case "document":
-            sendResult = await metaWhatsApp.sendDocument(to, mediaUrl, filename || "documento", caption || undefined, recipient);
+            sendResult = await mediaMetaClient.sendDocument(to, mediaUrl, filename || "documento", caption || undefined, recipient);
             displayContent = caption || filename || "[Documento]";
             break;
           default:
-            sendResult = await metaWhatsApp.sendImage(to, mediaUrl, caption || undefined, recipient);
+            sendResult = await mediaMetaClient.sendImage(to, mediaUrl, caption || undefined, recipient);
             displayContent = caption || "[Imagem]";
             break;
         }
@@ -823,7 +1175,7 @@ async function executeStep(
         });
         if (conv) {
           await prisma.message.create({
-            data: {
+            data: withOrgFromCtx({
               conversationId: conv.id,
               content: displayContent,
               direction: "out",
@@ -831,9 +1183,10 @@ async function executeStep(
               senderName: "Automação",
               externalId: mediaExternalId,
               mediaUrl,
-            },
+            }),
           });
           sseBus.publish("new_message", {
+            organizationId: getOrgIdOrNull(),
             conversationId: conv.id,
             contactId: rt.contactId,
             direction: "out",
@@ -846,7 +1199,6 @@ async function executeStep(
     }
 
     case "send_whatsapp_interactive": {
-      if (!metaWhatsApp.configured) throw new Error("send_whatsapp_interactive: Meta WhatsApp API não configurada");
       const phoneRaw = readString(cfg, "phone")?.trim() || rt.contact?.phone || "";
       const digits = phoneRaw.replace(/\D/g, "");
       const to = digits.length >= 8 ? digits : undefined;
@@ -878,9 +1230,21 @@ async function executeStep(
         conversationId = conv?.id;
       }
 
+      const interactiveMetaClient = await resolveAutomationMetaClient({
+        automationId: rt.automationId,
+        conversationId,
+        contactId: rt.contactId ?? null,
+        dealId: rt.dealId ?? null,
+      });
+      if (!interactiveMetaClient.configured) {
+        throw new Error(
+          "send_whatsapp_interactive: nenhum canal META_CLOUD_API configurado para esta organização."
+        );
+      }
+
       let externalId: string | null = null;
       try {
-        const sendResult = await metaWhatsApp.sendInteractiveButtons(to, body, buttons, header, footer, recipient);
+        const sendResult = await interactiveMetaClient.sendInteractiveButtons(to, body, buttons, header, footer, recipient);
         externalId = sendResult.messages?.[0]?.id ?? null;
       } catch (sendErr) {
         const errMsg = formatMetaSendError(sendErr);
@@ -888,7 +1252,7 @@ async function executeStep(
         if (conversationId) {
           await prisma.message
             .create({
-              data: {
+              data: withOrgFromCtx({
                 conversationId,
                 content: displayContent,
                 direction: "out",
@@ -896,7 +1260,7 @@ async function executeStep(
                 senderName: "Automação",
                 sendStatus: "failed",
                 sendError: errMsg.slice(0, 500),
-              },
+              }),
             })
             .catch((err) => log.warn("Falha ao persistir mensagem interativa de erro:", err));
           await prisma.conversation
@@ -908,16 +1272,17 @@ async function executeStep(
 
       if (conversationId) {
         await prisma.message.create({
-          data: {
+          data: withOrgFromCtx({
             conversationId,
             content: displayContent,
             direction: "out",
             messageType: "interactive",
             senderName: "Automação",
             externalId,
-          },
+          }),
         });
         sseBus.publish("new_message", {
+          organizationId: getOrgIdOrNull(),
           conversationId,
           contactId: rt.contactId ?? undefined,
           direction: "out",
@@ -1021,9 +1386,6 @@ async function executeStep(
       const content = readString(cfg, "content") ?? readString(cfg, "message") ?? "";
       log.debug(`Pergunta ao contato ${rt.contactId}: "${content.slice(0, 60)}"`);
       if (content) {
-        if (!metaWhatsApp.configured) {
-          throw new Error("question: Meta WhatsApp API não configurada");
-        }
         const phoneRaw = rt.contact?.phone ?? "";
         const digits = phoneRaw.replace(/\D/g, "");
         const to = digits.length >= 8 ? digits : undefined;
@@ -1031,18 +1393,29 @@ async function executeStep(
         if (to || recipient) {
           const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
           const interpolated = vars ? interpolateVariables(content, vars) : content;
-          const sendResult = await metaWhatsApp.sendText(to, interpolated, recipient);
-          const externalId = sendResult.messages?.[0]?.id ?? null;
 
           const conv = await prisma.conversation.findFirst({
             where: { contactId: rt.contactId, channel: "whatsapp" },
             select: { id: true },
           });
+          const questionMetaClient = await resolveAutomationMetaClient({
+            automationId: rt.automationId,
+            conversationId: conv?.id,
+            contactId: rt.contactId ?? null,
+            dealId: rt.dealId ?? null,
+          });
+          if (!questionMetaClient.configured) {
+            throw new Error(
+              "question: nenhum canal META_CLOUD_API configurado para esta organização."
+            );
+          }
+          const sendResult = await questionMetaClient.sendText(to, interpolated, recipient);
+          const externalId = sendResult.messages?.[0]?.id ?? null;
           if (conv) {
             await prisma.message.create({
-              data: { conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: "Automação", externalId },
+              data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: "Automação", externalId }),
             });
-            sseBus.publish("new_message", { conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
+            sseBus.publish("new_message", { organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
           }
         }
       }
@@ -1167,15 +1540,39 @@ async function executeStep(
         select: { name: true, pipelineId: true, pipeline: { select: { name: true } } },
       });
       if (!stage) throw new Error("create_deal: stageId inválido");
-      const deal = await prisma.deal.create({
-        data: {
-          title,
-          contactId: rt.contactId,
-          stageId,
-          status: "OPEN",
-          ...(rawValue != null ? { value: new Prisma.Decimal(String(rawValue)) } : {}),
-        },
-      });
+      // `Deal.number` e mandatorio + unico por org. Aloca max+1 com retry
+      // em P2002 (corrida concorrente). Mesmo padrao de services/deals.ts.
+      let deal: Deal | null = null;
+      let lastErr: unknown;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        const number = await nextDealNumber();
+        try {
+          deal = await prisma.deal.create({
+            data: withOrgFromCtx({
+              number,
+              title,
+              contactId: rt.contactId,
+              stageId,
+              status: "OPEN" as const,
+              ...(rawValue != null
+                ? { value: new Prisma.Decimal(String(rawValue)) }
+                : {}),
+            }),
+          });
+          break;
+        } catch (err) {
+          lastErr = err;
+          const isUnique =
+            typeof err === "object" &&
+            err !== null &&
+            "code" in err &&
+            (err as { code: string }).code === "P2002";
+          if (!isUnique) throw err;
+        }
+      }
+      if (!deal) {
+        throw lastErr ?? new Error("Falha ao alocar Deal.number apos retries");
+      }
       rt.dealId = deal.id;
       rt.deal = {
         ...(deal as Deal & { contactId: string | null }),
@@ -1337,12 +1734,13 @@ async function getLastInboundWamid(contactId: string): Promise<string | null> {
 async function humanizeBeforeStep(
   stepType: string,
   humanize: { markAsRead: boolean; simulateTyping: boolean; typingDelayMs: number },
-  wamid: string | null
+  wamid: string | null,
+  metaClient: MetaWhatsAppClient
 ): Promise<void> {
-  if (!WA_SEND_STEP_TYPES.has(stepType) || !wamid || !metaWhatsApp.configured) return;
+  if (!WA_SEND_STEP_TYPES.has(stepType) || !wamid || !metaClient.configured) return;
   if (humanize.simulateTyping) {
     try {
-      await metaWhatsApp.sendTypingIndicator(wamid);
+      await metaClient.sendTypingIndicator(wamid);
       await new Promise((r) => setTimeout(r, humanize.typingDelayMs));
     } catch (err) {
       log.debug("Indicador de digitação falhou:", err instanceof Error ? err.message : err);
@@ -1383,7 +1781,9 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
   const contact = context.contactId
     ? await prisma.contact.findUnique({ where: { id: context.contactId }, select: { name: true, phone: true } })
     : null;
-  const contactName = contact?.name ?? "Contato";
+  const contactLabel = contact
+    ? `${contact.name ?? "Contato"}${contact.phone ? ` (${contact.phone})` : ""}`
+    : "—";
 
   const contextData = typeof context.data === "object" && context.data !== null
     ? context.data as Record<string, unknown>
@@ -1393,9 +1793,24 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     (typeof contextData.waMessageId === "string" ? contextData.waMessageId : null) ||
     (context.contactId ? await getLastInboundWamid(context.contactId) : null);
 
-  if (humanize.markAsRead && wamid && metaWhatsApp.configured) {
+  let runConvIdForMeta: string | undefined;
+  if (context.contactId) {
+    const c = await prisma.conversation.findFirst({
+      where: { contactId: context.contactId, channel: "whatsapp" },
+      select: { id: true },
+    });
+    runConvIdForMeta = c?.id;
+  }
+  const runMetaClient = await resolveAutomationMetaClient({
+    automationId,
+    conversationId: runConvIdForMeta,
+    contactId: context.contactId ?? null,
+    dealId: context.dealId ?? null,
+  });
+
+  if (humanize.markAsRead && wamid && runMetaClient.configured) {
     try {
-      await metaWhatsApp.markAsRead(wamid);
+      await runMetaClient.markAsRead(wamid);
     } catch (err) {
       log.debug("Falha ao marcar mensagem como lida:", err instanceof Error ? err.message : err);
     }
@@ -1406,10 +1821,10 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     contactId: context.contactId,
     dealId: context.dealId,
     status: "STARTED",
-    message: `${contactName} — ${context.event === "message_received" ? "mensagem recebida" : context.event}`,
+    message: `${contactLabel} — ${context.event === "message_received" ? "mensagem recebida" : context.event}`,
     payload: {
       evento: context.event,
-      contato: contactName,
+      contato: contact?.name ?? "Contato",
       telefone: contact?.phone ?? undefined,
       ...(contextData.content ? { mensagem: String(contextData.content).slice(0, 200) } : {}),
       ...(contextData.channel ? { canal: contextData.channel } : {}),
@@ -1439,7 +1854,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     const enrichedConfig = { ...stepConfig, __stepId: step.id, __variables: flowVariables };
     const { __rfPos: _, __stepId: _s, nextStepId: _n, __hasExplicitEdges: _e, ...cleanConfig } = stepConfig;
 
-    await humanizeBeforeStep(step.type, humanize, wamid);
+    await humanizeBeforeStep(step.type, humanize, wamid, runMetaClient);
 
     let result: StepResult;
     try {
@@ -1513,8 +1928,8 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     dealId: rt.dealId,
     status,
     message: stepsFailed > 0
-      ? `Finalizada com erros (${automation.steps.length} passos)`
-      : `Finalizada com sucesso (${automation.steps.length} passos)`,
+      ? `${contactLabel} — finalizada com erros (${automation.steps.length} passos)`
+      : `${contactLabel} — finalizada com sucesso (${automation.steps.length} passos)`,
   });
 
   if (rt.dealId) {
@@ -1574,6 +1989,9 @@ export async function continueFromStep(
 
   const contact = await prisma.contact.findUnique({ where: { id: contactId } });
   if (!contact) return;
+  const contactLabel = contact
+    ? `${contact.name ?? "Contato"}${contact.phone ? ` (${contact.phone})` : ""}`
+    : contactId;
 
   const dealRaw = await prisma.deal.findFirst({
     where: { contactId, status: "OPEN" },
@@ -1607,13 +2025,25 @@ export async function continueFromStep(
     conversation,
   };
 
-  const contactName = contact.name ?? "Contato";
+  let contConvIdForMeta: string | undefined;
+  {
+    const c = await prisma.conversation.findFirst({
+      where: { contactId, channel: "whatsapp" },
+      select: { id: true },
+    });
+    contConvIdForMeta = c?.id;
+  }
+  const contMetaClient = await resolveAutomationMetaClient({
+    automationId,
+    conversationId: contConvIdForMeta,
+    contactId,
+    dealId: deal?.id ?? null,
+  });
 
-  const wamid = await getLastInboundWamid(contactId);
-
-  if (humanize.markAsRead && wamid && metaWhatsApp.configured) {
+  const wamidForRead = await getLastInboundWamid(contactId);
+  if (humanize.markAsRead && wamidForRead && contMetaClient.configured) {
     try {
-      await metaWhatsApp.markAsRead(wamid);
+      await contMetaClient.markAsRead(wamidForRead);
     } catch (err) {
       log.debug("Falha ao marcar mensagem como lida (continuação):", err instanceof Error ? err.message : err);
     }
@@ -1624,7 +2054,7 @@ export async function continueFromStep(
     contactId,
     dealId: deal?.id,
     status: "STARTED",
-    message: `${contactName} — continuando fluxo`,
+    message: `${contactLabel} — continuando fluxo`,
   });
 
   const stepById = new Map(automation.steps.map((s) => [s.id, s]));
@@ -1645,7 +2075,8 @@ export async function continueFromStep(
       __variables: flowVariables,
     };
 
-    await humanizeBeforeStep(step.type, humanize, wamid);
+    const wamid = await getLastInboundWamid(contactId);
+    await humanizeBeforeStep(step.type, humanize, wamid, contMetaClient);
 
     let result: StepResult;
     try {
@@ -1709,7 +2140,7 @@ export async function continueFromStep(
     contactId,
     dealId: deal?.id,
     status: "COMPLETED",
-    message: `Finalizada com sucesso`,
+    message: `${contactLabel} — finalizada com sucesso`,
   });
 
   if (deal?.id) {

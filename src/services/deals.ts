@@ -1,6 +1,8 @@
 import { Prisma, type DealStatus } from "@prisma/client";
 
-import { prisma } from "@/lib/prisma";
+import { prisma, type ScopedTx } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 
@@ -19,9 +21,11 @@ export function createDealEvent(
   // não passam no filtro; quando passarem, o DB lança runtime error).
   const metaJson = meta as Prisma.InputJsonValue;
   return prisma.dealEvent
-    .create({ data: { dealId, userId, type, meta: metaJson } })
+    .create({ data: withOrgFromCtx({ dealId, userId, type, meta: metaJson }) })
     .catch(() =>
-      prisma.dealEvent.create({ data: { dealId, userId: null, type, meta: metaJson } }),
+      prisma.dealEvent.create({
+        data: withOrgFromCtx({ dealId, userId: null, type, meta: metaJson }),
+      }),
     );
 }
 
@@ -160,12 +164,19 @@ const detailInclude = {
   },
 } satisfies Prisma.DealInclude;
 
-export async function getDealById(idOrNumber: string) {
+export type DealDetail = Prisma.DealGetPayload<{
+  include: typeof detailInclude;
+}>;
+
+export async function getDealById(idOrNumber: string): Promise<DealDetail | null> {
   const isNumeric = /^\d+$/.test(idOrNumber);
-  const deal = await prisma.deal.findUnique({
-    where: isNumeric ? { number: parseInt(idOrNumber, 10) } : { id: idOrNumber },
+  const orgId = getOrgIdOrThrow();
+  const deal = (await prisma.deal.findUnique({
+    where: isNumeric
+      ? { organizationId_number: { organizationId: orgId, number: parseInt(idOrNumber, 10) } }
+      : { id: idOrNumber },
     include: detailInclude,
-  });
+  })) as DealDetail | null;
   if (deal?.contact) {
     await enrichContactsWithUserAvatarFallback([deal.contact]);
   }
@@ -188,6 +199,32 @@ export type CreateDealInput = {
   ownerId?: string | null;
 };
 
+/**
+ * Calcula o proximo `Deal.number` da org corrente. O schema declara
+ * `@@unique([organizationId, number])` e o campo nao tem default — antes
+ * era autoincrement global, mas multi-tenancy partiu por org e Postgres
+ * sequences nao suportam particionamento. A extension Prisma escopa o
+ * aggregate por org via getOrgIdOrThrow(), entao isso ja vem isolado.
+ *
+ * Em caso de corrida (dois creates simultaneos resolvendo o mesmo
+ * `max+1`), o caller deve fazer retry em P2002 — ver `createDeal` abaixo.
+ */
+export async function nextDealNumber(): Promise<number> {
+  const r = await prisma.deal.aggregate({ _max: { number: true } });
+  return (r._max.number ?? 0) + 1;
+}
+
+const DEAL_NUMBER_MAX_RETRIES = 5;
+
+function isPrismaUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: string }).code === "P2002"
+  );
+}
+
 export async function createDeal(data: CreateDealInput) {
   const title = data.title.trim();
   if (!title) throw new Error("INVALID_TITLE");
@@ -198,22 +235,39 @@ export async function createDeal(data: CreateDealInput) {
   });
   const position = data.position ?? (maxPos._max.position ?? -1) + 1;
 
-  return prisma.deal.create({
-    data: {
-      ...(data.id ? { id: data.id } : {}),
-      title,
-      externalId: data.externalId === undefined ? undefined : data.externalId,
-      value: data.value !== undefined ? data.value : undefined,
-      status: data.status,
-      expectedClose: data.expectedClose === undefined ? undefined : data.expectedClose,
-      lostReason: data.lostReason === undefined ? undefined : data.lostReason,
-      position,
-      contactId: data.contactId === undefined ? undefined : data.contactId,
-      stageId: data.stageId,
-      ownerId: data.ownerId === undefined ? undefined : data.ownerId,
-    },
-    include: listInclude,
-  });
+  // `number` e mandatorio (sem default) e unico por org. Tentamos
+  // alocar max+1 e repetimos em P2002 para cobrir corridas concorrentes
+  // (ex.: dois usuarios da mesma org criando deal no mesmo segundo).
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < DEAL_NUMBER_MAX_RETRIES; attempt++) {
+    const number = await nextDealNumber();
+    try {
+      return await prisma.deal.create({
+        data: withOrgFromCtx({
+          ...(data.id ? { id: data.id } : {}),
+          number,
+          title,
+          externalId: data.externalId === undefined ? undefined : data.externalId,
+          value: data.value !== undefined ? data.value : undefined,
+          status: data.status,
+          expectedClose: data.expectedClose === undefined ? undefined : data.expectedClose,
+          lostReason: data.lostReason === undefined ? undefined : data.lostReason,
+          position,
+          contactId: data.contactId === undefined ? undefined : data.contactId,
+          stageId: data.stageId,
+          ownerId: data.ownerId === undefined ? undefined : data.ownerId,
+        }),
+        include: listInclude,
+      });
+    } catch (err) {
+      lastErr = err;
+      if (isPrismaUniqueViolation(err)) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr ?? new Error("Falha ao alocar Deal.number apos retries");
 }
 
 export type UpdateDealInput = {
@@ -230,7 +284,10 @@ export type UpdateDealInput = {
 };
 
 export async function updateDeal(id: string, data: UpdateDealInput) {
-  const payload: Prisma.DealUpdateInput = {};
+  // Importante: usar UncheckedUpdateInput evita conflito com a extension
+  // multi-tenant que injeta `organizationId` em `data` no update.
+  // No checked input (`DealUpdateInput`), `organizationId` não é aceito.
+  const payload: Prisma.DealUncheckedUpdateInput = {};
 
   if (data.title !== undefined) {
     const title = data.title.trim();
@@ -244,17 +301,9 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
   if (data.expectedClose !== undefined) payload.expectedClose = data.expectedClose;
   if (data.lostReason !== undefined) payload.lostReason = data.lostReason;
   if (data.position !== undefined) payload.position = data.position;
-  if (data.contactId !== undefined) {
-    payload.contact =
-      data.contactId === null ? { disconnect: true } : { connect: { id: data.contactId } };
-  }
-  if (data.stageId !== undefined) {
-    payload.stage = { connect: { id: data.stageId } };
-  }
-  if (data.ownerId !== undefined) {
-    payload.owner =
-      data.ownerId === null ? { disconnect: true } : { connect: { id: data.ownerId } };
-  }
+  if (data.contactId !== undefined) payload.contactId = data.contactId;
+  if (data.stageId !== undefined) payload.stageId = data.stageId;
+  if (data.ownerId !== undefined) payload.ownerId = data.ownerId;
   if (data.externalId !== undefined) {
     payload.externalId = data.externalId;
   }
@@ -297,7 +346,7 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
  *   abre uma própria para poder compor com contextos maiores.
  */
 export async function propagateOwnerToContactAndChat(
-  tx: Prisma.TransactionClient,
+  tx: ScopedTx,
   contactId: string | null | undefined,
   ownerId: string | null,
 ) {
@@ -502,11 +551,14 @@ export async function getBoardData(
   const productMap = new Map<string, string>();
   const productTypeMap = new Map<string, string>();
   if (allDealIds.length > 0) {
+    const orgId = getOrgIdOrThrow();
     const dealProducts = await prisma.$queryRaw<{ dealId: string; name: string; type: string }[]>`
       SELECT dp."dealId", p.name, p.type
       FROM deal_products dp
       INNER JOIN products p ON p.id = dp."productId"
       WHERE dp."dealId" = ANY(${allDealIds})
+        AND dp."organizationId" = ${orgId}
+        AND p."organizationId" = ${orgId}
       ORDER BY dp."createdAt" ASC
     `;
     for (const dp of dealProducts) {

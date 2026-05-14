@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { getLeadSources, type AnalyticsPeriod } from "@/services/analytics";
 
 function parseOptionalPeriod(
@@ -17,32 +17,34 @@ function parseOptionalPeriod(
   return { from, to };
 }
 
+// Bug 24/abr/26: usavamos `auth()` direto e o handler chamava
+// `getLeadSources` que depende de `getOrgIdOrThrow()` — sem o
+// AsyncLocalStorage scope ativo, getOrgIdOrThrow() explodia. Trocamos
+// por `withOrgContext` que envolve a lambda em runWithContext,
+// garantindo que tudo dentro veja o tenant scope.
 export async function GET(request: Request) {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
+  return withOrgContext(async () => {
+    try {
+      const { searchParams } = new URL(request.url);
+      const period = parseOptionalPeriod(searchParams);
+      if (
+        (searchParams.get("from") || searchParams.get("to")) &&
+        !period
+      ) {
+        return NextResponse.json(
+          { message: "Parâmetros from e to devem ser datas ISO válidas." },
+          { status: 400 }
+        );
+      }
 
-    const { searchParams } = new URL(request.url);
-    const period = parseOptionalPeriod(searchParams);
-    if (
-      (searchParams.get("from") || searchParams.get("to")) &&
-      !period
-    ) {
+      const data = await getLeadSources(period);
+      return NextResponse.json(data);
+    } catch (e) {
+      console.error(e);
       return NextResponse.json(
-        { message: "Parâmetros from e to devem ser datas ISO válidas." },
-        { status: 400 }
+        { message: "Erro ao carregar fontes de leads." },
+        { status: 500 }
       );
     }
-
-    const data = await getLeadSources(period);
-    return NextResponse.json(data);
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json(
-      { message: "Erro ao carregar fontes de leads." },
-      { status: 500 }
-    );
-  }
+  });
 }

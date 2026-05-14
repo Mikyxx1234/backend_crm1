@@ -14,6 +14,8 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { embedTexts, EMBEDDING_DIMENSIONS } from "@/services/ai/provider";
 
 const CHUNK_SIZE = 3200;
@@ -84,19 +86,24 @@ export async function indexKnowledgeDoc(docId: string, rawText: string) {
           );
         }
         const chunk = await prisma.aIAgentKnowledgeChunk.create({
-          data: {
+          data: withOrgFromCtx({
             docId,
             content: batch[j].content,
             position: batch[j].position,
             tokenCount: Math.ceil(batch[j].content.length / 4),
-          },
+          }),
           select: { id: true },
         });
         const vectorLiteral = `[${emb.map((n) => Number.isFinite(n) ? n : 0).join(",")}]`;
+        // Defesa em profundidade: chunk.id ja e PK unica globalmente, mas
+        // adicionamos AND "organizationId" pra que mesmo chamadas raw
+        // disparadas em ctx errado nao alterem chunks de outro tenant.
+        const orgId = getOrgIdOrThrow();
         await prisma.$executeRawUnsafe(
-          `UPDATE "ai_agent_knowledge_chunks" SET embedding = $1::vector WHERE id = $2`,
+          `UPDATE "ai_agent_knowledge_chunks" SET embedding = $1::vector WHERE id = $2 AND "organizationId" = $3`,
           vectorLiteral,
           chunk.id,
+          orgId,
         );
       }
     }

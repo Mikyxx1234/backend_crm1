@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 export type CreateTagInput = {
   name: string;
@@ -17,10 +18,10 @@ export async function getTagById(id: string) {
 
 export async function createTag(data: CreateTagInput) {
   return prisma.tag.create({
-    data: {
+    data: withOrgFromCtx({
       name: data.name.trim(),
       color: data.color?.trim() || undefined,
-    },
+    }),
   });
 }
 

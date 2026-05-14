@@ -1,6 +1,7 @@
 import type { ActivityType, Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 const ACTIVITY_TYPES: ActivityType[] = [
   "CALL",
@@ -83,7 +84,7 @@ export async function createActivity(data: CreateActivityInput) {
   if (!title) throw new Error("INVALID_TITLE");
 
   return prisma.activity.create({
-    data: {
+    data: withOrgFromCtx({
       type: data.type,
       title,
       description: data.description === undefined ? undefined : data.description,
@@ -93,7 +94,7 @@ export async function createActivity(data: CreateActivityInput) {
       contactId: data.contactId === undefined ? undefined : data.contactId,
       dealId: data.dealId === undefined ? undefined : data.dealId,
       userId: data.userId,
-    },
+    }),
     include: listInclude,
   });
 }

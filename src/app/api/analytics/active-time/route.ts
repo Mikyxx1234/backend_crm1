@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { computeActiveTimeByUser } from "@/lib/agent-presence";
-import { auth } from "@/lib/auth";
+import { requireAuth, userOrgFilter } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -16,10 +16,9 @@ export const dynamic = "force-dynamic";
  *   - to   (ISO date, opcional; default = agora)
  */
 export async function GET(req: Request) {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
+  const session = r.session;
 
   const url = new URL(req.url);
   const fromParam = url.searchParams.get("from");
@@ -49,6 +48,7 @@ export async function GET(req: Request) {
     where: {
       type: "HUMAN",
       role: { in: ["ADMIN", "MANAGER", "MEMBER"] },
+      ...userOrgFilter(session),
     },
     select: {
       id: true,

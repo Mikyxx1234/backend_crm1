@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
-import { authenticateApiRequest } from "@/lib/api-auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { canEditFieldForUser, requirePermissionForUser, requirePipelineScope, requireStageScope } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -13,6 +14,9 @@ export async function GET(request: Request, context: RouteContext) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "deal:view");
+    if (denied) return denied;
     const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
@@ -22,6 +26,14 @@ export async function GET(request: Request, context: RouteContext) {
     if (!deal) {
       return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
     }
+    const stageDenied = await requireStageScope(authResult.user, "view", deal.stage.id);
+    if (stageDenied) return stageDenied;
+    const pipelineDenied = await requirePipelineScope(
+      authResult.user,
+      "view",
+      (deal.stage as { pipelineId?: string }).pipelineId ?? "",
+    );
+    if (pipelineDenied && (deal.stage as { pipelineId?: string }).pipelineId) return pipelineDenied;
 
     const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
     const visibility = await getVisibilityFilter(user);
@@ -30,6 +42,7 @@ export async function GET(request: Request, context: RouteContext) {
     }
 
     return NextResponse.json(deal);
+    });
   } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao buscar negócio." }, { status: 500 });
@@ -41,6 +54,9 @@ export async function PUT(request: Request, context: RouteContext) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "deal:edit");
+    if (denied) return denied;
     const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
@@ -63,6 +79,8 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!existing) {
       return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
     }
+    const stageDenied = await requireStageScope(authResult.user, "view", existing.stage.id);
+    if (stageDenied) return stageDenied;
 
     const dealId = existing.id;
 
@@ -133,12 +151,26 @@ export async function PUT(request: Request, context: RouteContext) {
     const payload = Object.fromEntries(
       Object.entries(data).filter(([, v]) => v !== undefined)
     ) as Parameters<typeof updateDeal>[1];
+    const blockedFields: string[] = [];
+    for (const key of Object.keys(payload)) {
+      if (!(await canEditFieldForUser(authResult.user, "deal", key))) blockedFields.push(key);
+    }
+    if (blockedFields.length > 0) {
+      return NextResponse.json(
+        { message: "Sem permissão para editar campos.", blockedFields },
+        { status: 403 },
+      );
+    }
 
     if (Object.keys(payload).length === 0) {
       return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });
     }
 
     try {
+      if (payload.stageId) {
+        const moveDenied = await requireStageScope(authResult.user, "move", payload.stageId);
+        if (moveDenied) return moveDenied;
+      }
       const deal = await updateDeal(dealId, payload);
 
       const uid = authResult.user.id;
@@ -206,6 +238,7 @@ export async function PUT(request: Request, context: RouteContext) {
       }
       throw err;
     }
+    });
   } catch (e: unknown) {
     console.error(e);
     if (typeof e === "object" && e !== null && "code" in e) {
@@ -226,6 +259,9 @@ export async function DELETE(request: Request, context: RouteContext) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "deal:delete");
+    if (denied) return denied;
     const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
@@ -238,6 +274,7 @@ export async function DELETE(request: Request, context: RouteContext) {
 
     await deleteDeal(existing.id);
     return NextResponse.json({ ok: true });
+    });
   } catch (e: unknown) {
     console.error(e);
     if (typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2025") {

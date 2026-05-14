@@ -18,9 +18,14 @@
 
 import type { AIAgentAutonomy } from "@prisma/client";
 
-import { computeTypingDelayMs } from "@/lib/ai-agents/piloting";
-import { metaWhatsApp } from "@/lib/meta-whatsapp/client";
+import {
+  computeTypingDelayMs,
+  renderTemplate,
+} from "@/lib/ai-agents/piloting";
+import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { createActivity } from "@/services/activities";
 import { createDealEvent } from "@/services/deals";
@@ -91,7 +96,19 @@ export async function sendAgentMessage(args: {
 
   const isMeta = args.channel === "meta" || args.channel == null;
 
-  if (args.autonomyMode === "AUTONOMOUS" && isMeta && metaWhatsApp.configured) {
+  // Resolve cliente Meta DESTE canal (token/phoneId do tenant). Sem isso,
+  // o agente IA da DNA enviava via numero da Eduit (singleton global env).
+  const conv = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: { channelRef: { select: { id: true, config: true } } },
+  });
+  const channelConfig = conv?.channelRef?.config as
+    | Record<string, unknown>
+    | null
+    | undefined;
+  const metaClient = metaClientFromConfig(channelConfig);
+
+  if (args.autonomyMode === "AUTONOMOUS" && isMeta && metaClient.configured) {
     const contact = await prisma.contact.findUnique({
       where: { id: args.contactId },
       select: { phone: true },
@@ -112,12 +129,12 @@ export async function sendAgentMessage(args: {
       if (inboundWamid && simulateTyping) {
         // sendTypingIndicator implica status=read, então atende os
         // dois requisitos com UMA chamada.
-        await metaWhatsApp.sendTypingIndicator(inboundWamid);
+        await metaClient.sendTypingIndicator(inboundWamid);
         const delayMs = computeTypingDelayMs(text.length, typingPerCharMs);
         await sleep(delayMs);
       } else if (inboundWamid && markMessagesRead) {
         try {
-          await metaWhatsApp.markAsRead(inboundWamid);
+          await metaClient.markAsRead(inboundWamid);
         } catch (err) {
           console.warn(
             `[ai-piloting] markAsRead falhou conv=${args.conversationId}:`,
@@ -129,7 +146,7 @@ export async function sendAgentMessage(args: {
 
     let externalId: string | null = null;
     try {
-      const send = await metaWhatsApp.sendText(contact.phone, text);
+      const send = await metaClient.sendText(contact.phone, text);
       externalId = send.messages?.[0]?.id ?? null;
     } catch (err) {
       console.error(
@@ -139,7 +156,7 @@ export async function sendAgentMessage(args: {
     }
 
     const saved = await prisma.message.create({
-      data: {
+      data: withOrgFromCtx({
         conversationId: args.conversationId,
         content: text,
         direction: "out",
@@ -149,7 +166,7 @@ export async function sendAgentMessage(args: {
         senderName: "Agente IA",
         externalId,
         sendStatus: "sent",
-      },
+      }),
     });
     await prisma.conversation
       .update({
@@ -162,6 +179,7 @@ export async function sendAgentMessage(args: {
       })
       .catch(() => null);
     sseBus.publish("new_message", {
+      organizationId: getOrgIdOrNull(),
       conversationId: args.conversationId,
       contactId: args.contactId,
       direction: "out",
@@ -180,7 +198,7 @@ async function saveDraft(
   text: string,
 ): Promise<SendAgentMessageResult> {
   const saved = await prisma.message.create({
-    data: {
+    data: withOrgFromCtx({
       conversationId,
       content: text,
       direction: "out",
@@ -190,9 +208,10 @@ async function saveDraft(
       aiAgentUserId: agentUserId,
       senderName: "Agente IA (rascunho)",
       sendStatus: "draft",
-    },
+    }),
   });
   sseBus.publish("new_message", {
+    organizationId: getOrgIdOrNull(),
     conversationId,
     direction: "out",
     messageType: "ai_draft",
@@ -256,6 +275,165 @@ export async function markAgentGreetedNow(
       data: { aiGreetedAt: new Date() },
     })
     .catch(() => null);
+}
+
+// ── Saudação proativa (handoff entrando) ───────────────────────
+
+export type TriggerOpeningResult =
+  | { status: "sent"; messageId: string; conversationId: string }
+  | { status: "draft"; messageId: string; conversationId: string }
+  | {
+      status: "skipped";
+      reason:
+        | "no_conversation"
+        | "not_ai_agent"
+        | "agent_inactive"
+        | "no_opening_message"
+        | "already_greeted"
+        | "off_hours"
+        | "no_contact";
+    };
+
+/**
+ * Dispara a mensagem de saudação do agente IA PROATIVAMENTE — sem
+ * precisar esperar o cliente mandar algo. Usado pelo executor de
+ * automações no passo `transfer_to_ai_agent`: assim que a conversa
+ * é atribuída ao agente, ele já se apresenta no chat do cliente
+ * (em vez de ficar mudo até a primeira inbound, que pode nunca vir).
+ *
+ * A função é idempotente via `Conversation.aiGreetedAt` — se já
+ * cumprimentou na atribuição atual, retorna `already_greeted` e
+ * não duplica.
+ *
+ * Respeita business hours: fora do horário, envia `offHoursMessage`
+ * se configurada e NÃO marca `aiGreetedAt` (pra saudar de verdade
+ * na volta ao horário, via próxima inbound do cliente).
+ */
+export async function triggerAgentOpeningForContact(args: {
+  contactId: string;
+  agentUserId: string;
+  channel?: "meta" | "baileys" | null;
+}): Promise<TriggerOpeningResult> {
+  // Usa a conversa aberta mais recente do contato. Na prática, o CRM
+  // mantém 1 conversa por contato para canais (Meta/Baileys), então
+  // isso resolve ao único canal ativo dele.
+  const conversation = await prisma.conversation.findFirst({
+    where: { contactId: args.contactId },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true, assignedToId: true, aiGreetedAt: true },
+  });
+  if (!conversation) {
+    return { status: "skipped", reason: "no_conversation" };
+  }
+
+  const assignee = await prisma.user.findUnique({
+    where: { id: args.agentUserId },
+    select: {
+      id: true,
+      type: true,
+      aiAgentConfig: {
+        select: {
+          active: true,
+          autonomyMode: true,
+          openingMessage: true,
+          openingDelayMs: true,
+          businessHours: true,
+          simulateTyping: true,
+          typingPerCharMs: true,
+          markMessagesRead: true,
+        },
+      },
+    },
+  });
+  if (!assignee || assignee.type !== "AI") {
+    return { status: "skipped", reason: "not_ai_agent" };
+  }
+  const cfg = assignee.aiAgentConfig;
+  if (!cfg?.active) {
+    return { status: "skipped", reason: "agent_inactive" };
+  }
+  if (!cfg.openingMessage?.trim()) {
+    return { status: "skipped", reason: "no_opening_message" };
+  }
+  if (conversation.aiGreetedAt != null) {
+    return { status: "skipped", reason: "already_greeted" };
+  }
+
+  // Business hours gate — se fora, não dispara a saudação proativa.
+  // Preferimos ficar em silêncio até a volta ao horário (a mensagem
+  // offHours é pra RESPOSTA a inbound, não pra empurrar quando a
+  // automação plantou o contato na conversa).
+  const { isWithinBusinessHours, normalizeBusinessHours } = await import(
+    "@/lib/ai-agents/piloting"
+  );
+  const bh = normalizeBusinessHours(cfg.businessHours);
+  if (bh?.enabled && !isWithinBusinessHours(bh)) {
+    return { status: "skipped", reason: "off_hours" };
+  }
+
+  // Contexto pra template da saudação ({{contactName}}, {{dealTitle}},
+  // {{stageName}}). Reusa a MESMA mecânica do inbox-handler para que
+  // a saudação fique visualmente idêntica quando disparada pelos dois
+  // caminhos (automação vs. inbound).
+  const [contact, openDeal] = await Promise.all([
+    prisma.contact.findUnique({
+      where: { id: args.contactId },
+      select: { name: true },
+    }),
+    prisma.deal.findFirst({
+      where: { contactId: args.contactId, status: "OPEN" },
+      orderBy: { updatedAt: "desc" },
+      select: { title: true, stage: { select: { name: true } } },
+    }),
+  ]);
+  if (!contact) {
+    return { status: "skipped", reason: "no_contact" };
+  }
+
+  const greeting = renderTemplate(cfg.openingMessage, {
+    contactName: contact.name,
+    dealTitle: openDeal?.title ?? null,
+    stageName: openDeal?.stage?.name ?? null,
+  });
+
+  if (cfg.openingDelayMs > 0) {
+    await sleep(Math.min(cfg.openingDelayMs, 10_000));
+  }
+
+  const result = await sendAgentMessage({
+    conversationId: conversation.id,
+    contactId: args.contactId,
+    agentUserId: assignee.id,
+    autonomyMode: cfg.autonomyMode,
+    text: greeting,
+    channel: args.channel ?? "meta",
+    kind: "greeting",
+    humanBehavior: {
+      simulateTyping: cfg.simulateTyping,
+      typingPerCharMs: cfg.typingPerCharMs,
+      markMessagesRead: cfg.markMessagesRead,
+    },
+  });
+
+  if (result.status !== "skipped") {
+    await markAgentGreetedNow(conversation.id);
+  }
+
+  if (result.status === "sent") {
+    return {
+      status: "sent",
+      messageId: result.messageId,
+      conversationId: conversation.id,
+    };
+  }
+  if (result.status === "draft") {
+    return {
+      status: "draft",
+      messageId: result.messageId,
+      conversationId: conversation.id,
+    };
+  }
+  return { status: "skipped", reason: "no_contact" };
 }
 
 // ── Handoff ────────────────────────────────────────────────────
@@ -335,6 +513,7 @@ export async function executeAgentHandoff(
   }
 
   sseBus.publish(newAssignee ? "conversation_assigned" : "conversation_unassigned", {
+    organizationId: getOrgIdOrNull(),
     conversationId: args.conversationId,
     contactId: args.contactId,
     assignedToId: newAssignee,

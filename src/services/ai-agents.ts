@@ -13,6 +13,7 @@ import { Prisma } from "@prisma/client";
 import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getArchetype } from "@/lib/ai-agents/archetypes";
 import {
   HANDOFF_MODES,
@@ -266,7 +267,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
     });
 
     const config = await tx.aIAgentConfig.create({
-      data: {
+      data: withOrgFromCtx({
         userId: user.id,
         archetype: input.archetype,
         model: input.model ?? archetype.suggestedModel,
@@ -302,7 +303,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         simulateTyping: input.simulateTyping ?? true,
         typingPerCharMs: input.typingPerCharMs ?? 25,
         markMessagesRead: input.markMessagesRead ?? true,
-      },
+      }),
     });
 
     return { user, config };

@@ -22,6 +22,15 @@ export async function GET(request: Request) {
     if (!session?.user) {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
     }
+    // Super-admin nao tem organizationId — ele acessa o painel /admin global
+    // por outro caminho. Aqui exigimos org pra evitar agregado cross-tenant.
+    const orgId = session.user.organizationId;
+    if (!orgId) {
+      return NextResponse.json(
+        { message: "Sem organizacao no contexto." },
+        { status: 403 },
+      );
+    }
 
     const { searchParams } = new URL(request.url);
     const fromS = searchParams.get("from");
@@ -45,6 +54,7 @@ export async function GET(request: Request) {
         COALESCE(SUM(CAST(d.value AS DECIMAL)), 0) AS total_value
       FROM deals d
       WHERE d.status = 'LOST'::"DealStatus"
+        AND d."organizationId" = ${orgId}
         AND ${dateFilter}
       GROUP BY reason
       ORDER BY count DESC

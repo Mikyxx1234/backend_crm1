@@ -11,6 +11,7 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { prismaBase } from "@/lib/prisma-base";
 
 const channelMaps = new Map<string, Map<string, string>>();
 
@@ -91,10 +92,16 @@ export async function loadPersistedMappings(channelId: string): Promise<number> 
 
 async function persistMapping(channelId: string, lid: string, phone: string) {
   const id = `${channelId}:lid-map:${lid}`;
+  const channelRow = await prismaBase.channel.findUnique({
+    where: { id: channelId },
+    select: { organizationId: true },
+  });
+  const organizationId = channelRow?.organizationId ?? "";
   await prisma.baileysAuthKey.upsert({
     where: { id },
     create: {
       id,
+      organizationId,
       channelId,
       keyType: "lid-map",
       keyId: lid,

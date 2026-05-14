@@ -19,7 +19,10 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { fireTrigger } from "@/services/automation-triggers";
+import { nextDealNumber } from "@/services/deals";
 import { getNextOwner } from "@/services/lead-distribution";
 
 type EnsureOpenDealSource = "auto_whatsapp" | "auto_whatsapp_qr" | string;
@@ -83,6 +86,7 @@ export async function ensureOpenDealForContact(
 
     incomingStage = await prisma.stage.create({
       data: {
+        organizationId: getOrgIdOrThrow(),
         name: "Lead de Entrada",
         pipelineId: pipeline.id,
         position: newPosition,
@@ -101,17 +105,39 @@ export async function ensureOpenDealForContact(
 
   const ownerId = await getNextOwner(pipeline.id);
 
-  const deal = await prisma.deal.create({
-    data: {
-      title: `Negócio - ${contactName}`,
-      contactId,
-      stageId: incomingStage.id,
-      status: "OPEN",
-      position: (maxPos._max.position ?? -1) + 1,
-      ownerId,
-    },
-    select: { id: true },
-  });
+  // `Deal.number` e mandatorio (sem default) e unico por org. Tenta
+  // alocar max+1; em P2002 (corrida) repete ate 5x.
+  let deal: { id: string } | null = null;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const number = await nextDealNumber();
+    try {
+      deal = await prisma.deal.create({
+        data: withOrgFromCtx({
+          number,
+          title: `Negócio - ${contactName}`,
+          contactId,
+          stageId: incomingStage.id,
+          status: "OPEN" as const,
+          position: (maxPos._max.position ?? -1) + 1,
+          ownerId,
+        }),
+        select: { id: true },
+      });
+      break;
+    } catch (err) {
+      lastErr = err;
+      const isUnique =
+        typeof err === "object" &&
+        err !== null &&
+        "code" in err &&
+        (err as { code: string }).code === "P2002";
+      if (!isUnique) throw err;
+    }
+  }
+  if (!deal) {
+    throw lastErr ?? new Error("Falha ao alocar Deal.number apos retries");
+  }
 
   fireTrigger("deal_created", {
     dealId: deal.id,

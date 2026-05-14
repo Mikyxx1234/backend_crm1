@@ -1,5 +1,5 @@
 import { recordPresenceTransition } from "@/lib/agent-presence";
-import { prisma } from "@/lib/prisma";
+import { prismaBase as prisma } from "@/lib/prisma-base";
 import { sseBus } from "@/lib/sse-bus";
 
 /**
@@ -51,44 +51,66 @@ export function startPresenceReaper() {
 /**
  * Executa um único ciclo de reap. Exportado separadamente para testes e para
  * permitir disparo manual via rota admin no futuro, se quisermos.
+ *
+ * PR-1.1 audit: SYSTEM-CONTEXT — usa prismaBase (sem extension de scope).
+ * As 2 queries são cross-tenant (varrem agent_statuses de TODAS as orgs)
+ * porque o reaper é housekeeping global. Já retornam organizationId no
+ * RETURNING para que o SSE publish entregue eventos só ao tenant correto.
+ *
+ * TODO PR-1.4 (RLS): wrappear este corpo em withSuperAdminContext() para
+ * setar `SET LOCAL app.is_super_admin = true` no nível da conexão. Sem
+ * isso, com RLS ativa, os UPDATEs não atingem nenhuma linha (current_org=NULL).
  */
 export async function reapOnce() {
   const nowIso = new Date().toISOString();
 
-  // ONLINE → AWAY
-  const awayRows = await prisma.$queryRaw<{ userId: string }[]>`
+  // ONLINE → AWAY (cross-tenant: o reaper roda sem RequestContext;
+  // retornamos organizationId pra que o SSE publish caia na org certa)
+  const awayRows = await prisma.$queryRaw<
+    { userId: string; organizationId: string }[]
+  >`
     WITH updated AS (
       UPDATE "agent_statuses"
       SET status = 'AWAY', "updatedAt" = NOW()
       WHERE status = 'ONLINE'
         AND "lastActivityAt" IS NOT NULL
         AND "lastActivityAt" < (${nowIso}::timestamp - (${AWAY_THRESHOLD_MIN} || ' minutes')::interval)
-      RETURNING "userId"
+      RETURNING "userId", "organizationId"
     )
-    SELECT "userId" FROM updated
+    SELECT "userId", "organizationId" FROM updated
   `;
 
   for (const row of awayRows) {
     await recordPresenceTransition({ userId: row.userId, nextStatus: "AWAY" });
-    sseBus.publish("presence_update", { userId: row.userId, status: "AWAY" });
+    sseBus.publish("presence_update", {
+      organizationId: row.organizationId,
+      userId: row.userId,
+      status: "AWAY",
+    });
   }
 
   // AWAY → OFFLINE
-  const offlineRows = await prisma.$queryRaw<{ userId: string }[]>`
+  const offlineRows = await prisma.$queryRaw<
+    { userId: string; organizationId: string }[]
+  >`
     WITH updated AS (
       UPDATE "agent_statuses"
       SET status = 'OFFLINE', "updatedAt" = NOW()
       WHERE status = 'AWAY'
         AND "lastActivityAt" IS NOT NULL
         AND "lastActivityAt" < (${nowIso}::timestamp - (${OFFLINE_THRESHOLD_MIN} || ' minutes')::interval)
-      RETURNING "userId"
+      RETURNING "userId", "organizationId"
     )
-    SELECT "userId" FROM updated
+    SELECT "userId", "organizationId" FROM updated
   `;
 
   for (const row of offlineRows) {
     await recordPresenceTransition({ userId: row.userId, nextStatus: "OFFLINE" });
-    sseBus.publish("presence_update", { userId: row.userId, status: "OFFLINE" });
+    sseBus.publish("presence_update", {
+      organizationId: row.organizationId,
+      userId: row.userId,
+      status: "OFFLINE",
+    });
   }
 
   return { awayed: awayRows.length, offlined: offlineRows.length };

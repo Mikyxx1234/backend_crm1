@@ -1,3 +1,6 @@
+import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
+import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
+
 const GRAPH_VERSION = "v21.0";
 
 /**
@@ -174,6 +177,7 @@ export function isMetaGraphError(err: unknown): err is MetaGraphError {
  */
 export function formatMetaSendError(err: unknown): string {
   if (isMetaGraphError(err)) return err.toPersistedString();
+  if (isMetaFlowEnrichError(err)) return err.message;
   if (err instanceof Error) return err.message;
   return String(err);
 }
@@ -242,6 +246,11 @@ export class MetaWhatsAppClient {
       );
       throw err;
     }
+
+    console.log(
+      "[meta-graph]",
+      JSON.stringify({ path, httpStatus: res.status, body: data }),
+    );
     return data as T;
   }
 
@@ -499,18 +508,20 @@ export class MetaWhatsAppClient {
     recipient?: string,
   ): Promise<{ messages: Array<{ id: string }> }> {
     const dest = MetaWhatsAppClient.recipientFields(to, recipient);
+    const payload = {
+      messaging_product: "whatsapp",
+      ...dest,
+      type: "template",
+      template: {
+        name: templateName,
+        language: { code: languageCode },
+        ...(components ? { components } : {}),
+      },
+    };
+    console.log("[meta-send-template]", JSON.stringify(payload));
     return this.graphFetch(`${this.phoneNumberId}/messages`, {
       method: "POST",
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        ...dest,
-        type: "template",
-        template: {
-          name: templateName,
-          language: { code: languageCode },
-          ...(components ? { components } : {}),
-        },
-      }),
+      body: JSON.stringify(payload),
     });
   }
 
@@ -686,6 +697,22 @@ export class MetaWhatsAppClient {
     return waba;
   }
 
+  /**
+   * Detalhe de um template pelo ID Graph retornado em `message_templates`
+   * (campo `id` de cada linha). Preferível a listar centenas de templates
+   * para descobrir `components` (botão FLOW, índice, etc.).
+   */
+  async getMessageTemplateByGraphId(graphTemplateId: string): Promise<unknown> {
+    const id = graphTemplateId.trim();
+    if (!id) throw new Error("Meta: ID do template (Graph) inválido.");
+    const params = new URLSearchParams();
+    params.set(
+      "fields",
+      ["name", "language", "status", "category", "components"].join(","),
+    );
+    return this.graphFetch(`${id}?${params.toString()}`);
+  }
+
   /** Lista templates aprovados/pendentes da conta WhatsApp Business. */
   async listMessageTemplates(options?: {
     limit?: number;
@@ -702,6 +729,7 @@ export class MetaWhatsAppClient {
         "sub_category",
         "language",
         "id",
+        "parameter_format",
         "components",
         "quality_score",
         "rejected_reason",
@@ -726,6 +754,45 @@ export class MetaWhatsAppClient {
   async deleteMessageTemplate(templateGraphId: string): Promise<unknown> {
     const id = templateGraphId.trim();
     if (!id) throw new Error("ID do template inválido.");
+    return this.graphFetch(id, { method: "DELETE" });
+  }
+
+  // ── WhatsApp Flows (Flows API) ─────────────────────────────────
+  // @see https://developers.facebook.com/docs/whatsapp/flows/reference/flowsapi/
+
+  /** Lista flows da WABA. */
+  async listFlows(): Promise<unknown> {
+    const waba = this.wabaOrThrow();
+    return this.graphFetch(`${waba}/flows`);
+  }
+
+  /**
+   * Cria flow (rascunho ou publicado). Corpo típico:
+   * `{ name, categories: ["LEAD_GENERATION"], flow_json: "<string>", publish: true }`
+   */
+  async createFlow(payload: Record<string, unknown>): Promise<unknown> {
+    const waba = this.wabaOrThrow();
+    return this.graphFetch(`${waba}/flows`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  }
+
+  /** Detalhe de um flow por ID Graph. */
+  async getFlowById(
+    flowGraphId: string,
+    fields = "id,name,status,categories,validation_errors,json_version,preview",
+  ): Promise<unknown> {
+    const id = flowGraphId.trim();
+    if (!id) throw new Error("Meta: ID do Flow inválido.");
+    const params = new URLSearchParams({ fields });
+    return this.graphFetch(`${id}?${params.toString()}`);
+  }
+
+  /** Apaga flow em estado DRAFT. */
+  async deleteFlow(flowGraphId: string): Promise<unknown> {
+    const id = flowGraphId.trim();
+    if (!id) throw new Error("Meta: ID do Flow inválido.");
     return this.graphFetch(id, { method: "DELETE" });
   }
 
@@ -801,15 +868,41 @@ export const metaWhatsApp = new MetaWhatsAppClient(
 
 /**
  * Build a MetaWhatsAppClient from a channel's stored config (Embedded Signup).
- * Falls back to the env-var singleton if config is missing required fields.
+ * Falls back to the env-var singleton if config is missing required fields
+ * (quando `allowEnvFallback` é true, default — compatível com código legado).
+ *
+ * PR-1.2: aceita config tanto encriptado quanto plaintext (back-compat
+ * durante migracao). Se detectar valores com prefixo `enc:v1:`, decripta
+ * via `decryptSecret` antes de usar. Apos backfill completo, todos os
+ * valores chegam encriptados — `decryptSecret` em plaintext e no-op.
  */
+const emptyMetaClient = (): MetaWhatsAppClient => new MetaWhatsAppClient("", "", "");
+
 export function metaClientFromConfig(
   config: Record<string, unknown> | null | undefined,
+  options?: { allowEnvFallback?: boolean },
 ): MetaWhatsAppClient {
-  if (!config) return metaWhatsApp;
-  const token = typeof config.accessToken === "string" ? config.accessToken.trim() : "";
+  const allowEnvFallback = options?.allowEnvFallback !== false;
+
+  if (!config) return allowEnvFallback ? metaWhatsApp : emptyMetaClient();
+
+  const rawToken = typeof config.accessToken === "string" ? config.accessToken.trim() : "";
   const phoneId = typeof config.phoneNumberId === "string" ? config.phoneNumberId.trim() : "";
   const wabaId = typeof config.businessAccountId === "string" ? config.businessAccountId.trim() : "";
-  if (!token || !phoneId) return metaWhatsApp;
+
+  let token = rawToken;
+  if (rawToken && isEncryptedSecret(rawToken)) {
+    try {
+      token = decryptSecret(rawToken);
+    } catch (err) {
+      console.error(
+        "[meta-whatsapp/client] falha ao decriptar accessToken; caindo para singleton:",
+        err instanceof Error ? err.message : err,
+      );
+      return allowEnvFallback ? metaWhatsApp : emptyMetaClient();
+    }
+  }
+
+  if (!token || !phoneId) return allowEnvFallback ? metaWhatsApp : emptyMetaClient();
   return new MetaWhatsAppClient(token, phoneId, wabaId);
 }

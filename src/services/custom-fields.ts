@@ -1,6 +1,7 @@
 import type { CustomFieldType } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 export async function getCustomFields(entity = "contact") {
   return prisma.customField.findMany({
@@ -24,7 +25,7 @@ export async function createCustomField(data: {
   inboxLeadPanelOrder?: number | null;
 }) {
   return prisma.customField.create({
-    data: {
+    data: withOrgFromCtx({
       name: data.name,
       label: data.label,
       type: data.type,
@@ -33,7 +34,7 @@ export async function createCustomField(data: {
       entity: data.entity ?? "contact",
       showInInboxLeadPanel: data.showInInboxLeadPanel ?? false,
       inboxLeadPanelOrder: data.inboxLeadPanelOrder ?? null,
-    },
+    }),
   });
 }
 
@@ -88,11 +89,11 @@ export async function upsertContactCustomFieldValues(
         },
       },
       update: { value: v.value },
-      create: {
+      create: withOrgFromCtx({
         contactId,
         customFieldId: v.fieldId,
         value: v.value,
-      },
+      }),
     })
   );
 
@@ -132,11 +133,11 @@ export async function upsertDealCustomFieldValues(
         },
       },
       update: { value: v.value },
-      create: {
+      create: withOrgFromCtx({
         dealId,
         customFieldId: v.fieldId,
         value: v.value,
-      },
+      }),
     })
   );
 

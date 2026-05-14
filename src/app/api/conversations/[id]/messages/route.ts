@@ -1,12 +1,16 @@
 import { NextResponse } from "next/server";
 
-import { authenticateApiRequest } from "@/lib/api-auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { userOrgFilter } from "@/lib/auth-helpers";
 import type { AppUserRole } from "@/lib/auth-types";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaWhatsApp, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import { withRateLimit } from "@/lib/rate-limit";
 import { sendWhatsAppText, isBaileysChannel } from "@/lib/send-whatsapp";
+import { sseBus } from "@/lib/sse-bus";
 import { getConversationLite } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -49,6 +53,7 @@ export async function GET(request: Request, context: RouteContext) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
     const { id } = await context.params;
     const accessUser = authResult.user as { id: string; role: AppUserRole };
     const denied = await requireConversationAccess({ user: accessUser }, id);
@@ -126,11 +131,14 @@ export async function GET(request: Request, context: RouteContext) {
 
     const senderAvatarMap = new Map<string, string | null>();
     if (outSenderNames.length > 0) {
+      // Match cross-org seria leak (avatar de agente de outra org com mesmo
+      // nome). Filtra pela org do caller via userOrgFilter — super-admin ve tudo.
       const agents = await prisma.user.findMany({
         where: {
           OR: outSenderNames.map((name) => ({
             name: { equals: name, mode: "insensitive" as const },
           })),
+          ...userOrgFilter({ user: authResult.user }),
         },
         select: { name: true, avatarUrl: true },
       });
@@ -169,6 +177,7 @@ export async function GET(request: Request, context: RouteContext) {
         expiresAt: sessionExpiresAt,
       },
     });
+    });
   } catch (e: unknown) {
     console.error(e);
     const msg = e instanceof Error ? e.message : "Erro ao carregar mensagens.";
@@ -183,6 +192,20 @@ export async function POST(request: Request, context: RouteContext) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    // Rate-limit por organização: 600 req/min/org. Cobre tanto API token
+    // (integrações) quanto sessão de operador. Se um cliente quiser jogar
+    // 1k msgs/min, usa /campaigns que fila por outro caminho.
+    const userOrgId =
+      (authResult.user as { organizationId?: string | null }).organizationId ?? null;
+    const rl = await withRateLimit({
+      route: "/api/conversations/:id/messages",
+      profile: "api.default",
+      scope: "org",
+      id: userOrgId,
+    });
+    if (!rl.ok) return rl.response;
+
+    return await runWithApiUserContext(authResult.user, async () => {
     const { id } = await context.params;
     const accessUser = authResult.user as { id: string; role: AppUserRole };
     const denied = await requireConversationAccess({ user: accessUser }, id);
@@ -236,7 +259,7 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (isPrivateNote) {
       const saved = await prisma.message.create({
-        data: {
+        data: withOrgFromCtx({
           conversationId: conv.id,
           content,
           direction: "out",
@@ -245,7 +268,7 @@ export async function POST(request: Request, context: RouteContext) {
           senderName,
           replyToId: replyParentInternalId,
           replyToPreview,
-        },
+        }),
       });
 
       return NextResponse.json({
@@ -285,7 +308,7 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     const saved = await prisma.message.create({
-      data: {
+      data: withOrgFromCtx({
         conversationId: conv.id,
         content,
         direction: "out",
@@ -294,7 +317,7 @@ export async function POST(request: Request, context: RouteContext) {
         replyToId: replyParentInternalId,
         replyToPreview,
         ...(localOnly ? { sendStatus: "sent" } : {}),
-      },
+      }),
     });
 
     if (!useBaileys && !localOnly) {
@@ -341,6 +364,22 @@ export async function POST(request: Request, context: RouteContext) {
       data: { channel: "WhatsApp", content },
     }).catch((err) => console.warn("[automation trigger] message_sent:", err));
 
+    // Notifica abas/inboxes em tempo real: a conversa acabou de mudar de
+    // 'esperando' para 'respondidas' (ou similar). Sem isso, a UI so
+    // atualizava no proximo polling (15-20s) — usuario percebia delay.
+    try {
+      sseBus.publish("new_message", {
+        organizationId: conv.organizationId,
+        conversationId: conv.id,
+        contactId: conv.contactId,
+        direction: "out",
+        content,
+        timestamp: saved.createdAt,
+      });
+    } catch {
+      // best-effort: nunca derruba o envio por falha de SSE.
+    }
+
     // Agente enviou mensagem manual: cancela qualquer agendamento pendente
     // da conversa (convenção do "qualquer interação cancela"). Uso
     // cancelledById=null porque o cancelamento é automático, não manual.
@@ -365,6 +404,7 @@ export async function POST(request: Request, context: RouteContext) {
       } satisfies InboxMessageDto,
       ...(sendErrorMsg ? { metaError: sendErrorMsg } : {}),
     }, { status: 201 });
+    });
   } catch (e: unknown) {
     console.error(e);
     const msg = e instanceof Error ? e.message : "Erro ao enviar mensagem.";

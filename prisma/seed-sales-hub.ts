@@ -664,6 +664,10 @@ async function main() {
       "Usuário admin@eduit.com não encontrado. Rode `npx tsx prisma/seed.ts` antes.",
     );
   }
+  if (!admin.organizationId) {
+    throw new Error("Admin sem organizationId. Seed multi-tenancy nao foi rodado.");
+  }
+  const organizationId = admin.organizationId;
 
   // Pipeline + stages
   const pipeline = await prisma.pipeline.findUnique({
@@ -695,9 +699,9 @@ async function main() {
   const tagByName = new Map<string, { id: string }>();
   for (const [name, color] of Object.entries(TAG_COLORS)) {
     const t = await prisma.tag.upsert({
-      where: { name },
+      where: { organizationId_name: { organizationId, name } },
       update: { color },
-      create: { name, color },
+      create: { organizationId, name, color },
     });
     tagByName.set(name, t);
   }
@@ -750,6 +754,7 @@ async function main() {
     const externalId = `${SEED_PREFIX}${c.key}`;
     const created = await prisma.contact.create({
       data: {
+        organizationId,
         externalId,
         name: c.name,
         email: c.email,
@@ -793,6 +798,7 @@ async function main() {
         : null;
     const deal = await prisma.deal.create({
       data: {
+        organizationId,
         externalId: dealExternalId,
         title: d.title,
         value: d.value,
@@ -806,6 +812,7 @@ async function main() {
         position: dealCount,
         closedAt: dealClosedAt,
         lostReason: d.status === "LOST" ? d.lostReason ?? null : null,
+        number: dealCount + 1,
       },
     });
     dealCount++;
@@ -831,6 +838,7 @@ async function main() {
     const conversationStatus = d.conversationStatus ?? "OPEN";
     const conv = await prisma.conversation.create({
       data: {
+        organizationId,
         externalId: `${SEED_PREFIX}conv-${d.contactKey}`,
         channel: "whatsapp",
         status: conversationStatus,
@@ -855,6 +863,7 @@ async function main() {
     for (const m of sorted) {
       const msg = await prisma.message.create({
         data: {
+          organizationId,
           conversationId: conv.id,
           content: m.content,
           direction: m.direction,

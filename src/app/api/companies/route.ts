@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { authenticateApiRequest } from "@/lib/api-auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { createCompany, getCompanies } from "@/services/companies";
 
 function parseIntParam(v: string | null, fallback: number) {
@@ -14,6 +14,7 @@ export async function GET(request: Request) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
     const { searchParams } = new URL(request.url);
     const search = searchParams.get("search") ?? undefined;
     const page = parseIntParam(searchParams.get("page"), 1);
@@ -21,6 +22,7 @@ export async function GET(request: Request) {
 
     const result = await getCompanies({ search, page, perPage });
     return NextResponse.json(result);
+    });
   } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao listar empresas." }, { status: 500 });
@@ -32,6 +34,7 @@ export async function POST(request: Request) {
     const authResult = await authenticateApiRequest(request);
     if (!authResult.ok) return authResult.response;
 
+    return await runWithApiUserContext(authResult.user, async () => {
     let body: unknown;
     try {
       body = await request.json();
@@ -62,6 +65,7 @@ export async function POST(request: Request) {
     });
 
     return NextResponse.json(company, { status: 201 });
+    });
   } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao criar empresa." }, { status: 500 });

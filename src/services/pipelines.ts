@@ -1,8 +1,9 @@
 import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 
-const DEFAULT_STAGES: Omit<Prisma.StageCreateWithoutPipelineInput, "pipeline">[] = [
+const DEFAULT_STAGES: Omit<Prisma.StageCreateWithoutPipelineInput, "pipeline" | "organization">[] = [
   { name: "Novo", position: 0, color: "#6366f1", winProbability: 10, rottingDays: 30 },
   { name: "Qualificado", position: 1, color: "#8b5cf6", winProbability: 25, rottingDays: 30 },
   { name: "Proposta", position: 2, color: "#ec4899", winProbability: 50, rottingDays: 14 },
@@ -25,12 +26,14 @@ const stageWithCountSelect = {
 export async function ensureDefaultPipeline() {
   const count = await prisma.pipeline.count();
   if (count > 0) return;
+  const organizationId = getOrgIdOrThrow();
   await prisma.pipeline.create({
     data: {
       name: "Pipeline Principal",
       isDefault: true,
+      organizationId,
       stages: {
-        create: DEFAULT_STAGES.map((s) => ({ ...s })),
+        create: DEFAULT_STAGES.map((s) => ({ ...s, organizationId })),
       },
     },
   });
@@ -94,11 +97,13 @@ export async function createPipeline(data: { name: string }) {
     throw new Error("INVALID_NAME");
   }
 
+  const organizationId = getOrgIdOrThrow();
   return prisma.pipeline.create({
     data: {
       name,
+      organizationId,
       stages: {
-        create: DEFAULT_STAGES.map((s) => ({ ...s })),
+        create: DEFAULT_STAGES.map((s) => ({ ...s, organizationId })),
       },
     },
     include: {
@@ -186,6 +191,7 @@ export async function createStage(pipelineId: string, data: CreateStageInput) {
         name,
         position,
         pipelineId,
+        organizationId: getOrgIdOrThrow(),
         color: data.color ?? "#6366f1",
         winProbability: data.winProbability ?? 0,
         rottingDays: data.rottingDays ?? 30,

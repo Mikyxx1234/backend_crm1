@@ -1,6 +1,7 @@
 import type { DealStatus, LifecycleStage, Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 export type SegmentFilters = {
   search?: string;
@@ -34,7 +35,10 @@ export async function getSegmentById(id: string) {
 
 export async function createSegment(name: string, filters: SegmentFilters) {
   return prisma.segment.create({
-    data: { name, filters: filters as unknown as Prisma.InputJsonValue },
+    data: withOrgFromCtx({
+      name,
+      filters: filters as unknown as Prisma.InputJsonValue,
+    }),
   });
 }
 

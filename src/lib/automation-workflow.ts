@@ -128,13 +128,23 @@ function asRecord(v: unknown): Record<string, unknown> {
     : {};
 }
 
-export function summarizeTriggerConfig(triggerType: string, triggerConfig: unknown): string {
+export function summarizeTriggerConfig(
+  triggerType: string,
+  triggerConfig: unknown,
+  lookup?: Record<string, string>,
+): string {
   const c = asRecord(triggerConfig);
   switch (triggerType) {
     case "stage_changed": {
       const parts: string[] = [];
-      if (c.fromStageId) parts.push(`De: ${String(c.fromStageId)}`);
-      if (c.toStageId) parts.push(`Para: ${String(c.toStageId)}`);
+      if (c.fromStageId) {
+        const id = String(c.fromStageId);
+        parts.push(`De: ${lookup?.[id] ?? id}`);
+      }
+      if (c.toStageId) {
+        const id = String(c.toStageId);
+        parts.push(`Para: ${lookup?.[id] ?? id}`);
+      }
       return parts.length ? parts.join(" · ") : "Qualquer mudança de estágio";
     }
     case "tag_added": {
@@ -370,7 +380,7 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       };
     case "wait_for_reply":
       return {
-        timeoutMs: 60_000, receivedGotoStepId: "", timeoutGotoStepId: "",
+        timeoutMs: 60_000, receivedGotoStepId: "", timeoutGotoStepId: "", saveToVariable: "",
       };
     case "finish":
       return { action: "stop" };
@@ -433,14 +443,102 @@ export type ApiAutomationStep = {
   position: number;
 };
 
+function normalizeLegacyStepConfig(
+  stepType: string,
+  rawConfig: unknown,
+): Record<string, unknown> {
+  const cfg =
+    typeof rawConfig === "object" && rawConfig !== null && !Array.isArray(rawConfig)
+      ? { ...(rawConfig as Record<string, unknown>) }
+      : {};
+
+  // Compat legado (Kommo parser): vários passos usavam `_nextStepId`.
+  if (
+    (typeof cfg.nextStepId !== "string" || !cfg.nextStepId) &&
+    typeof cfg._nextStepId === "string" &&
+    cfg._nextStepId
+  ) {
+    cfg.nextStepId = cfg._nextStepId;
+  }
+
+  // Question legado podia salvar resposta em `_answeredGotoStepId`.
+  if (
+    stepType === "question" &&
+    (typeof cfg.elseGotoStepId !== "string" || !cfg.elseGotoStepId) &&
+    typeof cfg._answeredGotoStepId === "string" &&
+    cfg._answeredGotoStepId
+  ) {
+    cfg.elseGotoStepId = cfg._answeredGotoStepId;
+  }
+
+  // Condition legado (import Kommo):
+  // - `_branches[{ conditions, gotoStepId }]` -> `branches[{ rules, nextStepId }]`
+  // - `_falseGotoStepId` -> `elseStepId`
+  // - `_trueGotoStepId`  -> `nextStepId` (formato antigo de 1 regra)
+  if (stepType === "condition") {
+    if (
+      (typeof cfg.nextStepId !== "string" || !cfg.nextStepId) &&
+      typeof cfg._trueGotoStepId === "string" &&
+      cfg._trueGotoStepId
+    ) {
+      cfg.nextStepId = cfg._trueGotoStepId;
+    }
+
+    if (
+      (typeof cfg.elseStepId !== "string" || !cfg.elseStepId) &&
+      typeof cfg._falseGotoStepId === "string" &&
+      cfg._falseGotoStepId
+    ) {
+      cfg.elseStepId = cfg._falseGotoStepId;
+    }
+
+    if (!Array.isArray(cfg.branches) && Array.isArray(cfg._branches)) {
+      const legacyBranches = cfg._branches as Record<string, unknown>[];
+      cfg.branches = legacyBranches
+        .map((branch) => {
+          const rawRules = Array.isArray(branch.conditions)
+            ? (branch.conditions as Record<string, unknown>[])
+            : [];
+          const rules = rawRules
+            .map((rule) => {
+              const field =
+                typeof rule.field === "string"
+                  ? rule.field
+                  : typeof rule.path === "string"
+                    ? rule.path
+                    : "";
+              if (!field) return null;
+              return {
+                field,
+                op: typeof rule.op === "string" ? rule.op : "eq",
+                value: rule.value ?? "",
+              };
+            })
+            .filter((r) => r !== null);
+
+          if (rules.length === 0) return null;
+
+          return {
+            id: newBranchId(),
+            rules,
+            nextStepId:
+              typeof branch.gotoStepId === "string" && branch.gotoStepId
+                ? branch.gotoStepId
+                : undefined,
+          };
+        })
+        .filter((b) => b !== null);
+    }
+  }
+
+  return cfg;
+}
+
 export function apiStepsToWorkflow(steps: ApiAutomationStep[]): AutomationStep[] {
   return steps.map((s) => ({
     id: s.id,
     type: s.type,
-    config:
-      typeof s.config === "object" && s.config !== null && !Array.isArray(s.config)
-        ? { ...(s.config as Record<string, unknown>) }
-        : {},
+    config: normalizeLegacyStepConfig(s.type, s.config),
   }));
 }
 

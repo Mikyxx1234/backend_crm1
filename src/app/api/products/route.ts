@@ -1,12 +1,14 @@
 import { NextResponse } from "next/server";
 
-import { authenticateApiRequest } from "@/lib/api-auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 export async function GET(request: Request) {
   const authResult = await authenticateApiRequest(request);
   if (!authResult.ok) return authResult.response;
 
+  return await runWithApiUserContext(authResult.user, async () => {
   const url = new URL(request.url);
   const search = url.searchParams.get("search")?.trim() ?? "";
   const activeOnly = url.searchParams.get("active") !== "false";
@@ -35,12 +37,14 @@ export async function GET(request: Request) {
   ]);
 
   return NextResponse.json({ products, total, page, perPage });
+  });
 }
 
 export async function POST(request: Request) {
   const authResult = await authenticateApiRequest(request);
   if (!authResult.ok) return authResult.response;
 
+  return await runWithApiUserContext(authResult.user, async () => {
   let body: Record<string, unknown>;
   try {
     body = (await request.json()) as Record<string, unknown>;
@@ -57,7 +61,7 @@ export async function POST(request: Request) {
   const type = rawType === "SERVICE" ? "SERVICE" : "PRODUCT";
 
   const product = await prisma.product.create({
-    data: {
+    data: withOrgFromCtx({
       name,
       description: typeof body.description === "string" ? body.description.trim() || null : null,
       sku: typeof body.sku === "string" && body.sku.trim() ? body.sku.trim() : null,
@@ -65,8 +69,9 @@ export async function POST(request: Request) {
       unit: type === "SERVICE" ? "serviço" : (typeof body.unit === "string" && body.unit.trim() ? body.unit.trim() : "un"),
       type,
       isActive: body.isActive !== false,
-    },
+    }),
   });
 
   return NextResponse.json({ product }, { status: 201 });
+  });
 }

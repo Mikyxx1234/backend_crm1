@@ -12,6 +12,7 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { embedTexts } from "@/services/ai/provider";
 
 export type RetrievedChunk = {
@@ -32,8 +33,12 @@ export async function retrieveRelevantChunks(
   const text = query.trim();
   if (!text) return [];
 
+  const orgId = getOrgIdOrThrow();
+
   // Checa rapidamente se o agente tem algo indexado antes de gastar
-  // um embedding; evita chamadas à OpenAI quando não há docs.
+  // um embedding; evita chamadas à OpenAI quando não há docs. Como
+  // passa pela extension scoped, ja garante que o agente pertence
+  // a` org corrente.
   const hasDocs = await prisma.aIAgentKnowledgeDoc.findFirst({
     where: { agentId, status: "READY", chunkCount: { gt: 0 } },
     select: { id: true },
@@ -45,6 +50,11 @@ export async function retrieveRelevantChunks(
   if (!emb) return [];
   const vectorLiteral = `[${emb.map((n) => (Number.isFinite(n) ? n : 0)).join(",")}]`;
 
+  // Defesa em profundidade: o $queryRawUnsafe NAO passa pela extension.
+  // Filtramos por organizationId em chunks E docs (depois da migration
+  // multi-tenancy ambas as tabelas tem organizationId NOT NULL). Se algum
+  // bug fizer o caller passar agentId de outra org, a query volta vazia
+  // em vez de vazar chunks do tenant errado.
   const rows = await prisma.$queryRawUnsafe<
     Array<{
       id: string;
@@ -61,11 +71,14 @@ export async function retrieveRelevantChunks(
       WHERE d."agentId" = $2
         AND d.status = 'READY'
         AND c.embedding IS NOT NULL
+        AND d."organizationId" = $4
+        AND c."organizationId" = $4
       ORDER BY c.embedding <=> $1::vector
       LIMIT $3`,
     vectorLiteral,
     agentId,
     topK,
+    orgId,
   );
 
   return rows

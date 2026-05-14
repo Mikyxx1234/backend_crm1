@@ -1,6 +1,4 @@
-import { readFile } from "fs/promises";
 import { NextResponse } from "next/server";
-import path from "path";
 
 import { auth } from "@/lib/auth";
 import { convertToMp3, guessInputExt } from "@/lib/audio-convert";
@@ -39,18 +37,6 @@ async function fetchAudioBuffer(
 ): Promise<{ buffer: Buffer; contentType: string; urlPath: string }> {
   const decoded = decodeURIComponent(rawUrl);
 
-  if (decoded.startsWith("/uploads/")) {
-    const safe = decoded.replace(/\.\.+/g, "");
-    const filePath = path.join(process.cwd(), "public", safe);
-    const buffer = await readFile(filePath);
-    const ext = path.extname(safe).slice(1).toLowerCase() || "bin";
-    return {
-      buffer,
-      contentType: `audio/${ext === "mp3" ? "mpeg" : ext}`,
-      urlPath: safe,
-    };
-  }
-
   if (isMetaUrl(decoded)) {
     const token = process.env.META_WHATSAPP_ACCESS_TOKEN?.trim();
     if (!token) throw new Error("Token Meta não configurado.");
@@ -66,7 +52,10 @@ async function fetchAudioBuffer(
     };
   }
 
-  // Mesma origem (rotas internas tipo `/api/media/proxy?...`).
+  // PR 1.3: paths internos (`/uploads/...`, `/api/storage/...`,
+  // `/api/media/proxy?...`) sempre passam por HTTP fetch com cookies
+  // de sessão repassados — assim o middleware/gateway aplica auth +
+  // checagem de tenant. Ler do FS direto bypassaria essa validação.
   if (decoded.startsWith("/")) {
     const origin = new URL(request.url).origin;
     const cookie = request.headers.get("cookie") ?? "";
