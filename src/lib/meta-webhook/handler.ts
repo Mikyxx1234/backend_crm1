@@ -781,6 +781,22 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
   const nfm = obj(inter.nfm_reply);
   let fromNfm = "";
   if (Object.keys(nfm).length > 0) {
+    // Log estruturado do payload bruto pra debugging — ajuda a entender
+    // se Meta está mandando `response_json` ou apenas `body`. Em produção
+    // estável esse log pode ser removido; mantido por enquanto pra dar
+    // visibilidade sobre fluxos que ainda chegam vazios.
+    log.info("[whatsapp-flow] nfm_reply recebido", {
+      keys: Object.keys(nfm),
+      name: str(nfm.name) || null,
+      body: str(nfm.body) || null,
+      response_json_type: typeof nfm.response_json,
+      response_json_preview:
+        typeof nfm.response_json === "string"
+          ? nfm.response_json.slice(0, 500)
+          : nfm.response_json
+            ? JSON.stringify(nfm.response_json).slice(0, 500)
+            : null,
+    });
     const formatted = formatWhatsappFlowResponse(nfm);
     if (formatted) {
       fromNfm = formatted;
@@ -795,6 +811,18 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
   const flowReply = obj(inter.flow_reply);
   let fromFlow = "";
   if (Object.keys(flowReply).length > 0) {
+    log.info("[whatsapp-flow] flow_reply recebido", {
+      keys: Object.keys(flowReply),
+      name: str(flowReply.name) || null,
+      body: str(flowReply.body) || null,
+      response_json_type: typeof flowReply.response_json,
+      response_json_preview:
+        typeof flowReply.response_json === "string"
+          ? flowReply.response_json.slice(0, 500)
+          : flowReply.response_json
+            ? JSON.stringify(flowReply.response_json).slice(0, 500)
+            : null,
+    });
     const formatted = formatWhatsappFlowResponse(flowReply);
     if (formatted) {
       fromFlow = formatted;
