@@ -5,6 +5,48 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-14 — Sem Redis em ambiente de teste compartilhado com produção
+
+**Decisão.** No ambiente de teste no Easypanel
+(`banco-backend-crm.6tqx2r.easypanel.host`), o backend separado roda **sem
+Redis**. As envs `REDIS_URL` e `SSE_ENABLE_REDIS_PUBSUB` ficam ausentes.
+Cache, rate-limit e SSE pub/sub usam o fallback em memória que já existe
+no código.
+
+**Contexto.** O Redis disponível na infra atual está no project
+"banco" (junto do Postgres) e é **o mesmo Redis usado pelo monólito de
+produção** em `crm.eduit.com.br`. Dois pontos:
+
+1. Hostname interno do Docker (`banco_redis-crm`) **não resolve cross-project**
+   no Easypanel — só dentro do mesmo project. Daí o
+   `getaddrinfo ENOTFOUND banco_redis-crm` no backend separado.
+2. Mesmo se conseguíssemos conectar (expondo Redis externamente ou
+   movendo de project), **compartilhar Redis com produção é inaceitável**:
+   cache de `Organization`/feature flags/subscription colide, SSE
+   entrega eventos cruzados entre teste e produção, rate-limit do
+   teste consome budget da produção. Risco real de cache poisoning
+   em produção por conta de um ambiente de teste.
+
+**Alternativas descartadas.**
+
+- **Expor Redis externamente e compartilhar com produção.** Inseguro
+  (Redis com auth fraca é vetor comum de ransomware) e contamina
+  produção (ver acima).
+- **Subir um Redis novo no project do backend separado.** Funciona, mas
+  é overhead pra um ambiente que é só validação de UI/login. Reservado
+  para o deploy real em VPS de cliente final.
+
+**Impacto.**
+
+- Cache 100% em memória → válido enquanto for 1 réplica do backend
+  (que é o caso atual). Escalar pra 2+ réplicas exige Redis dedicado.
+- SSE entrega eventos só para conexões na **mesma instância** do
+  backend — também ok pra 1 réplica.
+- Rate-limit por IP/user fica per-instance — fine pra teste.
+- Em deploy de cliente final (VPS nova): criar Redis dedicado no mesmo
+  project do backend e setar `REDIS_URL=redis://default:SENHA@{project}_{redis}:6379`
+  e `SSE_ENABLE_REDIS_PUBSUB=1`.
+
 ### 2026-05-14 — Backend aponta para `db_crm` com `SKIP_PRISMA_MIGRATE=1`
 
 **Decisão.** No ambiente de teste no Easypanel
