@@ -54,18 +54,46 @@ export async function PUT(req: Request, ctx: Ctx) {
         ? body.availableForVoiceCalls
         : (existing?.availableForVoiceCalls ?? false);
 
-    const agentStatus = await prisma.agentStatus.upsert({
-      where: { userId: id },
-      create: withOrgFromCtx({ userId: id, status, availableForVoiceCalls }),
-      update: { status, availableForVoiceCalls },
-    });
+    try {
+      const agentStatus = await prisma.agentStatus.upsert({
+        where: { userId: id },
+        create: withOrgFromCtx({ userId: id, status, availableForVoiceCalls }),
+        update: { status, availableForVoiceCalls },
+      });
 
-    const statusChanged = !existing || existing.status !== status;
-    if (statusChanged) {
-      await recordPresenceTransition({ userId: id, nextStatus: status });
-      sseBus.publish("presence_update", { organizationId: getOrgIdOrNull(), userId: id, status });
+      const statusChanged = !existing || existing.status !== status;
+      if (statusChanged) {
+        await recordPresenceTransition({ userId: id, nextStatus: status });
+        sseBus.publish("presence_update", { organizationId: getOrgIdOrNull(), userId: id, status });
+      }
+
+      return NextResponse.json(agentStatus);
+    } catch (err) {
+      // Mesma proteção defensiva de `/api/agents/me/ping`: P2025/P2003
+      // ocorre quando o AgentStatus existe com `organizationId` desalinhado
+      // do contexto atual (cenário multi-tenant, user movido de org). A
+      // Prisma extension RLS bloqueia o upsert e devolve "Record not found".
+      // O fix real é mover o registro pra org correta (ver
+      // `scripts/fix-agent-status-cross-org.mjs`). Aqui apenas evitamos
+      // poluir log e quebrar o request — o cliente recebe 200 e tenta de
+      // novo no próximo heartbeat.
+      const isExpected =
+        err instanceof Error &&
+        (err.message.includes("Record to update not found") ||
+          err.message.includes("Record not found") ||
+          (err as { code?: string }).code === "P2025" ||
+          (err as { code?: string }).code === "P2003");
+      if (!isExpected) {
+        console.warn(
+          "[/api/agents/[id]/status PUT] falhou:",
+          err instanceof Error ? err.message : err,
+        );
+        throw err;
+      }
+      return NextResponse.json(
+        { ok: false, _migrationPending: true },
+        { status: 200 },
+      );
     }
-
-    return NextResponse.json(agentStatus);
   });
 }
