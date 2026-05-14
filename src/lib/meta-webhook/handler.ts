@@ -89,6 +89,88 @@ function obj(v: unknown): Record<string, unknown> {
     : {};
 }
 
+/**
+ * Formata uma resposta de WhatsApp Flow (nfm_reply / flow_reply) extraindo os
+ * pares "campo: valor" do `response_json` que a Meta manda no webhook.
+ *
+ * Por que: a Meta envia `body = "Sent"` (literal) nesse tipo de resposta — o
+ * conteúdo real preenchido pelo cliente fica em `response_json`. Antes do fix
+ * o chat exibia "Fluxo (resposta): Sent" e o operador não tinha como ler o que
+ * o cliente preencheu sem ir pro Meta Manager.
+ *
+ * Regras de formatação:
+ *   - `flow_token` é descartado (token interno de correlação, não tem valor de
+ *     negócio pra mostrar no chat).
+ *   - Chaves em snake_case viram "Title Case" (ex.: "telefone_principal" →
+ *     "Telefone principal"). Se a chave já tem espaço/caixa mista, é mantida.
+ *   - Valores são serializados como string legível: booleano vira "Sim/Não",
+ *     array vira CSV, objeto vira JSON compacto.
+ *   - Cada valor individual é truncado em 200 chars; o resultado final em
+ *     1000 chars (limite generoso pra caber em `Message.content` sem poluir
+ *     a UI de chat).
+ *   - Se `response_json` não parsear ou estiver vazio, retorna `null` (caller
+ *     decide se cai pro fallback antigo).
+ */
+function formatWhatsappFlowResponse(
+  nfm: Record<string, unknown>,
+): string | null {
+  const rawJson = nfm.response_json;
+  let payload: Record<string, unknown> | null = null;
+
+  if (typeof rawJson === "string" && rawJson.trim().length > 0) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        payload = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // JSON malformado — caller usa fallback do `body`.
+      return null;
+    }
+  } else if (rawJson && typeof rawJson === "object" && !Array.isArray(rawJson)) {
+    payload = rawJson as Record<string, unknown>;
+  }
+
+  if (!payload) return null;
+
+  const entries = Object.entries(payload).filter(
+    ([k]) => k !== "flow_token" && !k.startsWith("__"),
+  );
+  if (entries.length === 0) return null;
+
+  const formatKey = (k: string): string => {
+    if (/\s/.test(k) || /[A-Z]/.test(k)) return k;
+    const words = k.replace(/[_-]+/g, " ").trim();
+    if (!words) return k;
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  };
+
+  const formatVal = (v: unknown): string => {
+    if (v === null || v === undefined) return "—";
+    if (typeof v === "boolean") return v ? "Sim" : "Não";
+    if (typeof v === "number") return String(v);
+    if (Array.isArray(v)) {
+      const joined = v.map((item) => formatVal(item)).join(", ");
+      return joined.length > 200 ? `${joined.slice(0, 200)}…` : joined;
+    }
+    if (typeof v === "object") {
+      const json = JSON.stringify(v);
+      return json.length > 200 ? `${json.slice(0, 200)}…` : json;
+    }
+    const s = String(v);
+    return s.length > 200 ? `${s.slice(0, 200)}…` : s;
+  };
+
+  const flowName = str(nfm.name);
+  const header = flowName
+    ? `📋 Resposta do formulário (${flowName})`
+    : `📋 Resposta do formulário`;
+
+  const lines = entries.map(([k, v]) => `• ${formatKey(k)}: ${formatVal(v)}`);
+  const full = `${header}\n${lines.join("\n")}`;
+  return full.length > 1000 ? `${full.slice(0, 1000)}…` : full;
+}
+
 function arr(v: unknown): unknown[] {
   return Array.isArray(v) ? v : [];
 }
@@ -690,22 +772,38 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
     }
   }
 
+  // Resposta de WhatsApp Flow vem em duas formas no webhook da Meta:
+  //   1. `interactive.type = "nfm_reply"` (Native Form Message Reply — Cloud API)
+  //   2. `interactive.type = "flow_reply"` (variante mais antiga, ainda vista)
+  // Em ambos os casos, `body` literal vem "Sent" e os valores preenchidos
+  // ficam em `response_json` (string JSON). Formatamos como "Campo: valor"
+  // por linha pra que o operador leia direto no chat.
   const nfm = obj(inter.nfm_reply);
   let fromNfm = "";
   if (Object.keys(nfm).length > 0) {
-    const b = str(nfm.body);
-    fromNfm = b
-      ? `Fluxo (resposta): ${b.slice(0, 400)}${b.length > 400 ? "…" : ""}`
-      : "Fluxo: resposta recebida.";
+    const formatted = formatWhatsappFlowResponse(nfm);
+    if (formatted) {
+      fromNfm = formatted;
+    } else {
+      const b = str(nfm.body);
+      fromNfm = b && b.toLowerCase() !== "sent"
+        ? `Fluxo (resposta): ${b.slice(0, 400)}${b.length > 400 ? "…" : ""}`
+        : "📋 Resposta do formulário recebida (sem campos).";
+    }
   }
 
   const flowReply = obj(inter.flow_reply);
   let fromFlow = "";
   if (Object.keys(flowReply).length > 0) {
-    const body = str(flowReply.body) || str(flowReply.response_json);
-    fromFlow = body
-      ? `Fluxo: ${body.slice(0, 400)}${body.length > 400 ? "…" : ""}`
-      : "Fluxo: interação recebida.";
+    const formatted = formatWhatsappFlowResponse(flowReply);
+    if (formatted) {
+      fromFlow = formatted;
+    } else {
+      const body = str(flowReply.body);
+      fromFlow = body && body.toLowerCase() !== "sent"
+        ? `Fluxo: ${body.slice(0, 400)}${body.length > 400 ? "…" : ""}`
+        : "📋 Resposta do formulário recebida (sem campos).";
+    }
   }
 
   let text =
