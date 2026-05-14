@@ -5,6 +5,70 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-14 — User movido entre orgs: gera registros órfãos sob RLS
+
+**Decisão.** Sempre que um `User` for movido entre `Organization`s (campo
+`organizationId` no `users`), TODOS os registros 1:1 que carregam
+`organizationId` denormalizado precisam ser atualizados na mesma transação,
+ou Prisma RLS começa a devolver `P2025`/`P2003` em loop nos heartbeats.
+
+Tabelas afetadas conhecidas:
+
+- `agent_statuses` (1:1 com user, indexado por `userId @unique`)
+- *(adicionar aqui qualquer outra tabela com `organizationId + userId@unique`
+  que aparecer no futuro)*
+
+**Contexto.** Descoberto investigando `prisma.agentStatus.upsert()` em loop
+no log do backend separado. O user `adm@dnawork.ai` foi originalmente
+criado em `org_eduit` e depois movido para `org_dnawork`. O registro
+`agent_statuses` ficou com `organizationId = org_eduit`. Quando o user
+faz heartbeat:
+
+1. Sessão tem `organizationId = org_dnawork` (org atual do user).
+2. Prisma extension de RLS injeta `WHERE organizationId = 'org_dnawork'`
+   no `findUnique` interno do upsert.
+3. Não acha o registro (que existe, mas em outra org).
+4. Vai pro `create` path.
+5. Conflita em `userId @unique` (já existe um registro com esse userId).
+6. Prisma normaliza isso como `P2025: Record not found`.
+
+A produção do monólito (`crm.eduit.com.br`) provavelmente não tinha esse
+loop antes porque rodava com Prisma extension RLS desativado, ou
+processava cross-org sem filtrar (super-admin path).
+
+**Como detectar.**
+
+```bash
+DATABASE_URL=... node scripts/diagnose-agent-status.mjs
+```
+
+Mostra registros cross-org. Se houver, rodar:
+
+```bash
+DATABASE_URL=... node scripts/fix-agent-status-cross-org.mjs
+```
+
+(move cada AgentStatus pra `organizationId` igual ao do user dono).
+
+**Alternativas descartadas.**
+
+- **Cascade deletar AgentStatus quando user muda de org.** Perde
+  histórico de presença e o user fica "OFFLINE" até próximo ping. Pior UX.
+- **Remover o `organizationId` redundante de `agent_statuses`.** O index
+  por org existe pra performance de dashboards multi-tenant (listar todos
+  agentes ONLINE de uma org). Tirar quebraria essas queries.
+
+**Impacto.**
+
+- Hardening defensivo aplicado em `PUT /api/agents/[id]/status` (igual ao
+  já existente em `POST /api/agents/me/ping`): captura `P2025/P2003`,
+  responde 200 silenciosamente. Não polui log nem quebra UX se voltar a
+  aparecer registro órfão.
+- TODO técnico: encontrar e bloquear o lugar do código que **move user
+  entre orgs** (super-admin tool) e adicionar transação que atualize
+  `agent_statuses.organizationId` em conjunto. Sem isso, novos órfãos
+  podem nascer.
+
 ### 2026-05-14 — Sem Redis em ambiente de teste compartilhado com produção
 
 **Decisão.** No ambiente de teste no Easypanel
