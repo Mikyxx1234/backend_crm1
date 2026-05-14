@@ -28,15 +28,12 @@ function securityHeaders(): { key: string; value: string }[] {
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  // next-auth/react inicializa `__NEXTAUTH` com `process.env.NEXTAUTH_URL`.
-  // Sem isto, o client bundle pode não ver a variável (só existe no .env do
-  // servidor), e signIn/getSession quebram de forma opaca.
-  env: {
-    NEXTAUTH_URL:
-      process.env.NEXTAUTH_URL ??
-      process.env.VERCEL_URL ??
-      "http://localhost:3000",
-  },
+  // NOTA: NÃO listar `NEXTAUTH_URL` em `env` aqui. Isso inlinearia o valor
+  // em build time e impediria trocar a URL via env var no Easypanel sem
+  // rebuild. Este backend é só API (sem `next-auth/react` no client),
+  // então o `process.env.NEXTAUTH_URL` em runtime já é suficiente para
+  // o NextAuth server. Para frontends que rodem `next-auth/react`, o
+  // próprio cliente lê a URL em runtime via `/api/auth/session`.
   typescript: {
     // Mantemos TS errors fora do build por um motivo único: src/lib/prisma.ts
     // usa Prisma Client Extensions para auto-injetar `organizationId` em
