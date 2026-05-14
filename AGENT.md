@@ -5,6 +5,85 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-14 — Backend aponta para `db_crm` com `SKIP_PRISMA_MIGRATE=1`
+
+**Decisão.** No ambiente de teste no Easypanel
+(`banco-backend-crm.6tqx2r.easypanel.host`), o backend separado se conecta
+**ao mesmo banco `db_crm`** que o monólito de produção (`crm.eduit.com.br`),
+com `SKIP_PRISMA_MIGRATE=1` no entrypoint para evitar tentar aplicar a baseline
+nova em um banco já populado.
+
+**Contexto.** O `db_crm` em `187.127.27.39:5432` já tem schema multi-tenant
+completo (71 tabelas, 60 migrations registradas) e dados reais de produção
+(16 users, 3 organizations, 260 conversations, 915 messages). O backend
+separado nasceu com a baseline `20240101000000_init` gerada via
+`prisma migrate diff --from-empty`. Como `_prisma_migrations` do `db_crm`
+não conhece essa baseline (e o reverso: o repo do backend não tem 2
+migrations `20260429*_add_contact_ad_tracking` que existem no `db_crm`),
+deixar o `prisma migrate deploy` rodar no boot quebra (tenta aplicar
+baseline e dá `relation already exists`). O drift de schema é só
+cosmético (índices/defaults) — todas as colunas que o `schema.prisma`
+referencia existem no `db_crm`.
+
+**Alternativas descartadas.**
+
+- **Criar banco novo zerado e seed.** Perde os dados reais e os 16 users
+  existentes — todos os testes contra produção e sessões ativas viriam abaixo.
+- **Forçar drop + reaplicar baseline no `db_crm`.** Destrutivo demais para
+  banco que ainda é usado pelo monólito em produção. Risco real de perder
+  conversas e tickets ativos.
+- **Reconciliar histórico de migrations.** Editar `_prisma_migrations` à mão
+  pra alinhar com o repo é frágil e dificil de auditar; `SKIP_PRISMA_MIGRATE=1`
+  é mais seguro até o cutover definitivo.
+
+**Impacto.**
+
+- Para qualquer deploy do backend separado contra o **mesmo banco do monólito**,
+  setar `SKIP_PRISMA_MIGRATE=1` no env do Easypanel é obrigatório.
+- Quando subir em VPS nova com banco zerado (cenário cliente final), **NÃO**
+  setar `SKIP_PRISMA_MIGRATE`. O entrypoint vai aplicar a baseline + 58
+  migrations subsequentes normalmente.
+- Drift entre repo e `db_crm` precisa ser reconciliado antes do cutover
+  definitivo: capturar as 2 migrations `add_contact_ad_tracking` do
+  `db_crm` para o repo, gerar nova baseline, dropar o `_prisma_migrations`
+  no `db_crm` e re-marcar tudo como aplicado (single-shot, em janela de
+  manutenção).
+
+### 2026-05-14 — Não listar `NEXTAUTH_URL` em `next.config.ts > env`
+
+**Decisão.** O bloco `env: { NEXTAUTH_URL: ... }` foi removido do
+`next.config.ts` do backend. `process.env.NEXTAUTH_URL` é lido em runtime
+de verdade.
+
+**Contexto.** Em Next.js, qualquer variável listada no `env` do
+`next.config.ts` é **inlineada como string literal no bundle em build time**.
+Para um backend que só serve API (sem `next-auth/react` no client), esse
+inline não tem benefício e cria uma armadilha: o build do Easypanel
+capturou `NEXTAUTH_URL=http://localhost:3000` (fallback) e ficou imune
+a trocar a env no painel sem rebuild. Sintomas observados:
+
+- Cookie de sessão emitido sem prefixo `__Secure-` e sem flag `Secure`,
+  porque `useSecureCookies = nextAuthUrl.startsWith("https://")` viu o
+  inlined `"http://..."` e calculou `false`.
+- `Location` no 302 pós-login apontava para `http://localhost:3000`.
+- Middleware Edge do frontend procurava `__Secure-authjs.session-token`
+  e não achava → redirect infinito pra `/login`.
+
+**Alternativas descartadas.**
+
+- **Manter o bloco e setar `NEXTAUTH_URL` em build-args do Docker.** Fica
+  refém de o build sempre rodar com o env correto, e qualquer rebuild com
+  env errada (cenário Easypanel real) volta a quebrar silenciosamente.
+- **Hardcoded em `auth.config.ts`.** Pior — vira release-blocker em cada
+  ambiente diferente.
+
+**Impacto.** Trocar `NEXTAUTH_URL` no painel agora exige apenas
+**Restart** (não Rebuild). Cookie passa a sair com `__Secure-` + flag
+`Secure` quando atrás de HTTPS, exatamente como o middleware Edge do
+frontend espera ler via `getToken({ secureCookie: true })`.
+
+---
+
 ### 2026-05-14 — Re-fork a partir do `main` multi-tenant (`pre-update-multitenant` → `multi-tenant`)
 
 **Decisão.** Os repositórios `frontend_crm1` e `backend_crm1` foram **regenerados
