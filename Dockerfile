@@ -25,7 +25,7 @@ ENV HOSTNAME=0.0.0.0
 ENV HOME=/tmp
 ENV NPM_CONFIG_CACHE=/tmp/.npm
 
-RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates gosu && rm -rf /var/lib/apt/lists/*
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 
 COPY --from=builder /app/public ./public
@@ -47,6 +47,17 @@ RUN chmod +x /app/docker-entrypoint.sh \
   && mkdir -p /tmp/.npm \
   && chown -R nextjs:nodejs /tmp
 
-USER nextjs
+# PR storage-fix: pre-criar /app/storage com ownership nextjs ANTES do
+# volume ser montado. Em volumes Docker novos, isso herda a ownership.
+# Em volumes existentes (criados antes deste fix), o entrypoint corrige
+# em runtime via `gosu` (ver docker-entrypoint.sh).
+RUN mkdir -p /app/storage \
+  && chown -R nextjs:nodejs /app/storage \
+  && chmod -R 0775 /app/storage
+
+# IMPORTANTE: não setamos `USER nextjs` aqui. O entrypoint começa como
+# root para conseguir corrigir a ownership de `/app/storage` (o volume
+# do EasyPanel pode ter sido criado como root). Depois ele faz drop pra
+# nextjs via `gosu` antes de executar `node server.js`.
 EXPOSE 3000
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
