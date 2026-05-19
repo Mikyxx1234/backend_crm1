@@ -110,25 +110,55 @@ export type AdvancedDealFilters = {
   contactCustomFields?: CustomFieldFilter[];
 };
 
+/**
+ * Aceita "YYYY-MM-DD" (data pura) e ISO completo. Para data pura,
+ * retornamos o inicio do dia em UTC — quem chama decide se quer
+ * estender pro fim do dia (ver `dateRangeBounds`).
+ */
 function parseDate(value: string | null | undefined): Date | undefined {
   if (!value) return undefined;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const d = new Date(`${value}T00:00:00.000Z`);
+    return Number.isNaN(d.getTime()) ? undefined : d;
+  }
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? undefined : d;
 }
 
 type DateBounds = { gte?: Date; lte?: Date };
 
+/**
+ * Converte um range "YYYY-MM-DD" do front em bounds Date para o Prisma.
+ *
+ * - `from` -> gte = inicio do dia UTC do `from`
+ * - `to`   -> lte = fim do dia UTC do `to` (23:59:59.999)
+ *
+ * Nota timezone: comparamos em UTC. Para a maioria das aplicacoes
+ * isso e "good enough" — se o dataset for sensivel a fuso, o usuario
+ * pode usar "Personalizado" e definir horarios explicitos.
+ */
 function dateRangeBounds(range: DateRangeValue | undefined): DateBounds | undefined {
   if (!range) return undefined;
   const gte = parseDate(range.from);
-  const lte = parseDate(range.to);
-  if (!gte && !lte) return undefined;
+  const lteStart = parseDate(range.to);
+  if (!gte && !lteStart) return undefined;
   const f: DateBounds = {};
   if (gte) f.gte = gte;
-  if (lte) {
-    const end = new Date(lte);
-    end.setHours(23, 59, 59, 999);
-    f.lte = end;
+  if (lteStart) {
+    // Se o `to` veio como data pura (00:00 UTC), avanca pra 23:59:59.999
+    // do mesmo dia UTC para abranger todo o dia.
+    const isMidnightUtc =
+      lteStart.getUTCHours() === 0 &&
+      lteStart.getUTCMinutes() === 0 &&
+      lteStart.getUTCSeconds() === 0 &&
+      lteStart.getUTCMilliseconds() === 0;
+    if (isMidnightUtc) {
+      const end = new Date(lteStart);
+      end.setUTCHours(23, 59, 59, 999);
+      f.lte = end;
+    } else {
+      f.lte = lteStart;
+    }
   }
   return f;
 }
@@ -463,7 +493,153 @@ export async function buildDealWhereFromFilters(
  * Parse defensivo do body do cliente. Retorna `null` se o input não
  * for um objeto. Filtros desconhecidos são silenciosamente ignorados.
  */
+/**
+ * Operadores aceitos em CustomField. Mantenha sincronizado com a union
+ * em `CustomFieldFilter.operator`.
+ */
+const CUSTOM_FIELD_OPS = new Set([
+  "eq",
+  "neq",
+  "contains",
+  "not_contains",
+  "filled",
+  "empty",
+  "gt",
+  "lt",
+  "between",
+  "before",
+  "after",
+  "in",
+]);
+
+function asString(v: unknown): string | undefined {
+  if (typeof v !== "string") return undefined;
+  const s = v.trim();
+  return s.length > 0 ? s : undefined;
+}
+
+function asBool(v: unknown): boolean | undefined {
+  return typeof v === "boolean" ? v : undefined;
+}
+
+function asStringArray(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const arr = v.filter((x): x is string => typeof x === "string" && x.trim().length > 0);
+  return arr.length > 0 ? arr : undefined;
+}
+
+function asDateRange(v: unknown): DateRangeValue | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const r = v as { from?: unknown; to?: unknown };
+  const from = typeof r.from === "string" ? r.from : null;
+  const to = typeof r.to === "string" ? r.to : null;
+  if (!from && !to) return undefined;
+  return { from, to };
+}
+
+function asCustomFieldFilter(v: unknown): CustomFieldFilter | null {
+  if (!v || typeof v !== "object") return null;
+  const o = v as Record<string, unknown>;
+  const name = asString(o.name);
+  if (!name) return null;
+  const operator =
+    typeof o.operator === "string" && CUSTOM_FIELD_OPS.has(o.operator)
+      ? (o.operator as CustomFieldFilter["operator"])
+      : undefined;
+  let value: CustomFieldFilter["value"];
+  if (typeof o.value === "string") value = o.value;
+  else if (Array.isArray(o.value)) {
+    value = o.value.filter((x): x is string => typeof x === "string");
+  } else if (o.value && typeof o.value === "object") {
+    value = asDateRange(o.value) ?? null;
+  } else {
+    value = null;
+  }
+  return { name, operator, value };
+}
+
+function asCustomFieldArray(v: unknown): CustomFieldFilter[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out: CustomFieldFilter[] = [];
+  for (const item of v) {
+    const f = asCustomFieldFilter(item);
+    if (f) out.push(f);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+const VALID_DEAL_STATUSES = new Set(["OPEN", "WON", "LOST"]);
+const VALID_TAG_MODES = new Set(["any", "all", "none"]);
+
+/**
+ * Sanitiza/valida o payload recebido do cliente. Ignora campos
+ * desconhecidos e descarta valores invalidos. Nunca quebra — sempre
+ * devolve um objeto valido (potencialmente vazio).
+ */
 export function parseAdvancedDealFilters(input: unknown): AdvancedDealFilters {
   if (!input || typeof input !== "object") return {};
-  return input as AdvancedDealFilters;
+  const o = input as Record<string, unknown>;
+  const out: AdvancedDealFilters = {};
+
+  if (o.logic === "AND" || o.logic === "OR") out.logic = o.logic;
+
+  const search = asString(o.search);
+  if (search) out.search = search;
+
+  const pipelineId = asString(o.pipelineId);
+  if (pipelineId) out.pipelineId = pipelineId;
+
+  const stageIds = asStringArray(o.stageIds);
+  if (stageIds) out.stageIds = stageIds;
+
+  const statuses = asStringArray(o.statuses)?.filter((s) =>
+    VALID_DEAL_STATUSES.has(s),
+  ) as DealStatus[] | undefined;
+  if (statuses && statuses.length > 0) out.statuses = statuses;
+
+  // ownerIds aceita null como "sem responsavel"
+  if (Array.isArray(o.ownerIds)) {
+    const owners = o.ownerIds.filter(
+      (x): x is string | null => x === null || (typeof x === "string" && x.trim().length > 0),
+    );
+    if (owners.length > 0) out.ownerIds = owners;
+  }
+  const wo = asBool(o.withoutOwner);
+  if (wo) out.withoutOwner = wo;
+  const wc = asBool(o.withoutContact);
+  if (wc) out.withoutContact = wc;
+
+  const sources = asStringArray(o.sources);
+  if (sources) out.sources = sources;
+
+  const tagIds = asStringArray(o.tagIds);
+  if (tagIds) out.tagIds = tagIds;
+  if (typeof o.tagMode === "string" && VALID_TAG_MODES.has(o.tagMode)) {
+    out.tagMode = o.tagMode as "any" | "all" | "none";
+  }
+  const wt = asBool(o.withoutTags);
+  if (wt) out.withoutTags = wt;
+
+  const contactSearch = asString(o.contactSearch);
+  if (contactSearch) out.contactSearch = contactSearch;
+  const chp = asBool(o.contactHasPhone);
+  if (chp !== undefined) out.contactHasPhone = chp;
+  const che = asBool(o.contactHasEmail);
+  if (che !== undefined) out.contactHasEmail = che;
+
+  const created = asDateRange(o.createdAt);
+  if (created) out.createdAt = created;
+  const updated = asDateRange(o.updatedAt);
+  if (updated) out.updatedAt = updated;
+  const closed = asDateRange(o.closedAt);
+  if (closed) out.closedAt = closed;
+  const lastI = asDateRange(o.lastInteractionAt);
+  if (lastI) out.lastInteractionAt = lastI;
+
+  const dealCfs = asCustomFieldArray(o.dealCustomFields);
+  if (dealCfs) out.dealCustomFields = dealCfs;
+  const contactCfs = asCustomFieldArray(o.contactCustomFields);
+  if (contactCfs) out.contactCustomFields = contactCfs;
+
+  return out;
 }

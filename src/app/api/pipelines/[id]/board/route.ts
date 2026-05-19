@@ -46,8 +46,13 @@ export async function GET(request: Request, context: RouteContext) {
       });
       return NextResponse.json(board);
     } catch (e) {
-      console.error(e);
-      return NextResponse.json({ message: "Erro ao carregar quadro." }, { status: 500 });
+      console.error("[board GET] erro ao carregar quadro:", e);
+      const message =
+        e instanceof Error ? e.message : "Erro ao carregar quadro.";
+      return NextResponse.json(
+        { message: "Erro ao carregar quadro.", detail: message },
+        { status: 500 },
+      );
     }
   });
 }
@@ -113,8 +118,13 @@ export async function POST(request: Request, context: RouteContext) {
       );
       return NextResponse.json(board);
     } catch (e) {
-      console.error(e);
-      return NextResponse.json({ message: "Erro ao carregar quadro." }, { status: 500 });
+      console.error("[board POST] erro ao carregar quadro com filtros:", e);
+      const message =
+        e instanceof Error ? e.message : "Erro ao carregar quadro.";
+      return NextResponse.json(
+        { message: "Erro ao carregar quadro.", detail: message },
+        { status: 500 },
+      );
     }
   });
 }
