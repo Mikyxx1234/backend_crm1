@@ -25,7 +25,9 @@ ENV HOSTNAME=0.0.0.0
 ENV HOME=/tmp
 ENV NPM_CONFIG_CACHE=/tmp/.npm
 
-RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-certificates gosu && rm -rf /var/lib/apt/lists/*
+RUN apt-get update -y && apt-get install -y --no-install-recommends \
+      openssl ca-certificates gosu ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 nextjs
 
 COPY --from=builder /app/public ./public

@@ -5,23 +5,30 @@ import os from "os";
 import path from "path";
 
 function resolveFFmpeg(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const staticBin = require("ffmpeg-static") as string;
-    if (staticBin && existsSync(staticBin)) {
-      console.log("[audio-convert] Usando ffmpeg-static:", staticBin);
-      return staticBin;
-    }
-  } catch { /* ffmpeg-static not available */ }
-
+  // Preferimos o ffmpeg DO SISTEMA (apt-get install ffmpeg) ao binário do
+  // `ffmpeg-static`. Motivo: o pacote npm baixa um build minimalista que
+  // frequentemente não inclui `libopus`/`libmp3lame`, fazendo as estratégias
+  // de transcode falharem silenciosamente. O ffmpeg do Debian é completo,
+  // estável e tem todos os codecs necessários (Opus pra PTT, MP3 pra
+  // download universal). Mantemos `ffmpeg-static` só como último recurso
+  // pra ambientes onde ffmpeg não pôde ser instalado (ex.: Lambda).
   try {
     execFileSync("ffmpeg", ["-version"], { timeout: 5000, stdio: "pipe" });
     console.log("[audio-convert] Usando ffmpeg do sistema (PATH)");
     return "ffmpeg";
-  } catch {
-    console.warn("[audio-convert] ffmpeg nao encontrado nem via ffmpeg-static nem no PATH");
-    return "ffmpeg";
-  }
+  } catch { /* not in PATH, try static */ }
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const staticBin = require("ffmpeg-static") as string;
+    if (staticBin && existsSync(staticBin)) {
+      console.log("[audio-convert] Usando ffmpeg-static (fallback):", staticBin);
+      return staticBin;
+    }
+  } catch { /* ffmpeg-static not available */ }
+
+  console.warn("[audio-convert] ffmpeg nao encontrado nem no PATH nem via ffmpeg-static");
+  return "ffmpeg";
 }
 
 let _ffmpeg: string | undefined;
