@@ -12,6 +12,31 @@
 import type { DealStatus, Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
+import { getRequestContext } from "@/lib/request-context";
+
+/**
+ * Quando o termo de busca contém >=3 dígitos, casa o input contra o
+ * telefone do contato **normalizado** (somente dígitos). Suporta o caso
+ * comum: usuário digita "11945010493" mas telefone está salvo como
+ * "+55 (11) 94501-0493" ou variações.
+ */
+async function findContactIdsByPhoneDigits(
+  digits: string,
+): Promise<string[]> {
+  if (digits.length < 3) return [];
+  const ctx = getRequestContext();
+  const orgId = ctx?.organizationId;
+  if (!orgId) return [];
+  // regexp_replace remove tudo que não é dígito; LIKE faz substring match.
+  // Limitamos a 500 IDs para não explodir o IN.
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM contacts
+    WHERE "organizationId" = ${orgId}
+      AND regexp_replace(COALESCE(phone, ''), '\D', '', 'g') LIKE ${"%" + digits + "%"}
+    LIMIT 500
+  `;
+  return rows.map((r) => r.id);
+}
 
 export type DateRangeValue = {
   from?: string | null;
@@ -268,14 +293,31 @@ export async function buildDealWhereFromFilters(
 
   const search = filters.search?.trim();
   if (search) {
-    conditions.push({
-      OR: [
-        { title: { contains: search, mode: "insensitive" } },
-        { contact: { name: { contains: search, mode: "insensitive" } } },
-        { contact: { email: { contains: search, mode: "insensitive" } } },
-        { contact: { phone: { contains: search } } },
-      ],
-    });
+    const or: Prisma.DealWhereInput[] = [
+      { title: { contains: search, mode: "insensitive" } },
+      { contact: { name: { contains: search, mode: "insensitive" } } },
+      { contact: { email: { contains: search, mode: "insensitive" } } },
+      { contact: { phone: { contains: search } } },
+    ];
+
+    // Casa busca por telefone independente da formatação salva no banco.
+    const digits = search.replace(/\D+/g, "");
+    if (digits.length >= 3) {
+      const contactIds = await findContactIdsByPhoneDigits(digits);
+      if (contactIds.length > 0) {
+        or.push({ contactId: { in: contactIds } });
+      }
+      // Se a busca é PURAMENTE numérica, também tenta casar o número do
+      // próprio deal (`#123` na busca → match no `number`).
+      if (/^\d+$/.test(search)) {
+        const asNumber = Number(search);
+        if (Number.isFinite(asNumber)) {
+          or.push({ number: asNumber });
+        }
+      }
+    }
+
+    conditions.push({ OR: or });
   }
 
   if (filters.pipelineId) {
