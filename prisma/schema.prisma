@@ -101,6 +101,7 @@ model Organization {
   roles                    Role[]
   roleAssignments          UserRoleAssignment[]
   organizationSettings     OrganizationSetting[]
+  savedFilters             SavedFilter[]
 
   @@index([status])
   @@map("organizations")
@@ -341,6 +342,7 @@ model User {
   loginAttempts                  LoginAttempt[]
   dataRequests                   DataRequest[]
   roleAssignments                UserRoleAssignment[]
+  savedFilters                   SavedFilter[]           @relation("UserSavedFilters")
   erasedAt                       DateTime?
   /// Marca usuario anonimizado pela rotina LGPD (PR 4.3). O registro
   /// nao e deletado pra preservar FKs (AuditLog, mensagens). Apos
@@ -905,6 +907,28 @@ model CustomField {
   @@index([organizationId])
   @@index([organizationId, entity])
   @@map("custom_fields")
+}
+
+/// Filtros salvos do Kanban e outras listagens. `entityType` separa por
+/// contexto (ex.: "kanban_deals"). `filterConfig` é JSON livre — schema
+/// validado em runtime pelo serviço; permite evoluir filtros sem migration.
+model SavedFilter {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  entityType     String       @map("entityType")
+  name           String
+  filterConfig   Json         @default("{}") @map("filterConfig")
+  isDefault      Boolean      @default(false) @map("isDefault")
+  isShared       Boolean      @default(false) @map("isShared")
+  userId         String?      @map("userId")
+  user           User?        @relation("UserSavedFilters", fields: [userId], references: [id], onDelete: SetNull)
+  createdAt      DateTime     @default(now()) @map("createdAt")
+  updatedAt      DateTime     @updatedAt @map("updatedAt")
+
+  @@index([organizationId, entityType])
+  @@index([userId])
+  @@map("saved_filters")
 }
 
 enum CustomFieldType {
@@ -1651,8 +1675,10 @@ model WhatsappFlowField {
   /// Slug estável usado como `name` no TextInput Meta (`${form.fieldKey}`).
   fieldKey  String @map("field_key")
   label     String
-  /// TEXT | EMAIL | PHONE | TEXTAREA — subset mapeado para `input-type` Meta.
+  /// TEXT | EMAIL | PHONE | TEXTAREA | DROPDOWN | RADIO | MULTI_SELECT | DATE
   fieldType String @default("TEXT") @map("field_type")
+  /// Opções exibidas em Dropdown / RadioButtonsGroup / CheckboxGroup.
+  options   String[] @default([])
   required  Boolean @default(false)
   sortOrder Int     @default(0) @map("sort_order")
   mapping   WhatsappFlowFieldMapping?
@@ -1667,7 +1693,7 @@ model WhatsappFlowFieldMapping {
   fieldId        String                   @unique @map("field_id")
   field          WhatsappFlowField        @relation(fields: [fieldId], references: [id], onDelete: Cascade)
   targetKind     FlowFieldMappingTargetKind @map("target_kind")
-  /// Quando targetKind = CONTACT_NATIVE: name | phone | email (extensível).
+  /// CONTACT_NATIVE: name | phone | email | source — DEAL_NATIVE: title | value | expectedClose
   nativeKey      String?                  @map("native_key")
   customFieldId  String?                  @map("custom_field_id")
   customField    CustomField?             @relation(fields: [customFieldId], references: [id], onDelete: SetNull)
@@ -1684,6 +1710,7 @@ enum WhatsappFlowStatus {
 
 enum FlowFieldMappingTargetKind {
   CONTACT_NATIVE
+  DEAL_NATIVE
   CUSTOM_FIELD
 }
 

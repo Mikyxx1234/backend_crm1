@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { getBoardData, isValidDealStatus } from "@/services/deals";
+import { parseAdvancedDealFilters } from "@/services/kanban-filters";
 import { getPipelineMeta } from "@/services/pipelines";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -37,7 +38,79 @@ export async function GET(request: Request, context: RouteContext) {
         ? "ALL" as const
         : (statusParam && isValidDealStatus(statusParam) ? statusParam : undefined);
 
-      const board = await getBoardData(pipelineId, visibilityOwnerId, statusFilter);
+      const perStageRaw = url.searchParams.get("perStage");
+      const perStage = perStageRaw ? Math.max(1, parseInt(perStageRaw, 10) || 0) : undefined;
+
+      const board = await getBoardData(pipelineId, visibilityOwnerId, statusFilter, undefined, {
+        perStage,
+      });
+      return NextResponse.json(board);
+    } catch (e) {
+      console.error(e);
+      return NextResponse.json({ message: "Erro ao carregar quadro." }, { status: 500 });
+    }
+  });
+}
+
+/**
+ * Variante POST do board que aceita filtros avançados via body.
+ *
+ * Mantemos o GET intocado para compatibilidade — o frontend usa esta rota
+ * quando há filtros que não cabem em query string (custom fields, ranges
+ * de data, múltiplas tags, etc.).
+ */
+export async function POST(request: Request, context: RouteContext) {
+  return withOrgContext(async (session) => {
+    try {
+      const { id: pipelineId } = await context.params;
+      if (!pipelineId) {
+        return NextResponse.json({ message: "ID inválido." }, { status: 400 });
+      }
+
+      const meta = await getPipelineMeta(pipelineId);
+      if (!meta) {
+        return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
+      }
+
+      const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
+      const visibility = await getVisibilityFilter(user);
+      const visibilityOwnerId = visibility.canSeeAll ? null : user.id;
+
+      let bodyJson: unknown = null;
+      try {
+        bodyJson = await request.json();
+      } catch {
+        bodyJson = null;
+      }
+
+      const body = (bodyJson ?? {}) as { status?: string; filters?: unknown };
+      const statusParam = body.status;
+      const statusFilter =
+        statusParam === "ALL"
+          ? ("ALL" as const)
+          : statusParam && isValidDealStatus(statusParam)
+            ? (statusParam as "OPEN" | "WON" | "LOST")
+            : undefined;
+
+      const filters = parseAdvancedDealFilters(body.filters);
+      const limitOptions = {
+        perStage:
+          typeof (body as { perStage?: unknown }).perStage === "number"
+            ? Math.max(1, Math.floor((body as { perStage: number }).perStage))
+            : undefined,
+        offsetByStage:
+          (body as { offsetByStage?: Record<string, number> }).offsetByStage &&
+          typeof (body as { offsetByStage?: Record<string, number> }).offsetByStage === "object"
+            ? ((body as { offsetByStage: Record<string, number> }).offsetByStage)
+            : undefined,
+      };
+      const board = await getBoardData(
+        pipelineId,
+        visibilityOwnerId,
+        statusFilter,
+        filters,
+        limitOptions,
+      );
       return NextResponse.json(board);
     } catch (e) {
       console.error(e);

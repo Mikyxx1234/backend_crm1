@@ -47,6 +47,11 @@ import { processMetaWhatsappCallsWebhook } from "@/services/meta-whatsapp-calls-
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import {
+  formatWhatsappFlowResponse,
+  parseWhatsappFlowResponsePayload,
+} from "@/lib/meta-whatsapp/parse-flow-response";
+import { applyWhatsappFlowResponseToContact } from "@/services/whatsapp-flow-response";
 
 type ReferralInfo = {
   sourceId: string | null;
@@ -92,88 +97,6 @@ function obj(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v)
     ? (v as Record<string, unknown>)
     : {};
-}
-
-/**
- * Formata uma resposta de WhatsApp Flow (nfm_reply / flow_reply) extraindo os
- * pares "campo: valor" do `response_json` que a Meta manda no webhook.
- *
- * Por que: a Meta envia `body = "Sent"` (literal) nesse tipo de resposta — o
- * conteúdo real preenchido pelo cliente fica em `response_json`. Antes do fix
- * o chat exibia "Fluxo (resposta): Sent" e o operador não tinha como ler o que
- * o cliente preencheu sem ir pro Meta Manager.
- *
- * Regras de formatação:
- *   - `flow_token` é descartado (token interno de correlação, não tem valor de
- *     negócio pra mostrar no chat).
- *   - Chaves em snake_case viram "Title Case" (ex.: "telefone_principal" →
- *     "Telefone principal"). Se a chave já tem espaço/caixa mista, é mantida.
- *   - Valores são serializados como string legível: booleano vira "Sim/Não",
- *     array vira CSV, objeto vira JSON compacto.
- *   - Cada valor individual é truncado em 200 chars; o resultado final em
- *     1000 chars (limite generoso pra caber em `Message.content` sem poluir
- *     a UI de chat).
- *   - Se `response_json` não parsear ou estiver vazio, retorna `null` (caller
- *     decide se cai pro fallback antigo).
- */
-function formatWhatsappFlowResponse(
-  nfm: Record<string, unknown>,
-): string | null {
-  const rawJson = nfm.response_json;
-  let payload: Record<string, unknown> | null = null;
-
-  if (typeof rawJson === "string" && rawJson.trim().length > 0) {
-    try {
-      const parsed = JSON.parse(rawJson);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        payload = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // JSON malformado — caller usa fallback do `body`.
-      return null;
-    }
-  } else if (rawJson && typeof rawJson === "object" && !Array.isArray(rawJson)) {
-    payload = rawJson as Record<string, unknown>;
-  }
-
-  if (!payload) return null;
-
-  const entries = Object.entries(payload).filter(
-    ([k]) => k !== "flow_token" && !k.startsWith("__"),
-  );
-  if (entries.length === 0) return null;
-
-  const formatKey = (k: string): string => {
-    if (/\s/.test(k) || /[A-Z]/.test(k)) return k;
-    const words = k.replace(/[_-]+/g, " ").trim();
-    if (!words) return k;
-    return words.charAt(0).toUpperCase() + words.slice(1);
-  };
-
-  const formatVal = (v: unknown): string => {
-    if (v === null || v === undefined) return "—";
-    if (typeof v === "boolean") return v ? "Sim" : "Não";
-    if (typeof v === "number") return String(v);
-    if (Array.isArray(v)) {
-      const joined = v.map((item) => formatVal(item)).join(", ");
-      return joined.length > 200 ? `${joined.slice(0, 200)}…` : joined;
-    }
-    if (typeof v === "object") {
-      const json = JSON.stringify(v);
-      return json.length > 200 ? `${json.slice(0, 200)}…` : json;
-    }
-    const s = String(v);
-    return s.length > 200 ? `${s.slice(0, 200)}…` : s;
-  };
-
-  const flowName = str(nfm.name);
-  const header = flowName
-    ? `📋 Resposta do formulário (${flowName})`
-    : `📋 Resposta do formulário`;
-
-  const lines = entries.map(([k, v]) => `• ${formatKey(k)}: ${formatVal(v)}`);
-  const full = `${header}\n${lines.join("\n")}`;
-  return full.length > 1000 ? `${full.slice(0, 1000)}…` : full;
 }
 
 function arr(v: unknown): unknown[] {
@@ -692,6 +615,10 @@ type ParsedMessage = {
    */
   callPermissionType: "PERMANENT" | "TEMPORARY" | null;
   referral: ReferralInfo | null;
+  /** Payload bruto do WhatsApp Flow (nfm_reply) para gravar no lead. */
+  flowPayload: Record<string, unknown> | null;
+  flowMetaName: string | null;
+  flowToken: string | null;
 };
 
 function fallbackUnknownInteractive(
@@ -717,6 +644,9 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
   interactiveButtonId: string | null;
   interactiveButtonTitle: string | null;
   callPermissionType: "PERMANENT" | "TEMPORARY" | null;
+  flowPayload: Record<string, unknown> | null;
+  flowMetaName: string | null;
+  flowToken: string | null;
 } {
   const interactiveKind = str(inter.type) || null;
 
@@ -783,6 +713,10 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
   // Em ambos os casos, `body` literal vem "Sent" e os valores preenchidos
   // ficam em `response_json` (string JSON). Formatamos como "Campo: valor"
   // por linha pra que o operador leia direto no chat.
+  let flowPayload: Record<string, unknown> | null = null;
+  let flowMetaName: string | null = null;
+  let flowToken: string | null = null;
+
   const nfm = obj(inter.nfm_reply);
   let fromNfm = "";
   if (Object.keys(nfm).length > 0) {
@@ -802,6 +736,12 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
             ? JSON.stringify(nfm.response_json).slice(0, 500)
             : null,
     });
+    const parsedFlow = parseWhatsappFlowResponsePayload(nfm);
+    if (parsedFlow) {
+      flowPayload = parsedFlow.payload;
+      flowMetaName = parsedFlow.flowMetaName;
+      flowToken = parsedFlow.flowToken;
+    }
     const formatted = formatWhatsappFlowResponse(nfm);
     if (formatted) {
       fromNfm = formatted;
@@ -828,6 +768,12 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
             ? JSON.stringify(flowReply.response_json).slice(0, 500)
             : null,
     });
+    const parsedFlow = parseWhatsappFlowResponsePayload(flowReply);
+    if (parsedFlow) {
+      flowPayload = parsedFlow.payload;
+      flowMetaName = parsedFlow.flowMetaName ?? flowMetaName;
+      flowToken = parsedFlow.flowToken ?? flowToken;
+    }
     const formatted = formatWhatsappFlowResponse(flowReply);
     if (formatted) {
       fromFlow = formatted;
@@ -861,6 +807,9 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
     interactiveButtonId,
     interactiveButtonTitle,
     callPermissionType,
+    flowPayload,
+    flowMetaName,
+    flowToken,
   };
 }
 
@@ -882,6 +831,9 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
   let interactiveButtonTitle: string | null = null;
   let interactiveKind: string | null = null;
   let callPermissionType: "PERMANENT" | "TEMPORARY" | null = null;
+  let flowPayload: Record<string, unknown> | null = null;
+  let flowMetaName: string | null = null;
+  let flowToken: string | null = null;
 
   switch (type) {
     case "text": {
@@ -944,6 +896,9 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
       interactiveButtonId = parsedInter.interactiveButtonId;
       interactiveButtonTitle = parsedInter.interactiveButtonTitle;
       callPermissionType = parsedInter.callPermissionType;
+      flowPayload = parsedInter.flowPayload;
+      flowMetaName = parsedInter.flowMetaName;
+      flowToken = parsedInter.flowToken;
       break;
     }
     case "button": {
@@ -987,6 +942,9 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
     interactiveKind,
     callPermissionType,
     referral,
+    flowPayload,
+    flowMetaName,
+    flowToken,
   };
 }
 
@@ -1742,6 +1700,31 @@ async function executePostBody(
 
           if (!msgCreated) continue;
 
+          if (parsed.flowPayload && Object.keys(parsed.flowPayload).length > 0) {
+            try {
+              const flowApply = await applyWhatsappFlowResponseToContact({
+                contactId: contact.id,
+                conversationId: conversation.id,
+                organizationId: conversation.organizationId,
+                flowPayload: parsed.flowPayload,
+                flowMetaName: parsed.flowMetaName,
+                flowToken: parsed.flowToken,
+                channelRef: conversation.channelId
+                  ? { id: conversation.channelId, provider: "META_CLOUD_API" }
+                  : null,
+                waJid: null,
+              });
+              if (flowApply.alerts.length > 0) {
+                log.warn("[whatsapp-flow] alertas na aplicação", {
+                  contactId: contact.id,
+                  alerts: flowApply.alerts,
+                });
+              }
+            } catch (err) {
+              log.error("[whatsapp-flow] falha ao aplicar resposta no lead (não-fatal):", err);
+            }
+          }
+
           // Inbound do cliente cancela automaticamente qualquer mensagem
           // agendada pendente para esta conversa (cliente respondeu antes
           // do envio programado). Ignorado para mensagens de sistema.
@@ -1882,6 +1865,13 @@ async function executePostBody(
                   phoneNumberId,
                   conversationId: conversation.id,
                   waMessageId: parsed.waMessageId,
+                  ...(parsed.flowPayload
+                    ? {
+                        flowResponse: parsed.flowPayload,
+                        flowMetaName: parsed.flowMetaName,
+                        flowToken: parsed.flowToken,
+                      }
+                    : {}),
                 },
               });
             } catch (err) {

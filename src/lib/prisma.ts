@@ -95,6 +95,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "Role",
   "UserRoleAssignment",
   "OrganizationSetting",
+  "SavedFilter",
 ]);
 
 type AnyArgs = Record<string, unknown>;

@@ -46,11 +46,37 @@ export async function GET(request: Request) {
         : undefined;
     const sortOrder = sortOrderRaw === "asc" || sortOrderRaw === "desc" ? sortOrderRaw : undefined;
 
+    const customFieldFilters: { name: string; operator?: "eq" | "contains" | "filled"; value?: string }[] =
+      [];
+    const cfRaw = searchParams.get("customFieldFilters");
+    if (cfRaw) {
+      try {
+        const parsed = JSON.parse(cfRaw) as unknown;
+        if (Array.isArray(parsed)) {
+          for (const item of parsed) {
+            if (!item || typeof item !== "object") continue;
+            const o = item as Record<string, unknown>;
+            const name = typeof o.name === "string" ? o.name.trim() : "";
+            if (!name) continue;
+            const operator =
+              o.operator === "eq" || o.operator === "contains" || o.operator === "filled"
+                ? o.operator
+                : undefined;
+            const value = typeof o.value === "string" ? o.value : undefined;
+            customFieldFilters.push({ name, operator, value });
+          }
+        }
+      } catch {
+        /* ignore malformed JSON */
+      }
+    }
+
     const result = await getContacts({
       search,
       lifecycleStage,
       tagIds,
       companyId,
+      customFieldFilters: customFieldFilters.length > 0 ? customFieldFilters : undefined,
       page,
       perPage,
       sortBy,

@@ -6,6 +6,7 @@ import {
   deleteFlowDefinitionDraft,
   getFlowDefinitionById,
   replaceFlowDefinitionDraft,
+  updatePublishedFlowMappings,
   type FlowDefinitionUpsertInput,
 } from "@/services/whatsapp-flow-definitions";
 
@@ -39,7 +40,18 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!id) return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     try {
       const body = (await request.json()) as FlowDefinitionUpsertInput;
-      await replaceFlowDefinitionDraft(id, body);
+      const existing = await getFlowDefinitionById(id);
+      if (!existing) return NextResponse.json({ message: "Não encontrado." }, { status: 404 });
+      if (existing.status === "PUBLISHED" || existing.metaFlowId?.trim()) {
+        await updatePublishedFlowMappings(id, body);
+      } else if (existing.status === "DRAFT") {
+        await replaceFlowDefinitionDraft(id, body);
+      } else {
+        return NextResponse.json(
+          { message: "Flow arquivado não pode ser editado." },
+          { status: 400 },
+        );
+      }
       const row = await getFlowDefinitionById(id);
       return NextResponse.json(row);
     } catch (e) {

@@ -5,6 +5,10 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
+import {
+  buildDealWhereFromFilters,
+  type AdvancedDealFilters,
+} from "@/services/kanban-filters";
 
 export function isValidDealStatus(v: string): v is DealStatus {
   return v === "OPEN" || v === "WON" || v === "LOST";
@@ -495,23 +499,56 @@ export async function reopenDeal(id: string) {
   });
 }
 
+/** Limite default de cards exibidos por coluna no board. */
+const DEFAULT_BOARD_COLUMN_LIMIT = 100;
+const MAX_BOARD_COLUMN_LIMIT = 500;
+
+export type BoardLimitOptions = {
+  /** Quantos cards retornar por coluna. */
+  perStage?: number;
+  /** Offset por etapa: stageId -> quantos pular. Permite "Carregar mais". */
+  offsetByStage?: Record<string, number>;
+};
+
 export async function getBoardData(
   pipelineId: string,
   visibilityOwnerId?: string | null,
   statusFilter?: DealStatus | "ALL",
+  advancedFilters?: AdvancedDealFilters,
+  limitOptions?: BoardLimitOptions,
 ) {
   const now = new Date();
 
-  const dealWhere: Prisma.DealWhereInput = {};
+  const conditions: Prisma.DealWhereInput[] = [];
+
   if (statusFilter && statusFilter !== "ALL") {
-    dealWhere.status = statusFilter;
+    conditions.push({ status: statusFilter });
   } else if (!statusFilter) {
-    dealWhere.status = "OPEN";
+    conditions.push({ status: "OPEN" });
   }
   if (visibilityOwnerId) {
-    dealWhere.ownerId = visibilityOwnerId;
+    conditions.push({ ownerId: visibilityOwnerId });
   }
 
+  if (advancedFilters && Object.keys(advancedFilters).length > 0) {
+    // pipelineId/statuses no advancedFilters não substituem visibilidade —
+    // ficam como condições adicionais (AND).
+    const advConditions = await buildDealWhereFromFilters(advancedFilters);
+    for (const c of advConditions) conditions.push(c);
+  }
+
+  const dealWhere: Prisma.DealWhereInput =
+    conditions.length === 0 ? {} : conditions.length === 1 ? conditions[0] : { AND: conditions };
+
+  const perStage = Math.min(
+    MAX_BOARD_COLUMN_LIMIT,
+    Math.max(1, limitOptions?.perStage ?? DEFAULT_BOARD_COLUMN_LIMIT),
+  );
+  const offsetByStage = limitOptions?.offsetByStage ?? {};
+
+  // 1) Etapas + cards. Para evitar problemas de UX em "Carregar mais",
+  //    quando uma etapa tem `extraLoaded > 0`, retornamos `perStage + extraLoaded`
+  //    (acumulado). O frontend continua vendo todos os cards já carregados.
   const stages = await prisma.stage.findMany({
     where: { pipelineId },
     orderBy: { position: "asc" },
@@ -519,6 +556,7 @@ export async function getBoardData(
       deals: {
         where: dealWhere,
         orderBy: { position: "asc" },
+        take: perStage,
         include: {
           contact: {
             select: {
@@ -540,6 +578,45 @@ export async function getBoardData(
       },
     },
   });
+
+  // 2) Para etapas com extra carregado > 0, substitui pelo conjunto acumulado.
+  const stageIdsWithOffset = Object.keys(offsetByStage).filter((id) => (offsetByStage[id] ?? 0) > 0);
+  if (stageIdsWithOffset.length > 0) {
+    for (const stageId of stageIdsWithOffset) {
+      const extra = offsetByStage[stageId] ?? 0;
+      const expanded = await prisma.deal.findMany({
+        where: { ...dealWhere, stageId },
+        orderBy: { position: "asc" },
+        take: perStage + extra,
+        include: {
+          contact: {
+            select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
+          },
+          owner: { select: { id: true, name: true, avatarUrl: true } },
+          tags: { select: { tag: { select: { id: true, name: true, color: true } } } },
+          activities: {
+            where: { completed: false },
+            select: { id: true, scheduledAt: true },
+            take: 5,
+          },
+        },
+      });
+      const idx = stages.findIndex((s) => s.id === stageId);
+      if (idx >= 0) stages[idx] = { ...stages[idx], deals: expanded };
+    }
+  }
+
+  // 3) Contagem TOTAL por etapa (independente do limit) — usada pra exibir
+  //    "+N mais" e os totais reais por coluna.
+  const totalsByStage = new Map<string, number>();
+  if (stages.length > 0) {
+    const groups = await prisma.deal.groupBy({
+      by: ["stageId"],
+      where: { ...dealWhere, stageId: { in: stages.map((s) => s.id) } },
+      _count: { _all: true },
+    });
+    for (const g of groups) totalsByStage.set(g.stageId, g._count._all);
+  }
 
   const allDealIds = stages.flatMap((s) => s.deals.map((d) => d.id));
   const allContactIds = stages
@@ -641,10 +718,18 @@ export async function getBoardData(
     .filter((stage) => !stage.isIncoming || stage.deals.length > 0)
     .map((stage) => {
       const metric = metricsMap.get(stage.id);
+      const totalCount = totalsByStage.get(stage.id) ?? stage.deals.length;
+      // `extra` agora representa "quantos cards adicionais foram pedidos".
+      // O total carregado é o tamanho real do array.
+      const loadedCount = stage.deals.length;
+      const hasMore = loadedCount < totalCount;
       return {
         ...stage,
         conversionRate: metric?.conversionRate ?? 0,
         avgDaysInStage: metric?.avgDaysInStage ?? 0,
+        totalCount,
+        loadedCount,
+        hasMore,
         deals: stage.deals.map((deal) => {
           const threshold = addDays(deal.updatedAt, stage.rottingDays);
           const isRotting = now.getTime() > threshold.getTime();

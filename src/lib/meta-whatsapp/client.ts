@@ -789,6 +789,38 @@ export class MetaWhatsAppClient {
     return this.graphFetch(`${id}?${params.toString()}`);
   }
 
+  /** Lista assets do flow (inclui FLOW_JSON com download_url). */
+  async listFlowAssets(flowGraphId: string): Promise<unknown> {
+    const id = flowGraphId.trim();
+    if (!id) throw new Error("Meta: ID do Flow inválido.");
+    return this.graphFetch(`${id}/assets`);
+  }
+
+  /** Baixa e parseia o FLOW_JSON publicado na Meta. */
+  async downloadFlowJson(flowGraphId: string): Promise<Record<string, unknown>> {
+    const raw = (await this.listFlowAssets(flowGraphId)) as {
+      data?: Array<{ asset_type?: string; download_url?: string }>;
+    };
+    const asset = raw.data?.find((a) => a.asset_type === "FLOW_JSON");
+    const url = asset?.download_url?.trim();
+    if (!url) {
+      throw new Error("Meta não devolveu FLOW_JSON para este flow (asset ausente).");
+    }
+
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${this.accessToken}` },
+    });
+    if (!res.ok) {
+      throw new Error(`Falha ao baixar FLOW_JSON (${res.status}).`);
+    }
+    const text = await res.text();
+    const parsed = JSON.parse(text) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("FLOW_JSON inválido.");
+    }
+    return parsed as Record<string, unknown>;
+  }
+
   /** Apaga flow em estado DRAFT. */
   async deleteFlow(flowGraphId: string): Promise<unknown> {
     const id = flowGraphId.trim();

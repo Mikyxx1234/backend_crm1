@@ -23,11 +23,21 @@ export function isValidLifecycleStage(v: string): v is LifecycleStage {
   return LIFECYCLE_STAGES.includes(v as LifecycleStage);
 }
 
+export type ContactCustomFieldFilter = {
+  /** Nome do CustomField (ex.: curso_interesse, graduacao). */
+  name: string;
+  /** eq | contains | filled (tem valor não vazio). */
+  operator?: "eq" | "contains" | "filled";
+  value?: string;
+};
+
 export type GetContactsParams = {
   search?: string;
   lifecycleStage?: LifecycleStage;
   tagIds?: string[];
   companyId?: string;
+  /** Filtros por campos customizados do contato (AND entre itens). */
+  customFieldFilters?: ContactCustomFieldFilter[];
   page?: number;
   perPage?: number;
   sortBy?: "name" | "email" | "createdAt" | "updatedAt" | "leadScore" | "lifecycleStage";
@@ -57,7 +67,66 @@ export async function getContacts(params: GetContactsParams = {}) {
       { name: { contains: search, mode: "insensitive" } },
       { email: { contains: search, mode: "insensitive" } },
       { phone: { contains: search, mode: "insensitive" } },
+      {
+        customFields: {
+          some: {
+            value: { contains: search, mode: "insensitive" },
+          },
+        },
+      },
     ];
+  }
+
+  if (params.customFieldFilters && params.customFieldFilters.length > 0) {
+    const fieldNames = params.customFieldFilters.map((f) => f.name.trim()).filter(Boolean);
+    if (fieldNames.length > 0) {
+      const defs = await prisma.customField.findMany({
+        where: { entity: "contact", name: { in: fieldNames } },
+        select: { id: true, name: true },
+      });
+      const byName = new Map(defs.map((d) => [d.name, d.id]));
+
+      const andFilters: Prisma.ContactWhereInput[] = [];
+      for (const f of params.customFieldFilters) {
+        const name = f.name.trim();
+        const fieldId = byName.get(name);
+        if (!fieldId) continue;
+
+        const op = f.operator ?? (f.value ? "eq" : "filled");
+        if (op === "filled") {
+          andFilters.push({
+            customFields: {
+              some: {
+                customFieldId: fieldId,
+                value: { not: "" },
+              },
+            },
+          });
+        } else if (op === "contains" && f.value?.trim()) {
+          andFilters.push({
+            customFields: {
+              some: {
+                customFieldId: fieldId,
+                value: { contains: f.value.trim(), mode: "insensitive" },
+              },
+            },
+          });
+        } else if (f.value !== undefined) {
+          andFilters.push({
+            customFields: {
+              some: {
+                customFieldId: fieldId,
+                value: f.value,
+              },
+            },
+          });
+        }
+      }
+
+      if (andFilters.length > 0) {
+        where.AND = [...(Array.isArray(where.AND) ? where.AND : []), ...andFilters];
+      }
+    }
   }
 
   if (params.lifecycleStage) {
