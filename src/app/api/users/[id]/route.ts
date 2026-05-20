@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { UserRole } from "@prisma/client";
 
 import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
+import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 
 const MIN_PASSWORD_LENGTH = 6;
@@ -118,10 +119,23 @@ export async function PUT(request: Request, context: RouteContext) {
     }
 
     try {
-      const user = await prisma.user.update({
-        where: { id },
-        data,
-        select: userSelect,
+      const user = await prisma.$transaction(async (tx) => {
+        const updated = await tx.user.update({
+          where: { id },
+          data,
+          select: { ...userSelect, organizationId: true },
+        });
+        if (data.role && updated.organizationId) {
+          await syncUserRoleAssignment(tx, {
+            userId: updated.id,
+            organizationId: updated.organizationId,
+            role: data.role,
+            assignedById: r.session.user.id,
+          });
+        }
+        const { organizationId: _omit, ...rest } = updated;
+        void _omit;
+        return rest;
       });
       return NextResponse.json(user);
     } catch (e) {

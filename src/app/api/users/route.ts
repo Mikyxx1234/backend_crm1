@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 
 import { requireAdmin, requireAuth, userOrgFilter } from "@/lib/auth-helpers";
+import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 
 const VALID_ROLES = ["ADMIN", "MANAGER", "MEMBER"] as const;
@@ -76,15 +77,24 @@ export async function POST(request: Request) {
       );
     }
 
-    const user = await prisma.user.create({
-      data: {
-        name,
-        email,
-        hashedPassword,
+    const user = await prisma.$transaction(async (tx) => {
+      const created = await tx.user.create({
+        data: {
+          name,
+          email,
+          hashedPassword,
+          role: validRole,
+          organization: { connect: { id: orgId } },
+        },
+        select: { id: true, name: true, email: true, role: true },
+      });
+      await syncUserRoleAssignment(tx, {
+        userId: created.id,
+        organizationId: orgId,
         role: validRole,
-        organization: { connect: { id: orgId } },
-      },
-      select: { id: true, name: true, email: true, role: true },
+        assignedById: r.session.user.id,
+      });
+      return created;
     });
 
     return NextResponse.json(user, { status: 201 });
