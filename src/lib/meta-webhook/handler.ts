@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
@@ -1411,11 +1412,12 @@ async function executePostBody(
   log.debug(`POST recebido (${rawBody.length} bytes, assinatura=${signature ? "sim" : "não"}, scope=${scope?.organizationSlug ?? "(legacy)"})`);
 
   const secrets = await collectAppSecrets(scope);
+  let signatureValid = false;
   if (secrets.length > 0) {
-    const verified = secrets.some((s) =>
+    signatureValid = secrets.some((s) =>
       verifyMetaWebhookSignature(rawBody, signature, s),
     );
-    if (!verified) {
+    if (!signatureValid) {
       log.warn(
         `Assinatura inválida (${secrets.length} secret(s) testado(s)) — verifique CRM_META_APP_SECRET / channel.config.appSecret`,
       );
@@ -1441,8 +1443,21 @@ async function executePostBody(
     return NextResponse.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
+  // Auditoria: persistir TODOS os POSTs Meta com payload bruto integral.
+  // Linkamos depois com automation_logs via context.data.metaWebhookEventId
+  // para exibir o JSON original do webhook na UI da automação.
+  const metaWebhookEventId = await createMetaWebhookEvent({
+    rawBody: body,
+    headers: pickWebhookHeaders(request.headers),
+    signatureValid,
+    scope,
+  });
+
   const object = str(body.object);
   if (object !== "whatsapp_business_account") {
+    if (metaWebhookEventId) {
+      await markWebhookEventProcessed(metaWebhookEventId, "object_ignored");
+    }
     return NextResponse.json({ status: "ignored" });
   }
 
@@ -1865,6 +1880,7 @@ async function executePostBody(
                   phoneNumberId,
                   conversationId: conversation.id,
                   waMessageId: parsed.waMessageId,
+                  metaWebhookEventId,
                   ...(parsed.flowPayload
                     ? {
                         flowResponse: parsed.flowPayload,
@@ -1899,6 +1915,148 @@ async function executePostBody(
     }
   }
 
+  if (metaWebhookEventId) {
+    await markWebhookEventProcessed(metaWebhookEventId, null);
+  }
+
   return NextResponse.json({ status: "ok" });
+}
+
+// ─── Auditoria do webhook Meta ────────────────────────────────
+// Captura o payload bruto + headers relevantes do POST e gera um
+// MetaWebhookEvent. O ID é propagado via context.data.metaWebhookEventId
+// até o `automation_logs.metaWebhookEventId`, permitindo que a UI da
+// automação exiba o JSON original entregue pela Meta.
+
+function pickWebhookHeaders(h: Headers): Record<string, string> {
+  const keys = [
+    "x-hub-signature-256",
+    "x-forwarded-for",
+    "x-real-ip",
+    "user-agent",
+    "content-type",
+    "x-request-id",
+  ];
+  const out: Record<string, string> = {};
+  for (const k of keys) {
+    const v = h.get(k);
+    if (v) out[k] = v;
+  }
+  return out;
+}
+
+function summarizeFirstMessage(body: Record<string, unknown>): {
+  eventType: string;
+  phoneNumberId: string | null;
+  waMessageId: string | null;
+  fromPhone: string | null;
+} {
+  let eventType = "unknown";
+  let phoneNumberId: string | null = null;
+  let waMessageId: string | null = null;
+  let fromPhone: string | null = null;
+
+  const entries = arr(body.entry);
+  for (const entry of entries) {
+    const e = obj(entry);
+    const changes = arr(e.changes);
+    for (const change of changes) {
+      const ch = obj(change);
+      const field = str(ch.field);
+      const value = obj(ch.value);
+      const metadata = obj(value.metadata);
+      const pid = str(metadata.phone_number_id);
+      if (pid && !phoneNumberId) phoneNumberId = pid;
+
+      if (field === "messages") {
+        const messages = arr(value.messages);
+        if (messages.length > 0) {
+          eventType = "message";
+          const m = obj(messages[0]);
+          const id = str(m.id);
+          const from = str(m.from);
+          if (id) waMessageId = id;
+          if (from) fromPhone = from;
+        } else if (arr(value.statuses).length > 0) {
+          eventType = eventType === "unknown" ? "status" : eventType;
+        }
+      } else if (field) {
+        eventType = eventType === "unknown" ? field : eventType;
+      }
+    }
+  }
+
+  return { eventType, phoneNumberId, waMessageId, fromPhone };
+}
+
+async function createMetaWebhookEvent(args: {
+  rawBody: Record<string, unknown>;
+  headers: Record<string, string>;
+  signatureValid: boolean;
+  scope: WebhookScope | undefined;
+}): Promise<string | null> {
+  const { rawBody, headers, signatureValid, scope } = args;
+  const summary = summarizeFirstMessage(rawBody);
+
+  // Resolve channelId best-effort pelo phoneNumberId.
+  let channelId: string | null = null;
+  let organizationId: string | null = scope?.organizationId ?? null;
+  if (summary.phoneNumberId) {
+    try {
+      const channel = await prismaBase.channel.findFirst({
+        where: {
+          type: "WHATSAPP",
+          provider: "META_CLOUD_API",
+          config: { path: ["phoneNumberId"], equals: summary.phoneNumberId },
+        },
+        select: { id: true, organizationId: true },
+      });
+      if (channel) {
+        channelId = channel.id;
+        if (!organizationId) organizationId = channel.organizationId;
+      }
+    } catch (err) {
+      log.debug("Falha ao resolver channel para webhook event (não-fatal):", err);
+    }
+  }
+
+  try {
+    const created = await prismaBase.metaWebhookEvent.create({
+      data: {
+        organizationId: organizationId ?? null,
+        channelId,
+        signatureValid,
+        objectType: str(rawBody.object) || null,
+        eventType: summary.eventType,
+        phoneNumberId: summary.phoneNumberId,
+        waMessageId: summary.waMessageId,
+        fromPhone: summary.fromPhone,
+        rawBody: rawBody as Prisma.InputJsonValue,
+        headers: headers as Prisma.InputJsonValue,
+      },
+      select: { id: true },
+    });
+    return created.id;
+  } catch (err) {
+    log.error("Falha ao persistir MetaWebhookEvent (não-fatal):", err);
+    return null;
+  }
+}
+
+async function markWebhookEventProcessed(
+  id: string,
+  errorMessage: string | null,
+): Promise<void> {
+  try {
+    await prismaBase.metaWebhookEvent.update({
+      where: { id },
+      data: {
+        processed: true,
+        processingError: errorMessage,
+      },
+    });
+  } catch (err) {
+    log.debug("Falha ao marcar MetaWebhookEvent como processado (não-fatal):", err);
+  }
 }
 

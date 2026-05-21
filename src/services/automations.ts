@@ -402,6 +402,24 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
       skip,
       take: perPage,
       orderBy: { executedAt: "desc" },
+      include: {
+        metaWebhookEvent: {
+          select: {
+            id: true,
+            receivedAt: true,
+            eventType: true,
+            objectType: true,
+            phoneNumberId: true,
+            waMessageId: true,
+            fromPhone: true,
+            signatureValid: true,
+            processed: true,
+            processingError: true,
+            headers: true,
+            rawBody: true,
+          },
+        },
+      },
     }),
     prisma.automationLog.count({ where }),
   ]);
