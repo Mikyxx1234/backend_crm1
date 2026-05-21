@@ -186,6 +186,7 @@ async function logStep(args: {
   status: string;
   message: string;
   payload?: Record<string, unknown> | null;
+  metaWebhookEventId?: string | null;
 }) {
   const base = {
     automationId: args.automationId,
@@ -196,6 +197,7 @@ async function logStep(args: {
   };
 
   const payloadJson = args.payload ? (args.payload as Prisma.InputJsonValue) : undefined;
+  const metaWebhookEventId = args.metaWebhookEventId ?? null;
 
   try {
     await prisma.automationLog.create({
@@ -204,6 +206,7 @@ async function logStep(args: {
         stepId: (args.stepId as string) ?? null,
         stepType: (args.stepType as string) ?? null,
         ...(payloadJson !== undefined ? { payload: payloadJson } : {}),
+        ...(metaWebhookEventId ? { metaWebhookEventId } : {}),
       }),
     });
   } catch (firstErr) {
@@ -212,6 +215,7 @@ async function logStep(args: {
         data: withOrgFromCtx({
           ...base,
           ...(payloadJson !== undefined ? { payload: payloadJson } : {}),
+          ...(metaWebhookEventId ? { metaWebhookEventId } : {}),
         }),
       });
     } catch (secondErr) {
@@ -1816,6 +1820,11 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     }
   }
 
+  const metaWebhookEventId =
+    typeof contextData.metaWebhookEventId === "string"
+      ? contextData.metaWebhookEventId
+      : null;
+
   await logStep({
     automationId,
     contactId: context.contactId,
@@ -1829,6 +1838,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       ...(contextData.content ? { mensagem: String(contextData.content).slice(0, 200) } : {}),
       ...(contextData.channel ? { canal: contextData.channel } : {}),
     },
+    metaWebhookEventId,
   });
 
   const rt = await resolveRuntimeContext(automationId, payload);

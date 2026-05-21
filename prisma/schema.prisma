@@ -68,6 +68,7 @@ model Organization {
   automationSteps          AutomationStep[]
   automationLogs           AutomationLog[]
   automationContexts       AutomationContext[]
+  metaWebhookEvents        MetaWebhookEvent[]
   channels                 Channel[]
   baileysAuthKeys          BaileysAuthKey[]
   quickReplies             QuickReply[]
@@ -1457,18 +1458,20 @@ model AutomationStep {
 }
 
 model AutomationLog {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  automationId   String
-  contactId      String?
-  dealId         String?
-  stepId         String?
-  stepType       String?
-  status         String
-  message        String?
-  payload        Json?
-  executedAt     DateTime     @default(now())
+  id                  String            @id @default(cuid())
+  organizationId      String
+  organization        Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  automationId        String
+  contactId           String?
+  dealId              String?
+  stepId              String?
+  stepType            String?
+  status              String
+  message             String?
+  payload             Json?
+  executedAt          DateTime          @default(now())
+  metaWebhookEventId  String?
+  metaWebhookEvent    MetaWebhookEvent? @relation(fields: [metaWebhookEventId], references: [id], onDelete: SetNull)
 
   @@index([organizationId])
   @@index([automationId])
@@ -1477,7 +1480,42 @@ model AutomationLog {
   @@index([executedAt])
   @@index([automationId, executedAt])
   @@index([automationId, stepId])
+  @@index([metaWebhookEventId])
   @@map("automation_logs")
+}
+
+// ──────────────────────────────────────────────
+// Meta Webhook Events (auditoria do webhook WhatsApp)
+// Guarda o JSON cru completo entregue pela Meta em cada POST,
+// junto com identificadores para busca rápida (waMessageId,
+// phoneNumberId). 1 evento Meta pode disparar N AutomationLogs.
+// Não há limpeza automática — retenção indefinida.
+// ──────────────────────────────────────────────
+
+model MetaWebhookEvent {
+  id              String          @id @default(cuid())
+  organizationId  String?
+  organization    Organization?   @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  channelId       String?
+  channel         Channel?        @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  receivedAt      DateTime        @default(now())
+  signatureValid  Boolean
+  objectType      String?
+  eventType       String
+  phoneNumberId   String?
+  waMessageId     String?
+  fromPhone       String?
+  rawBody         Json
+  headers         Json?
+  processed       Boolean         @default(false)
+  processingError String?
+
+  automationLogs  AutomationLog[]
+
+  @@index([organizationId, receivedAt(sort: Desc)])
+  @@index([waMessageId])
+  @@index([phoneNumberId, receivedAt(sort: Desc)])
+  @@map("meta_webhook_events")
 }
 
 // ──────────────────────────────────────────────
@@ -1503,6 +1541,7 @@ model Channel {
   conversations   Conversation[]
   baileysAuthKeys BaileysAuthKey[]
   campaigns       Campaign[]
+  metaWebhookEvents MetaWebhookEvent[]
 
   @@index([organizationId])
   @@index([organizationId, status])
