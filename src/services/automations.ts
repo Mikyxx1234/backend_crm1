@@ -420,6 +420,43 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
           },
         },
       },
+    }).then(async (logs) => {
+      // Enriquece com dados de ad-tracking do contato. Como nem todo log
+      // tem contactId e nem todo contato tem ad-tracking, fazemos uma
+      // query separada batch e fundimos no frontend.
+      const contactIds = Array.from(
+        new Set(
+          logs
+            .map((l) => l.contactId)
+            .filter((v): v is string => typeof v === "string"),
+        ),
+      );
+      if (contactIds.length === 0) return logs;
+      const contacts = await prisma.contact.findMany({
+        where: { id: { in: contactIds } },
+        select: {
+          id: true,
+          adSourceId: true,
+          adSourceType: true,
+          adCtwaClid: true,
+          adHeadline: true,
+          adResolvedId: true,
+          adResolvedName: true,
+          adResolvedAdsetId: true,
+          adResolvedAdsetName: true,
+          adResolvedCampaignId: true,
+          adResolvedCampaignName: true,
+          adResolvedAt: true,
+          adResolveStatus: true,
+          adResolveError: true,
+        },
+      });
+      const byId = new Map(contacts.map((c) => [c.id, c]));
+      return logs.map((l) => ({
+        ...l,
+        contactAdTracking:
+          l.contactId && byId.has(l.contactId) ? byId.get(l.contactId) : null,
+      }));
     }),
     prisma.automationLog.count({ where }),
   ]);

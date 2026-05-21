@@ -34,6 +34,7 @@ import {
   maybeGrantWhatsappCallConsent,
 } from "@/services/whatsapp-call-consent-webhook";
 import { fireTrigger } from "@/services/automation-triggers";
+import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { maybeReplyAsAIAgent } from "@/services/ai/inbox-handler";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { getLogger } from "@/lib/logger";
@@ -1663,6 +1664,46 @@ async function executePostBody(
                 log.info(
                   `Referral de anúncio salvo — contato=${contact.id} adId=${ref.sourceId ?? "—"} ctwa=${ref.ctwaClid ?? "—"} headline="${ref.headline ?? "—"}"`,
                 );
+              }
+
+              // Resolução do ad_id real via Marketing API quando o referral
+              // veio como post promovido. Roda em background (fire-and-forget)
+              // pra não atrasar o 200 OK pra Meta. Resultados são gravados
+              // nos campos `ad_resolved_*` do contato.
+              if (ref.sourceId) {
+                if (ref.sourceType === "ad") {
+                  // source_type=ad já traz o ad_id no source_id — copia direto.
+                  void prisma.contact
+                    .update({
+                      where: { id: contact.id },
+                      data: {
+                        adResolvedId: ref.sourceId,
+                        adResolvedAt: new Date(),
+                        adResolveStatus: "ok",
+                        adResolveError: null,
+                      },
+                    })
+                    .catch((e) =>
+                      log.debug(
+                        "falha ao copiar adResolvedId direto (não-fatal):",
+                        e,
+                      ),
+                    );
+                } else if (ref.sourceType === "post") {
+                  // Post promovido — precisa chamar Graph API pra mapear post→ad.
+                  const orgId = getOrgIdOrNull();
+                  if (orgId) {
+                    const token = await resolveAccessToken(
+                      phoneNumberId || undefined,
+                    );
+                    void resolveAdAndPersistAsync({
+                      contactId: contact.id,
+                      organizationId: orgId,
+                      sourceId: ref.sourceId,
+                      accessToken: token,
+                    });
+                  }
+                }
               }
             }
           } catch (err) {
