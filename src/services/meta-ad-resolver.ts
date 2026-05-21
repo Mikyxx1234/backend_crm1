@@ -30,7 +30,46 @@ type ResolvedAd = {
   adsetName: string | null;
   campaignId: string | null;
   campaignName: string | null;
+  utmSource: string | null;
+  utmMedium: string | null;
+  utmCampaign: string | null;
+  utmContent: string | null;
+  utmTerm: string | null;
 };
+
+/**
+ * Parseia a string `url_tags` do Ad (Marketing API). Formato típico:
+ *   "utm_source=peideinafarofa&utm_medium=z%C3%A9leitor&utm_campaign=..."
+ * Decodifica %xx e extrai os 5 UTMs padrão. Outros parâmetros são ignorados.
+ */
+function parseUrlTags(urlTags: string | null | undefined): {
+  utmSource: string | null;
+  utmMedium: string | null;
+  utmCampaign: string | null;
+  utmContent: string | null;
+  utmTerm: string | null;
+} {
+  const empty = {
+    utmSource: null,
+    utmMedium: null,
+    utmCampaign: null,
+    utmContent: null,
+    utmTerm: null,
+  };
+  if (!urlTags || typeof urlTags !== "string") return empty;
+  try {
+    const params = new URLSearchParams(urlTags.startsWith("?") ? urlTags.slice(1) : urlTags);
+    return {
+      utmSource: params.get("utm_source"),
+      utmMedium: params.get("utm_medium"),
+      utmCampaign: params.get("utm_campaign"),
+      utmContent: params.get("utm_content"),
+      utmTerm: params.get("utm_term"),
+    };
+  } catch {
+    return empty;
+  }
+}
 
 type ResolutionResult = {
   status: ResolveStatus;
@@ -56,7 +95,7 @@ async function fetchAdFromPost(
   const url = new URL(`${GRAPH_BASE}/${encodeURIComponent(postId)}`);
   url.searchParams.set(
     "fields",
-    "id,promotion_info{ad_id,ad_object_story_id},ads{id,name,adset{id,name,campaign{id,name}}}",
+    "id,promotion_info{ad_id,ad_object_story_id},ads{id,name,url_tags,adset{id,name,campaign{id,name}}}",
   );
 
   let res: Response;
@@ -129,9 +168,11 @@ async function fetchAdFromPost(
   let adsetName: string | null = null;
   let campaignId: string | null = null;
   let campaignName: string | null = null;
+  let urlTagsStr: string | null = null;
 
   if (adFromList) {
     if (typeof adFromList.name === "string") adName = adFromList.name;
+    if (typeof adFromList.url_tags === "string") urlTagsStr = adFromList.url_tags;
     const adset = adFromList.adset as Record<string, unknown> | undefined;
     if (adset) {
       if (typeof adset.id === "string") adsetId = adset.id;
@@ -146,13 +187,14 @@ async function fetchAdFromPost(
     // Enriquecer via /{ad_id}
     try {
       const adUrl = new URL(`${GRAPH_BASE}/${encodeURIComponent(adId)}`);
-      adUrl.searchParams.set("fields", "id,name,adset{id,name,campaign{id,name}}");
+      adUrl.searchParams.set("fields", "id,name,url_tags,adset{id,name,campaign{id,name}}");
       const r = await fetch(adUrl.toString(), {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
       if (r.ok) {
         const a = (await r.json()) as Record<string, unknown>;
         if (typeof a.name === "string") adName = a.name;
+        if (typeof a.url_tags === "string") urlTagsStr = a.url_tags;
         const adset = a.adset as Record<string, unknown> | undefined;
         if (adset) {
           if (typeof adset.id === "string") adsetId = adset.id;
@@ -169,10 +211,12 @@ async function fetchAdFromPost(
     }
   }
 
+  const utms = parseUrlTags(urlTagsStr);
+
   return {
     status: "ok",
     error: null,
-    data: { adId, adName, adsetId, adsetName, campaignId, campaignName },
+    data: { adId, adName, adsetId, adsetName, campaignId, campaignName, ...utms },
   };
 }
 
@@ -202,6 +246,11 @@ async function lookupCache(
       adResolvedAdsetName: true,
       adResolvedCampaignId: true,
       adResolvedCampaignName: true,
+      adUtmSource: true,
+      adUtmMedium: true,
+      adUtmCampaign: true,
+      adUtmContent: true,
+      adUtmTerm: true,
     },
     orderBy: { adResolvedAt: "desc" },
   });
@@ -213,6 +262,11 @@ async function lookupCache(
     adsetName: cached.adResolvedAdsetName,
     campaignId: cached.adResolvedCampaignId,
     campaignName: cached.adResolvedCampaignName,
+    utmSource: cached.adUtmSource,
+    utmMedium: cached.adUtmMedium,
+    utmCampaign: cached.adUtmCampaign,
+    utmContent: cached.adUtmContent,
+    utmTerm: cached.adUtmTerm,
   };
 }
 
@@ -255,6 +309,11 @@ export async function resolveAdAndPersistAsync(args: {
           adResolvedAdsetName: cached.adsetName,
           adResolvedCampaignId: cached.campaignId,
           adResolvedCampaignName: cached.campaignName,
+          adUtmSource: cached.utmSource,
+          adUtmMedium: cached.utmMedium,
+          adUtmCampaign: cached.utmCampaign,
+          adUtmContent: cached.utmContent,
+          adUtmTerm: cached.utmTerm,
           adResolvedAt: new Date(),
           adResolveStatus: "ok",
           adResolveError: null,
@@ -280,6 +339,11 @@ export async function resolveAdAndPersistAsync(args: {
         adResolvedAdsetName: result.data?.adsetName ?? null,
         adResolvedCampaignId: result.data?.campaignId ?? null,
         adResolvedCampaignName: result.data?.campaignName ?? null,
+        adUtmSource: result.data?.utmSource ?? null,
+        adUtmMedium: result.data?.utmMedium ?? null,
+        adUtmCampaign: result.data?.utmCampaign ?? null,
+        adUtmContent: result.data?.utmContent ?? null,
+        adUtmTerm: result.data?.utmTerm ?? null,
         adResolvedAt: new Date(),
         adResolveStatus: result.status,
         adResolveError: result.error,
