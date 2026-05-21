@@ -449,6 +449,11 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
           adResolvedAt: true,
           adResolveStatus: true,
           adResolveError: true,
+          adUtmSource: true,
+          adUtmMedium: true,
+          adUtmCampaign: true,
+          adUtmContent: true,
+          adUtmTerm: true,
         },
       });
       const byId = new Map(contacts.map((c) => [c.id, c]));

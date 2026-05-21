@@ -731,6 +731,13 @@ model Contact {
   adResolvedAt       DateTime?      @map("ad_resolved_at")
   adResolveStatus    String?        @map("ad_resolve_status")
   adResolveError     String?        @map("ad_resolve_error")
+  /// UTMs estruturados extraídos do campo `url_tags` do Ad (Marketing API).
+  /// Preenchidos junto da resolução post→ad quando o anúncio define parâmetros de URL.
+  adUtmSource        String?        @map("ad_utm_source")
+  adUtmMedium        String?        @map("ad_utm_medium")
+  adUtmCampaign      String?        @map("ad_utm_campaign")
+  adUtmContent       String?        @map("ad_utm_content")
+  adUtmTerm          String?        @map("ad_utm_term")
   whatsappJid    String?
   /// Meta WhatsApp business-scoped user ID (BSUID), ex. US.xxx — ver doc Meta / usernames.
   /// Unicidade por org (WABAs diferentes têm espaços de BSUID independentes).
