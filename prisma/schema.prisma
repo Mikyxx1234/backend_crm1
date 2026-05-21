@@ -720,6 +720,17 @@ model Contact {
   adSourceType   String?        @map("ad_source_type")
   adCtwaClid     String?        @map("ad_ctwa_clid")
   adHeadline     String?        @map("ad_headline")
+  /// Resolução do post→ad via Marketing API (quando sourceType=="post").
+  /// Preenchido async pelo resolver; status="ok"/"not_found"/"no_access"/"error".
+  adResolvedId       String?        @map("ad_resolved_id")
+  adResolvedName     String?        @map("ad_resolved_name")
+  adResolvedAdsetId    String?      @map("ad_resolved_adset_id")
+  adResolvedAdsetName  String?      @map("ad_resolved_adset_name")
+  adResolvedCampaignId    String?   @map("ad_resolved_campaign_id")
+  adResolvedCampaignName  String?   @map("ad_resolved_campaign_name")
+  adResolvedAt       DateTime?      @map("ad_resolved_at")
+  adResolveStatus    String?        @map("ad_resolve_status")
+  adResolveError     String?        @map("ad_resolve_error")
   whatsappJid    String?
   /// Meta WhatsApp business-scoped user ID (BSUID), ex. US.xxx — ver doc Meta / usernames.
   /// Unicidade por org (WABAs diferentes têm espaços de BSUID independentes).
