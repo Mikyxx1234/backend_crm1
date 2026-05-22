@@ -64,6 +64,7 @@ model Organization {
   whatsappCallEvents       WhatsappCallEvent[]
   scheduledWhatsappCalls   ScheduledWhatsappCall[]
   scheduledMessages        ScheduledMessage[]
+  bulkOperations           BulkOperation[]
   automations              Automation[]
   automationSteps          AutomationStep[]
   automationLogs           AutomationLog[]
@@ -337,6 +338,7 @@ model User {
   aiAgentMessages                Message[]               @relation("MessageAIAgent")
   scheduledMessagesCreated       ScheduledMessage[]      @relation("ScheduledMessageCreatedBy")
   scheduledMessagesCancelled     ScheduledMessage[]      @relation("ScheduledMessageCancelledBy")
+  bulkOperationsCreated          BulkOperation[]         @relation("BulkOperationCreatedBy")
   dashboardLayouts               UserDashboardLayout[]
   fieldLayoutConfigs             FieldLayoutConfig[]
   mfaBackupCodes                 UserMfaBackupCode[]
@@ -2587,4 +2589,96 @@ enum ScheduledMessageStatus {
   SENT
   CANCELLED
   FAILED
+}
+
+// ──────────────────────────────────────────────
+// Bulk Operations (operações em massa assíncronas)
+// ──────────────────────────────────────────────
+// Registra operações em massa enfileiradas (BullMQ) e processadas por
+// workers fora do backend-api. Postgres é a fonte da verdade do
+// progresso/histórico — o estado no BullMQ é volátil e existe apenas
+// enquanto o job está na fila/processamento.
+//
+// Escopo inicial: operações sobre Deals (move de stage em lote, update
+// em massa de custom fields). O enum `BulkOperationType` é expansível
+// para futuras operações pesadas (Contacts, Activities, ETL).
+//
+// `payload` armazena o JSON de entrada do job (ex.: { dealIds, stageId }),
+// usado para auditoria e para reprocessamento manual quando necessário.
+// `errors` é JSON com até ~500 entradas { dealId, message, attempt, at }
+// — limite proteção contra bloat em operações grandes.
+
+model BulkOperation {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  /// Tipo da operação — direciona o roteamento no worker para o handler correto.
+  type   BulkOperationType
+  status BulkOperationStatus @default(PENDING)
+
+  /// Quantidade total de itens a processar (calculado no enqueue).
+  total     Int @default(0)
+  /// Itens processados (sucesso + falha + ignorados). Atualizado em chunks
+  /// pelo worker; cliente calcula `progressPercent = processed/total`.
+  processed Int @default(0)
+  /// Itens que aplicaram a operação com sucesso (incluindo no-ops idempotentes).
+  succeeded Int @default(0)
+  /// Itens que falharam — detalhe individual em `errors`.
+  failed    Int @default(0)
+
+  /// Lista (JSON) de erros por item, formato:
+  ///   [{ itemId, message, attempt, at }, ...]
+  /// Limitado a ~500 entradas pelo worker para evitar bloat em DB; quando
+  /// excede o cap, o worker marca `errorsTruncated=true` via metadata.
+  errors  Json?
+  /// Snapshot do payload de entrada do job (ex.: { dealIds, stageId }).
+  /// Usado para auditoria e replay manual. Mantém em sync com o tipo do job.
+  payload Json
+
+  /// User que iniciou a operação. SetNull se o user for deletado/anonimizado
+  /// — preserva histórico mesmo após LGPD/erasure.
+  createdById String?
+  createdBy   User?   @relation("BulkOperationCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  /// Quando o worker pegou o job para processar (status -> PROCESSING).
+  startedAt  DateTime?
+  /// Quando o worker terminou (status -> COMPLETED/PARTIAL/FAILED/CANCELLED).
+  finishedAt DateTime?
+
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@index([organizationId, type, status])
+  @@map("bulk_operations")
+}
+
+enum BulkOperationType {
+  /// Atualiza custom fields em massa para múltiplos deals (upsert por field).
+  DEAL_BULK_UPDATE_FIELDS
+  /// Move múltiplos deals para uma mesma stage (idempotente).
+  DEAL_BULK_MOVE_STAGE
+  /// Reservado — change owner em massa (a portar para async em iteração futura).
+  DEAL_BULK_CHANGE_OWNER
+  /// Reservado — mark_won/lost/delete em massa.
+  DEAL_BULK_MARK_WON
+  DEAL_BULK_MARK_LOST
+  DEAL_BULK_DELETE
+}
+
+enum BulkOperationStatus {
+  /// Criado no DB, ainda não pego pelo worker.
+  PENDING
+  /// Worker em execução; `processed` cresce conforme cada chunk completa.
+  PROCESSING
+  /// Todos os itens processaram com sucesso (failed=0).
+  COMPLETED
+  /// Worker terminou, mas com falhas pontuais (failed>0, succeeded>0).
+  PARTIAL
+  /// Worker terminou com erro infraestrutural (todos os itens falharam ou
+  /// falha geral antes de processar qualquer item).
+  FAILED
+  /// Cancelado manualmente (reservado para iteração futura).
+  CANCELLED
 }

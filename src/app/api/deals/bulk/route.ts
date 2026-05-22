@@ -4,11 +4,20 @@ import { auth } from "@/lib/auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
+import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
 import { fireTrigger } from "@/services/automation-triggers";
 import { assignDealOwner, createDealEvent } from "@/services/deals";
 
 const VALID_ACTIONS = ["move_stage", "change_owner", "mark_won", "mark_lost", "delete"] as const;
 type BulkAction = (typeof VALID_ACTIONS)[number];
+
+/**
+ * Threshold acima do qual `move_stage` automaticamente roda async via worker.
+ * Abaixo do threshold (e sem `async: true` explícito no body), mantém o
+ * comportamento síncrono histórico para não quebrar UIs existentes que
+ * esperam `{ affected: number }` na resposta.
+ */
+const ASYNC_AUTO_THRESHOLD = 50;
 
 export async function POST(request: Request) {
   try {
@@ -46,6 +55,73 @@ export async function POST(request: Request) {
 
       const stage = await prisma.stage.findUnique({ where: { id: stageId }, select: { id: true, name: true } });
       if (!stage) return NextResponse.json({ message: "Etapa não encontrada." }, { status: 404 });
+
+      // Modo async opt-in: explicito (body.async=true) ou implícito por
+      // tamanho (> ASYNC_AUTO_THRESHOLD). Cria BulkOperation, enfileira
+      // job e devolve 202 com operationId. Frontend pollar via GET
+      // /api/bulk-operations/[id]. Preserva o comportamento síncrono
+      // existente para chamadas menores (compat com UI atual).
+      const wantAsync =
+        body.async === true || dealIds.length > ASYNC_AUTO_THRESHOLD;
+
+      if (wantAsync) {
+        if (!userLike.organizationId) {
+          return NextResponse.json(
+            { message: "Operação requer contexto de organização." },
+            { status: 403 },
+          );
+        }
+        const operation = await prisma.bulkOperation.create({
+          data: {
+            type: "DEAL_BULK_MOVE_STAGE",
+            status: "PENDING",
+            total: dealIds.length,
+            payload: { dealIds, targetStageId: stageId },
+            createdById: uid,
+          },
+          select: { id: true },
+        });
+        const job = await enqueueLeadsBulk(LEADS_BULK_JOB_NAMES.bulkMoveStage, {
+          operationId: operation.id,
+          organizationId: userLike.organizationId,
+          initiatedByUserId: uid,
+          dealIds,
+          targetStageId: stageId,
+        });
+        if (!job) {
+          await prisma.bulkOperation.update({
+            where: { id: operation.id },
+            data: {
+              status: "FAILED",
+              finishedAt: new Date(),
+              errors: [
+                {
+                  itemId: "__operation__",
+                  message: "Fila de jobs indisponível (Redis offline)",
+                  attempt: 0,
+                  at: new Date().toISOString(),
+                },
+              ],
+            },
+          });
+          return NextResponse.json(
+            {
+              message: "Fila de jobs indisponível.",
+              operationId: operation.id,
+            },
+            { status: 503 },
+          );
+        }
+        return NextResponse.json(
+          {
+            message: "Operação enfileirada.",
+            operationId: operation.id,
+            total: dealIds.length,
+            action,
+          },
+          { status: 202 },
+        );
+      }
 
       const deals = await prisma.deal.findMany({
         where: { id: { in: dealIds } },

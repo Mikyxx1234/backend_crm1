@@ -439,9 +439,26 @@ async function checkCampaignCompletion(campaignId: string) {
 
 // ── Bootstrap ────────────────────────────────────────────
 
+function envPositiveInt(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : defaultValue;
+}
+
 export function startCampaignWorkers() {
   const redisUrl = getRedisUrl();
   const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
+
+  // Rate limit do envio Meta — configurável por env para permitir afinar
+  // sem rebuild. Defaults preservam o comportamento histórico (80/s, que
+  // é o limite tier base da Meta Cloud API; clients com tier maior podem
+  // subir essa configuração).
+  const rateLimitMax = envPositiveInt("WHATSAPP_RATE_LIMIT_MAX", 80);
+  const rateLimitDuration = envPositiveInt(
+    "WHATSAPP_RATE_LIMIT_DURATION",
+    1000,
+  );
 
   /**
    * Workers BullMQ rodam fora de qualquer request handler — sem session
@@ -484,7 +501,7 @@ export function startCampaignWorkers() {
     {
       connection: connection.duplicate(),
       concurrency: 10,
-      limiter: { max: 80, duration: 1000 },
+      limiter: { max: rateLimitMax, duration: rateLimitDuration },
     },
   );
 

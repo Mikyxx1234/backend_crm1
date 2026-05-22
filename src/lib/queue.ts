@@ -1,4 +1,4 @@
-import { Queue } from "bullmq";
+import { Queue, type JobsOptions } from "bullmq";
 import IORedis from "ioredis";
 
 export const AUTOMATION_JOBS_QUEUE_NAME = "automation-jobs" as const;
@@ -6,8 +6,25 @@ export const BAILEYS_OUTBOUND_QUEUE_NAME = "baileys-outbound" as const;
 export const BAILEYS_CONTROL_QUEUE_NAME = "baileys-control" as const;
 export const CAMPAIGN_DISPATCH_QUEUE_NAME = "campaign-dispatch" as const;
 export const CAMPAIGN_SEND_QUEUE_NAME = "campaign-send" as const;
+/**
+ * Fila de operações em massa sobre Deals (bulk update de custom fields,
+ * bulk move de stage). Foi nomeada `leads-bulk` (não `deals-bulk`) por
+ * convenção de produto — no falar do usuário do CRM "lead" e "deal" se
+ * misturam — mas o escopo atual é estritamente Deals/cards do funil.
+ *
+ * Worker que consome: `src/workers/leads-worker.ts`.
+ */
+export const LEADS_BULK_QUEUE_NAME = "leads-bulk" as const;
 
 const AUTOMATION_JOB_NAME = "run" as const;
+
+/** Nomes de job da fila `leads-bulk`. */
+export const LEADS_BULK_JOB_NAMES = {
+  bulkUpdateFields: "bulk-update-fields",
+  bulkMoveStage: "bulk-move-stage",
+} as const;
+export type LeadsBulkJobName =
+  (typeof LEADS_BULK_JOB_NAMES)[keyof typeof LEADS_BULK_JOB_NAMES];
 
 export type AutomationJobContext = {
   contactId?: string;
@@ -49,6 +66,43 @@ export type CampaignSendPayload = {
   contactBsuid?: string;
 };
 
+// ── Leads bulk payloads ──────────────────────────────────
+//
+// Todos os jobs da fila `leads-bulk` referenciam um `BulkOperation` no
+// Postgres pelo `operationId`. O Postgres é a fonte da verdade do progresso;
+// o payload do BullMQ carrega apenas o que o handler precisa para processar
+// (organizationId para multi-tenant, IDs dos deals, parâmetros da ação).
+//
+// A duplicação `organizationId` (também presente no BulkOperation) é
+// proposital: evita uma query extra no worker antes de chamar
+// `withSystemContext`, e funciona como defesa em profundidade caso o
+// registro do BulkOperation desapareça (cascade delete da Organization).
+
+type LeadsBulkBasePayload = {
+  /** ID do registro `BulkOperation` que rastreia esse job no Postgres. */
+  operationId: string;
+  /** Tenant — também usado pelo worker para `withSystemContext`. */
+  organizationId: string;
+  /** User que iniciou a operação (audit). Null = origem sistema/automação. */
+  initiatedByUserId: string | null;
+};
+
+export type BulkUpdateFieldsPayload = LeadsBulkBasePayload & {
+  /** IDs dos deals a atualizar (validados como pertencentes à org no handler). */
+  dealIds: string[];
+  /** Lista de pares (customFieldId, value) a aplicar via upsert em cada deal. */
+  updates: Array<{ fieldId: string; value: string }>;
+};
+
+export type BulkMoveStagePayload = LeadsBulkBasePayload & {
+  /** IDs dos deals a mover. */
+  dealIds: string[];
+  /** Stage de destino (validada no handler como pertencente à org). */
+  targetStageId: string;
+};
+
+export type LeadsBulkPayload = BulkUpdateFieldsPayload | BulkMoveStagePayload;
+
 const redisUrl = process.env.REDIS_URL;
 
 const globalForQueue = globalThis as unknown as {
@@ -58,6 +112,7 @@ const globalForQueue = globalThis as unknown as {
   baileysControlQueue?: Queue<BaileysControlPayload>;
   campaignDispatchQueue?: Queue<CampaignDispatchPayload>;
   campaignSendQueue?: Queue<CampaignSendPayload>;
+  leadsBulkQueue?: Queue<LeadsBulkPayload>;
 };
 
 function getQueueRedis(): IORedis | null {
@@ -214,10 +269,80 @@ export async function enqueueCampaignSend(payload: CampaignSendPayload) {
     console.warn("[queue] Redis indisponível — não é possível enviar mensagem de campanha");
     return null;
   }
+  // Retries/backoff configuráveis via env para permitir afinar comportamento
+  // sem rebuild. Defaults preservam o comportamento histórico (6 tentativas,
+  // backoff exponencial iniciando em 3s).
+  const attempts = readPositiveInt(process.env.WHATSAPP_MAX_ATTEMPTS, 6);
+  const backoffDelay = readPositiveInt(process.env.WHATSAPP_BACKOFF_DELAY, 3000);
   return queue.add("send", payload, {
     removeOnComplete: true,
     removeOnFail: false,
-    attempts: 6,
-    backoff: { type: "exponential", delay: 3000 },
+    attempts,
+    backoff: { type: "exponential", delay: backoffDelay },
   });
+}
+
+// ── Leads bulk queue ─────────────────────────────────────
+
+function getLeadsBulkQueue(): Queue<LeadsBulkPayload> | null {
+  const redis = getQueueRedis();
+  if (!redis) return null;
+  if (!globalForQueue.leadsBulkQueue) {
+    globalForQueue.leadsBulkQueue = new Queue<LeadsBulkPayload>(
+      LEADS_BULK_QUEUE_NAME,
+      { connection: redis },
+    );
+  }
+  return globalForQueue.leadsBulkQueue;
+}
+
+/**
+ * Enfileira um job na fila `leads-bulk`.
+ *
+ * Os retries são pensados para erros transientes (DB indisponível, conflito
+ * de stage por concorrência etc.). Falhas por-item (deal específico) são
+ * registradas em `BulkOperation.errors` pelo próprio handler e NÃO causam
+ * retry do job inteiro — o worker continua processando os demais itens.
+ *
+ * Defaults: 5 tentativas com backoff exponencial iniciando em 5s.
+ * Override via `LEADS_BULK_MAX_ATTEMPTS` / `LEADS_BULK_BACKOFF_DELAY`.
+ *
+ * Retorna `null` se Redis estiver indisponível — o caller deve marcar o
+ * `BulkOperation` como `FAILED` e responder 503 ao cliente (não deixar
+ * o registro em PENDING para sempre).
+ */
+export async function enqueueLeadsBulk<P extends LeadsBulkPayload>(
+  jobName: LeadsBulkJobName,
+  payload: P,
+  overrides?: JobsOptions,
+) {
+  const queue = getLeadsBulkQueue();
+  if (!queue) {
+    console.warn(
+      "[queue] Redis indisponível — não é possível enfileirar leads-bulk",
+    );
+    return null;
+  }
+  const attempts = readPositiveInt(process.env.LEADS_BULK_MAX_ATTEMPTS, 5);
+  const backoffDelay = readPositiveInt(
+    process.env.LEADS_BULK_BACKOFF_DELAY,
+    5000,
+  );
+  const opts: JobsOptions = {
+    removeOnComplete: true,
+    removeOnFail: false,
+    attempts,
+    backoff: { type: "exponential", delay: backoffDelay },
+    ...overrides,
+  };
+  return queue.add(jobName, payload, opts);
+}
+
+// ── Helpers privados ─────────────────────────────────────
+
+function readPositiveInt(raw: string | undefined, fallback: number): number {
+  if (!raw) return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.floor(n);
 }

@@ -14,6 +14,11 @@ RUN mkdir -p public
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npx prisma generate
 RUN npm run build
+# Workers BullMQ: compilar TS → JS standalone (CJS) com esbuild. Não usamos
+# `tsx` em prod porque o `.next/standalone` (único node_modules copiado pro
+# runner) não inclui o `tsx` — ele só está no node_modules de dev/build.
+# Ver scripts/build-workers.mjs para os entry points compilados.
+RUN npm run build:workers
 
 FROM node:22-bookworm-slim AS runner
 WORKDIR /app
@@ -37,6 +42,10 @@ COPY --from=builder /app/prisma ./prisma
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 # Runtime: engines + client (standalone já traz parte do @prisma; isto completa).
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+# Workers compilados (campaign-worker.js, leads-worker.js).
+# Esses arquivos são executados com `node dist/workers/<name>.js` quando
+# APP_MODE=worker-whatsapp ou APP_MODE=worker-leads no docker-entrypoint.sh.
+COPY --from=builder /app/dist/workers ./dist/workers
 # CLI: não copiar só `node_modules/prisma` — `@prisma/config` exige `effect`, `c12`, … hoistados.
 ARG PRISMA_VERSION=6.19.3
 RUN mkdir -p /opt/prisma-cli \

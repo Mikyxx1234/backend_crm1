@@ -5,6 +5,118 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-22 — APP_MODE separa API/workers no EasyPanel (1 imagem, 3 serviços)
+
+**Decisão.** O Dockerfile produz uma única imagem que pode executar em três
+modos via env `APP_MODE`:
+
+- `APP_MODE=api` (default) — Next.js standalone server. Único modo que aplica
+  `prisma migrate deploy` no entrypoint (workers não aplicam migrations para
+  evitar race condition entre serviços do mesmo deploy).
+- `APP_MODE=worker-whatsapp` — `node dist/workers/campaign-worker.js`. Consome
+  as filas `campaign-dispatch` + `campaign-send` (lógica de envio Meta Cloud
+  API JÁ existente — não foi reescrita).
+- `APP_MODE=worker-leads` — `node dist/workers/leads-worker.js`. Consome a
+  fila `leads-bulk` (operações em massa de Deals: `bulk-update-fields`,
+  `bulk-move-stage`).
+
+No EasyPanel, criar 3 serviços apontando para o MESMO repositório/imagem,
+diferenciados apenas pela env `APP_MODE`. Todos compartilham `DATABASE_URL`,
+`REDIS_URL`, `NEXTAUTH_*` etc. — workers só precisam do subconjunto que usam,
+mas sem prejuízo se receberem todas.
+
+**Contexto.** Antes desta mudança, o Dockerfile só subia `node server.js`.
+O `campaign-worker.ts` existia mas não tinha script npm nem branch no
+entrypoint — campanhas enfileiravam jobs que ninguém consumia em produção,
+a menos que alguém executasse `tsx src/workers/campaign-worker.ts` manualmente
+em outro processo. Quando o usuário pediu BullMQ workers, descobrimos que
+~95% da infra já existia; o gap era operacional (deploy + ergonomia).
+
+**Por que esbuild compila os workers em vez de usar `tsx` em prod.** O runner
+stage do Dockerfile copia apenas `.next/standalone`, que é o output do Next
+trace — ele inclui só pacotes que o bundle Next referencia em runtime. `tsx`
+(em `dependencies` no package.json) NÃO é referenciado pelo Next e portanto
+não é copiado para o runner. `npm run build:workers` (`scripts/build-workers.mjs`)
+usa esbuild para empacotar `campaign-worker.ts` e `leads-worker.ts` em CJS
+standalone, externalizando `@prisma/client` (que precisa vir dos engines
+nativos copiados em `node_modules/@prisma/*`). Dev local mantém `tsx` por
+ergonomia (sem rebuild a cada edit) — scripts `start:worker:*` (dev) vs
+`start:worker:*:prod` (Docker).
+
+**Por que migrations só em APP_MODE=api.** Se workers também aplicassem
+`prisma migrate deploy`, três serviços competiriam pelo mesmo lock de
+migration no Postgres em cada deploy. O serviço API é o "owner" das migrations;
+workers assumem que o schema está pronto. Em ambientes `SKIP_PRISMA_MIGRATE=1`
+(test apontando para banco do monólito), nem o API aplica — operador roda
+manual via `psql`.
+
+**Alternativas descartadas.**
+
+- **Dockerfile.worker separado.** Imagem por papel é mais enxuta mas dobra
+  complexidade de CI/registry e desincroniza versões entre API e worker.
+  Uma imagem só com `APP_MODE` é mais simples para o tamanho atual do projeto.
+- **Migrations dentro do worker.** Levaria a race condition se 3 serviços
+  do mesmo deploy subissem em paralelo. Mesmo com `IF NOT EXISTS` no SQL,
+  o `_prisma_migrations` table não tolera concorrência limpa.
+- **Rodar workers in-process do Next API.** Já fazemos isso para timers leves
+  (`sse-bus.ts` bootstrap), mas BullMQ Workers ocupam um event loop e
+  competiriam com requests HTTP. Processos separados isolam falhas (worker
+  morto não derruba a API) e permitem scaling independente.
+
+---
+
+### 2026-05-22 — BulkOperation: Postgres como fonte da verdade do progresso
+
+**Decisão.** Operações em massa enfileiradas no BullMQ registram seu estado
+em uma tabela `bulk_operations` no Postgres (modelo `BulkOperation`). O Redis
+mantém apenas o job na fila enquanto está sendo processado; todo histórico,
+progresso, erros e auditoria vivem no Postgres.
+
+Endpoints criados:
+
+- `POST /api/deals/bulk` — modo async opt-in (flag `async: true` no body,
+  ou auto-async se `dealIds.length > 50`) para `action: "move_stage"`. Outras
+  ações (change_owner, mark_won, mark_lost, delete) continuam síncronas por
+  enquanto.
+- `POST /api/deals/bulk/custom-fields` — NOVA funcionalidade (não existia
+  bulk de custom fields antes), sempre async, com `BulkOperation` tracking.
+- `GET /api/bulk-operations/[id]` — frontend pollar progresso via
+  `{ total, processed, succeeded, failed, progressPercent, errors[] }`.
+
+Idempotência: a Prisma extension de scope filtra todas as queries por
+`organizationId`. Workers usam `withSystemContext(orgId, ...)` para
+configurar o AsyncLocalStorage antes de invocar handlers que usam `prisma`
+(scoped). `_update-progress.ts` usa `prismaBase` (sem scope) para atualizar
+o `BulkOperation` — evita acoplamento com a extension nos workers compilados.
+
+**Contexto.** O backend tinha 5 filas BullMQ em produção, mas nenhum modelo
+para rastrear estado de operações em massa fora do escopo de campanhas
+WhatsApp (que tem seu próprio modelo `Campaign` + `CampaignRecipient`). Para
+operações de Deals em lote, faltava completamente um trilho — `POST
+/api/deals/bulk` rodava 100% síncrono com loops N+1.
+
+**Por que não usar apenas o estado do BullMQ.** O BullMQ remove jobs com
+`removeOnComplete: true` (default no projeto). Sem snapshot em DB, o
+histórico se perde — impossível responder "que bulk operations rodaram nessa
+org no último mês?". Além disso, polling do frontend ficaria amarrado ao
+Redis estar acessível pela rota API, o que dobra a superfície de
+dependência.
+
+**Cuidado 7 do enunciado (idempotência + fire-and-forget):**
+
+- `bulk-move-stage` reverifica `stageId !== target` antes de cada update.
+  Deals já na stage destino são contados como sucesso sem disparar
+  `DealEvent` ou `fireTrigger`. Retry do job não reaplica triggers.
+- `updateMany` atômico por chunk de 50 deals. Side effects (`createDealEvent`,
+  `fireTrigger`) ficam fora da transação principal — fire-and-forget com log,
+  igual ao helper síncrono `moveDeal` em `services/deals.ts`.
+- Erros por-deal são acumulados em `BulkOperation.errors` (JSON array) com
+  cap de 500 entradas. Worker continua processando os demais deals do chunk.
+- Re-throw acontece apenas em erros de infraestrutura (DB down) que causam
+  retry do job inteiro pelo BullMQ.
+
+---
+
 ### 2026-05-14 — User movido entre orgs: gera registros órfãos sob RLS
 
 **Decisão.** Sempre que um `User` for movido entre `Organization`s (campo

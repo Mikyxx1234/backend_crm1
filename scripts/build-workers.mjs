@@ -1,0 +1,93 @@
+#!/usr/bin/env node
+/**
+ * Build dos workers BullMQ para JavaScript executável com `node`.
+ *
+ * Por que precisamos compilar?
+ * ────────────────────────────
+ * O Dockerfile (runner stage) copia APENAS `.next/standalone` do builder.
+ * O standalone do Next.js minifica `node_modules` mantendo só o que o bundle
+ * Next usa em runtime — `tsx` (que está em `dependencies` no package.json)
+ * NÃO é referenciado pelo Next, então o standalone tracing não inclui ele.
+ *
+ * Logo, em produção/Docker, `tsx src/workers/<file>.ts` NÃO FUNCIONA. Esse
+ * script empacota os workers em arquivos CJS standalone em `dist/workers/`
+ * que são copiados para o runner e executados com `node`.
+ *
+ * Em dev local (`npm run start:worker:leads`) seguimos usando `tsx` direto
+ * — mais rápido pra iterar, sem precisar de rebuild a cada edit.
+ *
+ * Decisões do bundle:
+ *   - `format: cjs`: package.json não tem `"type": "module"`; CJS é o
+ *     formato seguro/compatível com o resto do projeto.
+ *   - `external: ["@prisma/client", ".prisma/client", "@prisma/adapter-pg"]`
+ *     mantém o Prisma vindo de `node_modules/@prisma/*` (já copiado pelo
+ *     Dockerfile linhas 38-39). Bundlar o Prisma Client quebra porque ele
+ *     tem dependências nativas (engines) carregadas via `require.resolve`.
+ *   - `external: ["pino-pretty"]` evita carregar pino-pretty no bundle
+ *     (logger.ts importa dinamicamente; em prod NODE_ENV=production não usa).
+ *   - Plugin custom resolve o alias `@/...` que vem do `tsconfig.json`
+ *     (`"@/*": ["./src/*"]`) sem dep extra (`tsconfig-paths` etc.).
+ *   - `sourcemap: true`: stacktraces apontam para os .ts originais.
+ *   - `bundle: true` + `platform: node`: agrega todas as deps transitivas
+ *     em um único .js por entrypoint — fácil de copiar pro runner.
+ */
+
+import { build } from "esbuild";
+import path from "node:path";
+import url from "node:url";
+
+const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(__dirname, "..");
+
+/**
+ * Plugin esbuild que resolve o alias `@/...` para `<projectRoot>/src/...`.
+ * Espelha o `paths` do tsconfig sem precisar puxar dep extra.
+ */
+const aliasAtPlugin = {
+  name: "alias-at",
+  setup(builder) {
+    builder.onResolve({ filter: /^@\// }, (args) => {
+      const rel = args.path.slice(2); // remove "@/"
+      // .ts/.tsx/.js — deixa o esbuild resolver a extensão.
+      return { path: path.resolve(projectRoot, "src", rel) };
+    });
+  },
+};
+
+const entries = [
+  // WhatsApp / campanhas — worker existente, sem mudanças de lógica.
+  "src/workers/campaign-worker.ts",
+  // Leads (Deals) — worker novo.
+  "src/workers/leads-worker.ts",
+];
+
+await build({
+  absWorkingDir: projectRoot,
+  entryPoints: entries,
+  outdir: path.resolve(projectRoot, "dist/workers"),
+  bundle: true,
+  platform: "node",
+  target: "node22",
+  format: "cjs",
+  sourcemap: true,
+  logLevel: "info",
+  // Prisma + adapter precisam vir de `node_modules/@prisma/*` (engines nativas).
+  // pino-pretty é dynamic-require pra dev only.
+  external: [
+    "@prisma/client",
+    ".prisma/client",
+    "@prisma/adapter-pg",
+    "pino-pretty",
+  ],
+  // Carrega o tsconfig do projeto para herdar `target`, `strict`, etc.
+  tsconfig: path.resolve(projectRoot, "tsconfig.json"),
+  plugins: [aliasAtPlugin],
+  // Aliases adicionais para nomes que esbuild não consegue resolver
+  // sozinho em CJS (raro, mas existem casos com `next` que vazam imports).
+  // Mantemos vazio por enquanto — adicionar conforme aparecerem warnings.
+  // Marca como worker code para evitar tree-shaking agressivo de side effects
+  // (ex.: registro de signal handlers no `if (require.main === module)`).
+  treeShaking: false,
+});
+
+console.log("[build-workers] ✓ workers compilados em dist/workers/");
