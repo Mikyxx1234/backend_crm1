@@ -96,6 +96,19 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "UserRoleAssignment",
   "OrganizationSetting",
   "SavedFilter",
+  // BulkOperation tem organizationId NOT NULL no schema. Sem entrar
+  // aqui:
+  //   - prisma.bulkOperation.create() falha porque organizationId
+  //     nao eh injetado e o Prisma rejeita o data (callsites em
+  //     /api/deals/bulk e /api/deals/bulk/custom-fields confiam na
+  //     extension pra inject — nao passam organizationId no payload).
+  //   - prisma.bulkOperation.findUnique({ where: { id } }) em
+  //     /api/bulk-operations/[id] retornaria operations de QUALQUER
+  //     org (data leak cross-tenant) porque o where nao receberia
+  //     o filtro automatico de organizationId.
+  // Worker (leads-worker + jobs/leads/*) usa prismaBase e ja escopa
+  // manualmente — esses callsites nao mudam.
+  "BulkOperation",
 ]);
 
 type AnyArgs = Record<string, unknown>;
