@@ -23,6 +23,14 @@
  *     mantém o Prisma vindo de `node_modules/@prisma/*` (já copiado pelo
  *     Dockerfile linhas 38-39). Bundlar o Prisma Client quebra porque ele
  *     tem dependências nativas (engines) carregadas via `require.resolve`.
+ *   - `external: ["pg"]` é CRÍTICO: o `@prisma/adapter-pg` faz `require("pg")`
+ *     internamente. Se bundlarmos `pg` aqui, ficam DUAS cópias da lib no
+ *     processo: a bundlada (usada pelo `new Pool()` em `prisma-base.ts`) e
+ *     a de `node_modules` (usada pelo adapter). O `PrismaPg` recebe um
+ *     `Pool` da instância "errada" e silenciosamente cai em defaults libpq
+ *     (PGHOST=localhost), causando `Can't reach database server at 127.0.0.1`
+ *     mesmo com `DATABASE_URL` correto. Marcando `pg` como external garante
+ *     instância única.
  *   - `external: ["pino-pretty"]` evita carregar pino-pretty no bundle
  *     (logger.ts importa dinamicamente; em prod NODE_ENV=production não usa).
  *   - Plugin custom resolve o alias `@/...` que vem do `tsconfig.json`
@@ -128,11 +136,14 @@ await build({
   sourcemap: true,
   logLevel: "info",
   // Prisma + adapter precisam vir de `node_modules/@prisma/*` (engines nativas).
-  // pino-pretty é dynamic-require pra dev only.
+  // `pg` precisa ser external para compartilhar a MESMA instância com o
+  // `@prisma/adapter-pg` (ver doc no topo do arquivo). pino-pretty é
+  // dynamic-require pra dev only.
   external: [
     "@prisma/client",
     ".prisma/client",
     "@prisma/adapter-pg",
+    "pg",
     "pino-pretty",
   ],
   // Carrega o tsconfig do projeto para herdar `target`, `strict`, etc.
