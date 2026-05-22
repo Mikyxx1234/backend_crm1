@@ -24,6 +24,35 @@ fi
 
 echo "[entrypoint] iniciando backend CRM ($(date -u +'%Y-%m-%dT%H:%M:%SZ')) — user=$(id -un) uid=$(id -u)"
 
+# Carrega /app/.env se o Easypanel/usuário tiver montado o arquivo.
+#
+# Por que precisamos disso?
+#   O Easypanel oferece um toggle "Create .env file" que, quando ligado,
+#   CRIA um arquivo /app/.env com as variáveis declaradas no painel
+#   "Environment Variables" — MAS não injeta essas variáveis como
+#   process.env do container. O Next.js standalone (server.js) carrega
+#   esse .env internamente via @next/env (loadEnvConfig), por isso o
+#   `APP_MODE=api` funciona mesmo sem essa linha.
+#
+#   Os workers compilados com esbuild (`node dist/workers/<name>.js`)
+#   NÃO carregam o .env — process.env.DATABASE_URL fica undefined, pg
+#   cai no default `localhost:5432` e o worker quebra com
+#   "Can't reach database server at 127.0.0.1:5432" a cada job.
+#
+#   Sourcing aqui (set -a + .) garante que TODAS as linhas KEY=value
+#   do .env virem env vars do shell, e o `exec node ...` herda. É
+#   idempotente: se o Next.js já leu o .env, não atrapalha (process.env
+#   apenas tem os mesmos valores). Em ambientes onde o Easypanel injeta
+#   tudo como runtime env (toggle desligado), o .env não existe e o
+#   bloco é pulado.
+if [ -f /app/.env ]; then
+  echo "[entrypoint] sourcing /app/.env (env vars do Easypanel via arquivo)"
+  set -a
+  # shellcheck disable=SC1091
+  . /app/.env
+  set +a
+fi
+
 # Smoke test: confirma que $STORAGE_DIR está gravável depois do drop.
 if touch "$STORAGE_DIR/.write-test" 2>/dev/null; then
   rm -f "$STORAGE_DIR/.write-test"
