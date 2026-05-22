@@ -33,11 +33,58 @@
  */
 
 import { build } from "esbuild";
+import fs from "node:fs";
 import path from "node:path";
 import url from "node:url";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, "..");
+
+/**
+ * Extensões testadas para resolver `@/foo` em ordem. Espelha o
+ * `resolveExtensions` default do esbuild + também `index.*` para
+ * imports apontando para diretórios.
+ *
+ * Por que precisamos disso?
+ * Quando um plugin retorna `path` em `onResolve`, o esbuild trata o
+ * caminho como FINAL — não aplica `resolveExtensions` automático.
+ * Sem isso, `import "@/lib/logger"` virava
+ * `/app/src/lib/logger` (sem `.ts`), o esbuild tentava ler como
+ * arquivo literal e quebrava com "Cannot read file" em containers
+ * onde o filesystem é case-sensitive (Linux).
+ */
+const ALIAS_EXTENSIONS = [
+  ".ts",
+  ".tsx",
+  ".mts",
+  ".cts",
+  ".js",
+  ".jsx",
+  ".mjs",
+  ".cjs",
+];
+
+function resolveAliasPath(rel) {
+  const baseAbs = path.resolve(projectRoot, "src", rel);
+  for (const ext of ALIAS_EXTENSIONS) {
+    const candidate = `${baseAbs}${ext}`;
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+  }
+  if (fs.existsSync(baseAbs) && fs.statSync(baseAbs).isDirectory()) {
+    for (const ext of ALIAS_EXTENSIONS) {
+      const candidate = path.join(baseAbs, `index${ext}`);
+      if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+        return candidate;
+      }
+    }
+  }
+  if (fs.existsSync(baseAbs) && fs.statSync(baseAbs).isFile()) {
+    return baseAbs;
+  }
+  return null;
+}
 
 /**
  * Plugin esbuild que resolve o alias `@/...` para `<projectRoot>/src/...`.
@@ -48,8 +95,17 @@ const aliasAtPlugin = {
   setup(builder) {
     builder.onResolve({ filter: /^@\// }, (args) => {
       const rel = args.path.slice(2); // remove "@/"
-      // .ts/.tsx/.js — deixa o esbuild resolver a extensão.
-      return { path: path.resolve(projectRoot, "src", rel) };
+      const resolved = resolveAliasPath(rel);
+      if (!resolved) {
+        return {
+          errors: [
+            {
+              text: `[alias-at] não consegui resolver "${args.path}" — testei extensões ${ALIAS_EXTENSIONS.join(", ")} em src/${rel}`,
+            },
+          ],
+        };
+      }
+      return { path: resolved };
     });
   },
 };
