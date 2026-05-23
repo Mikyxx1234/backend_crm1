@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { withOrgContext } from "@/lib/auth-helpers";
+import { userOrgFilter, withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -9,7 +9,7 @@ import { prisma } from "@/lib/prisma";
  * contact) e os `source` distintos dos contatos da org.
  */
 export async function GET() {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
     try {
       const [pipelines, users, tags, customFields, sources] = await Promise.all([
         prisma.pipeline.findMany({
@@ -23,8 +23,20 @@ export async function GET() {
             },
           },
         }),
+        // Bug 23/mai/26: o `where` so tinha `isErased: false`, sem filtro
+        // de organizationId. Como User NAO esta em SCOPED_MODELS da Prisma
+        // Extension (precisa funcionar sem ctx pra login/jwt), a filtragem
+        // por org aqui eh MANUAL e OBRIGATORIA — sem ela, o painel de
+        // filtros do Kanban listava users de TODAS as orgs do cluster
+        // (vazamento cross-tenant grave). Fix: alinhar com /api/users
+        // (type: HUMAN + userOrgFilter). isErased mantido pra ocultar
+        // contas anonimizadas (LGPD/erasure).
         prisma.user.findMany({
-          where: { isErased: false },
+          where: {
+            isErased: false,
+            type: "HUMAN",
+            ...userOrgFilter(session),
+          },
           orderBy: { name: "asc" },
           select: { id: true, name: true, avatarUrl: true, role: true, type: true },
         }),
