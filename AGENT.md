@@ -5,6 +5,78 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-26 — `Message.templateConfigId` (FK) corrige roteamento de Flow inbound
+
+**Decisão.** Adicionar FK `Message.templateConfigId → WhatsAppTemplateConfig`
+(nullable, `onDelete: SET NULL`) e gravar o vínculo em todos os call sites de
+envio outbound de template. O resolver `resolveFlowDefinitionForInbound` passa
+a usar esse FK como caminho primário (cascata exata → nome Meta → best-match
+por field keys).
+
+**Contexto.** O resolver original, quando a resposta inbound chegava com
+`flow_token`, fazia `whatsAppTemplateConfig.findFirst({ where: { flowId: { not:
+null } }, orderBy: { updatedAt: "desc" } })` — escolhia *qualquer* template
+config com flowId da organização, ignorando completamente qual template foi
+de fato enviado. Em orgs com 2+ templates Flow, a resposta era roteada para
+o flow errado, os `fieldKey` não casavam, e todos os campos caíam em `skipped`
+com motivo "Campo não configurado no flow do CRM". Sintoma reportado: *"o
+form está configurado mas não preenche os dados nos campos do negócio"*.
+
+**Por que FK e não outra abordagem.**
+
+- **FK (`templateConfigId`)** ✅ — resolução O(1), integridade referencial,
+  `onDelete: SET NULL` preserva histórico se o config for deletado.
+- **String `templateMetaName`** — resiliente a deleção do config, mas
+  renomear template Meta quebraria casamento futuro.
+- **String `templateGraphId` (Meta ID)** — imune a renames internos, mas se
+  a Meta refizesse o template (novo `metaTemplateId`), também quebraria.
+
+A FK ainda permite consultas analíticas tipo "quantas respostas o flow X
+gerou" via join — string IDs não dão isso barato.
+
+**Mensagens antigas.** A coluna é nullable. Mensagens pré-migration mantêm
+`templateConfigId = NULL` e seguem usando o fallback histórico (nome Meta +
+best-match por keys) — não há backfill porque o gap só dói quando a org
+tem múltiplos templates Flow, e a resposta antiga já foi processada (ou
+não) há tempos.
+
+**Call sites de envio atualizados:**
+
+- `app/api/conversations/[id]/template/route.ts` — envio manual da inbox.
+- `services/automation-executor.ts` — ação `send_whatsapp_template` de
+  automações (Funil de Automações).
+- `services/ai/tools.ts` — tool `send_whatsapp_template` do Agente IA.
+- `services/scheduled-messages-worker.ts` — fallback template ao expirar
+  janela 24h.
+
+**Call sites NÃO atualizados (não disparam Flow):**
+
+- `app/api/conversations/[id]/call-permission/route.ts` — pedido de
+  permissão de ligação WhatsApp. Template específico sem botão Flow.
+- `services/missed-call-schedule-offer.ts` — oferta de reagendamento após
+  ligação perdida. Template fixo sem Flow.
+- `workers/campaign-worker.ts` — campanhas em massa. Hoje campanhas não
+  suportam Flow; quando passarem a suportar, atualizar aqui.
+
+**Alternativas descartadas.**
+
+- **Sem migration, só corrigir resolver pelo `flowMetaName`.** Funciona se
+  a Meta sempre enviasse `nfm_reply.name`, mas ela não envia consistentemente
+  — varia por categoria/template. A FK é o único caminho 100% determinístico.
+- **Backfill retroativo das mensagens antigas.** Custo > valor: respostas
+  antigas já foram processadas. Backfill via heurística seria adivinhar.
+
+**Como testar pós-deploy.**
+
+1. `prisma migrate deploy` aplica `20260526090000_add_message_template_config_id`
+   no startup do container `APP_MODE=api`.
+2. Enviar template Flow novo pela inbox → conferir no banco
+   `SELECT template_config_id FROM messages WHERE conversation_id = '...' ORDER BY created_at DESC LIMIT 1;`
+3. Cliente responde o Flow no WhatsApp → conferir log `[whatsapp-flow] apply
+   concluído` com `flowDefinitionId` igual ao esperado e `applied.length > 0`.
+
+---
+
 ### 2026-05-22 — APP_MODE separa API/workers no EasyPanel (1 imagem, 3 serviços)
 
 **Decisão.** O Dockerfile produz uma única imagem que pode executar em três

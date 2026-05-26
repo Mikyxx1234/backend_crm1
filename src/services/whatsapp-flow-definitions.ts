@@ -393,10 +393,27 @@ export type ResolvedFlowDefinition = NonNullable<
 >;
 
 /**
- * Correlaciona resposta inbound com definição publicada no CRM:
- * 1) metaFlowId / nome no payload Meta
- * 2) flow_token → última mensagem outbound com mesmo token
- * 3) melhor match por chaves de campo na resposta
+ * Correlaciona resposta inbound com definição publicada no CRM. Cascata em
+ * ordem decrescente de precisão:
+ *
+ *   1. FK exata: `Message.templateConfigId` → `WhatsAppTemplateConfig.flowId`
+ *      Caminho preferido — funciona corretamente quando a org tem múltiplos
+ *      templates com Flow. Requer que o envio outbound persista o vínculo
+ *      (ver `prisma.message.create(... templateConfigId)` nos call sites de
+ *      envio de template).
+ *
+ *   2. `flowMetaName` (nome do Flow na Meta) → casa com `metaFlowId` ou
+ *      `name` do `WhatsappFlowDefinition`. Útil quando a Meta envia o
+ *      `nfm_reply.name` (nem sempre vem preenchido).
+ *
+ *   3. Best-match por field keys — fallback histórico para mensagens
+ *      outbound antigas sem `templateConfigId` (pré-migration). Funciona
+ *      bem se as `fieldKey` forem distintas entre flows da org.
+ *
+ * IMPORTANTE: a cascata é "primeiro positivo retorna". Não dá fallback se o
+ * passo 1 encontra outbound mas o template não tem `flowId` (cenário
+ * configurado errado pelo operador) — registra alerta no log para o
+ * applier reportar à UI.
  */
 export async function resolveFlowDefinitionForInbound(params: {
   organizationId: string;
@@ -412,14 +429,7 @@ export async function resolveFlowDefinitionForInbound(params: {
 
   if (published.length === 0) return null;
 
-  const metaName = params.flowMetaName?.trim();
-  if (metaName) {
-    const byMeta = published.find(
-      (f) => f.metaFlowId === metaName || f.name === metaName,
-    );
-    if (byMeta) return byMeta;
-  }
-
+  // (1) Resolução exata via FK persistida no envio outbound.
   const token = params.flowToken?.trim();
   if (token) {
     const outbound = await prisma.message.findFirst({
@@ -429,24 +439,28 @@ export async function resolveFlowDefinitionForInbound(params: {
         direction: "out",
       },
       orderBy: { createdAt: "desc" },
-      select: { createdAt: true },
+      select: {
+        templateConfigId: true,
+        templateConfig: { select: { flowId: true } },
+      },
     });
-    if (outbound) {
-      const templateCfg = await prisma.whatsAppTemplateConfig.findFirst({
-        where: {
-          organizationId: params.organizationId,
-          flowId: { not: null },
-        },
-        orderBy: { updatedAt: "desc" },
-        select: { flowId: true },
-      });
-      if (templateCfg?.flowId) {
-        const linked = published.find((f) => f.id === templateCfg.flowId);
-        if (linked) return linked;
-      }
+    const linkedFlowId = outbound?.templateConfig?.flowId ?? null;
+    if (linkedFlowId) {
+      const linked = published.find((f) => f.id === linkedFlowId);
+      if (linked) return linked;
     }
   }
 
+  // (2) Match por nome enviado pela Meta no payload do nfm_reply.
+  const metaName = params.flowMetaName?.trim();
+  if (metaName) {
+    const byMeta = published.find(
+      (f) => f.metaFlowId === metaName || f.name === metaName,
+    );
+    if (byMeta) return byMeta;
+  }
+
+  // (3) Best-match por chaves de campo (fallback histórico).
   const keys = new Set(
     params.responseKeys.map((k) => k.trim().replace(/[^a-zA-Z0-9_]/g, "_")),
   );

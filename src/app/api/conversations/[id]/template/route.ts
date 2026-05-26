@@ -134,12 +134,18 @@ export async function POST(request: Request, context: RouteContext) {
 
     let templateCategory: string | null = null;
     let templateGraphId: string | null = templateGraphIdFromBody;
+    // CRÍTICO: capturar `id` da config aqui é o que permite ao resolver de
+    // Flow inbound identificar o flow correto quando a resposta voltar.
+    // Sem isso, o resolver caía em heurístico que pegava "qualquer template
+    // com flowId" da org e gravava as respostas no flow errado.
+    let templateConfigId: string | null = null;
     try {
       const cfg = await prisma.whatsAppTemplateConfig.findFirst({
         where: { metaTemplateName: templateName },
-        select: { category: true, metaTemplateId: true },
+        select: { id: true, category: true, metaTemplateId: true },
       });
       templateCategory = cfg?.category ?? null;
+      templateConfigId = cfg?.id ?? null;
       if (!templateGraphId && cfg?.metaTemplateId?.trim()) {
         templateGraphId = cfg.metaTemplateId.trim();
       }
@@ -193,6 +199,7 @@ export async function POST(request: Request, context: RouteContext) {
         ...(typeof resolvedFlowToken === "string" && resolvedFlowToken.trim()
           ? { flowToken: resolvedFlowToken.trim() }
           : {}),
+        ...(templateConfigId ? { templateConfigId } : {}),
       }),
     });
 

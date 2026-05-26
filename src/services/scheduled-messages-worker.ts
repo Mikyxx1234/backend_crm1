@@ -298,12 +298,20 @@ async function sendViaMetaTemplate(
       : undefined;
 
   let templateGraphId: string | null = null;
+  // Capturar `id` aqui (única query — antes eram 2) para vincular a
+  // mensagem outbound ao template config via `templateConfigId`. Sem isso,
+  // respostas de Flow enviadas via fallback agendado seriam roteadas para
+  // o flow errado pelo resolver de Flow inbound.
+  let templateConfigId: string | null = null;
+  let templateCategory: string | null = null;
   try {
     const tc = await prisma.whatsAppTemplateConfig.findFirst({
       where: { metaTemplateName: templateName },
-      select: { metaTemplateId: true },
+      select: { id: true, metaTemplateId: true, category: true },
     });
     templateGraphId = tc?.metaTemplateId?.trim() || null;
+    templateConfigId = tc?.id ?? null;
+    templateCategory = tc?.category ?? null;
   } catch {
     /* ignore */
   }
@@ -323,16 +331,6 @@ async function sendViaMetaTemplate(
     recipient,
   );
   const externalId = result.messages?.[0]?.id ?? null;
-
-  // Descoberta da categoria do template (idêntica ao route /template).
-  let templateCategory: string | null = null;
-  try {
-    const cfg = await prisma.whatsAppTemplateConfig.findFirst({
-      where: { metaTemplateName: templateName },
-      select: { category: true },
-    });
-    templateCategory = cfg?.category ?? null;
-  } catch {}
 
   // `item.content` é o texto que o usuário digitou ao agendar — guardamos
   // como bodyPreview para o label da mensagem no inbox ficar significativo
@@ -355,6 +353,7 @@ async function sendViaMetaTemplate(
       ...(typeof enrichResult.flowToken === "string" && enrichResult.flowToken.trim()
         ? { flowToken: enrichResult.flowToken.trim() }
         : {}),
+      ...(templateConfigId ? { templateConfigId } : {}),
     }),
   });
 

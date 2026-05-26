@@ -1029,12 +1029,17 @@ async function executeStep(
 
       if (tplConversationId) {
         let tplBodyPreview: string | null = null;
+        // CRÍTICO: capturar `id` aqui é o que permite ao resolver de Flow
+        // inbound identificar corretamente qual flow foi disparado pela
+        // automação quando a resposta voltar pelo webhook.
+        let tplConfigId: string | null = null;
         try {
           const tplCfg = await prisma.whatsAppTemplateConfig.findFirst({
             where: { metaTemplateName: templateName },
-            select: { bodyPreview: true, category: true },
+            select: { id: true, bodyPreview: true, category: true },
           });
           tplBodyPreview = tplCfg?.bodyPreview ?? null;
+          tplConfigId = tplCfg?.id ?? null;
         } catch {}
         const tplContent = tplBodyPreview
           ? `📋 *${templateName}*\n\n${tplBodyPreview}`
@@ -1051,6 +1056,7 @@ async function executeStep(
             ...(typeof enrichTpl.flowToken === "string" && enrichTpl.flowToken.trim()
               ? { flowToken: enrichTpl.flowToken.trim() }
               : {}),
+            ...(tplConfigId ? { templateConfigId: tplConfigId } : {}),
           }),
         });
 

@@ -290,12 +290,17 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
         if (!contact?.phone) return fail("Contato sem telefone.");
         const lc = languageCode ?? "pt_BR";
         let templateGraphId: string | null = null;
+        // Capturar `id` aqui para gravar `templateConfigId` no message.create
+        // — assim o resolver de Flow inbound identifica corretamente o flow
+        // disparado pelo Agente IA quando o cliente responder.
+        let tplConfigId: string | null = null;
         try {
           const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
             where: { metaTemplateName: templateName },
-            select: { metaTemplateId: true },
+            select: { id: true, metaTemplateId: true },
           });
           templateGraphId = gidRow?.metaTemplateId?.trim() || null;
+          tplConfigId = gidRow?.id ?? null;
         } catch {
           /* ignore */
         }
@@ -336,6 +341,7 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
             ...(typeof enrichSend.flowToken === "string" && enrichSend.flowToken.trim()
               ? { flowToken: enrichSend.flowToken.trim() }
               : {}),
+            ...(tplConfigId ? { templateConfigId: tplConfigId } : {}),
           }),
         });
         await prisma.conversation
