@@ -61,6 +61,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "Nome, email e senha são obrigatórios." }, { status: 400 });
     }
 
+    // Normalizacao alinhada com PUT /api/users/[id]: trim sempre, e
+    // lowercase no email pra que "Email@x" e "email@x" colidam na
+    // unique constraint global (em vez de criarem o mesmo user "duas vezes").
+    const normalizedEmail = email.trim().toLowerCase();
+    const trimmedName = name.trim();
+
     const validRole = role && VALID_ROLES.includes(role as (typeof VALID_ROLES)[number])
       ? (role as (typeof VALID_ROLES)[number])
       : "MEMBER";
@@ -77,32 +83,63 @@ export async function POST(request: Request) {
       );
     }
 
-    const user = await prisma.$transaction(async (tx) => {
-      const created = await tx.user.create({
-        data: {
-          name,
-          email,
-          hashedPassword,
+    try {
+      const user = await prisma.$transaction(async (tx) => {
+        const created = await tx.user.create({
+          data: {
+            name: trimmedName,
+            email: normalizedEmail,
+            hashedPassword,
+            role: validRole,
+            organization: { connect: { id: orgId } },
+          },
+          select: { id: true, name: true, email: true, role: true },
+        });
+        await syncUserRoleAssignment(tx, {
+          userId: created.id,
+          organizationId: orgId,
           role: validRole,
-          organization: { connect: { id: orgId } },
-        },
-        select: { id: true, name: true, email: true, role: true },
+          assignedById: r.session.user.id,
+        });
+        return created;
       });
-      await syncUserRoleAssignment(tx, {
-        userId: created.id,
-        organizationId: orgId,
-        role: validRole,
-        assignedById: r.session.user.id,
-      });
-      return created;
-    });
-
-    return NextResponse.json(user, { status: 201 });
-  } catch (e: unknown) {
-    const prismaErr = e as { code?: string };
-    if (prismaErr.code === "P2002") {
-      return NextResponse.json({ message: "E-mail já cadastrado." }, { status: 409 });
+      return NextResponse.json(user, { status: 201 });
+    } catch (e: unknown) {
+      const prismaErr = e as { code?: string };
+      if (prismaErr.code === "P2002") {
+        // Como User.email eh @unique GLOBAL, o duplicate pode estar em
+        // OUTRA org (signup publico antigo, conta esquecida, etc) — caso
+        // em que a UI de Equipe nao consegue ver/excluir o registro.
+        // Diferenciamos pra mensagem dar o caminho de saida em vez de
+        // virar misterio. User nao esta em SCOPED_MODELS, entao essa
+        // query roda cross-tenant sem precisar de prismaBase.
+        const existing = await prisma.user.findFirst({
+          where: { email: normalizedEmail },
+          select: {
+            organizationId: true,
+            organization: { select: { name: true } },
+          },
+        });
+        if (
+          existing &&
+          existing.organizationId &&
+          existing.organizationId !== orgId
+        ) {
+          const orgName = existing.organization?.name;
+          return NextResponse.json(
+            {
+              message: orgName
+                ? `E-mail já cadastrado em outra organização ("${orgName}"). Peça ao usuário para sair da outra ou contate o suporte.`
+                : "E-mail já cadastrado em outra organização. Contate o suporte para liberar o convite.",
+            },
+            { status: 409 },
+          );
+        }
+        return NextResponse.json({ message: "E-mail já cadastrado." }, { status: 409 });
+      }
+      throw e;
     }
+  } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao criar usuário." }, { status: 500 });
   }

@@ -5,6 +5,75 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-26 — `POST/PUT /api/users` diferencia P2002 cross-org
+
+**Decisão.** Quando `prisma.user.create()` (POST `/api/users`) ou
+`prisma.user.update({ data: { email } })` (PUT `/api/users/[id]`) caem em
+`P2002` por colisão de `email`, o handler agora faz uma **segunda query
+cross-org** (`prisma.user.findFirst({ where: { email } })`) para descobrir
+**em qual organização** o duplicado vive. Se for em outra org, devolve uma
+mensagem específica do tipo *"E-mail já cadastrado em outra organização
+('Foo Inc.'). Peça ao usuário para sair da outra ou contate o suporte."* —
+em vez do genérico *"E-mail já cadastrado."*. Aproveitou-se a passada para
+normalizar `email.trim().toLowerCase()` e `name.trim()` no POST (o PUT já
+fazia isso).
+
+**Contexto.** `User.email` é `@unique` **global** no schema (linha 280 do
+`schema.prisma`, comentário canônico: "um email pertence a uma única
+org"). Combinado com `/api/signup` aberto, qualquer pessoa pode criar uma
+org "fantasma" via signup público e ficar com o próprio email
+sequestrado pra colisão. Caso real (2026-05-26): a admin DnaWork tentou
+cadastrar `larissa@dnawork.ai` em `org_dnawork` e recebeu 409 — a Larissa
+tinha feito signup público antes e ficou de ADMIN solo em uma org `dna-work`
+com `onboardingCompletedAt=null`. Como `/settings/team` só lista users da
+**própria** org (`userOrgFilter`), a duplicada era invisível e a "exclusão"
+da admin nem ia a lugar nenhum (404 silencioso, percebido como sucesso).
+Mensagem genérica fazia o admin ficar 30+ min sem saber por onde sair.
+
+A correção do **caso pontual** foi um `DELETE FROM organizations WHERE id
+= '<ghost>'` em transação (cascade do schema limpou User + agent_status +
+agent_presence_logs + login_attempts + audit_log). Esse PR trata apenas a
+prevenção da próxima ocorrência.
+
+**Alternativas descartadas.**
+
+- **Tornar `User.email` único por org (`@@unique([email, organizationId])`).**
+  Resolveria de vez (o admin DnaWork conseguiria cadastrar `larissa@…` na
+  org dele independentemente de outra org ter o mesmo email). MAS quebra
+  premissa do NextAuth/login atual ("email identifica univocamente a
+  conta"). Login precisaria pedir org (slug, subdomínio, dropdown) — é
+  redesenho de auth, fora de escopo de bugfix. Migration também é
+  arriscada em prod com 10k+ users.
+- **Bloquear `/api/signup` para domínios de orgs já existentes.** Heurístico
+  (e-mail Gmail/Hotmail anula o critério, e-mail corporativo é o caso útil
+  mas exige extrair o domínio e comparar com algum campo da Organization
+  que hoje não existe). Vale como follow-up, não como fix do P2002.
+- **Soft-delete em `User.delete()` para nunca derrubar o registro.** O
+  schema já tem `isErased` + `erasedAt` pra LGPD, mas o `DELETE
+  /api/users/[id]` é hard delete proposital — soft-delete misturaria
+  semântica e ainda não resolveria o caso (a Larissa não foi deletada de
+  jeito nenhum, ela está em **outra** org).
+- **Retornar o `organizationId` do duplicado no body do 409.** Vazaria
+  informação cross-tenant (a admin DnaWork não tem motivo legítimo de
+  saber o ID interno da org-fantasma). O nome da org vai porque o admin
+  precisa de uma pista acionável; ID interno fica de fora.
+
+**Impacto.**
+
+- Zero alteração em schema, migration, NextAuth ou frontend (a UI já mostra
+  `data.message` cru, então a string nova aparece automaticamente).
+- O findFirst extra só roda no caminho de erro (P2002), que é raríssimo —
+  não afeta latência do happy path.
+- `prisma.user.findFirst` opera cross-org porque `User` **não está em
+  `SCOPED_MODELS`** do `prisma.ts`. Nada a fazer manualmente; documentar
+  aqui pra não regredir caso alguém pense em adicionar User ao scope no
+  futuro.
+- Follow-up sugerido (não incluso neste PR): considerar gating do
+  `/api/signup` por allowlist de domínios ou por flag, pra reduzir a
+  chance de "orgs fantasmas" criadas por convidado em vez de admin.
+
+---
+
 ### 2026-05-26 — Filtros exatos `?email` / `?phone` em `/api/contacts` e `?contactEmail` / `?contactPhone` em `/api/deals`
 
 **Decisão.** Estender os GETs de listagem com **filtros 1:1** (não-contains)
