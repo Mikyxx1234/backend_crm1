@@ -31,6 +31,12 @@ export async function GET(request: Request) {
     const tagIds = tagIdsParam
       ? tagIdsParam.split(",").map((id) => id.trim()).filter(Boolean)
       : undefined;
+    // Filtros exatos pensados para "lead-or-create" em integrações (n8n).
+    // Diferente do `search` (contains em vários campos), aqui o match é
+    // 1:1 — total=0 significa "não existe", total>=1 significa "existe e
+    // a resposta já traz o(s) item(ns)".
+    const emailExact = searchParams.get("email") ?? undefined;
+    const phoneExact = searchParams.get("phone") ?? undefined;
     const page = parseIntParam(searchParams.get("page"), 1);
     const perPage = parseIntParam(searchParams.get("perPage"), 20);
     const sortByRaw = searchParams.get("sortBy");
@@ -77,6 +83,8 @@ export async function GET(request: Request) {
       tagIds,
       companyId,
       customFieldFilters: customFieldFilters.length > 0 ? customFieldFilters : undefined,
+      emailExact,
+      phoneExact,
       page,
       perPage,
       sortBy,

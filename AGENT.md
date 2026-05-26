@@ -5,6 +5,89 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-26 — Filtros exatos `?email` / `?phone` em `/api/contacts` e `?contactEmail` / `?contactPhone` em `/api/deals`
+
+**Decisão.** Estender os GETs de listagem com **filtros 1:1** (não-contains)
+pelo email/telefone do contato, sem criar endpoint novo. Em `getContacts`
+entraram `emailExact` e `phoneExact`; em `getDeals` entraram `contactEmail`,
+`contactPhone` e `contactId`. Os `route.ts` correspondentes leem os query
+params `email`, `phone` (contacts) e `contactEmail`, `contactPhone`,
+`contactId` (deals) e repassam ao service. Comportamento de `?search=` e
+qualquer chamada existente **fica intocado** — só ficou a superfície maior.
+
+**Contexto.** O backend só tinha `?search=` (contains case-insensitive em
+`name|email|phone|customFields`). Para integrações (n8n, Zapier, Make)
+isso é ruim porque:
+
+1. *Falso positivo:* procurar `maria@a.com` matcha também `mariaclara@a.com.br`.
+2. *Sem booleano de existência:* o caller precisa baixar a página e fazer
+   comparação manual no nó Code do n8n.
+3. *Dois round-trips para deals:* não existia jeito de perguntar "esse
+   contato tem deal aberto?" sem antes resolver o contactId via `/api/contacts`.
+
+O caso disparador foi um workflow n8n "lead-or-create" — o operador queria
+1 chamada por entidade para decidir entre `POST` (criar) ou `PUT`
+(atualizar). Com `?search=` precisava de 1 GET + nó Code + IF — frágil
+para emails parecidos.
+
+**Por que estender o GET existente, e não criar `/api/contacts/lookup`.**
+
+- **Estender GET (escolhido)** ✅ — segue o padrão do projeto (filtros via
+  query são a forma canônica em todo o `app/api/**`). Diff trivial: ~20
+  linhas em service + ~5 em route, zero quebra de compat. n8n usa direto
+  com `?perPage=1` (`total=0` = não existe, `total>=1` = existe e dados já
+  vêm em `items[0]`).
+- **Endpoint dedicado `lookup` / `exists`** — semanticamente mais explícito,
+  mas adiciona 2 endpoints a uma superfície já grande (318 rotas). Duplica
+  a lógica do listing principal. Recusado por custo de manutenção.
+- **`HEAD /api/contacts?email=...`** — idiomático HTTP (200 existe / 404
+  não), mas no-code (n8n) lida muito melhor com JSON paginado do que com
+  status code puro. Recusado por DX.
+- **Workaround só no n8n** (status quo) — não resolve o falso positivo de
+  `contains`. Mantém o overhead em todo workflow novo. Recusado.
+
+**Match de telefone — tolerância a formatação.** O `Contact.phone` é
+salvo só com `.trim()` no `route.ts` de POST (sem normalizar dígitos).
+Existem registros com `+5511999998888`, `(11) 99999-8888`, `5511999998888`
+no mesmo banco. Para `?phone` fazer sentido na prática usamos:
+
+```ts
+OR: [
+  { phone: { equals: rawInput } },              // valor cru
+  { phone: { endsWith: digitsOnly } },          // últimos N dígitos
+]
+```
+
+Só ativa o `endsWith` quando o input tem >= 8 dígitos (evita matchar
+"99" como sufixo). Não fizemos backfill de normalização do `phone` — seria
+mudança destrutiva sem ganho proporcional; o `endsWith` cobre o caso real.
+
+**Match de email.** `equals` com `mode: "insensitive"` (o Prisma traduz
+para `ILIKE` no Postgres) — o input é forçado a lowercase antes da query
+para evitar problemas com providers que case-folding diferente.
+
+**Sem registro órfão.** A combinação `?email=` + `?lifecycleStage=LEAD`
+funciona: ambos viram condições adicionais no `where` (AND). Mesmo
+princípio para `?contactEmail=` + `?status=OPEN&pipelineId=...` em deals.
+
+**Impacto operacional.**
+
+- n8n: workflows ganham 1 chamada a menos por lead (era GET + Code; agora é
+  só GET com `?email=`). Update no `API_REFERENCE.md` §6.1, §7.1 e §19.
+- Sem migration. Sem mudança de schema.
+- Bearer token continua sendo a forma recomendada de auth (mesmo padrão).
+
+**Alternativas descartadas (resumo).**
+
+- Endpoint dedicado `lookup` (acima).
+- `HEAD` request (acima).
+- Forçar normalização de `phone` no banco (custo > benefício para um caso
+  resolvido por `endsWith`).
+- Aceitar regex no `?phone=` (overkill; usuário pode usar `?search=` se
+  precisar de fuzzy).
+
+---
+
 ### 2026-05-26 — `Message.templateConfigId` (FK) corrige roteamento de Flow inbound
 
 **Decisão.** Adicionar FK `Message.templateConfigId → WhatsAppTemplateConfig`

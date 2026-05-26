@@ -39,6 +39,17 @@ export type GetDealsParams = {
   status?: DealStatus;
   ownerId?: string;
   search?: string;
+  /**
+   * Match EXATO pelo email do contato dono do deal (case-insensitive).
+   * Espelha o pattern `emailExact` de `getContacts` — pensado para que
+   * integrações respondam "esse cliente tem deal aberto?" sem precisar
+   * fazer GET de contacts antes.
+   */
+  contactEmail?: string;
+  /** Match EXATO pelo telefone do contato (tolerante a formatação). */
+  contactPhone?: string;
+  /** Match direto por contactId — útil quando o caller já tem o id resolvido. */
+  contactId?: string;
   page?: number;
   perPage?: number;
   visibilityWhere?: Prisma.DealWhereInput;
@@ -90,6 +101,29 @@ export async function getDeals(params: GetDealsParams = {}) {
         { contact: { name: { contains: search, mode: "insensitive" } } },
         { contact: { email: { contains: search, mode: "insensitive" } } },
       ],
+    });
+  }
+
+  if (params.contactId) {
+    conditions.push({ contactId: params.contactId });
+  }
+
+  const contactEmail = params.contactEmail?.trim().toLowerCase();
+  if (contactEmail) {
+    conditions.push({
+      contact: { email: { equals: contactEmail, mode: "insensitive" } },
+    });
+  }
+
+  const contactPhoneRaw = params.contactPhone?.trim();
+  if (contactPhoneRaw) {
+    const digits = contactPhoneRaw.replace(/\D/g, "");
+    const phoneOr: Prisma.ContactWhereInput[] = [{ phone: { equals: contactPhoneRaw } }];
+    if (digits && digits.length >= 8) {
+      phoneOr.push({ phone: { endsWith: digits } });
+    }
+    conditions.push({
+      contact: phoneOr.length === 1 ? phoneOr[0] : { OR: phoneOr },
     });
   }
 

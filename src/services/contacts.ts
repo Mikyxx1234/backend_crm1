@@ -38,6 +38,19 @@ export type GetContactsParams = {
   companyId?: string;
   /** Filtros por campos customizados do contato (AND entre itens). */
   customFieldFilters?: ContactCustomFieldFilter[];
+  /**
+   * Match EXATO de email (case-insensitive). Pensado para integrações que
+   * precisam responder "esse lead já existe?" sem o ruído do `search`
+   * (que faz contains em vários campos e pode retornar falsos positivos).
+   */
+  emailExact?: string;
+  /**
+   * Match EXATO de telefone, tolerante a formatação. Se o input vier com
+   * 8+ dígitos, casamos tanto pelo valor cru salvo no DB quanto pelos
+   * últimos N dígitos (endsWith), absorvendo variações como `+5511...`
+   * vs `(11) 9...`. Para n8n: passe só dígitos no query param.
+   */
+  phoneExact?: string;
   page?: number;
   perPage?: number;
   sortBy?: "name" | "email" | "createdAt" | "updatedAt" | "leadScore" | "lifecycleStage";
@@ -141,6 +154,29 @@ export async function getContacts(params: GetContactsParams = {}) {
     where.tags = {
       some: { tagId: { in: params.tagIds } },
     };
+  }
+
+  const exactFilters: Prisma.ContactWhereInput[] = [];
+
+  const emailExact = params.emailExact?.trim().toLowerCase();
+  if (emailExact) {
+    exactFilters.push({
+      email: { equals: emailExact, mode: "insensitive" },
+    });
+  }
+
+  const phoneRaw = params.phoneExact?.trim();
+  if (phoneRaw) {
+    const digits = phoneRaw.replace(/\D/g, "");
+    const phoneOr: Prisma.ContactWhereInput[] = [{ phone: { equals: phoneRaw } }];
+    if (digits && digits.length >= 8) {
+      phoneOr.push({ phone: { endsWith: digits } });
+    }
+    exactFilters.push(phoneOr.length === 1 ? phoneOr[0] : { OR: phoneOr });
+  }
+
+  if (exactFilters.length > 0) {
+    where.AND = [...(Array.isArray(where.AND) ? where.AND : []), ...exactFilters];
   }
 
   const orderBy: Prisma.ContactOrderByWithRelationInput = (() => {

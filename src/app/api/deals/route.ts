@@ -28,6 +28,12 @@ export async function GET(request: Request) {
       statusRaw && isValidDealStatus(statusRaw) ? statusRaw : undefined;
     const ownerId = searchParams.get("ownerId") ?? undefined;
     const search = searchParams.get("search") ?? undefined;
+    // Filtros exatos por contato dono do deal — pareados com `?email`/`?phone`
+    // em `/api/contacts`. Permitem responder "este contato tem deal nesse
+    // pipeline/stage?" em uma chamada só (sem GET de contacts antes).
+    const contactId = searchParams.get("contactId") ?? undefined;
+    const contactEmail = searchParams.get("contactEmail") ?? undefined;
+    const contactPhone = searchParams.get("contactPhone") ?? undefined;
     const page = parseIntParam(searchParams.get("page"), 1);
     const perPage = parseIntParam(searchParams.get("perPage"), 20);
 
@@ -40,6 +46,9 @@ export async function GET(request: Request) {
       status,
       ownerId,
       search,
+      contactId,
+      contactEmail,
+      contactPhone,
       page,
       perPage,
       visibilityWhere: visibility.dealWhere,
