@@ -37,7 +37,13 @@ export type ConditionOp =
   | "starts_with"
   | "ends_with"
   | "empty"
-  | "not_empty";
+  | "not_empty"
+  // 27/mai/26 — Operadores específicos para checagem de tags. Funcionam
+  // contra `contact.tags`/`contact.tagIds` (e seus pares em `deal`),
+  // populados em `resolveRuntimeContext`. `value` pode ser nome OU ID
+  // — o avaliador faz match contra ambos os arrays.
+  | "has_tag"
+  | "not_has_tag";
 
 export type ConditionRule = {
   field: string;
@@ -80,10 +86,15 @@ function normalizeOp(raw: unknown): ConditionOp {
   if (s === "greater_or_equal") return "gte";
   if (s === "less_or_equal") return "lte";
   if (s === "contains") return "includes";
+  // Aliases pra ops de tag — gente que importou config de outro lugar
+  // pode vir com formas variadas.
+  if (s === "contains_tag" || s === "tag_present" || s === "tag_added") return "has_tag";
+  if (s === "missing_tag" || s === "tag_absent" || s === "tag_not_present") return "not_has_tag";
   const allowed: ConditionOp[] = [
     "eq", "ne", "gt", "lt", "gte", "lte",
     "includes", "starts_with", "ends_with",
     "empty", "not_empty",
+    "has_tag", "not_has_tag",
   ];
   return (allowed.includes(s as ConditionOp) ? s : "eq") as ConditionOp;
 }
@@ -161,6 +172,16 @@ export function normalizeConditionConfig(raw: unknown): ConditionConfig {
   return { branches: [], elseStepId: undefined };
 }
 
+function describeRule(rule: ConditionRule): string {
+  if (rule.op === "has_tag") {
+    return `tem tag "${String(rule.value ?? "")}"`;
+  }
+  if (rule.op === "not_has_tag") {
+    return `não tem tag "${String(rule.value ?? "")}"`;
+  }
+  return `${rule.field} ${rule.op} ${String(rule.value ?? "").slice(0, 20)}`;
+}
+
 /**
  * Retorna uma string curta pro summary dentro do node. Mostra a
  * primeira regra da primeira branch + qtd de branches extras.
@@ -171,7 +192,7 @@ export function summarizeConditionConfig(raw: unknown): string {
   const first = cfg.branches[0];
   const firstRule = first.rules[0];
   const base = firstRule
-    ? `${firstRule.field} ${firstRule.op} ${String(firstRule.value ?? "").slice(0, 20)}`
+    ? describeRule(firstRule)
     : first.label ?? "Branch 1";
   const extras =
     cfg.branches.length > 1

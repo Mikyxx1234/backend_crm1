@@ -124,10 +124,35 @@ export function evaluateTrigger(
       const pipelineId = readString(cfg, "pipelineId");
       const dataPipelineId = readString(data, "pipelineId");
       if (pipelineId && dataPipelineId && dataPipelineId !== pipelineId) return false;
+      if (pipelineId && !dataPipelineId) return false;
+      // 27/mai/26 — Adicionado filtro por `stageId` (e suporte a `toStageId`
+      // como alias, pra alinhar com o payload do auto-deal). Antes só
+      // filtrava pipeline; agora o operador consegue criar "automação X
+      // quando lead/deal entra no estágio Y".
+      const stageId = readString(cfg, "stageId");
+      const dataStageId = readString(data, "stageId") ?? readString(data, "toStageId");
+      if (stageId && dataStageId && dataStageId !== stageId) return false;
+      if (stageId && !dataStageId) return false;
       return true;
     }
-    case "contact_created":
+    case "contact_created": {
+      // 27/mai/26 — Filtros por pipeline/estágio adicionados. O evento é
+      // disparado ANTES do auto-deal ser criado, então `enrichContext`
+      // tenta carregar o deal aberto do contato (race best-effort). Se
+      // nenhum filtro estiver configurado, segue passando como antes.
+      const pipelineId = readString(cfg, "pipelineId");
+      const dataPipelineId = readString(data, "pipelineId") ?? readString(data, "dealPipelineId");
+      if (pipelineId && dataPipelineId && dataPipelineId !== pipelineId) return false;
+      if (pipelineId && !dataPipelineId) return false;
+      const stageId = readString(cfg, "stageId");
+      const dataStageId =
+        readString(data, "stageId") ??
+        readString(data, "dealStageId") ??
+        readString(data, "toStageId");
+      if (stageId && dataStageId && dataStageId !== stageId) return false;
+      if (stageId && !dataStageId) return false;
       return true;
+    }
     case "conversation_created": {
       const channel = readString(cfg, "channel");
       const dataChannel = readString(data, "channel");
@@ -155,12 +180,13 @@ export function evaluateTrigger(
       const dataChannel = readString(data, "channel");
       if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
       const stageId = readString(cfg, "stageId");
-      const dataStageId = readString(data, "dealStageId");
+      const dataStageId = readString(data, "stageId") ?? readString(data, "dealStageId");
       if (stageId && dataStageId && dataStageId !== stageId) return false;
       if (stageId && !dataStageId) return false;
       const pipelineId = readString(cfg, "pipelineId");
-      const dataPipelineId = readString(data, "dealPipelineId");
+      const dataPipelineId = readString(data, "pipelineId") ?? readString(data, "dealPipelineId");
       if (pipelineId && dataPipelineId && dataPipelineId !== pipelineId) return false;
+      if (pipelineId && !dataPipelineId) return false;
       return true;
     }
     default:

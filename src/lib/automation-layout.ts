@@ -3,8 +3,10 @@ import type { AutomationStep } from "@/lib/automation-workflow";
 const NONE = "__none__";
 const START_X = 200;
 const GAP_X = 300;
-const START_Y = 140;
-const GAP_Y = 170;
+// 27/mai/26 — Alinhado com `NODE_Y` do canvas no frontend (=300) e com
+// o `START_Y` espelhado em `frontend_crm1/src/lib/automation-layout.ts`.
+const START_Y = 300;
+const GAP_Y = 220;
 
 function isRealTarget(target: unknown, stepIds: Set<string>): target is string {
   return typeof target === "string" && target !== "" && target !== NONE && stepIds.has(target);
@@ -45,16 +47,22 @@ function outgoingTargets(step: AutomationStep, stepIds: Set<string>): string[] {
 }
 
 /**
- * Auto-organiza o fluxo preservando a lógica das conexões:
- * - X por profundidade (distância dos nós raiz)
- * - Y por ordem estável de descoberta (evita sobreposição)
+ * Auto-organiza o fluxo preservando a lógica das conexões.
+ *
+ * Coordenadas:
+ * - `X` por profundidade (caminho MAIS LONGO desde a raiz). Em
+ *   fluxos convergentes (diamond A→B→D, A→C→D) usar shortest path
+ *   colocava o nó convergente perto demais, com edge voltando pra
+ *   trás. Longest path resolve.
+ * - `Y` por lane: filhos herdam a lane do pai (cadeia linear vira
+ *   linha horizontal), ramificações alocam lanes novas. Orphans em
+ *   lanes próprias depois das principais.
  */
 export function autoAlignWorkflowSteps(steps: AutomationStep[]): AutomationStep[] {
   if (steps.length <= 1) return steps;
 
   const idsInOrder = steps.map((s) => s.id);
   const stepIds = new Set(idsInOrder);
-  const indexById = new Map(idsInOrder.map((id, i) => [id, i]));
 
   const outgoing = new Map<string, string[]>();
   const indegree = new Map<string, number>();
@@ -67,44 +75,63 @@ export function autoAlignWorkflowSteps(steps: AutomationStep[]): AutomationStep[
   }
 
   const roots = idsInOrder.filter((id, i) => i === 0 || (indegree.get(id) ?? 0) === 0);
-  const queue: string[] = [...roots];
-  const depth = new Map<string, number>(roots.map((id) => [id, 0]));
-  const seen = new Set(queue);
 
-  while (queue.length > 0) {
-    const id = queue.shift()!;
-    const d = depth.get(id) ?? 0;
-    const out = outgoing.get(id) ?? [];
-    for (const tgt of out) {
-      const prev = depth.get(tgt);
-      if (prev == null || d + 1 < prev) depth.set(tgt, d + 1);
-      if (!seen.has(tgt)) {
-        seen.add(tgt);
-        queue.push(tgt);
+  const depth = new Map<string, number>();
+  for (const r of roots) depth.set(r, 0);
+  for (let iter = 0; iter < steps.length + 1; iter++) {
+    let changed = false;
+    for (const step of steps) {
+      const d = depth.get(step.id);
+      if (d == null) continue;
+      const out = outgoing.get(step.id) ?? [];
+      for (const tgt of out) {
+        const cur = depth.get(tgt);
+        if (cur == null || d + 1 > cur) {
+          depth.set(tgt, d + 1);
+          changed = true;
+        }
       }
+    }
+    if (!changed) break;
+  }
+
+  const reachedMax = Math.max(0, ...Array.from(depth.values()));
+  const orphans: string[] = [];
+  for (const id of idsInOrder) {
+    if (!depth.has(id)) {
+      depth.set(id, reachedMax + 1);
+      orphans.push(id);
     }
   }
 
-  const maxDepth = Math.max(0, ...depth.values());
-  for (const id of idsInOrder) {
-    if (!depth.has(id)) depth.set(id, maxDepth + 1 + (indexById.get(id) ?? 0));
-  }
+  const laneById = new Map<string, number>();
+  let nextLane = 0;
 
-  const laneOrder: string[] = [];
-  const laneSeen = new Set<string>();
-  const dfs = (id: string) => {
-    if (laneSeen.has(id)) return;
-    laneSeen.add(id);
-    laneOrder.push(id);
+  const assignLanes = (id: string, currentLane: number): void => {
+    if (laneById.has(id)) return;
+    laneById.set(id, currentLane);
     const out = outgoing.get(id) ?? [];
-    for (const tgt of out) dfs(tgt);
+    if (out.length === 0) return;
+    assignLanes(out[0], currentLane);
+    for (let i = 1; i < out.length; i++) {
+      nextLane++;
+      assignLanes(out[i], nextLane);
+    }
   };
-  for (const root of roots) dfs(root);
-  for (const id of idsInOrder) {
-    if (!laneSeen.has(id)) laneOrder.push(id);
+
+  for (const root of roots) {
+    if (!laneById.has(root)) {
+      assignLanes(root, nextLane);
+      nextLane++;
+    }
   }
 
-  const laneById = new Map(laneOrder.map((id, i) => [id, i]));
+  for (const id of idsInOrder) {
+    if (!laneById.has(id)) {
+      laneById.set(id, nextLane);
+      nextLane++;
+    }
+  }
 
   return steps.map((step) => {
     const cfg = (step.config ?? {}) as Record<string, unknown>;
@@ -116,4 +143,3 @@ export function autoAlignWorkflowSteps(steps: AutomationStep[]): AutomationStep[
     return { ...step, config: nextCfg };
   });
 }
-

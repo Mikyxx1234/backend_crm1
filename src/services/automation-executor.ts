@@ -294,6 +294,15 @@ type RuntimeContext = {
   contact: Contact | null;
   deal: DealWithNames | null;
   conversation: ConversationSnapshot | null;
+  // 27/mai/26 — Tags carregadas junto com contact/deal pra avaliação
+  // de `has_tag`/`not_has_tag` nas conditions. Mantemos id e nome em
+  // arrays paralelos pra suportar match por qualquer um dos dois (o
+  // operador escolhe um nome no picker da UI; salvar por id continua
+  // disponível pra retrocompat e robustez a renomes).
+  contactTagIds: string[];
+  contactTagNames: string[];
+  dealTagIds: string[];
+  dealTagNames: string[];
 };
 
 async function loadConversationSnapshot(
@@ -359,11 +368,17 @@ async function resolveRuntimeContext(
   const dealId = ctx.dealId;
 
   let deal: DealWithNames | null = null;
+  let dealTagIds: string[] = [];
+  let dealTagNames: string[] = [];
   if (dealId) {
     const rawDeal = await prisma.deal.findUnique({
       where: { id: dealId },
       include: {
         stage: { select: { name: true, pipelineId: true, pipeline: { select: { name: true } } } },
+        // 27/mai/26 — Carrega tags do deal junto pra avaliação de
+        // `has_tag` em conditions. Selecionamos só id+name pra não
+        // inflar payload com color etc.
+        tags: { select: { tagId: true, tag: { select: { name: true } } } },
       },
     });
     if (!rawDeal) {
@@ -371,21 +386,60 @@ async function resolveRuntimeContext(
       return null;
     }
     if (!contactId && rawDeal.contactId) contactId = rawDeal.contactId;
-    const { stage, ...dealOnly } = rawDeal;
+    const { stage, tags, ...dealOnly } = rawDeal;
     deal = {
       ...(dealOnly as Deal & { contactId: string | null }),
       stageName: stage?.name ?? "",
       pipelineId: stage?.pipelineId ?? "",
       pipelineName: stage?.pipeline?.name ?? "",
     };
+    dealTagIds = tags.map((t) => t.tagId);
+    dealTagNames = tags
+      .map((t) => t.tag?.name)
+      .filter((n): n is string => typeof n === "string");
   }
 
   let contact: Contact | null = null;
-  if (contactId) contact = await prisma.contact.findUnique({ where: { id: contactId } });
+  let contactTagIds: string[] = [];
+  let contactTagNames: string[] = [];
+  if (contactId) {
+    // Em vez de uma findUnique + uma segunda query pras tags, fazemos
+    // uma única query com include — `Contact` no `rt` continua sendo
+    // o tipo base do Prisma (tags são desestruturadas em campos
+    // separados no RuntimeContext pra não vazar pro evalRoot quem não
+    // quer).
+    const rawContact = await prisma.contact.findUnique({
+      where: { id: contactId },
+      include: {
+        tags: { select: { tagId: true, tag: { select: { name: true } } } },
+      },
+    });
+    if (rawContact) {
+      const { tags, ...contactOnly } = rawContact;
+      contact = contactOnly as Contact;
+      contactTagIds = tags.map((t) => t.tagId);
+      contactTagNames = tags
+        .map((t) => t.tag?.name)
+        .filter((n): n is string => typeof n === "string");
+    }
+  }
 
   const conversation = contactId ? await loadConversationSnapshot(contactId, data) : null;
 
-  return { automationId, contactId, dealId, event: ctx.event, data, contact, deal, conversation };
+  return {
+    automationId,
+    contactId,
+    dealId,
+    event: ctx.event,
+    data,
+    contact,
+    deal,
+    conversation,
+    contactTagIds,
+    contactTagNames,
+    dealTagIds,
+    dealTagNames,
+  };
 }
 
 function getByPath(root: Record<string, unknown>, path: string): unknown {
@@ -474,6 +528,20 @@ function evalCondition(leftRaw: unknown, op: string, rightRaw: unknown): boolean
       if (typeof left === "string") return left.trim() !== "";
       if (Array.isArray(left)) return left.length > 0;
       return true;
+    case "has_tag":
+    case "not_has_tag": {
+      // `left` é sempre um array (`contact.tags`, `contact.tagIds`,
+      // `deal.tags`, `deal.tagIds`) — o evalRoot garante isso. `right`
+      // pode ser nome OU id (a UI escolhe via picker, mas a checagem
+      // case-insensitive contra ambos é resiliente). Se o lado esquerdo
+      // não for array, devolvemos `false` (configuração inválida).
+      if (!Array.isArray(left)) return op === "not_has_tag";
+      const needle = typeof right === "string" ? right.trim().toLowerCase() : String(right ?? "").trim().toLowerCase();
+      if (!needle) return op === "not_has_tag"; // value vazio = "sem tag escolhida" → trata como "nenhuma match"
+      const haystack = left.map((v) => String(v ?? "").trim().toLowerCase());
+      const hit = haystack.includes(needle);
+      return op === "has_tag" ? hit : !hit;
+    }
     default:
       return false;
   }
@@ -1343,12 +1411,22 @@ async function executeStep(
       // caminho `branch.nextStepId`. Se nenhuma bater, usa `elseStepId`.
       const flowVars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
       const evalRoot: Record<string, unknown> = {
-        contact: rt.contact ? { ...rt.contact } : {},
+        // 27/mai/26 — `tags` e `tagIds` expostos no evalRoot a partir
+        // dos arrays carregados em `resolveRuntimeContext`. Os ops
+        // `has_tag`/`not_has_tag` esperam encontrar arrays — se o
+        // contato não tiver tags, fica `[]`, o que faz `has_tag`
+        // retornar false (correto). Sobrescrevemos depois do spread
+        // pra garantir que campos com mesmo nome do Prisma não vencem.
+        contact: rt.contact
+          ? { ...rt.contact, tags: rt.contactTagNames, tagIds: rt.contactTagIds }
+          : { tags: rt.contactTagNames, tagIds: rt.contactTagIds },
         // `rt.deal` já carrega `stageName`, `pipelineId` e `pipelineName`
         // em runtime (ver `resolveRuntimeContext`). As versões "por ID"
         // ficam disponíveis pra retrocompatibilidade, e os novos campos
         // "por nome" são o caminho preferido nas novas conditions.
-        deal: rt.deal ? { ...rt.deal } : {},
+        deal: rt.deal
+          ? { ...rt.deal, tags: rt.dealTagNames, tagIds: rt.dealTagIds }
+          : { tags: rt.dealTagNames, tagIds: rt.dealTagIds },
         conversation: rt.conversation ?? null,
         data: rt.data,
         event: rt.event,

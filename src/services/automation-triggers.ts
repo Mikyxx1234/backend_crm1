@@ -55,8 +55,42 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
         dealId: context.dealId ?? deal.id,
         data: {
           ...data,
+          // Mantemos os dois conjuntos de chaves pra retro-compat:
+          // `dealStageId`/`dealPipelineId` (legado) e `stageId`/`pipelineId`
+          // (alinhado com o payload de deal_created e com o config da UI).
+          stageId: deal.stageId,
+          pipelineId: deal.stage.pipelineId,
           dealStageId: deal.stageId,
           dealPipelineId: deal.stage.pipelineId,
+        },
+      };
+    }
+  }
+
+  if (event === "contact_created" && context.contactId) {
+    // 27/mai/26 — Enriquecimento best-effort para suportar filtro por
+    // pipeline/estágio em "contato criado". O auto-deal é criado em
+    // paralelo (fire-and-forget) com este trigger; se já tiver entrado
+    // até aqui, conseguimos preencher o estágio. Quando não, o
+    // `evaluateTrigger` filtra fora — o operador deve usar o gatilho
+    // `deal_created` se quiser garantia absoluta.
+    const deal = await prisma.deal.findFirst({
+      where: { contactId: context.contactId, status: "OPEN" },
+      select: {
+        id: true,
+        stageId: true,
+        stage: { select: { pipelineId: true } },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+    if (deal) {
+      return {
+        ...context,
+        dealId: context.dealId ?? deal.id,
+        data: {
+          ...data,
+          stageId: deal.stageId,
+          pipelineId: deal.stage.pipelineId,
         },
       };
     }

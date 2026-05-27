@@ -5,6 +5,104 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-27 — Ops `has_tag` / `not_has_tag` nas condições de automação
+
+**Decisão.** Estender `automation-condition.ts` com dois novos operadores
+(`has_tag` e `not_has_tag`) e enriquecer o `RuntimeContext` em
+`automation-executor.ts` para expor `contactTagNames`/`contactTagIds` e
+seus pares de deal. No `evalRoot` da condition, esses arrays viram
+`contact.tags` (nomes), `contact.tagIds` (IDs), `deal.tags`,
+`deal.tagIds`. O comparador case-insensitive em `evalCondition` aceita
+match contra qualquer um dos dois arrays — o usuário escolhe um NOME
+no picker da UI, mas configs antigos que salvarem ID continuam
+funcionando.
+
+**Contexto.** O operador pediu "se tem TAG X adicionada ou não" como
+opção explícita na condição. A infra já tinha `add_tag`/`remove_tag`
+como passos de ação, mas faltava a contrapartida de leitura no
+`condition`. Usar o `includes` genérico contra `contact.tags` daria
+pra resolver tecnicamente, mas seria descobrível só pra quem soubesse
+o path do evalRoot — operador prefere ver "Tem a tag" como op de
+primeira classe.
+
+**Alternativas descartadas.**
+
+- **Adicionar só o campo `contact.tags` e reusar `includes`/`empty`.**
+  Funciona em runtime, mas a UI ficaria confusa (ops irrelevantes
+  visíveis pro campo de tags). Preferimos ops explícitos com label
+  "Tem a tag" / "Não tem a tag", filtrados no select da UI quando o
+  campo é de tag — UX claro.
+- **Carregar tags lazy no `evalCondition`.** Mais "preguiçoso" mas
+  exigiria uma query extra por rule de condition. Carregando junto no
+  `resolveRuntimeContext` (uma única `include`) batemos no banco uma
+  vez por job — muito mais barato.
+- **Salvar IDs no value picker em vez de nomes.** Mais resiliente a
+  renomes mas exige que o operador veja UUIDs (ruim). O picker salva
+  nome; o evaluator faz match contra nome E id (case-insensitive),
+  então compat com configs antigas que vinham com ID é mantida.
+
+**Impacto.** Backward-compatible — automações antigas sem ops de tag
+não veem diferença (tags são carregadas mas só consultadas se a rule
+pedir). Custo de banco: +1 include em `resolveRuntimeContext`
+(`TagOnContact` + `TagOnDeal`) por job — tabela tem índice em
+`(contactId)`/`(dealId)`, custo negligível.
+
+---
+
+### 2026-05-27 — Filtros de pipeline/estágio nos gatilhos de automação
+
+**Decisão.** Estender o `evaluateTrigger` em `src/services/automations.ts`
+para suportar filtros opcionais por `pipelineId` e `stageId` nos gatilhos
+`contact_created`, `deal_created`, `deal_won` e `deal_lost`. Também
+padronizar a leitura de `stageId`/`pipelineId` em `message_received` e
+`message_sent` (antes só lia `dealStageId`/`dealPipelineId` enriquecidos
+internamente — agora aceita os dois nomes pra permitir que a UI escreva
+os campos canônicos).
+
+Como o evento `contact_created` é disparado em paralelo ao auto-deal
+(via `ensureOpenDealForContact` em `src/services/auto-deals.ts`), o
+filtro por estágio só vale se o deal já tiver sido criado quando o
+trigger chegar no worker. Pra maximizar a janela útil, `enrichContext`
+em `src/services/automation-triggers.ts` agora faz um lookup
+best-effort do deal aberto mais recente do contato.
+
+**Contexto.** O operador relatou no chat que (a) não conseguia editar a
+automação depois de salvar o fluxo e (b) faltavam gatilhos do tipo
+"mensagem recebida em X estágio" e "lead/contato criado em X estágio".
+
+- **(a)** Já existia rota de edição (`PUT /api/automations/[id]`) — o
+  problema era UX no frontend: o nó do gatilho no canvas era inerte. A
+  correção é só no frontend (ver entrada gêmea no AGENT.md do
+  frontend_crm1).
+- **(b)** O backend já enriquecia `message_received`/`message_sent` com
+  estágio do deal aberto, mas (i) lia só `dealStageId`/`dealPipelineId`
+  (forçando a UI a escrever esses nomes específicos), e
+  (ii) `contact_created` retornava sempre `true` sem nenhum filtro.
+
+**Alternativas descartadas.**
+
+- **Adicionar um novo gatilho separado, `contact_created_in_stage`.**
+  Multiplicaria o número de tipos sem ganho — o mesmo evento com config
+  opcional já cobre os dois casos (filtra ou não filtra). Mais código
+  pra manter e mais friction pro usuário escolher entre dois gatilhos
+  quase idênticos.
+- **Reordenar o disparo: criar o deal ANTES de emitir
+  `contact_created`.** Tem efeito colateral em quem já usa o gatilho
+  hoje (o payload mudaria de momento de emissão). Como o trigger é
+  fire-and-forget e vai pro worker (delay natural de BullMQ), a janela
+  de race quase sempre fica do nosso lado — o enrich best-effort
+  resolve >95% dos casos sem mudar contratos.
+- **Forçar `stageId` obrigatório quando configurado no
+  `contact_created`.** Já é o comportamento (`if (stageId && !dataStageId)
+  return false`), só explicitado no comentário pra evitar bug futuro.
+
+**Impacto.** Automações existentes que usam `contact_created` ou
+`deal_*` sem `stageId`/`pipelineId` configurado continuam disparando
+exatamente como antes (filtros opcionais — só restringem se
+preenchidos). Mudança backward-compatible.
+
+---
+
 ### 2026-05-27 — `POST /api/leads` atômico + Bearer destravado em `/custom-fields`
 
 **Decisão.**
