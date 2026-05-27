@@ -772,6 +772,30 @@ async function executeStep(
         create: { contactId: targetContactId, tagId: resolvedTagId },
         update: {},
       });
+
+      // 27/mai/26 — Espelha a tag no deal aberto do contato (TagOnDeal)
+      // pra que kanban e inbox mostrem a mesma tag. Antes, `add_tag` só
+      // gravava `TagOnContact`: inbox exibia a tag (renderiza tags do
+      // contato) mas o card do kanban não (renderiza tags do deal).
+      // Operador relatou "no inbox aparece a TAG CLT, mas no kanban não".
+      // Buscamos o deal aberto via `rt.dealId` quando presente, ou caímos
+      // pro deal mais recente do contato — ambos best-effort.
+      const targetDealId =
+        rt.dealId ??
+        (await prisma.deal
+          .findFirst({
+            where: { contactId: targetContactId, status: "OPEN" },
+            select: { id: true },
+            orderBy: { updatedAt: "desc" },
+          })
+          .then((d) => d?.id));
+      if (targetDealId) {
+        await prisma.tagOnDeal.upsert({
+          where: { dealId_tagId: { dealId: targetDealId, tagId: resolvedTagId } },
+          create: { dealId: targetDealId, tagId: resolvedTagId },
+          update: {},
+        });
+      }
       return {};
     }
 
@@ -794,6 +818,22 @@ async function executeStep(
         await prisma.tagOnContact.deleteMany({
           where: { contactId: targetContactId, tagId: resolvedTagId },
         });
+        // Simétrico ao `add_tag`: remove também do deal aberto do
+        // contato. Mantém inbox e kanban sincronizados.
+        const targetDealId =
+          rt.dealId ??
+          (await prisma.deal
+            .findFirst({
+              where: { contactId: targetContactId, status: "OPEN" },
+              select: { id: true },
+              orderBy: { updatedAt: "desc" },
+            })
+            .then((d) => d?.id));
+        if (targetDealId) {
+          await prisma.tagOnDeal.deleteMany({
+            where: { dealId: targetDealId, tagId: resolvedTagId },
+          });
+        }
       }
       return {};
     }

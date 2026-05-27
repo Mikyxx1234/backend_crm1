@@ -5,6 +5,46 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-27 — `add_tag`/`remove_tag` espelham em `TagOnContact` + `TagOnDeal`
+
+**Decisão.** Os steps `add_tag` e `remove_tag` em
+`automation-executor.ts` agora persistem em ambas as tabelas:
+`tags_on_contacts` (como antes) **e** `tags_on_deals` (novo).
+Pra o deal alvo usamos `rt.dealId` quando presente; senão buscamos
+o deal `OPEN` mais recente do contato como fallback best-effort.
+Backfill SQL aplicado em produção pra refletir tags já existentes no
+contato → deal aberto (idempotente via `ON CONFLICT DO NOTHING`).
+
+**Contexto.** Operador relatou: "no inbox aparece a TAG CLT, mas no
+kanban não. Tem que ser igual." A inbox renderiza
+`contact.tags` (lado esquerdo: contato), enquanto o card do kanban
+renderiza `deal.tags`. Como `add_tag` só salvava em
+`TagOnContact`, o resultado visual era inconsistente: tag aparecia
+em uma tela, sumia em outra. Decisão é tratar o step como
+"adiciona em todos os lugares relevantes da pessoa", que é a
+expectativa do operador.
+
+**Alternativas descartadas.**
+
+- **Opção entity (contact|deal) no step.** Cobre o caso técnico
+  mas força operador a escolher — e ele praticamente sempre quer
+  ambos. Adia decisão pra UI sem ganho prático.
+- **Renderizar tags de contato no card do kanban (fix puro de UI).**
+  Quebra o conceito de tag de deal (que existe pra qualificar
+  o negócio independente do contato). Mantemos os dois conceitos
+  separados no schema; só fazemos o step refletir nos dois.
+- **Backfill via Prisma seed.** SQL direto via script ad-hoc é
+  mais barato pra um one-off com 2 linhas. Documento aqui pra
+  rastreio.
+
+**Impacto.** `add_tag` agora roda +1 query (upsert na
+`tags_on_deals`) e +1 query se precisar fallback pro deal aberto.
+`remove_tag` idem. Custo aceitável dado o baixo volume de tag ops
+por automação. Backward-compatible: configs antigos seguem
+funcionando — só ganham a sincronização de borda.
+
+---
+
 ### 2026-05-27 — Formatação legível das respostas do WhatsApp Flows
 
 **Decisão.** Reescrita do `formatWhatsappFlowResponse` em
