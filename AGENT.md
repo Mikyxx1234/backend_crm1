@@ -5,6 +5,53 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-27 — Inbox: lista de conversas com paginação (cap 200)
+
+**Decisão.** O endpoint `GET /api/conversations` agora aceita
+`perPage` até **200** (antes era 100). A lista de conversas no inbox
+no frontend foi migrada de `useQuery` (1 chamada hardcoded de
+`perPage=60`) para `useInfiniteQuery`: pede 60 por página e dispara
+`fetchNextPage` via `IntersectionObserver` numa sentinela no final
+do `<ul>`, com `rootMargin: 240px` pra pré-carregar antes do
+operador bater no fim.
+
+**Contexto.** Operador com 455 conversas em "Entrada" relatou que
+"a rolagem trava e não aparece tudo". O front pedia apenas 60
+conversas e nunca pedia mais — não havia paginação subsequente.
+Sintoma típico de lista limitada sem infinite scroll: o scroll
+funciona, mas só percorre os 60 itens carregados.
+
+**Alternativas descartadas.**
+
+- **Subir `perPage` pra 500 e renderizar tudo de uma vez.** Mais
+  simples mas paga renderização de 500 linhas com `MotionDiv` +
+  swipe-row + avatars no boot inicial — visivelmente travado em
+  máquinas modestas e desperdiça largura de banda se o operador
+  só interage com as 20 do topo.
+- **Virtualização (`react-virtual`/`@tanstack/react-virtual`).**
+  Solução ideal pra listas muito grandes, mas a lista atual tem
+  cards complexos (avatar, tags, swipe actions, presença) e
+  alturas variáveis. Migração teria escopo bem maior. Infinite
+  scroll resolve o caso atual (40 conversas/operador é o p95) com
+  zero refactor de item.
+
+**Impacto.** Boot continua puxando só 60. A invalidação por
+ações (`assign`, `read`, `resolve`, realtime) continua funcionando
+porque react-query refetcha automaticamente todas as páginas já
+carregadas. `refetchInterval: 20_000` segue ativo. UX nova: rodapé
+mostra "Carregando mais…" durante fetch e "Fim da lista · N
+conversas" quando esgota.
+
+**Arquivos.**
+
+- `backend_crm1/src/services/conversations.ts` — cap
+  `perPage` 100 → 200.
+- `frontend_crm1/src/components/inbox/conversation-list.tsx` —
+  `useQuery` → `useInfiniteQuery` + `IntersectionObserver` +
+  rodapé de paginação.
+
+---
+
 ### 2026-05-27 — `add_tag`/`remove_tag` espelham em `TagOnContact` + `TagOnDeal`
 
 **Decisão.** Os steps `add_tag` e `remove_tag` em

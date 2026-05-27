@@ -209,7 +209,10 @@ export async function getConversations(
   perPage: number;
 }> {
   const page = Math.max(1, params.page ?? 1);
-  const perPage = Math.min(100, Math.max(1, params.perPage ?? 20));
+  // 27/mai/26 — Cap subido de 100 → 200 pra acomodar o infinite scroll
+  // da lista de conversas (operador com 455+ conversas em "Entrada"
+  // travava porque o front pedia 60 e nunca pedia mais).
+  const perPage = Math.min(200, Math.max(1, params.perPage ?? 20));
   const skip = (page - 1) * perPage;
 
   const conditions: Prisma.ConversationWhereInput[] = [];
