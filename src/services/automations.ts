@@ -192,6 +192,26 @@ export function evaluateTrigger(
       const pipelineId = readString(cfg, "pipelineId");
       const dataPipelineId = readString(data, "pipelineId") ?? readString(data, "dealPipelineId");
       if (pipelineId && dataPipelineId && dataPipelineId !== pipelineId) return false;
+      // 27/mai/26 (v3) — Filtro por status do negocio (OPEN/WON/LOST).
+      // Aceita CSV pra "qualquer um de" (ex.: "WON,LOST") — o front
+      // expoe isso como a opcao composta "Ganho ou Perdido", que e o
+      // caso pratico de retencao/reengajamento. Ao contrario de
+      // stage/pipeline, aqui somos estritos: se o operador filtrou
+      // por status e o contato nao tem nenhum deal (data sem
+      // `dealStatus`), a automacao NAO dispara — o filtro deixaria de
+      // ter sentido se passasse pra contatos sem negocio.
+      const dealStatus = readString(cfg, "dealStatus");
+      if (dealStatus) {
+        const accepted = dealStatus
+          .split(",")
+          .map((s) => s.trim().toUpperCase())
+          .filter(Boolean);
+        if (accepted.length > 0) {
+          const dataDealStatus = readString(data, "dealStatus");
+          if (!dataDealStatus) return false;
+          if (!accepted.includes(dataDealStatus.toUpperCase())) return false;
+        }
+      }
       return true;
     }
     default:

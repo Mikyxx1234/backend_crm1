@@ -40,15 +40,34 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
   }
 
   if ((event === "message_received" || event === "message_sent") && context.contactId) {
-    const deal = await prisma.deal.findFirst({
+    // 27/mai/26 (v3) — Suporte ao filtro `dealStatus` (OPEN/WON/LOST).
+    // Antes pegavamos só o deal OPEN; agora priorizamos OPEN mas, se
+    // o contato não tem nenhum aberto, caímos no deal mais recente
+    // (qualquer status). Assim conseguimos enriquecer com `dealStatus`
+    // pra clientes que já viraram WON/LOST e voltaram a mandar
+    // mensagem (pós-venda, reengajamento, etc.).
+    let deal = await prisma.deal.findFirst({
       where: { contactId: context.contactId, status: "OPEN" },
       select: {
         id: true,
+        status: true,
         stageId: true,
         stage: { select: { pipelineId: true } },
       },
       orderBy: { updatedAt: "desc" },
     });
+    if (!deal) {
+      deal = await prisma.deal.findFirst({
+        where: { contactId: context.contactId, status: { in: ["WON", "LOST"] } },
+        select: {
+          id: true,
+          status: true,
+          stageId: true,
+          stage: { select: { pipelineId: true } },
+        },
+        orderBy: { updatedAt: "desc" },
+      });
+    }
     if (deal) {
       return {
         ...context,
@@ -62,6 +81,7 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
           pipelineId: deal.stage.pipelineId,
           dealStageId: deal.stageId,
           dealPipelineId: deal.stage.pipelineId,
+          dealStatus: deal.status,
         },
       };
     }

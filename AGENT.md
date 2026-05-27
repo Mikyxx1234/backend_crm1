@@ -5,6 +5,67 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-27 — Filtro de `dealStatus` em `message_received`/`message_sent`
+
+**Decisão.** Gatilhos `message_received` e `message_sent` ganharam
+filtro opcional por `dealStatus` (`OPEN` / `WON` / `LOST`). O campo
+aceita CSV pra "any of" — a UI expõe a opção composta "Ganho ou
+Perdido" (CSV `WON,LOST`) que é o caso prático combinado pelo
+operador (mesma automação cobre retenção pós-venda e
+reengajamento). `enrichContext` foi estendido pra buscar o deal
+mais recente em qualquer status (priorizando `OPEN`, com fallback
+pra `WON`/`LOST`) e expor `data.dealStatus`.
+
+Diferente dos filtros `stageId`/`pipelineId` (best-effort, passam
+quando o lado direito é desconhecido), `dealStatus` é **estrito**:
+se o operador filtrou por status e o contato não tem deal nenhum,
+o gatilho NÃO dispara. Justificativa: um filtro de status só faz
+sentido quando há um negócio pra comparar — passar best-effort
+disparararia automações em qualquer "lead sem negócio", o que é
+exatamente o oposto da intenção do filtro.
+
+**Contexto.** Operador pediu literalmente: "preciso de mensagem
+recebida quando é um contato que está GANHO ou PERDIDO". Cenários
+típicos: cliente WON volta a falar (pós-venda, NPS, upsell) e
+lead LOST volta a falar (reengajamento, "boas-vindas de volta").
+
+**Alternativas descartadas.**
+
+- **Multi-select com checkboxes.** Mais flexível mas paga UX por
+  +1 dep ou +50 linhas custom; o caso prático é 1 valor ou a dupla
+  WON+LOST. Resolvemos com 4 opções single + 1 composta.
+- **Dois gatilhos novos (`message_received_won`,
+  `message_received_lost`).** Polui o enum, duplica código e ainda
+  não cobre "Ganho OU Perdido" naturalmente.
+- **Sempre buscar deal mais recente independente de status (sem
+  fallback explícito).** Mais simples, mas o caso comum (filtro
+  por stage de lead OPEN) ficaria suscetível a "vazar" stage de
+  deal já fechado. Priorizar OPEN preserva o comportamento antigo
+  pra usuários que não usam o filtro novo.
+
+**Impacto.** `enrichContext` agora roda até 2 queries (1 normal +
+fallback only-on-miss) em vez de 1 — overhead desprezível e só
+ocorre em `message_received`/`message_sent`. Automações existentes
+sem `dealStatus` setado continuam idênticas (passam por todos
+status).
+
+**Arquivos.**
+
+- `backend_crm1/src/services/automation-triggers.ts` —
+  `enrichContext` agora busca também WON/LOST como fallback e
+  expõe `data.dealStatus`.
+- `backend_crm1/src/services/automations.ts` — `evaluateTrigger`
+  case `message_received|message_sent` aceita `dealStatus` (CSV)
+  com semântica estrita.
+- `frontend_crm1/src/components/automations/trigger-config-fields.tsx`
+  — dropdown "Status do negócio" no bloco message_received/sent.
+- `frontend_crm1/src/lib/automation-workflow.ts` —
+  `defaultTriggerConfig` inicializa `dealStatus: ""` e
+  `summarizeTriggerConfig` rotula bonitinho (Em aberto / Ganho /
+  Perdido / Ganho ou Perdido).
+
+---
+
 ### 2026-05-27 — Inbox: lista de conversas com paginação (cap 200)
 
 **Decisão.** O endpoint `GET /api/conversations` agora aceita
