@@ -5,6 +5,92 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-27 — `POST /api/leads` atômico + Bearer destravado em `/custom-fields`
+
+**Decisão.**
+
+1. Migrar `GET/PUT /api/contacts/[id]/custom-fields` e
+   `GET/PUT /api/deals/[id]/custom-fields` de `withOrgContext` para o par
+   `authenticateApiRequest` + `runWithApiUserContext`. Resultado prático:
+   ambos passam a aceitar **Bearer**, igual ao restante de `/api/contacts/*`
+   e `/api/deals/*`.
+2. Criar `POST /api/leads` — endpoint **atômico** que faz lead-or-create em
+   uma única chamada: contato (idempotente por phone → email), bloco
+   opcional de deal no `stageId` escolhido, custom fields de contato e de
+   deal (resolvidos por `fieldId` **ou** `name`), e disparo do trigger
+   `deal_created`.
+
+**Contexto.** O usuário rodando integração via n8n bateu em três muros:
+
+- O curl `GET /api/contacts?phone=...` parecia funcionar mas retornava 456
+  contatos (todos da org) porque o deployment antigo no Easypanel
+  (`banco-backend-crm.6tqx2r.easypanel.host`) rodava código **antes** do
+  PR que adicionou `?phone=` exato (entrada AGENT.md de 26/mai/2026,
+  linha 77). O deployment correto (`backend-backend.v74knz.easypanel.host`)
+  já tinha o filtro e devolvia `total=1`. Resolveu trocando a URL no n8n.
+- `PUT /api/contacts/[id]/custom-fields` e `PUT /api/deals/[id]/custom-fields`
+  devolviam 401 mesmo com Bearer válido porque ambos usavam
+  `withOrgContext`, que só lê cookie do NextAuth (não tem fallback para
+  Bearer). Validado por reprodução com curl real:
+  `GET /api/contacts/<id>/custom-fields` com Bearer → 401 "Não autorizado.".
+- Mesmo destravados, o fluxo "criar lead com contato + custom fields +
+  stage" exigia 4 round-trips (`POST /api/contacts` → `POST /api/deals` →
+  `PUT contact custom-fields` → `PUT deal custom-fields`), com janela de
+  inconsistência se alguma das chamadas falhasse no meio. n8n não tem
+  transação distribuída — o estado podia ficar parcial (contato sem deal,
+  deal sem custom fields).
+
+**Alternativas descartadas.**
+
+- **Trocar `withOrgContext` por `withApiAuthContext` em todos os ~70 routes
+  que ainda usam o primeiro.** Tentador, mas a maioria desses routes é
+  admin/settings/inbox interno que **não tem caso de uso Bearer hoje** e
+  carrega contratos de sessão (cookies, CSRF) que mudariam de comportamento.
+  Risco/benefício ruim — refatoração ampla por um requisito que cobre 2 rotas.
+- **Criar `/api/v2/leads` em outro path e deixar a v1 quebrada.** Versionar
+  cedo demais cria carga cognitiva e dois caminhos pra manter. O endpoint
+  novo é aditivo (nenhum endpoint existente muda contrato), não precisa
+  bump de versão.
+- **Webhook do n8n entrando direto em `/api/webhooks/n8n` (sem Bearer).**
+  Significaria HMAC compartilhado e rota pública — mais superfície de
+  ataque e divergência do padrão Bearer já documentado. Bearer com token
+  por org é o caminho canônico.
+- **Custom field upsert via array `[ { name, value } ]` em vez de `[ { fieldId, value } ]`.**
+  Mantemos suporte aos dois (resolve por `name` quando `fieldId` está
+  ausente). Resolver por name é "human-friendly" pro n8n; resolver por id
+  é determinístico e não muda quando a label do campo é editada. O endpoint
+  novo aceita os dois e devolve `missingCustomFields` quando o `name` não
+  bate — falha não-fatal, não derruba a request inteira.
+
+**Impacto.**
+
+- Zero migração de schema. Apenas três arquivos novos/alterados:
+  - `src/app/api/contacts/[id]/custom-fields/route.ts` (Bearer destravado).
+  - `src/app/api/deals/[id]/custom-fields/route.ts` (Bearer destravado;
+    mantém `requirePermissionForUser` + `canEditFieldForUser` por campo;
+    continua gerando evento `CUSTOM_FIELD_UPDATED` na timeline).
+  - `src/app/api/leads/route.ts` (novo, ~360 linhas; reusa
+    `createContact`, `updateContact`, `createDeal`,
+    `upsertContactCustomFieldValues`, `upsertDealCustomFieldValues`).
+- A idempotência do `POST /api/leads` é **best-effort**, não transacional:
+  o lookup de contato roda fora da transação (Prisma extension não
+  envolve `findFirst` em transação implícita). Em concorrência alta, duas
+  chamadas com o mesmo phone podem ambas criar contato — colisão raríssima
+  no caso real (n8n + lead único por trigger) e fica P2002 quando email
+  é único na org. Follow-up: usar `prisma.contact.upsert` + chave única
+  composta `(organizationId, phone_normalized)` exigiria nova column +
+  migration; não foi feito agora.
+- O endpoint **sempre cria deal novo** quando o bloco `deal` está presente
+  (mesmo se o contato foi reusado). Deduplicar deal automaticamente
+  exigiria mais regras de negócio (qual stage? mesma pipeline? deal aberto
+  ou qualquer?) e não cabe nesse PR. Caller faz `GET /api/deals?contactPhone=...`
+  antes se precisar.
+- `API_REFERENCE.md` atualizado: prefixo `crm_` → `eduit_`, body real do
+  `PUT custom-fields` (array de `{ fieldId, value }`, não objeto literal),
+  seção nova "`POST /api/leads`" com exemplo n8n.
+
+---
+
 ### 2026-05-26 — `POST/PUT /api/users` diferencia P2002 cross-org
 
 **Decisão.** Quando `prisma.user.create()` (POST `/api/users`) ou

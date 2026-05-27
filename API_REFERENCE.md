@@ -42,9 +42,13 @@ que não venham com nenhum dos dois (exceto allowlist em §3).
 3. Use em **todas** as requisições subsequentes:
 
 ```http
-Authorization: Bearer crm_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+Authorization: Bearer eduit_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 Content-Type: application/json
 ```
+
+> O token gerado tem **sempre** o prefixo `eduit_` seguido de 48 caracteres
+> hexadecimais (ver `src/services/api-tokens.ts`). Documentação antiga
+> mencionando `crm_` é vestígio e foi removida.
 
 - Rate-limit: **400 req/min por token** (ver `withRateLimitHeaders` em
   `src/lib/api-auth.ts`). Em caso de excesso retorna `429`.
@@ -356,8 +360,8 @@ existe (e os dados já vêm em `items[0]`, sem precisar de segundo GET).
 | GET | `/api/contacts/[id]/timeline` | — | Linha do tempo: eventos, mensagens, deals, atividades. |
 | GET | `/api/contacts/[id]/notes` | — | Notas do contato. |
 | POST | `/api/contacts/[id]/notes` | `{ body }` | Cria nota. |
-| GET | `/api/contacts/[id]/custom-fields` | — | Custom fields do contato. |
-| PUT | `/api/contacts/[id]/custom-fields` | `{ values: { [key]: value } }` | Atualiza custom fields. |
+| GET | `/api/contacts/[id]/custom-fields` | — | Custom fields do contato. **Aceita Bearer.** |
+| PUT | `/api/contacts/[id]/custom-fields` | `{ values: [{ fieldId, value }] }` | Upsert dos custom fields. **Aceita Bearer.** Use `GET /api/custom-fields?entity=contact` para descobrir os `fieldId`s. Itens com `value=""` removem o valor. |
 | POST | `/api/contacts/[id]/tags` | `{ tagId }` ou `{ tagIds: [] }` | Adiciona tag(s). |
 | DELETE | `/api/contacts/[id]/tags` | `?tagId=...` | Remove tag. |
 
@@ -376,6 +380,70 @@ Content-Type: application/json
   "source": "n8n-webhook"
 }
 ```
+
+#### `POST /api/leads` — entrada **atômica** de lead (recomendado para n8n)
+
+Em uma única chamada faz lead-or-create do contato + cria deal no estágio
+escolhido + grava custom fields de contato e de deal. **Idempotente** por
+telefone (preferido) ou email — chamar duas vezes não duplica contato.
+
+| Método | Path | Auth | Body |
+|--------|------|------|------|
+| POST | `/api/leads` | Bearer | ver schema abaixo |
+
+```jsonc
+{
+  // Bloco contato (obrigatório). Lookup procura primeiro por phone, depois email.
+  "contact": {
+    "name": "Maria Silva",           // obrigatório APENAS quando vai criar
+    "email": "maria@example.com",    // qualquer um destes dois
+    "phone": "+5511999998888",       // serve como chave de idempotência
+    "lifecycleStage": "LEAD",        // SUBSCRIBER|LEAD|MQL|SQL|OPPORTUNITY|CUSTOMER|EVANGELIST|OTHER
+    "source": "n8n-form-anuncio-x",
+    "leadScore": 30,
+    "assignedToId": null,
+    "customFields": [
+      { "name": "curso_interesse", "value": "Engenharia de Dados" },
+      { "fieldId": "ckxxx...", "value": "Plus" }   // pode usar fieldId direto
+    ]
+  },
+
+  // Bloco deal (opcional). Quando presente, cria deal sempre — mesmo se o
+  // contato for reusado. Para evitar duplicar deal, faça antes:
+  //   GET /api/deals?contactPhone=...&status=OPEN&pipelineId=...
+  "deal": {
+    "stageId": "cmoftx9ot000fmq01uf55fr9k",        // obrigatório
+    "title": "Lead Engenharia de Dados — Maria",   // opcional; default "Lead - <contact.name>"
+    "value": 1500.00,
+    "ownerId": null,
+    "customFields": [
+      { "name": "origem_canal", "value": "instagram" }
+    ]
+  }
+}
+```
+
+Resposta:
+
+```jsonc
+{
+  "contact": { /* contato completo */ },
+  "contactCreated": true,           // false quando o contato já existia
+  "deal": { /* deal criado, ou null se o bloco deal não veio */ },
+  "dealCreated": true,
+  // Presente apenas quando algum customField passado por `name` não foi
+  // encontrado. Os demais campos foram gravados normalmente.
+  "missingCustomFields": { "contact": ["xxxxx"], "deal": [] }
+}
+```
+
+Códigos:
+
+- `200 OK` quando contato e deal foram **reusados** (raro — quando só atualiza campos).
+- `201 Created` quando criou contato ou deal.
+- `400` para qualquer validação (lifecycleStage inválido, stageId fora da org, etc.).
+- `403` falta `contact:create` ou `deal:create`, ou stage fora do escopo do usuário.
+- `409` violação de unicidade (raro — concorrência criando o mesmo email).
 
 ### 6.2. Companies
 
@@ -447,8 +515,8 @@ existe (e `items[]` já traz os deals com `contact`, `stage`, `owner`).
 | POST | `/api/deals/[id]/products` | `{ productId, quantity?, unitPrice? }` | Adiciona produto. |
 | PUT | `/api/deals/[id]/products/[itemId]` | `{ quantity?, unitPrice? }` | Atualiza item. |
 | DELETE | `/api/deals/[id]/products/[itemId]` | — | Remove item. |
-| GET | `/api/deals/[id]/custom-fields` | — | Custom fields do deal. |
-| PUT | `/api/deals/[id]/custom-fields` | `{ values: {...} }` | Atualiza custom fields. |
+| GET | `/api/deals/[id]/custom-fields` | — | Custom fields do deal. **Aceita Bearer.** |
+| PUT | `/api/deals/[id]/custom-fields` | `{ values: [{ fieldId, value }] }` | Upsert dos custom fields. **Aceita Bearer.** Mesmo formato dos contatos; use `GET /api/custom-fields?entity=deal`. Mudanças geram evento `CUSTOM_FIELD_UPDATED` na timeline. |
 | POST | `/api/deals/[id]/tags` | `{ tagId }` ou `{ tagIds: [] }` | Adiciona tag(s). |
 | DELETE | `/api/deals/[id]/tags` | `?tagId=...` | Remove tag. |
 | POST | `/api/deals/import` | **multipart**: `file` (CSV) | Importação em lote. |
@@ -976,6 +1044,7 @@ DELETE  /api/companies/[id]
 GET     /api/config/public                     (público)
 GET     /api/contacts*
 POST    /api/contacts*
+POST    /api/leads*                            (lead atômico — contato + deal + custom fields)
 POST    /api/contacts/import
 POST    /api/contacts/merge
 GET     /api/contacts/[id]*
@@ -1210,10 +1279,14 @@ Tipo: **Header Auth**
 ### Fluxos exemplo
 
 1. **Webhook → criar contato + deal (lead-or-create)**
-   - n8n recebe lead em webhook.
-   - `GET /api/contacts?email={{email}}&perPage=1` → se `total>=1`, reusa `items[0].id`; se `total=0`, cria com `POST /api/contacts`.
-   - Antes de abrir deal: `GET /api/deals?contactId={{contactId}}&status=OPEN&pipelineId=...` para checar duplicidade.
-   - Se não houver deal aberto, `POST /api/deals` com `{title, stageId, contactId}`.
+   - **Recomendado:** `POST /api/leads` resolve tudo em **uma chamada** (idempotente
+     por phone/email, cria deal no `stageId` escolhido e grava custom fields).
+     Ver §6.1 → "`POST /api/leads`".
+   - Fluxo manual (legado, mais round-trips):
+     - `GET /api/contacts?phone={{phone}}&perPage=1` → reusa `items[0].id` se `total>=1`, senão `POST /api/contacts`.
+     - `GET /api/deals?contactPhone={{phone}}&status=OPEN&pipelineId=...` para checar duplicidade.
+     - Se não houver deal aberto: `POST /api/deals` com `{title, stageId, contactId}`.
+     - Custom fields: `PUT /api/contacts/[id]/custom-fields` e `PUT /api/deals/[id]/custom-fields`.
 
 2. **CRM dispara evento → n8n**
    - Em `/api/automations` criar automação com trigger `deal_won`.
