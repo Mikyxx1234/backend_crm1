@@ -50,41 +50,120 @@ export function parseWhatsappFlowResponsePayload(
   };
 }
 
+/**
+ * Converte chave crua do Meta Flows em label legível.
+ *
+ * Os Flows do WhatsApp serializam respostas no formato
+ * `screen_<n>_Nome_Do_Campo_<idx>` (ex.: `screen_0_Nome_Completo_0`).
+ * Antes, o `formatKey` só fazia uppercase da primeira letra e
+ * retornava o key cru quando já tinha maiúscula — o operador via
+ * `screen_0_Nome_Completo_0: ...` na inbox, ilegível.
+ *
+ * Agora:
+ *  - remove prefixo `screen_<n>_`
+ *  - remove sufixo `_<n>` (índice do campo na tela)
+ *  - troca `_` por espaço
+ *  - title-case por palavra
+ */
+// Conectivos que permanecem em minúsculo no meio do título (português
+// e inglês curtos). A primeira palavra ainda é capitalizada.
+const LOWERCASE_TITLE_STOPWORDS = new Set([
+  "de", "do", "da", "dos", "das", "e", "ou", "a", "o", "em",
+  "no", "na", "nos", "nas", "para", "por", "of", "the", "to", "and",
+]);
+
+function cleanFlowFieldLabel(k: string): string {
+  let s = k.replace(/^screen_\d+_/i, "").replace(/_\d+$/, "");
+  s = s.replace(/_+/g, " ").trim();
+  if (!s) return "Campo";
+  return s
+    .split(" ")
+    .map((w, idx) => {
+      if (w.length === 0) return w;
+      const lower = w.toLowerCase();
+      if (idx > 0 && LOWERCASE_TITLE_STOPWORDS.has(lower)) return lower;
+      return w.charAt(0).toUpperCase() + w.slice(1);
+    })
+    .join(" ");
+}
+
+/**
+ * Limpa um valor de resposta do Flow.
+ *
+ * Opções de single/multi-select chegam como `<idx>_Texto_Da_Opcao`
+ * (ex.: `0_SIM`, `2_Noite`, `0_1_ano_do_ensino_médio`,
+ * `0_Anoto_e_falo_com_o_supervisor_😅`). Removemos o índice no
+ * início e voltamos os underscores pra espaço. Datas ISO viram
+ * DD/MM/AAAA. Arrays e strings com vírgula viram lista limpa.
+ */
+function cleanFlowFieldValue(v: unknown): string {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "boolean") return v ? "Sim" : "Não";
+  if (typeof v === "number") return String(v);
+  if (Array.isArray(v)) {
+    return v
+      .map((item) => cleanFlowFieldValue(item))
+      .filter((s) => s && s !== "—")
+      .join(", ");
+  }
+  if (typeof v === "object") {
+    return JSON.stringify(v);
+  }
+  let s = String(v);
+
+  // Data ISO (YYYY-MM-DD) → DD/MM/AAAA
+  const isoDate = s.match(/^(\d{4})-(\d{2})-(\d{2})(?:T.*)?$/);
+  if (isoDate) {
+    return `${isoDate[3]}/${isoDate[2]}/${isoDate[1]}`;
+  }
+
+  // Multi-select pode vir como "1_Tarde, 0_Manhã" — limpa cada item
+  // separadamente. Heurística: se contém ", " e mais de um termo
+  // começa com "<dígito>_", trata como lista.
+  if (s.includes(", ")) {
+    const parts = s.split(", ");
+    const allOptions = parts.every((p) => /^\d+_/.test(p));
+    if (allOptions) {
+      return parts.map((p) => cleanSingleOption(p)).join(", ");
+    }
+  }
+
+  return cleanSingleOption(s);
+}
+
+function cleanSingleOption(s: string): string {
+  // Remove índice de opção no início (ex.: "0_SIM" → "SIM")
+  let cleaned = s.replace(/^\d+_/, "");
+  // Converte underscores em espaços
+  cleaned = cleaned.replace(/_+/g, " ").trim();
+  return cleaned || "—";
+}
+
 export function formatWhatsappFlowResponse(nfm: Record<string, unknown>): string | null {
   const parsed = parseWhatsappFlowResponsePayload(nfm);
   if (!parsed) return null;
 
-  const formatKey = (k: string): string => {
-    if (/\s/.test(k) || /[A-Z]/.test(k)) return k;
-    const words = k.replace(/[_-]+/g, " ").trim();
-    if (!words) return k;
-    return words.charAt(0).toUpperCase() + words.slice(1);
-  };
-
-  const formatVal = (v: unknown): string => {
-    if (v === null || v === undefined) return "—";
-    if (typeof v === "boolean") return v ? "Sim" : "Não";
-    if (typeof v === "number") return String(v);
-    if (Array.isArray(v)) {
-      const joined = v.map((item) => formatVal(item)).join(", ");
-      return joined.length > 200 ? `${joined.slice(0, 200)}…` : joined;
-    }
-    if (typeof v === "object") {
-      const json = JSON.stringify(v);
-      return json.length > 200 ? `${json.slice(0, 200)}…` : json;
-    }
-    const s = String(v);
-    return s.length > 200 ? `${s.slice(0, 200)}…` : s;
-  };
-
   const flowName = parsed.flowMetaName;
-  const header = flowName
-    ? `📋 Resposta do formulário (${flowName})`
-    : `📋 Resposta do formulário`;
+  // Nome do flow vem como o operador definiu na Meta (ex.:
+  // `cadastro_estagiario`, `form_clt`). Só substituímos underscores
+  // por espaço — não removemos prefixo numérico (não é uma opção
+  // de single-select).
+  const prettyName = flowName ? flowName.replace(/_+/g, " ").trim() : null;
+  const headerLabel = prettyName
+    ? `📋 *Resposta do formulário* — _${prettyName}_`
+    : `📋 *Resposta do formulário*`;
 
-  const lines = Object.entries(parsed.payload).map(
-    ([k, v]) => `• ${formatKey(k)}: ${formatVal(v)}`,
-  );
-  const full = `${header}\n${lines.join("\n")}`;
-  return full.length > 1000 ? `${full.slice(0, 1000)}…` : full;
+  // Layout pergunta / resposta com linha em branco entre pares.
+  // WhatsApp renderiza *bold* e _italic_ nativamente, então o
+  // operador vê hierarquia visual sem precisar parsear texto.
+  const blocks = Object.entries(parsed.payload).map(([k, v]) => {
+    const label = cleanFlowFieldLabel(k);
+    const value = cleanFlowFieldValue(v);
+    return `*${label}*\n↳ ${value}`;
+  });
+
+  const full = `${headerLabel}\n\n${blocks.join("\n\n")}`;
+  // Limite ampliado de 1000 → 2000 chars porque formulários com 6+
+  // campos chegavam truncados em produção.
+  return full.length > 2000 ? `${full.slice(0, 2000)}…` : full;
 }

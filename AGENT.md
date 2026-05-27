@@ -5,6 +5,58 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-27 — Formatação legível das respostas do WhatsApp Flows
+
+**Decisão.** Reescrita do `formatWhatsappFlowResponse` em
+`lib/meta-whatsapp/parse-flow-response.ts` pra parsear o formato cru
+do Meta Flows e produzir um texto formatado:
+
+- **Labels:** `screen_<n>_Nome_Do_Campo_<idx>` →
+  `Nome do Campo` (remove prefixo de tela, sufixo de índice e troca
+  underscores por espaço, com title-case que respeita conectivos em
+  minúsculo — `Data de Nascimento`, não `Data De Nascimento`).
+- **Valores de single/multi-select:** `0_SIM`, `2_Noite`,
+  `0_1_ano_do_ensino_médio`, `0_Anoto_e_falo_com_o_supervisor_😅`
+  → `SIM`, `Noite`, `1 ano do ensino médio`,
+  `Anoto e falo com o supervisor 😅` (remove o índice de opção e
+  underscores). Multi-select chega como string com vírgulas
+  (`1_Tarde, 0_Manhã`) ou array — ambos tratados.
+- **Datas ISO:** `2010-03-04` → `04/03/2010`.
+- **Layout:** cada campo vira `*Pergunta*\n↳ Resposta` separados por
+  linha em branco; cabeçalho com nome do flow em itálico. Limite
+  ampliado de 1000 → 2000 chars (formulários com 6+ campos chegavam
+  truncados).
+
+**Contexto.** Operador relatou: "a resposta que vem do flows do
+whatsapp fica muito ruim de entender, os dados precisam ser tratados".
+Antes, o `formatKey` antigo tinha um early-return absurdo: "se a chave
+já contém maiúscula, devolve crua" — o que matava todos os formulários
+do Meta (chaves vinham com `Nome_Completo`, contendo maiúscula). Texto
+salvo na `Message.content` ia ilegível pra inbox.
+
+**Alternativas descartadas.**
+
+- **Mapeamento por flow JSON definition.** O ideal seria puxar os
+  labels do JSON do Flow (cadastrado na Meta) e usar diretamente.
+  Mas: (a) requer fetch a cada inbound (latência no webhook), (b)
+  os labels do Flow já são derivados das mesmas chaves
+  `screen_X_Nome_Y` por convenção da Meta — a tradução pura por
+  regex chega no mesmo resultado em ~99% dos casos com zero
+  acoplamento à Meta API.
+- **Renderização rica no front (cards com pergunta/resposta).**
+  Mexeria em vários componentes da inbox e renderização da
+  timeline. Texto formatado direto na `Message.content` resolve em
+  uma camada só e segue compatível com qualquer cliente que
+  renderize markdown estilo WhatsApp.
+
+**Impacto.** Backward-compatible — mensagens antigas no DB
+permanecem como estão (já foram salvas). Novas respostas de Flow
+entram formatadas. Inbox, dashboard e timeline do contato passam a
+mostrar `*Nome Completo*\n↳ Erika de Jesus domingos` em vez de
+`screen_0_Nome_Completo_0: Erika de Jesus domingos`.
+
+---
+
 ### 2026-05-27 — `has_tag`/`not_has_tag` enxergam tags atualizadas + união contact+deal
 
 **Decisão.** Três ajustes no `automation-executor.ts` para fazer
