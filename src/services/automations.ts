@@ -214,6 +214,15 @@ export function evaluateTrigger(
       }
       return true;
     }
+    case "manual": {
+      // 27/mai/26 — Gatilho imperativo. O operador escolheu rodar a
+      // automacao explicitamente pelo botao "Rodar automacao" na
+      // conversa (inbox/kanban); nao ha filtro a avaliar. A
+      // protecao contra disparo nao-autorizado fica no endpoint
+      // POST /api/automations/:id/run, que so enfileira automacoes
+      // ativas com triggerType="manual".
+      return true;
+    }
     default:
       return true;
   }
@@ -224,6 +233,13 @@ export type GetAutomationsParams = {
   search?: string;
   page?: number;
   perPage?: number;
+  /**
+   * 27/mai/26 — Filtro por `triggerType` (usado pelo botao "Rodar
+   * automacao" no inbox/kanban pra listar so as automacoes com
+   * gatilho `manual`). Aceita string unica; se necessario no futuro
+   * pode virar string[].
+   */
+  triggerType?: string;
 };
 
 const automationListSelect = {
@@ -246,6 +262,9 @@ export async function getAutomations(params: GetAutomationsParams = {}) {
   const where: Prisma.AutomationWhereInput = {};
   if (params.active !== undefined) {
     where.active = params.active;
+  }
+  if (params.triggerType) {
+    where.triggerType = params.triggerType;
   }
   const search = params.search?.trim();
   if (search) {

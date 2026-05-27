@@ -5,6 +5,82 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-27 — Gatilho `manual` + botão "Rodar automação"
+
+**Decisão.** Novo `triggerType: "manual"` adicionado ao enum
+compartilhado. Disparo exclusivamente via endpoint imperativo
+`POST /api/automations/[id]/run`. Frontend ganha um componente
+reutilizável `<RunAutomationButton>` plugado em:
+
+- `ConversationHeader.toolbarActions` no inbox (ao lado de
+  Transferir e Lembrar).
+- `DealHeader > HeaderActionCluster` no detalhe do negócio
+  (kanban), apenas quando há contato vinculado.
+
+O endpoint é **restrito ao próprio tipo `manual`**: tentar
+disparar uma automação `message_received`, `stage_changed` etc.
+retorna 409. Justificativa: evita duplo-disparo (a interação
+original já dispara o gatilho reativo) e bypass de filtros
+configurados no trigger.
+
+**Contexto.** Operador pediu literalmente: "preciso ter um tipo de
+gatilho de automação que é manual, por exemplo, eu no meu inbox
+ou no kanban, DENTRO da conversa do meu cliente, eu tenho a opção
+de executar uma automação".
+
+**Alternativas descartadas.**
+
+- **Permitir disparar qualquer automação manualmente.** Tentador
+  mas abre duas portas ruins: (1) duplo-disparo se o gatilho
+  original também dispara em paralelo, (2) operador escapa de
+  filtros (canal, stage, dealStatus) que o gatilho original
+  respeita.
+- **Reaproveitar `tag_added` como "trigger manual de facto".**
+  Quebra rastreabilidade no log (toda execução manual pareceria
+  automática) e mistura conceitos.
+- **Botão direto no card do kanban.** Polui o card; o operador
+  já clica no card pra ver detalhes — colocar no detalhe (drawer)
+  é mais natural e respeita a hierarquia visual existente.
+
+**Comportamento por design (registrado pra evitar regressão).**
+
+- **Sem trava de duplicata** (rate-limit/dedup): enfileira igual
+  aos gatilhos reativos. Se virar problema, adicionar dedup-key
+  de 1 min no `enqueueAutomationJob`.
+- **`enqueueAutomation` recebe `event: "manual"`.** O executor
+  só usa `event` pra logging (`log.debug`, mensagem do
+  `AutomationLog`); nenhum step tem lógica condicional por
+  evento, então `"manual"` é totalmente seguro.
+- **Tolerante a `dealId` stale.** UI pode passar um dealId
+  obsoleto (operador alternou conversas em paralelo) — o
+  endpoint ignora silenciosamente em vez de falhar.
+
+**Arquivos.**
+
+- `backend_crm1/src/lib/automation-workflow.ts` —
+  `AutomationTriggerType` + enum + `triggerTypeLabel` +
+  `summarizeTriggerConfig` + `defaultTriggerConfig` ganham `manual`.
+- `backend_crm1/src/services/automations.ts` —
+  `evaluateTrigger` case `manual` (passa sempre);
+  `GetAutomationsParams.triggerType` + `where.triggerType` no
+  `getAutomations`.
+- `backend_crm1/src/app/api/automations/route.ts` — GET aceita
+  `?triggerType=manual` (usado pelo botão pra listar manuais).
+- `backend_crm1/src/app/api/automations/[id]/run/route.ts` —
+  novo endpoint POST.
+- `frontend_crm1/src/lib/automation-workflow.ts` — espelha enum +
+  label + default + summary do backend.
+- `frontend_crm1/src/components/automations/trigger-config-fields.tsx`
+  — case `manual` renderiza um bloco explicativo (sem campos).
+- `frontend_crm1/src/components/automations/run-automation-button.tsx`
+  — novo componente (dropdown que lista manuais + dispara).
+- `frontend_crm1/src/app/(dashboard)/inbox/client-page.tsx` —
+  acopla o botão em `toolbarActions`.
+- `frontend_crm1/src/components/pipeline/deal-detail/header.tsx`
+  — acopla o botão no `HeaderActionCluster` (só se há contato).
+
+---
+
 ### 2026-05-27 — Filtro de `dealStatus` em `message_received`/`message_sent`
 
 **Decisão.** Gatilhos `message_received` e `message_sent` ganharam

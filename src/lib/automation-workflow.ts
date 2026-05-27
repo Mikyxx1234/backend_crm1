@@ -16,7 +16,8 @@ export type AutomationTriggerType =
   | "lifecycle_changed"
   | "agent_changed"
   | "message_received"
-  | "message_sent";
+  | "message_sent"
+  | "manual";
 
 export type AutomationStep = {
   id: string;
@@ -37,6 +38,7 @@ export const AUTOMATION_TRIGGER_TYPES: AutomationTriggerType[] = [
   "agent_changed",
   "message_received",
   "message_sent",
+  "manual",
 ];
 
 export const ACTION_STEP_TYPES = [
@@ -85,6 +87,7 @@ export function triggerTypeLabel(t: string): string {
     agent_changed: "Agente alterado",
     message_received: "Mensagem recebida",
     message_sent: "Mensagem enviada",
+    manual: "Manual (executar pela conversa)",
   };
   return map[t] ?? t;
 }
@@ -178,6 +181,8 @@ export function summarizeTriggerConfig(
       const ch = c.channel;
       return ch ? `Canal: ${String(ch)}` : "Qualquer canal";
     }
+    case "manual":
+      return "Disparada manualmente da conversa";
     default:
       return "—";
   }
@@ -571,6 +576,8 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
     case "message_received":
     case "message_sent":
       return { channel: "" };
+    case "manual":
+      return {};
     default:
       return {};
   }

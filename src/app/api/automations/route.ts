@@ -33,8 +33,9 @@ export async function GET(request: Request) {
       const search = searchParams.get("search") ?? undefined;
       const page = parseIntParam(searchParams.get("page"), 1);
       const perPage = parseIntParam(searchParams.get("perPage"), 20);
+      const triggerType = searchParams.get("triggerType")?.trim() || undefined;
 
-      const result = await getAutomations({ active, search, page, perPage });
+      const result = await getAutomations({ active, search, page, perPage, triggerType });
       return NextResponse.json(result);
     } catch (e) {
       console.error(e);
