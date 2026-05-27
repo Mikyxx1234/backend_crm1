@@ -305,6 +305,53 @@ type RuntimeContext = {
   dealTagNames: string[];
 };
 
+/**
+ * Carrega tags do contato e do deal em arrays paralelos (ids + nomes).
+ *
+ * Usado por `resolveRuntimeContext` (primeira execução) e por
+ * `continueFromStep` (continuação após `wait_for_reply`/`question`),
+ * além de ser invocado dentro do loop após cada `add_tag`/`remove_tag`
+ * pra que a próxima `condition` enxergue o estado atualizado das tags.
+ */
+async function loadAutomationTagSnapshot(
+  contactId: string | undefined,
+  dealId: string | undefined,
+): Promise<{
+  contactTagIds: string[];
+  contactTagNames: string[];
+  dealTagIds: string[];
+  dealTagNames: string[];
+}> {
+  let contactTagIds: string[] = [];
+  let contactTagNames: string[] = [];
+  let dealTagIds: string[] = [];
+  let dealTagNames: string[] = [];
+
+  if (contactId) {
+    const rows = await prisma.tagOnContact.findMany({
+      where: { contactId },
+      select: { tagId: true, tag: { select: { name: true } } },
+    });
+    contactTagIds = rows.map((r) => r.tagId);
+    contactTagNames = rows
+      .map((r) => r.tag?.name)
+      .filter((n): n is string => typeof n === "string");
+  }
+
+  if (dealId) {
+    const rows = await prisma.tagOnDeal.findMany({
+      where: { dealId },
+      select: { tagId: true, tag: { select: { name: true } } },
+    });
+    dealTagIds = rows.map((r) => r.tagId);
+    dealTagNames = rows
+      .map((r) => r.tag?.name)
+      .filter((n): n is string => typeof n === "string");
+  }
+
+  return { contactTagIds, contactTagNames, dealTagIds, dealTagNames };
+}
+
 async function loadConversationSnapshot(
   contactId: string,
   payloadData: Record<string, unknown>,
@@ -1436,7 +1483,30 @@ async function executeStep(
       const conditionCfg = normalizeConditionConfig(cfg);
       for (const branch of conditionCfg.branches) {
         const allMatch = branch.rules.every((rule) => {
-          const left = rule.field ? getByPath(evalRoot, rule.field) : undefined;
+          let left = rule.field ? getByPath(evalRoot, rule.field) : undefined;
+
+          // 27/mai/26 v2 — Para `has_tag`/`not_has_tag`, considera a
+          // UNIÃO de tags de contato + deal independente do field
+          // escolhido na UI (`contact.tags`, `deal.tags`, ou as versões
+          // `.tagIds`). O step `add_tag` atual só persiste em
+          // `TagOnContact`, então um operador que configura
+          // `deal.tags has_tag "CLT"` esperando match na tag
+          // recém-adicionada via fluxo nunca veria a condição bater.
+          // União resolve o cenário-padrão sem exigir UI nova de
+          // entity (contact vs deal) no step `add_tag`.
+          if (
+            (rule.op === "has_tag" || rule.op === "not_has_tag") &&
+            (rule.field === "contact.tags" ||
+              rule.field === "deal.tags" ||
+              rule.field === "contact.tagIds" ||
+              rule.field === "deal.tagIds")
+          ) {
+            const useIds = rule.field === "contact.tagIds" || rule.field === "deal.tagIds";
+            left = useIds
+              ? [...rt.contactTagIds, ...rt.dealTagIds]
+              : [...rt.contactTagNames, ...rt.dealTagNames];
+          }
+
           const rightRaw = rule.value;
           // Right pode ser string com {{variavel}} — interpola com as
           // flowVars antes de comparar.
@@ -1957,6 +2027,18 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
         flowVariables = { ...flowVariables, [result.setVariable.name]: result.setVariable.value };
         rt.data = { ...rt.data, ...flowVariables };
       }
+      // 27/mai/26 — Refresh das tags no `rt` após add_tag/remove_tag pra
+      // que conditions subsequentes (no MESMO fluxo, sem wait_for_reply
+      // no meio) enxerguem o estado atualizado. Antes o snapshot vinha
+      // de `resolveRuntimeContext` e ficava stale, fazendo `has_tag`
+      // sempre retornar false.
+      if (step.type === "add_tag" || step.type === "remove_tag") {
+        const snap = await loadAutomationTagSnapshot(rt.contactId, rt.dealId);
+        rt.contactTagIds = snap.contactTagIds;
+        rt.contactTagNames = snap.contactTagNames;
+        rt.dealTagIds = snap.dealTagIds;
+        rt.dealTagNames = snap.dealTagNames;
+      }
       await logStep({
         automationId,
         contactId: rt.contactId,
@@ -2108,6 +2190,13 @@ export async function continueFromStep(
 
   const conversation = await loadConversationSnapshot(contactId, variables);
 
+  // 27/mai/26 — Carrega tags do contato e do deal pra que as conditions
+  // com `has_tag`/`not_has_tag` enxerguem o estado atual. Antes,
+  // `continueFromStep` montava o `rt` sem esses arrays e a condition
+  // sempre caía no else (operador relatou: "selecionei CLT, condição
+  // veio depois e foi ignorada").
+  const tagSnapshot = await loadAutomationTagSnapshot(contactId, deal?.id);
+
   const rt: RuntimeContext = {
     automationId,
     contactId,
@@ -2117,6 +2206,10 @@ export async function continueFromStep(
     contact,
     deal,
     conversation,
+    contactTagIds: tagSnapshot.contactTagIds,
+    contactTagNames: tagSnapshot.contactTagNames,
+    dealTagIds: tagSnapshot.dealTagIds,
+    dealTagNames: tagSnapshot.dealTagNames,
   };
 
   let contConvIdForMeta: string | undefined;
@@ -2178,6 +2271,13 @@ export async function continueFromStep(
       if (result.setVariable) {
         flowVariables = { ...flowVariables, [result.setVariable.name]: result.setVariable.value };
         rt.data = { ...rt.data, ...flowVariables };
+      }
+      if (step.type === "add_tag" || step.type === "remove_tag") {
+        const snap = await loadAutomationTagSnapshot(rt.contactId, rt.dealId);
+        rt.contactTagIds = snap.contactTagIds;
+        rt.contactTagNames = snap.contactTagNames;
+        rt.dealTagIds = snap.dealTagIds;
+        rt.dealTagNames = snap.dealTagNames;
       }
       await logStep({
         automationId,

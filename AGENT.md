@@ -5,6 +5,61 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-27 — `has_tag`/`not_has_tag` enxergam tags atualizadas + união contact+deal
+
+**Decisão.** Três ajustes no `automation-executor.ts` para fazer
+condições de tag funcionarem no fluxo de receptivo:
+
+1. **`continueFromStep` popula tags.** A função que continua o fluxo
+   depois de `wait_for_reply`/`question` montava o `RuntimeContext`
+   sem os arrays `contactTagIds/Names`/`dealTagIds/Names`. Resultado:
+   condition `has_tag` sempre via `undefined` no lado esquerdo e
+   caía no `else`. Agora chama `loadAutomationTagSnapshot` antes de
+   montar o `rt`.
+2. **Refresh após `add_tag`/`remove_tag`.** Dentro do loop de execução
+   (em `executeAutomation` e `continueFromStep`), assim que o step
+   termina e foi `add_tag`/`remove_tag`, recarregamos as tags pra
+   que conditions subsequentes enxerguem o novo estado — antes o
+   snapshot era de `resolveRuntimeContext` (início do job).
+3. **União contact+deal nas ops de tag.** No `condition` case,
+   quando `rule.op` é `has_tag`/`not_has_tag` e o field é
+   `contact.tags`/`deal.tags`/`contact.tagIds`/`deal.tagIds`, o
+   `left` da comparação passa a ser a UNIÃO dos dois arrays
+   correspondentes (nomes ou ids). Motivo: hoje o step `add_tag`
+   persiste só em `TagOnContact` (não tem opção entity), então
+   operadores que escolhem `deal.tags` na UI esperando ver a tag
+   recém-adicionada via `add_tag` no fluxo não veriam match. União
+   elimina essa armadilha sem exigir UI nova.
+
+**Contexto.** Operador relatou: "rodou a automação de receptivo, mas a
+condição de tag não foi, eu selecionei CLT, depois tem a condição, mas
+o fluxo seguiu e ignorou essa condição". Diagnóstico nos logs do
+banco: o branch da condition retornava SUCCESS mas o próximo step
+executado era sempre o `elseStepId`, indicando que `has_tag` retornava
+`false` mesmo com a tag adicionada. Três causas convergentes: rt
+sem tags em continuação, snapshot stale dentro do loop, e mismatch
+contact/deal na config vs `add_tag`.
+
+**Alternativas descartadas.**
+
+- **Mudar `add_tag` pra ter entity (contact|deal).** Resolveria o ponto 3
+  na raiz, mas exige UI nova no `step-config-panel`, migração silenciosa
+  pros configs existentes (operadores teriam que reabrir cada step pra
+  setar `entity: "contact"`), e tem efeito-rede zero pro caso atual.
+  Mantemos `add_tag` em contact e fazemos união no condition — mesma UX
+  com 1/10 do esforço.
+- **Refrescar o rt inteiro depois de cada step.** Mais "robusto" mas
+  ridículo em custo (5 queries por step × N steps). Refresh seletivo
+  pós-`add_tag`/`remove_tag` é suficiente porque só tags mudam
+  externamente ao `rt`.
+
+**Impacto.** Backward-compatible — automações com `has_tag` em config
+antiga que dependiam do separator contact vs deal viam falso negativo
+(armadilha), agora funcionam. Custo: +1 query por step de tag e +2
+queries por continuação (tags do contato + tags do deal).
+
+---
+
 ### 2026-05-27 — Auto-deal prioriza pipeline `isDefault` (não mais "mais antigo")
 
 **Decisão.** Em `services/auto-deals.ts` (`ensureOpenDealForContact`),
