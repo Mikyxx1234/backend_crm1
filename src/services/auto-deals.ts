@@ -64,7 +64,14 @@ export async function ensureOpenDealForContact(
     return { status: "existing", dealId: existing.id };
   }
 
-  const pipeline = await prisma.pipeline.findFirst({ orderBy: { createdAt: "asc" } });
+  // 27/mai/26 — Prioriza pipeline marcado como `isDefault` (configurado
+  // via UI de pipelines). Cai pro mais antigo só como fallback quando
+  // nenhum default existe. Antes pegava sempre o mais antigo, o que
+  // confundia operadores com mais de um pipeline (lead aparecia no
+  // pipeline errado).
+  const pipeline = await prisma.pipeline.findFirst({
+    orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+  });
   if (!pipeline) {
     console.warn(`[${logTag}] nenhum pipeline encontrado — deal não criado para ${contactName}`);
     return { status: "skipped", reason: "no_pipeline" };

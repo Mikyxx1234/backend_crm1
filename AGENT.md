@@ -5,6 +5,78 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-27 — Auto-deal prioriza pipeline `isDefault` (não mais "mais antigo")
+
+**Decisão.** Em `services/auto-deals.ts` (`ensureOpenDealForContact`),
+a query `prisma.pipeline.findFirst` passou de
+`orderBy: { createdAt: "asc" }` para
+`orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }]`. Resultado:
+quando uma org tem mais de um pipeline, o auto-deal é criado no
+pipeline marcado como padrão na UI (`/pipelines` → toggle "Padrão");
+o mais antigo segue como fallback quando nenhum default existe.
+
+**Contexto.** Operador relatou: "quando um número que não existe enviar
+mensagem para o whatsapp, tem que criar lead e contato direto na
+primeira etapa do kanban". O sistema JÁ criava o lead+contato+deal,
+mas no pipeline "Atendimento" (mais antigo, sem `isDefault`) ao invés
+do "Pipeline Principal" (`isDefault: true`, usado de fato pelo
+operador). O lead "sumia" porque o operador estava olhando o pipeline
+errado.
+
+**Alternativas descartadas.**
+
+- **Pipeline configurável por canal/source.** Mais flexível
+  (`channels.config.defaultPipelineId`) mas é overkill — operador tem
+  um único kanban "verdadeiro". `isDefault` já existe no schema, só
+  faltava ser respeitado aqui.
+- **Migrar o lead atual ("caio") pro pipeline default.** Não toquei
+  em dados — futuras mensagens caem no pipeline certo, e o
+  `ensureOpenDealForContact` é idempotente (não recria se já existe
+  deal aberto). Operador pode mover o deal manualmente se quiser.
+
+**Impacto.** Backward-compatible: orgs com um único pipeline (ou sem
+`isDefault` setado) seguem com o comportamento anterior (mais antigo).
+Para a org atual, novos leads WhatsApp passam a entrar em "Pipeline
+Principal → Lead de Entrada" (`position: 0`, `isIncoming: true`).
+
+---
+
+### 2026-05-27 — Trigger `message_received` best-effort no filtro de estágio + DELETE de contato sem bloqueio
+
+**Decisão.**
+
+1. Em `services/automations.ts`, `evaluateTrigger` para
+   `message_received`/`message_sent` deixou de ser *fail-closed* quando
+   o config tem `stageId`/`pipelineId` mas o `enrichContext` não
+   consegue popular (contato sem deal aberto). Nova regra: bloqueia só
+   quando *conhecemos* o estágio do contato e ele diverge; quando não
+   conhecemos, passa.
+2. Em `app/api/contacts/[id]/route.ts`, removido o early-return `409`
+   por `checkContactDeals`. O `deleteContact` já nullifica deals
+   (preserva histórico no kanban) e remove em cascata
+   conversations/messages/activities/notes/automation_logs.
+
+**Contexto.** Operador relatou: (a) gatilho de mensagem com filtro de
+estágio nunca disparava — diagnóstico: contato sem deal aberto no
+momento da mensagem (cenário-padrão em receptivo) caía no fail-closed;
+(b) "quero excluir o lead independente se tem deal ou não" — a
+checagem era defensiva demais, o serviço já tratava o caso.
+
+**Alternativas descartadas.**
+
+- Criar auto-deal síncrono antes do trigger: acopla webhook ao kanban,
+  aumenta latência. Best-effort no enrich mantém o padrão atual.
+- Cascade delete dos deals: perde histórico. Nullify deixa o deal no
+  kanban como "contato removido", semanticamente correto.
+
+**Impacto.** Backward-compatible para automações com deal aberto.
+Operadores em receptivo agora veem `message_received` disparar
+sempre — pra filtragem fina usar `condition` step. Deals órfãos
+(sem `contactId`) passam a existir; o front já trata `deal.contact ===
+null`.
+
+---
+
 ### 2026-05-27 — Ops `has_tag` / `not_has_tag` nas condições de automação
 
 **Decisão.** Estender `automation-condition.ts` com dois novos operadores

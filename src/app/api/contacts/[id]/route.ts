@@ -9,7 +9,6 @@ import {
   getContactById,
   updateContact,
   isValidLifecycleStage,
-  checkContactDeals,
 } from "@/services/contacts";
 
 const log = getLogger("api.contacts.[id]");
@@ -190,14 +189,9 @@ export async function DELETE(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "Contato não encontrado." }, { status: 404 });
     }
 
-    const { hasDeals, dealCount } = await checkContactDeals(id);
-    if (hasDeals) {
-      return NextResponse.json(
-        { message: `Não é possível excluir: este contato possui ${dealCount} negócio${dealCount !== 1 ? "s" : ""} vinculado${dealCount !== 1 ? "s" : ""}. Remova ou transfira os negócios antes de excluir.` },
-        { status: 409 },
-      );
-    }
-
+    // 27/mai/26 — Bloqueio por `dealCount > 0` removido. `deleteContact`
+    // ja nulifica `contactId` nos deals (preserva historico no kanban) e
+    // remove conversas, mensagens, notas, atividades e logs.
     await deleteContact(id);
     log.info(`contato ${id} excluído com sucesso`);
     return NextResponse.json({ ok: true });

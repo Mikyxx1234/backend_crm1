@@ -176,17 +176,22 @@ export function evaluateTrigger(
     }
     case "message_received":
     case "message_sent": {
+      // 27/mai/26 (v2) — Best-effort: o filtro de estagio/pipeline so
+      // descarta o evento quando CONHECEMOS o estagio do contato (via
+      // deal aberto enriquecido em `enrichContext`) e ele DIVERGE do
+      // filtro. Se nao conhecemos (sem deal aberto, contato novo, etc.)
+      // deixamos passar — caso contrario o gatilho "mensagem recebida"
+      // nunca dispara pra contatos sem negocio aberto, que e o cenario
+      // mais comum em receptivo.
       const channel = readString(cfg, "channel");
       const dataChannel = readString(data, "channel");
       if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
       const stageId = readString(cfg, "stageId");
       const dataStageId = readString(data, "stageId") ?? readString(data, "dealStageId");
       if (stageId && dataStageId && dataStageId !== stageId) return false;
-      if (stageId && !dataStageId) return false;
       const pipelineId = readString(cfg, "pipelineId");
       const dataPipelineId = readString(data, "pipelineId") ?? readString(data, "dealPipelineId");
       if (pipelineId && dataPipelineId && dataPipelineId !== pipelineId) return false;
-      if (pipelineId && !dataPipelineId) return false;
       return true;
     }
     default:
