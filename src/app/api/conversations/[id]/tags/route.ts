@@ -21,7 +21,7 @@
 
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { createDealEvent } from "@/services/deals";
@@ -105,66 +105,69 @@ async function applyTagToTargets(
   return { appliedToContact, appliedToDeal };
 }
 
+// Bug 29/mai/26: usávamos `auth()` direto, mas as queries via `prisma`
+// org-scoped (loadConversationTargets / applyTagToTargets) avaliam
+// `getOrgIdOrThrow()` na Prisma extension — que exige o contexto criado
+// por `withOrgContext`. Sem o wrapper, o handler quebrava com
+// "organization context ausente". Mesmo fix já aplicado em deals/contacts.
 export async function POST(request: Request, ctx: Ctx) {
-  try {
-    const session = await auth();
-    if (!session?.user) return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+  return withOrgContext(async (session) => {
+    try {
+      const { id } = await ctx.params;
+      const denied = await requireConversationAccess(session, id);
+      if (denied) return denied;
 
-    const { id } = await ctx.params;
-    const denied = await requireConversationAccess(session, id);
-    if (denied) return denied;
+      const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+      if (!body) return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
 
-    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-    if (!body) return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
+      const tagId = typeof body.tagId === "string" ? body.tagId.trim() : "";
+      const action = body.action === "remove" ? "remove" : "add";
+      if (!tagId) return NextResponse.json({ message: "tagId obrigatório." }, { status: 400 });
 
-    const tagId = typeof body.tagId === "string" ? body.tagId.trim() : "";
-    const action = body.action === "remove" ? "remove" : "add";
-    if (!tagId) return NextResponse.json({ message: "tagId obrigatório." }, { status: 400 });
+      const targets = await loadConversationTargets(id);
+      if (!targets) return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
 
-    const targets = await loadConversationTargets(id);
-    if (!targets) return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
+      const tagExists = await prisma.tag.findUnique({ where: { id: tagId }, select: { id: true } });
+      if (!tagExists) return NextResponse.json({ message: "Tag não encontrada." }, { status: 404 });
 
-    const tagExists = await prisma.tag.findUnique({ where: { id: tagId }, select: { id: true } });
-    if (!tagExists) return NextResponse.json({ message: "Tag não encontrada." }, { status: 404 });
+      const uid = (session.user as { id: string }).id;
+      const result = await applyTagToTargets(uid, tagId, targets, action);
 
-    const uid = (session.user as { id: string }).id;
-    const result = await applyTagToTargets(uid, tagId, targets, action);
-
-    return NextResponse.json({ ok: true, action, ...result });
-  } catch (e) {
-    console.error("[conversations/tags] erro:", e);
-    return NextResponse.json(
-      { message: e instanceof Error ? e.message : "Erro ao aplicar tag." },
-      { status: 500 },
-    );
-  }
+      return NextResponse.json({ ok: true, action, ...result });
+    } catch (e) {
+      console.error("[conversations/tags] erro:", e);
+      return NextResponse.json(
+        { message: e instanceof Error ? e.message : "Erro ao aplicar tag." },
+        { status: 500 },
+      );
+    }
+  });
 }
 
 export async function DELETE(request: Request, ctx: Ctx) {
-  try {
-    const session = await auth();
-    if (!session?.user) return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+  return withOrgContext(async (session) => {
+    try {
+      const { id } = await ctx.params;
+      const denied = await requireConversationAccess(session, id);
+      if (denied) return denied;
 
-    const { id } = await ctx.params;
-    const denied = await requireConversationAccess(session, id);
-    if (denied) return denied;
+      const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+      const tagId = typeof body?.tagId === "string" ? body.tagId.trim() : "";
+      if (!tagId) return NextResponse.json({ message: "tagId obrigatório." }, { status: 400 });
 
-    const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
-    const tagId = typeof body?.tagId === "string" ? body.tagId.trim() : "";
-    if (!tagId) return NextResponse.json({ message: "tagId obrigatório." }, { status: 400 });
+      const targets = await loadConversationTargets(id);
+      if (!targets) return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
 
-    const targets = await loadConversationTargets(id);
-    if (!targets) return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
+      const uid = (session.user as { id: string }).id;
+      const result = await applyTagToTargets(uid, tagId, targets, "remove");
 
-    const uid = (session.user as { id: string }).id;
-    const result = await applyTagToTargets(uid, tagId, targets, "remove");
-
-    return NextResponse.json({ ok: true, action: "remove", ...result });
-  } catch (e) {
-    console.error("[conversations/tags] erro:", e);
-    return NextResponse.json(
-      { message: e instanceof Error ? e.message : "Erro ao remover tag." },
-      { status: 500 },
-    );
-  }
+      return NextResponse.json({ ok: true, action: "remove", ...result });
+    } catch (e) {
+      console.error("[conversations/tags] erro:", e);
+      return NextResponse.json(
+        { message: e instanceof Error ? e.message : "Erro ao remover tag." },
+        { status: 500 },
+      );
+    }
+  });
 }
