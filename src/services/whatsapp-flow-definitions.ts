@@ -1,6 +1,10 @@
 import { prisma } from "@/lib/prisma";
 import { buildWaFlowJsonString, type CrmFlowScreenInput } from "@/lib/meta-whatsapp/build-static-wa-flow-json";
 import type { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
+import {
+  cleanFlowFieldLabel,
+  normalizeFlowMatchKey,
+} from "@/lib/meta-whatsapp/parse-flow-response";
 import { parseWaFlowJsonToCrmScreens } from "@/lib/meta-whatsapp/parse-wa-flow-json";
 
 export type FlowDefinitionInputScreen = {
@@ -460,19 +464,28 @@ export async function resolveFlowDefinitionForInbound(params: {
     if (byMeta) return byMeta;
   }
 
-  // (3) Best-match por chaves de campo (fallback histórico).
-  const keys = new Set(
-    params.responseKeys.map((k) => k.trim().replace(/[^a-zA-Z0-9_]/g, "_")),
-  );
-  if (keys.size === 0) return published[0] ?? null;
+  // (3) Best-match por campo (fallback histórico). Compara tanto a chave
+  // crua quanto o RÓTULO normalizado — as respostas da Meta normalmente
+  // vêm com a chave derivada do label, não do `fieldKey` salvo (que tem
+  // sufixo hash). Sem normalizar por label, o score dava 0 e caía no
+  // `published[0]` (flow errado), fazendo os campos não casarem.
+  const respNorms = params.responseKeys
+    .map((k) => normalizeFlowMatchKey(cleanFlowFieldLabel(k)))
+    .filter((s) => s.length >= 3);
+  if (respNorms.length === 0) return published[0] ?? null;
 
   let best: (typeof published)[number] | null = null;
   let bestScore = 0;
   for (const flow of published) {
-    const fieldKeys = flow.screens.flatMap((s) =>
-      s.fields.map((f) => f.fieldKey.trim().replace(/[^a-zA-Z0-9_]/g, "_")),
+    const fieldNorms = flow.screens.flatMap((s) =>
+      s.fields.flatMap((f) => [
+        normalizeFlowMatchKey(f.label),
+        normalizeFlowMatchKey(f.fieldKey),
+      ]),
     );
-    const score = fieldKeys.filter((k) => keys.has(k)).length;
+    const score = respNorms.filter((r) =>
+      fieldNorms.some((fn) => fn === r || (r.length >= 3 && fn.startsWith(r))),
+    ).length;
     if (score > bestScore) {
       bestScore = score;
       best = flow;

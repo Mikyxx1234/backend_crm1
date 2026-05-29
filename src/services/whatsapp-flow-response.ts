@@ -1,7 +1,11 @@
 import type { CustomFieldType, Prisma } from "@prisma/client";
 
 import { getLogger } from "@/lib/logger";
-import { sanitizeFlowFieldKey } from "@/lib/meta-whatsapp/parse-flow-response";
+import {
+  cleanFlowFieldLabel,
+  normalizeFlowMatchKey,
+  sanitizeFlowFieldKey,
+} from "@/lib/meta-whatsapp/parse-flow-response";
 import { sendWhatsAppText } from "@/lib/send-whatsapp";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -316,12 +320,34 @@ function findFieldDefinition(
   responseKey: string,
 ): FlowFieldWithMapping | undefined {
   const sanitized = sanitizeFlowFieldKey(responseKey);
-  return fields.find(
+
+  // (1) Match exato pelo fieldKey (flows criados pelo builder do CRM, em
+  // que a chave do payload == fieldKey).
+  const exact = fields.find(
     (f) =>
       f.fieldKey === responseKey ||
       sanitizeFlowFieldKey(f.fieldKey) === sanitized ||
       f.fieldKey === sanitized,
   );
+  if (exact) return exact;
+
+  // (2) Match tolerante pelo RÓTULO normalizado. Flows criados/importados
+  // pela Meta entregam a resposta com a chave derivada do label
+  // (ex.: `screen_0_Nome_Completo_0` / `Numero_de_Telefone`), enquanto o
+  // `fieldKey` salvo carrega um sufixo hash (`Nome_Completo_608eea`). Sem
+  // isto, nenhum campo casava e nada era gravado.
+  const respNorm = normalizeFlowMatchKey(cleanFlowFieldLabel(responseKey));
+  if (!respNorm) return undefined;
+  return fields.find((f) => {
+    const labelNorm = normalizeFlowMatchKey(f.label);
+    const keyNorm = normalizeFlowMatchKey(f.fieldKey);
+    return (
+      labelNorm === respNorm ||
+      keyNorm === respNorm ||
+      // fieldKey costuma ser "<label><hash>"; aceita prefixo.
+      (respNorm.length >= 3 && keyNorm.startsWith(respNorm))
+    );
+  });
 }
 
 /**

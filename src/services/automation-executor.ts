@@ -1576,6 +1576,59 @@ async function executeStep(
       return {};
     }
 
+    case "consume_stock":
+    case "decrement_stock": {
+      // Baixa de estoque OPT-IN: o operador adiciona este passo a uma
+      // automação (ex.: gatilho `deal_won` ou entrada em estágio) para
+      // reduzir o estoque dos produtos vinculados ao negócio. Só age em
+      // produtos com `trackStock=true`. BLOQUEIA (lança erro) se faltar
+      // estoque em qualquer item — não aplica baixa parcial nem deixa
+      // o estoque negativo.
+      let targetDealId = rt.dealId ?? readString(cfg, "dealId");
+      if (!targetDealId && rt.contactId) {
+        const openDeal = await prisma.deal.findFirst({
+          where: { contactId: rt.contactId, status: "OPEN" },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true },
+        });
+        targetDealId = openDeal?.id;
+      }
+      if (!targetDealId) throw new Error("consume_stock: dealId ausente no contexto");
+
+      const items = await prisma.dealProduct.findMany({
+        where: { dealId: targetDealId },
+        select: {
+          quantity: true,
+          product: { select: { id: true, name: true, trackStock: true, stock: true } },
+        },
+      });
+
+      const tracked = items.filter((it) => it.product.trackStock);
+      if (tracked.length === 0) return {};
+
+      // Pré-checagem de bloqueio: se algum produto não tem saldo, aborta
+      // tudo antes de qualquer escrita.
+      for (const it of tracked) {
+        const need = Number(it.quantity);
+        const have = Number(it.product.stock);
+        if (have < need) {
+          throw new Error(
+            `consume_stock: estoque insuficiente para "${it.product.name}" (disponível ${have}, necessário ${need})`,
+          );
+        }
+      }
+
+      await prisma.$transaction(
+        tracked.map((it) =>
+          prisma.product.update({
+            where: { id: it.product.id },
+            data: { stock: { decrement: Number(it.quantity) } },
+          }),
+        ),
+      );
+      return {};
+    }
+
     case "delay": {
       const ms = readNumber(cfg, "ms") ?? readNumber(cfg, "milliseconds") ?? 0;
       await new Promise((r) => setTimeout(r, Math.max(0, Math.floor(ms))));

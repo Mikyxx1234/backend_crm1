@@ -1106,6 +1106,11 @@ model Product {
   unit           String       @default("un")
   type           String       @default("PRODUCT")
   isActive       Boolean      @default(true)
+  /// Quando true, o produto controla estoque/limite. Só então `stock` é
+  /// relevante e a baixa (step `consume_stock`) age sobre ele.
+  trackStock     Boolean      @default(false) @map("track_stock")
+  /// Quantidade disponível em estoque (relevante só com trackStock=true).
+  stock          Decimal      @default(0) @db.Decimal(12, 2)
 
   dealProducts DealProduct[]
   customValues ProductCustomFieldValue[]

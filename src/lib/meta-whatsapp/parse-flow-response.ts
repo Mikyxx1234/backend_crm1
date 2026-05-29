@@ -72,7 +72,21 @@ const LOWERCASE_TITLE_STOPWORDS = new Set([
   "no", "na", "nos", "nas", "para", "por", "of", "the", "to", "and",
 ]);
 
-function cleanFlowFieldLabel(k: string): string {
+/**
+ * Normaliza uma string para comparação tolerante (matching de campos
+ * Flow): remove acentos, baixa caixa e descarta tudo que não for
+ * alfanumérico. Ex.: "Número de Telefone" e "Numero_de_Telefone" →
+ * "numerodetelefone".
+ */
+export function normalizeFlowMatchKey(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+export function cleanFlowFieldLabel(k: string): string {
   let s = k.replace(/^screen_\d+_/i, "").replace(/_\d+$/, "");
   s = s.replace(/_+/g, " ").trim();
   if (!s) return "Campo";
