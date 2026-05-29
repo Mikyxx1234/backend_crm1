@@ -5,6 +5,79 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-05-29 — Tenancy P0: `userOrgFilter` escopa super-admin à org ativa + fecha IDOR no `PUT /api/users/[id]`
+
+**Decisão.** Inverter a ordem das checagens em `userOrgFilter`
+(`src/lib/auth-helpers.ts`): a **org ativa tem prioridade sobre o
+super-admin**. O bypass `return {}` agora só ocorre quando o
+super-admin **não** tem `organizationId` (contexto de plataforma).
+Além disso, o `PUT /api/users/[id]` ganhou um pré-check escopado
+(`prisma.user.findFirst({ where: { id, ...userOrgFilter(session) } })`,
+404 se fora do escopo) espelhando o que o `DELETE` já fazia.
+
+```ts
+// antes (bypass vinha primeiro — vazava cross-org):
+if (session.user.isSuperAdmin) return {};
+if (!session.user.organizationId) return { organizationId: "__none__" };
+return { organizationId: session.user.organizationId };
+
+// depois (org ativa primeiro):
+if (session.user.organizationId) return { organizationId: session.user.organizationId };
+if (session.user.isSuperAdmin) return {};
+return { organizationId: "__none__" };
+```
+
+**Contexto.** Operador relatou: "ao adicionar usuários na org eduit
+estão vindo usuários da org DNA". Auditoria (Playwright + leitura de
+código) confirmou: o usuário `fabio@eduit.com.br` é super-admin **com**
+org ativa, então `userOrgFilter` retornava `{}` e a tela de Equipe
+(`GET /api/users`) — e mais 6 endpoints org-scoped — listavam users de
+**todas** as orgs do cluster. Pior: `DELETE`/`PUT /api/users/[id]`
+permitiam apagar/editar users de outra org só conhecendo o id (IDOR).
+
+**Por que esta abordagem (correção central, não por-endpoint).** Os 7
+callers de `userOrgFilter` foram auditados; **todos querem escopo por
+org** (os próprios comentários em `kanban/filter-options` e
+`conversations/[id]/messages` mencionam tentativas anteriores de fechar
+vazamentos). Nenhum caller está sob `/admin/*`. As rotas `/admin/*` têm
+lógica de acesso própria e **não** dependem de `userOrgFilter`. Logo,
+corrigir o helper conserta os 7 de uma vez sem risco de regressão em
+fluxo legítimo de administração de plataforma.
+
+**Alternativas descartadas.**
+
+- **Adicionar `organizationId` explícito em cada um dos 7 `where`.**
+  Mais verboso, frágil (o 8º caller futuro esqueceria) e não resolve o
+  IDOR do `PUT`. O ponto único de verdade é o helper.
+- **Remover o bypass de super-admin por completo.** Quebraria o
+  contexto de plataforma sem org (onde ver tudo é intencional). Mantido
+  apenas para `organizationId == null`.
+- **Mover `User` para os `SCOPED_MODELS` da Prisma Extension.** Inviável:
+  o login (NextAuth `authorize`) precisa achar `User` por email **sem**
+  contexto de org. Por isso o filtro de `User` é manual e centralizado
+  neste helper.
+
+**Impacto / comportamento preservado.**
+
+- Super-admin **com** org: agora vê só a própria org nas telas
+  org-scoped (Equipe, filtros do Kanban, avatares de agente, analytics,
+  status/schedules de agentes). Para visão cross-org, usar `/admin/*`.
+- Super-admin **sem** org: inalterado (visão global).
+- `PUT /api/users/[id]` cross-org → 404 (antes: editava).
+
+**Arquivos.**
+
+- `backend/src/lib/auth-helpers.ts` — reordenação de `userOrgFilter`.
+- `backend/src/app/api/users/[id]/route.ts` — pré-check escopado no `PUT`.
+
+**Verificação.** `tsc` sem erros novos (baseline já tinha os mesmos
+erros pré-existentes de `$transaction`/`TransactionClient` em
+`users/route.ts:98` e `[id]/route.ts`). Validação ao vivo via Playwright
+(`GET /api/users` deve retornar só users da org eduit) **pendente até o
+deploy** — o ambiente em produção ainda roda o código antigo.
+
+---
+
 ### 2026-05-27 — Gatilho `manual` + botão "Rodar automação"
 
 **Decisão.** Novo `triggerType: "manual"` adicionado ao enum
