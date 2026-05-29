@@ -161,6 +161,73 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
   return undefined;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Webhook — interpolação de variáveis dotted-path no body/headers
+//
+// O step `webhook` aceita um `body` (string JSON) e `headers` custom com
+// tokens `{{caminho.pontilhado}}` (ex.: `{{contact.name}}`,
+// `{{contact.adCtwaClid}}`, `{{deal.id}}`, `{{event}}`, `{{timestamp}}`).
+// Resolvemos cada token contra um root montado a partir do RuntimeContext
+// e substituímos pelo valor escapado para JSON (sem aspas externas — o
+// template já as fornece em `"{{...}}"`). Token ausente vira string vazia.
+//
+// Backward-compat: se `body` não for configurado, mantemos o payload
+// legado `{ event, contactId, dealId, data }`.
+// ─────────────────────────────────────────────────────────────────
+
+function resolveDottedPath(root: Record<string, unknown>, path: string): unknown {
+  const parts = path.split(".").map((p) => p.trim()).filter(Boolean);
+  let cur: unknown = root;
+  for (const p of parts) {
+    if (cur === null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[p];
+  }
+  return cur;
+}
+
+function webhookValueToString(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (v instanceof Date) return v.toISOString();
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+function jsonEscapeFragment(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+}
+
+const WEBHOOK_TOKEN_RE = /\{\{\s*([\w.]+)\s*\}\}/g;
+
+function interpolateWebhookString(template: string, root: Record<string, unknown>): string {
+  return template.replace(WEBHOOK_TOKEN_RE, (_m, path: string) => {
+    const val = resolveDottedPath(root, path);
+    return jsonEscapeFragment(webhookValueToString(val));
+  });
+}
+
+function buildWebhookRoot(rt: RuntimeContext): Record<string, unknown> {
+  return {
+    event: rt.event,
+    automationId: rt.automationId,
+    timestamp: new Date().toISOString(),
+    contactId: rt.contactId ?? null,
+    dealId: rt.dealId ?? null,
+    contact: rt.contact ?? null,
+    deal: rt.deal ?? null,
+    data: rt.data ?? {},
+  };
+}
+
 function readBoolean(obj: Record<string, unknown>, key: string): boolean | undefined {
   const v = obj[key];
   if (typeof v === "boolean") return v;
@@ -1474,12 +1541,35 @@ async function executeStep(
       if (!url) throw new Error("webhook: url obrigatória");
       const method = (readString(cfg, "method") ?? "POST").toUpperCase();
       const headers = asRecord(cfg["headers"]) ?? {};
-      const bodyPayload = { event: rt.event, contactId: rt.contactId ?? null, dealId: rt.dealId ?? null, data: rt.data };
+
+      // Root pra resolver os tokens {{...}} do body/headers custom.
+      const root = buildWebhookRoot(rt);
+
       const h = new Headers({ "Content-Type": "application/json" });
-      for (const [k, v] of Object.entries(headers)) { if (typeof v === "string") h.set(k, v); }
+      for (const [k, v] of Object.entries(headers)) {
+        if (typeof v === "string") h.set(k, interpolateWebhookString(v, root));
+      }
+
+      // Body custom (com variáveis) tem prioridade. Sem ele, payload legado.
+      const customBody = readString(cfg, "body");
+      let bodyStr: string | undefined;
+      if (method === "GET" || method === "HEAD") {
+        bodyStr = undefined;
+      } else if (customBody && customBody.trim()) {
+        bodyStr = interpolateWebhookString(customBody, root);
+      } else {
+        bodyStr = JSON.stringify({
+          event: rt.event,
+          contactId: rt.contactId ?? null,
+          dealId: rt.dealId ?? null,
+          data: rt.data,
+        });
+      }
+
       const res = await fetch(url, {
-        method, headers: h,
-        body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(bodyPayload),
+        method,
+        headers: h,
+        body: bodyStr,
         signal: AbortSignal.timeout(30_000),
       });
       if (!res.ok) throw new Error(`webhook: HTTP ${res.status}`);
