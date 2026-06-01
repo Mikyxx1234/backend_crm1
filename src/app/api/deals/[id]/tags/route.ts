@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { withOrgContext } from "@/lib/auth-helpers";
+import { withApiAuthContext } from "@/lib/api-auth";
 import type { AppUserRole } from "@/lib/auth-types";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -12,8 +12,10 @@ type Ctx = { params: Promise<{ id: string }> };
 // Bug 27/abr/26: usavamos `auth()` direto. A rota chama `withOrgFromCtx`
 // (direto ou via service), avaliado ANTES da Prisma extension popular
 // o ctx. Migrado para withOrgContext.
+// Fix 01/jun/26: trocado withOrgContext por withApiAuthContext para aceitar
+// Bearer Token (ApiToken) além da sessão NextAuth, igual GET /api/deals.
 export async function POST(request: Request, ctx: Ctx) {
-  return withOrgContext(async (session) => {
+  return withApiAuthContext(request, async (user) => {
     try {
       const { id } = await ctx.params;
       const existing = await getDealById(id);
@@ -38,7 +40,7 @@ export async function POST(request: Request, ctx: Ctx) {
         if (existingTag) {
           resolvedTagId = existingTag.id;
         } else {
-          const role = (session.user as { role?: AppUserRole }).role;
+          const role = user.role as AppUserRole;
           if (role !== "ADMIN" && role !== "MANAGER") {
             return NextResponse.json({ message: "Sem permissão para criar tags. Selecione uma existente." }, { status: 403 });
           }
@@ -55,7 +57,7 @@ export async function POST(request: Request, ctx: Ctx) {
         create: { dealId, tagId: resolvedTagId },
       });
 
-      const uid = (session.user as { id: string }).id;
+      const uid = user.id;
       const resolvedTag = await prisma.tag.findUnique({ where: { id: resolvedTagId }, select: { name: true, color: true } });
       createDealEvent(dealId, uid, "TAG_ADDED", { tagName: resolvedTag?.name ?? tagName, tagColor: resolvedTag?.color ?? tagColor }).catch(() => {});
 
@@ -67,7 +69,7 @@ export async function POST(request: Request, ctx: Ctx) {
 }
 
 export async function DELETE(request: Request, ctx: Ctx) {
-  return withOrgContext(async (session) => {
+  return withApiAuthContext(request, async (user) => {
     try {
       const { id } = await ctx.params;
       const existing = await getDealById(id);
@@ -84,7 +86,7 @@ export async function DELETE(request: Request, ctx: Ctx) {
         where: { dealId_tagId: { dealId, tagId } },
       }).catch(() => {});
 
-      const uid = (session.user as { id: string }).id;
+      const uid = user.id;
       createDealEvent(dealId, uid, "TAG_REMOVED", { tagName: tagInfo?.name ?? tagId, tagColor: tagInfo?.color ?? "" }).catch(() => {});
 
       return NextResponse.json({ ok: true });
