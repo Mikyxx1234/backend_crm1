@@ -41,7 +41,7 @@ export async function GET(request: Request) {
 
       if (!pipelineId) {
         return NextResponse.json(
-          { stages: [], summary: { totalValue: 0, totalDeals: 0, winRate: 0, avgTicket: 0, deltas: { winRate: 0, avgTicket: 0 } } },
+          { stages: [], newInPeriod: { count: 0, value: 0 }, summary: { totalValue: 0, totalDeals: 0, winRate: 0, avgTicket: 0, deltas: { winRate: 0, avgTicket: 0 } } },
         );
       }
 

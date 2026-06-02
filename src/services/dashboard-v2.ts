@@ -105,6 +105,8 @@ export interface DealStageFlow {
 
 export interface DealsOverviewResult {
   stages: DealStageFlow[];
+  /** Negócios CRIADOS dentro do período selecionado (1º card do carrossel). */
+  newInPeriod: { count: number; value: number };
   summary: {
     totalValue: number;
     totalDeals: number;
@@ -193,6 +195,24 @@ export async function getDealsOverview(
     GROUP BY d."stageId"
   `);
 
+  // Novos do período: negócios CRIADOS na janela (entrada de leads),
+  // independente do status atual. Escopo = estágios do pipeline ativo.
+  const newRows = stageIds.length
+    ? await prisma.$queryRaw<{ cnt: bigint; val: unknown }[]>(Prisma.sql`
+        SELECT COUNT(*)::bigint AS cnt,
+               COALESCE(SUM(CAST(d.value AS DECIMAL)), 0) AS val
+        FROM deals d
+        WHERE d."organizationId" = ${orgId}
+          AND d."stageId" IN (${Prisma.join(stageIds)})
+          AND d."createdAt" >= ${period.from} AND d."createdAt" <= ${period.to}
+          ${ownerFilter}
+      `)
+    : [];
+  const newInPeriod = {
+    count: newRows[0] ? Number(newRows[0].cnt) : 0,
+    value: newRows[0] ? toNumber(newRows[0].val) : 0,
+  };
+
   const snapMap = new Map(snapshotRows.map((r) => [r.stageId, r]));
   const enteredMap = new Map(enteredRows.map((r) => [r.stageId, Number(r.c)]));
   const exitedMap = new Map(exitedRows.map((r) => [r.stageId, Number(r.c)]));
@@ -224,6 +244,7 @@ export async function getDealsOverview(
 
   return {
     stages: stageFlow,
+    newInPeriod,
     summary: {
       totalValue: totalValue || cur.pipelineValue,
       totalDeals: totalDeals || cur.openDeals,

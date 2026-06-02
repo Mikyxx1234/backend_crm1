@@ -56,6 +56,7 @@ export async function PUT(request: Request, ctx: Ctx) {
         ...((existing?.entity === "contact" || existing?.entity === "deal") && body.inboxLeadPanelOrder !== undefined
           ? { inboxLeadPanelOrder }
           : {}),
+        ...(body.highlightRules !== undefined ? { highlightRules: body.highlightRules } : {}),
       });
       return NextResponse.json(field);
     } catch (e) {

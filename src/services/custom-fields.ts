@@ -1,5 +1,6 @@
-import type { CustomFieldType } from "@prisma/client";
+import type { CustomFieldType, Prisma } from "@prisma/client";
 
+import { parseHighlightRules, resolveHighlight } from "@/lib/highlight";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
@@ -23,6 +24,7 @@ export async function createCustomField(data: {
   entity?: string;
   showInInboxLeadPanel?: boolean;
   inboxLeadPanelOrder?: number | null;
+  highlightRules?: unknown;
 }) {
   return prisma.customField.create({
     data: withOrgFromCtx({
@@ -34,6 +36,9 @@ export async function createCustomField(data: {
       entity: data.entity ?? "contact",
       showInInboxLeadPanel: data.showInInboxLeadPanel ?? false,
       inboxLeadPanelOrder: data.inboxLeadPanelOrder ?? null,
+      ...(data.highlightRules !== undefined
+        ? { highlightRules: parseHighlightRules(data.highlightRules) as unknown as Prisma.InputJsonValue }
+        : {}),
     }),
   });
 }
@@ -47,9 +52,19 @@ export async function updateCustomField(
     required?: boolean;
     showInInboxLeadPanel?: boolean;
     inboxLeadPanelOrder?: number | null;
+    highlightRules?: unknown;
   }
 ) {
-  return prisma.customField.update({ where: { id }, data });
+  const { highlightRules, ...rest } = data;
+  return prisma.customField.update({
+    where: { id },
+    data: {
+      ...rest,
+      ...(highlightRules !== undefined
+        ? { highlightRules: parseHighlightRules(highlightRules) as unknown as Prisma.InputJsonValue }
+        : {}),
+    },
+  });
 }
 
 export async function deleteCustomField(id: string) {
@@ -65,15 +80,19 @@ export async function getContactCustomFieldValues(contactId: string) {
     },
   });
 
-  return fields.map((f) => ({
-    fieldId: f.id,
-    name: f.name,
-    label: f.label,
-    type: f.type,
-    options: f.options,
-    required: f.required,
-    value: f.values[0]?.value ?? null,
-  }));
+  return fields.map((f) => {
+    const value = f.values[0]?.value ?? null;
+    return {
+      fieldId: f.id,
+      name: f.name,
+      label: f.label,
+      type: f.type,
+      options: f.options,
+      required: f.required,
+      value,
+      highlight: resolveHighlight(value, f.highlightRules),
+    };
+  });
 }
 
 export async function upsertContactCustomFieldValues(
@@ -109,15 +128,19 @@ export async function getDealCustomFieldValues(dealId: string) {
     },
   });
 
-  return fields.map((f) => ({
-    fieldId: f.id,
-    name: f.name,
-    label: f.label,
-    type: f.type,
-    options: f.options,
-    required: f.required,
-    value: f.dealValues[0]?.value ?? null,
-  }));
+  return fields.map((f) => {
+    const value = f.dealValues[0]?.value ?? null;
+    return {
+      fieldId: f.id,
+      name: f.name,
+      label: f.label,
+      type: f.type,
+      options: f.options,
+      required: f.required,
+      value,
+      highlight: resolveHighlight(value, f.highlightRules),
+    };
+  });
 }
 
 export async function upsertDealCustomFieldValues(
