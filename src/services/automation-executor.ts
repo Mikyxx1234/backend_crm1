@@ -216,6 +216,13 @@ function interpolateWebhookString(template: string, root: Record<string, unknown
 }
 
 function buildWebhookRoot(rt: RuntimeContext): Record<string, unknown> {
+  // 03/jun/26 — root expandido pra cobrir o que o construtor visual de
+  // body do step `webhook` lista no catálogo (ver
+  // `automation-webhook-variables.ts` no front). Antes só tinha
+  // `contact`/`deal`/`event`/`data`, então tokens como `{{contactTagNames}}`,
+  // `{{conversation.id}}` e `{{contactCustomFields.<nome>}}` apareciam na
+  // UI mas resolviam pra string vazia. Mantemos os campos existentes
+  // intactos pra não quebrar bodies salvos.
   return {
     event: rt.event,
     automationId: rt.automationId,
@@ -224,7 +231,14 @@ function buildWebhookRoot(rt: RuntimeContext): Record<string, unknown> {
     dealId: rt.dealId ?? null,
     contact: rt.contact ?? null,
     deal: rt.deal ?? null,
+    conversation: rt.conversation ?? null,
     data: rt.data ?? {},
+    contactTagIds: rt.contactTagIds ?? [],
+    contactTagNames: rt.contactTagNames ?? [],
+    dealTagIds: rt.dealTagIds ?? [],
+    dealTagNames: rt.dealTagNames ?? [],
+    contactCustomFields: rt.contactCustomFields ?? {},
+    dealCustomFields: rt.dealCustomFields ?? {},
   };
 }
 
@@ -370,6 +384,14 @@ type RuntimeContext = {
   contactTagNames: string[];
   dealTagIds: string[];
   dealTagNames: string[];
+  // 03/jun/26 — Snapshot de custom fields do contato/negócio. Usado
+  // pelo construtor visual do step `webhook` pra emitir tokens como
+  // `{{contactCustomFields.<nome>}}`. Chave é o `name` (slug) do
+  // CustomField; valor é o `String` armazenado em
+  // `*_custom_field_values.value` (todos os tipos serializam pra
+  // string no banco).
+  contactCustomFields: Record<string, string>;
+  dealCustomFields: Record<string, string>;
 };
 
 /**
@@ -380,6 +402,52 @@ type RuntimeContext = {
  * além de ser invocado dentro do loop após cada `add_tag`/`remove_tag`
  * pra que a próxima `condition` enxergue o estado atualizado das tags.
  */
+/**
+ * Snapshot dos custom fields do contato e do negócio (chave = `name` do
+ * CustomField, valor = string armazenada). Usado tanto na execução
+ * inicial quanto em `continueFromStep` pra que o webhook tenha a versão
+ * mais atual quando o operador montou um body que referencia
+ * `{{contactCustomFields.celular_55}}`, `{{dealCustomFields.observacao}}`
+ * etc. via construtor visual.
+ *
+ * Recarregamos depois de `update_field` (no loop principal) pra evitar
+ * que um webhook subsequente envie a versão antiga.
+ */
+async function loadAutomationCustomFieldsSnapshot(
+  contactId: string | undefined,
+  dealId: string | undefined,
+): Promise<{
+  contactCustomFields: Record<string, string>;
+  dealCustomFields: Record<string, string>;
+}> {
+  const contactCustomFields: Record<string, string> = {};
+  const dealCustomFields: Record<string, string> = {};
+
+  if (contactId) {
+    const rows = await prisma.contactCustomFieldValue.findMany({
+      where: { contactId },
+      select: { value: true, customField: { select: { name: true } } },
+    });
+    for (const r of rows) {
+      const name = r.customField?.name;
+      if (name) contactCustomFields[name] = r.value ?? "";
+    }
+  }
+
+  if (dealId) {
+    const rows = await prisma.dealCustomFieldValue.findMany({
+      where: { dealId },
+      select: { value: true, customField: { select: { name: true } } },
+    });
+    for (const r of rows) {
+      const name = r.customField?.name;
+      if (name) dealCustomFields[name] = r.value ?? "";
+    }
+  }
+
+  return { contactCustomFields, dealCustomFields };
+}
+
 async function loadAutomationTagSnapshot(
   contactId: string | undefined,
   dealId: string | undefined,
@@ -540,6 +608,11 @@ async function resolveRuntimeContext(
 
   const conversation = contactId ? await loadConversationSnapshot(contactId, data) : null;
 
+  const customFieldsSnapshot = await loadAutomationCustomFieldsSnapshot(
+    contactId,
+    dealId,
+  );
+
   return {
     automationId,
     contactId,
@@ -553,6 +626,8 @@ async function resolveRuntimeContext(
     contactTagNames,
     dealTagIds,
     dealTagNames,
+    contactCustomFields: customFieldsSnapshot.contactCustomFields,
+    dealCustomFields: customFieldsSnapshot.dealCustomFields,
   };
 }
 
@@ -2222,6 +2297,19 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
         rt.dealTagIds = snap.dealTagIds;
         rt.dealTagNames = snap.dealTagNames;
       }
+      // 03/jun/26 — Mesmo motivo das tags: se um `update_field` mudou
+      // um custom field (de contato ou negócio), um webhook subsequente
+      // que use `{{contactCustomFields.<x>}}` precisa enxergar o valor
+      // atualizado. Recarregamos só os custom fields (tags não mudam
+      // aqui) pra evitar query desnecessária.
+      if (step.type === "update_field") {
+        const snap = await loadAutomationCustomFieldsSnapshot(
+          rt.contactId,
+          rt.dealId,
+        );
+        rt.contactCustomFields = snap.contactCustomFields;
+        rt.dealCustomFields = snap.dealCustomFields;
+      }
       await logStep({
         automationId,
         contactId: rt.contactId,
@@ -2379,6 +2467,10 @@ export async function continueFromStep(
   // sempre caía no else (operador relatou: "selecionei CLT, condição
   // veio depois e foi ignorada").
   const tagSnapshot = await loadAutomationTagSnapshot(contactId, deal?.id);
+  const customFieldsSnapshot = await loadAutomationCustomFieldsSnapshot(
+    contactId,
+    deal?.id,
+  );
 
   const rt: RuntimeContext = {
     automationId,
@@ -2393,6 +2485,8 @@ export async function continueFromStep(
     contactTagNames: tagSnapshot.contactTagNames,
     dealTagIds: tagSnapshot.dealTagIds,
     dealTagNames: tagSnapshot.dealTagNames,
+    contactCustomFields: customFieldsSnapshot.contactCustomFields,
+    dealCustomFields: customFieldsSnapshot.dealCustomFields,
   };
 
   let contConvIdForMeta: string | undefined;
@@ -2461,6 +2555,14 @@ export async function continueFromStep(
         rt.contactTagNames = snap.contactTagNames;
         rt.dealTagIds = snap.dealTagIds;
         rt.dealTagNames = snap.dealTagNames;
+      }
+      if (step.type === "update_field") {
+        const snap = await loadAutomationCustomFieldsSnapshot(
+          rt.contactId,
+          rt.dealId,
+        );
+        rt.contactCustomFields = snap.contactCustomFields;
+        rt.dealCustomFields = snap.dealCustomFields;
       }
       await logStep({
         automationId,
