@@ -70,10 +70,13 @@ async function readAuthFromRequestCookie(
  * / inline scripts do Next. CSP fica de TODO separado com testes.
  */
 function withSecurityHeaders(res: NextResponse): NextResponse {
-  res.headers.set(
-    "Strict-Transport-Security",
-    "max-age=31536000; includeSubDomains; preload",
-  );
+  // HSTS só em HTTPS — em HTTP local causaria Mixed Content e bloquearia SSE
+  if ((process.env.NEXTAUTH_URL ?? "").startsWith("https://")) {
+    res.headers.set(
+      "Strict-Transport-Security",
+      "max-age=31536000; includeSubDomains; preload",
+    );
+  }
   res.headers.set("X-Content-Type-Options", "nosniff");
   res.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   res.headers.set("X-Frame-Options", "SAMEORIGIN");
