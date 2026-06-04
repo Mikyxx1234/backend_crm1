@@ -52,21 +52,6 @@ let cached: WhatsAppHealthStatus | null = null;
 let cachedAt = 0;
 let inflight: Promise<WhatsAppHealthStatus> | null = null;
 
-// Suprime repetição de erro de "ID não existe / sem permissão" (code 100/33).
-// Logamos warn uma única vez por restart de processo — relogar a cada 2 min
-// polui os logs sem agregar valor, já que o root cause é config de ENV.
-let permanentErrorLoggedAt = 0;
-const PERMANENT_ERROR_LOG_SUPPRESS_MS = 60 * 60 * 1_000; // 1h entre re-logs
-
-/** Detecta erros permanentes de configuração (ID inválido, permissão ausente). */
-function isPermanentConfigError(msg: string): boolean {
-  return (
-    /does not exist|cannot be loaded due to missing permissions/i.test(msg) ||
-    /code[=\s]+100.*subcode[=\s]+33/i.test(msg) ||
-    /Object with ID/i.test(msg)
-  );
-}
-
 function ttlMs(): number {
   const raw = process.env.WHATSAPP_HEALTH_TTL_MS;
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
@@ -158,23 +143,7 @@ async function fetchFresh(): Promise<WhatsAppHealthStatus> {
     return status;
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : String(err);
-
-    // Erros permanentes de config (ID antigo/inválido no ENV) não merecem
-    // warn a cada 2 min — suprimimos após o primeiro log por restart.
-    const isPermanent = isPermanentConfigError(errMsg);
-    const now = Date.now();
-    const shouldLog = !isPermanent || (now - permanentErrorLoggedAt > PERMANENT_ERROR_LOG_SUPPRESS_MS);
-    if (shouldLog) {
-      if (isPermanent) {
-        permanentErrorLoggedAt = now;
-        log.warn(
-          `Falha ao consultar saúde do número WhatsApp (ID do ENV inválido ou sem permissão — verifique META_WHATSAPP_PHONE_NUMBER_ID): ${errMsg}`,
-        );
-      } else {
-        log.warn(`Falha ao consultar saúde do número WhatsApp: ${errMsg}`);
-      }
-    }
-
+    log.warn(`Falha ao consultar saúde do número WhatsApp: ${errMsg}`);
     return {
       reachable: false,
       severity: "unknown",
@@ -198,10 +167,7 @@ export async function getWhatsAppHealth(options?: { force?: boolean }): Promise<
   inflight = fetchFresh()
     .then((status) => {
       cached = status;
-      // Se o erro for permanente de config (ID inválido no ENV), usar TTL
-      // estendido (1h) para não re-tentar a cada 2 min desnecessariamente.
-      const isPermErr = !status.reachable && status.error && isPermanentConfigError(status.error);
-      cachedAt = isPermErr ? Date.now() - ttlMs() + PERMANENT_ERROR_LOG_SUPPRESS_MS : Date.now();
+      cachedAt = Date.now();
       return status;
     })
     .finally(() => {
