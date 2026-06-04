@@ -191,10 +191,16 @@ export function isSuperAdmin(session: Session | null | undefined): boolean {
  * O model `User` NAO esta no SCOPED_MODELS da Prisma Extension porque o
  * login (NextAuth authorize) precisa achar User por email sem contexto.
  * Em troca, TODA rota que lista users via prisma.user.* precisa filtrar
- * manualmente pela org da sessao. Este helper centraliza essa logica:
+ * manualmente pela org da sessao. Este helper centraliza essa logica.
  *
- *   - Super-admin (organizationId=null) -> filtro vazio (ve tudo).
- *   - User normal -> { organizationId: <org> }.
+ * Semantica (ordem importa):
+ *   1. Tem org ativa  -> { organizationId: <org> }. Vale TAMBEM para
+ *      super-admin: operando "dentro" de uma org, ele enxerga apenas
+ *      aquela org nas telas org-scoped (Equipe, filtros do Kanban, etc).
+ *   2. Super-admin SEM org ativa -> {} (visao global). Esse e o unico
+ *      caminho de bypass, reservado ao contexto de plataforma. As rotas
+ *      `/admin/*` tem logica propria e NAO dependem deste helper.
+ *   3. User normal sem org -> { organizationId: "__none__" } (nada).
  *
  * Uso:
  *   const where = { type: "HUMAN", ...userOrgFilter(session) };
@@ -202,13 +208,21 @@ export function isSuperAdmin(session: Session | null | undefined): boolean {
  *
  * Fix de regressao 24/abr/26: GET /api/users vazava lista global de users
  * entre tenants porque o filtro estava faltando.
+ *
+ * Fix 29/mai/26 (tenancy P0): o bypass `if (isSuperAdmin) return {}` vinha
+ * ANTES da checagem de org ativa, entao um super-admin com org (ex.: dono
+ * da plataforma que tambem e membro de uma org) via usuarios de TODAS as
+ * orgs na tela de Equipe — e podia ate excluir/editar cross-org. Agora a
+ * org ativa tem prioridade; o bypass so vale quando NAO ha org ativa.
  */
 export function userOrgFilter(
   session: Session | { user: { organizationId: string | null; isSuperAdmin: boolean } },
 ): { organizationId?: string } {
+  if (session.user.organizationId) {
+    return { organizationId: session.user.organizationId };
+  }
   if (session.user.isSuperAdmin) return {};
-  if (!session.user.organizationId) return { organizationId: "__none__" };
-  return { organizationId: session.user.organizationId };
+  return { organizationId: "__none__" };
 }
 
 /**

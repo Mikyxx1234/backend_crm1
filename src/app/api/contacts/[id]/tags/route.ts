@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { withOrgContext } from "@/lib/auth-helpers";
+import { withApiAuthContext } from "@/lib/api-auth";
 import type { AppUserRole } from "@/lib/auth-types";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -11,8 +11,10 @@ type Ctx = { params: Promise<{ id: string }> };
 // Bug 27/abr/26: usavamos `auth()` direto. A rota chama `withOrgFromCtx`
 // (direto ou via service), avaliado ANTES da Prisma extension popular
 // o ctx. Migrado para withOrgContext.
+// Fix 01/jun/26: trocado withOrgContext por withApiAuthContext para aceitar
+// Bearer Token (ApiToken) além da sessão NextAuth, igual GET /api/contacts.
 export async function POST(request: Request, ctx: Ctx) {
-  return withOrgContext(async (session) => {
+  return withApiAuthContext(request, async (user) => {
     try {
       const { id: contactId } = await ctx.params;
       const body = (await request.json()) as Record<string, unknown>;
@@ -33,7 +35,7 @@ export async function POST(request: Request, ctx: Ctx) {
         if (existing) {
           resolvedTagId = existing.id;
         } else {
-          const role = (session.user as { role?: AppUserRole }).role;
+          const role = user.role as AppUserRole;
           if (role !== "ADMIN" && role !== "MANAGER") {
             return NextResponse.json({ message: "Sem permissão para criar tags. Selecione uma existente." }, { status: 403 });
           }
@@ -58,7 +60,7 @@ export async function POST(request: Request, ctx: Ctx) {
 }
 
 export async function DELETE(request: Request, ctx: Ctx) {
-  return withOrgContext(async () => {
+  return withApiAuthContext(request, async () => {
     try {
       const { id: contactId } = await ctx.params;
       const body = (await request.json()) as Record<string, unknown>;

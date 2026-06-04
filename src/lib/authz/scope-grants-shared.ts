@@ -29,6 +29,31 @@ const INBOX_CATEGORY_TAB_ORDER: readonly Exclude<InboxTab, "todos">[] = [
 type RoleKey = "ADMIN" | "MANAGER" | "MEMBER";
 type RoleScope = Partial<Record<RoleKey, string[]>>;
 
+/**
+ * Override por usuário individual para ações do CRM.
+ *
+ * 29/mai/26 — adicionado para suportar a tela `/settings/permissions` no
+ * frontend, que define toggles por usuário (não por papel) para 3 ações:
+ *
+ *   - `editLeads`     — mover deals entre estágios + editar campos
+ *   - `runAutomations`— disparar automações manualmente
+ *   - `assignOwner`   — atribuir/trocar responsável
+ *
+ * Schema: `crm.<action>.users[userId] = boolean`
+ *   - `true`  → override permissivo (passa mesmo se RBAC negar)
+ *   - `false` → override restritivo (bloqueia mesmo se RBAC permitir)
+ *   - chave ausente → segue regra do RBAC (`Role` + `UserRoleAssignment`)
+ *
+ * Quem consome: `requirePermissionForUser` (`resource-policy.ts`) faz o
+ * lookup ANTES de retornar 403, mapeando `PermissionKey` → `CrmActionKey`
+ * via `RBAC_TO_CRM_ACTION`.
+ */
+export type CrmActionKey = "editLeads" | "runAutomations" | "assignOwner";
+type CrmActionUserGrants = Partial<Record<string, boolean>>;
+export type CrmActionGrants = Partial<
+  Record<CrmActionKey, { users?: CrmActionUserGrants }>
+>;
+
 export type ScopeGrants = {
   /** Abas da Inbox por papel (`MEMBER`). Valores: chaves de aba ou `"*"`. */
   inbox?: {
@@ -61,7 +86,20 @@ export type ScopeGrants = {
     routes?: RoleScope;
     settingsItems?: RoleScope;
   };
+  /**
+   * Overrides por usuário para 3 ações de alto nível do CRM. Configurado
+   * via UI em /settings/permissions; consultado em
+   * `requirePermissionForUser` como fallback permissivo quando o RBAC
+   * tradicional negaria.
+   */
+  crm?: CrmActionGrants;
 };
+
+export const CRM_ACTION_KEYS: readonly CrmActionKey[] = [
+  "editLeads",
+  "runAutomations",
+  "assignOwner",
+] as const;
 
 function asRoleKey(role: string | null | undefined): RoleKey | null {
   if (role === "ADMIN" || role === "MANAGER" || role === "MEMBER") return role;
@@ -80,6 +118,30 @@ function normalizeRoleScope(input: unknown): RoleScope {
     MANAGER: normalizeIds(src.MANAGER),
     MEMBER: normalizeIds(src.MEMBER),
   };
+}
+
+function normalizeCrmUserGrants(input: unknown): CrmActionUserGrants {
+  if (!input || typeof input !== "object") return {};
+  const src = input as Record<string, unknown>;
+  const out: CrmActionUserGrants = {};
+  for (const [userId, raw] of Object.entries(src)) {
+    if (typeof userId !== "string" || !userId) continue;
+    if (typeof raw === "boolean") out[userId] = raw;
+  }
+  return out;
+}
+
+function normalizeCrmGrants(input: unknown): CrmActionGrants {
+  if (!input || typeof input !== "object") return {};
+  const src = input as Record<string, unknown>;
+  const out: CrmActionGrants = {};
+  for (const action of CRM_ACTION_KEYS) {
+    const node = src[action];
+    if (!node || typeof node !== "object") continue;
+    const usersRaw = (node as Record<string, unknown>).users;
+    out[action] = { users: normalizeCrmUserGrants(usersRaw) };
+  }
+  return out;
 }
 
 export function parseScopeGrants(input: unknown): ScopeGrants {
@@ -123,7 +185,27 @@ export function parseScopeGrants(input: unknown): ScopeGrants {
       routes: normalizeRoleScope(sidebar.routes),
       settingsItems: normalizeRoleScope(sidebar.settingsItems),
     },
+    crm: normalizeCrmGrants(src.crm),
   };
+}
+
+/**
+ * Lê o override por usuário para uma ação do CRM. Retorna `true | false`
+ * (override explícito) ou `null` (sem override — segue a regra do RBAC).
+ *
+ * Mantém-se em scope-grants-shared (zero I/O) pra ser usável tanto no
+ * backend (resource-policy) quanto em código compartilhado eventual.
+ */
+export function readCrmActionGrant(
+  grants: ScopeGrants,
+  action: CrmActionKey,
+  userId: string,
+): boolean | null {
+  const node = grants.crm?.[action];
+  if (!node) return null;
+  const value = node.users?.[userId];
+  if (value === true || value === false) return value;
+  return null;
 }
 
 function hasRoleRule(scope: RoleScope | undefined, role: RoleKey): boolean {

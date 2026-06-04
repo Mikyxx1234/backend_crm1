@@ -88,6 +88,7 @@ export async function POST(request: Request) {
         entity,
         showInInboxLeadPanel,
         inboxLeadPanelOrder: inboxLeadPanelOrder ?? null,
+        ...(Array.isArray(body.highlightRules) ? { highlightRules: body.highlightRules } : {}),
       });
       return NextResponse.json(field, { status: 201 });
     } catch (e) {

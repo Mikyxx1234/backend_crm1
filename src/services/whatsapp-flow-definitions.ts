@@ -1,6 +1,10 @@
 import { prisma } from "@/lib/prisma";
 import { buildWaFlowJsonString, type CrmFlowScreenInput } from "@/lib/meta-whatsapp/build-static-wa-flow-json";
 import type { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
+import {
+  cleanFlowFieldLabel,
+  normalizeFlowMatchKey,
+} from "@/lib/meta-whatsapp/parse-flow-response";
 import { parseWaFlowJsonToCrmScreens } from "@/lib/meta-whatsapp/parse-wa-flow-json";
 
 export type FlowDefinitionInputScreen = {
@@ -429,7 +433,14 @@ export async function resolveFlowDefinitionForInbound(params: {
 
   if (published.length === 0) return null;
 
-  // (1) Resolução exata via FK persistida no envio outbound.
+  // O `flowId` do template guarda o METAFLOWID (id da Meta), não o id interno
+  // do CRM. Bug histórico: a resolução comparava com `f.id` (cuid) e nunca
+  // casava → mesmo com token, tudo caía no match por rótulo (ambíguo quando a
+  // org tem flows publicados com rótulos parecidos).
+  const byMetaFlowId = (metaFlowId: string | null | undefined) =>
+    metaFlowId ? published.find((f) => f.metaFlowId === metaFlowId) ?? null : null;
+
+  // (1) Resolução exata via flow_token persistido no envio outbound.
   const token = params.flowToken?.trim();
   if (token) {
     const outbound = await prisma.message.findFirst({
@@ -439,47 +450,77 @@ export async function resolveFlowDefinitionForInbound(params: {
         direction: "out",
       },
       orderBy: { createdAt: "desc" },
-      select: {
-        templateConfigId: true,
-        templateConfig: { select: { flowId: true } },
-      },
+      select: { templateConfig: { select: { flowId: true } } },
     });
-    const linkedFlowId = outbound?.templateConfig?.flowId ?? null;
-    if (linkedFlowId) {
-      const linked = published.find((f) => f.id === linkedFlowId);
-      if (linked) return linked;
-    }
+    const linked = byMetaFlowId(outbound?.templateConfig?.flowId);
+    if (linked) return linked;
   }
+
+  // (1b) Resolução pelos templates de Flow disparados NESTA conversa. A Meta
+  // frequentemente omite o `flow_token` no nfm_reply, mas os templates
+  // outbound carregam `templateConfig.flowId` (= metaFlowId). Restringir os
+  // candidatos aos flows efetivamente enviados na conversa elimina a
+  // ambiguidade entre flows publicados com rótulos parecidos — principal
+  // causa de respostas gravadas no flow errado (ou não gravadas).
+  const sentOutbound = await prisma.message.findMany({
+    where: {
+      conversationId: params.conversationId,
+      direction: "out",
+      templateConfig: { is: { flowId: { not: null } } },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { templateConfig: { select: { flowId: true } } },
+  });
+  const sentPublished: typeof published = [];
+  for (const m of sentOutbound) {
+    const f = byMetaFlowId(m.templateConfig?.flowId);
+    if (f && !sentPublished.some((x) => x.id === f.id)) sentPublished.push(f);
+  }
+
+  // Candidatos: prioriza flows enviados na conversa; senão, todos os publicados.
+  const pool = sentPublished.length > 0 ? sentPublished : published;
+
+  // Um único flow com Flow enviado na conversa → resolução determinística.
+  if (sentPublished.length === 1) return sentPublished[0];
 
   // (2) Match por nome enviado pela Meta no payload do nfm_reply.
   const metaName = params.flowMetaName?.trim();
   if (metaName) {
-    const byMeta = published.find(
+    const byMeta = pool.find(
       (f) => f.metaFlowId === metaName || f.name === metaName,
     );
     if (byMeta) return byMeta;
   }
 
-  // (3) Best-match por chaves de campo (fallback histórico).
-  const keys = new Set(
-    params.responseKeys.map((k) => k.trim().replace(/[^a-zA-Z0-9_]/g, "_")),
-  );
-  if (keys.size === 0) return published[0] ?? null;
+  // (3) Best-match por campo, restrito ao pool de candidatos. Compara tanto a
+  // chave crua quanto o RÓTULO normalizado — as respostas da Meta normalmente
+  // vêm com a chave derivada do label, não do `fieldKey` salvo (que tem
+  // sufixo hash). Sem normalizar por label, o score dava 0 e caía no
+  // primeiro candidato (flow errado), fazendo os campos não casarem.
+  const respNorms = params.responseKeys
+    .map((k) => normalizeFlowMatchKey(cleanFlowFieldLabel(k)))
+    .filter((s) => s.length >= 3);
+  if (respNorms.length === 0) return pool[0] ?? null;
 
   let best: (typeof published)[number] | null = null;
   let bestScore = 0;
-  for (const flow of published) {
-    const fieldKeys = flow.screens.flatMap((s) =>
-      s.fields.map((f) => f.fieldKey.trim().replace(/[^a-zA-Z0-9_]/g, "_")),
+  for (const flow of pool) {
+    const fieldNorms = flow.screens.flatMap((s) =>
+      s.fields.flatMap((f) => [
+        normalizeFlowMatchKey(f.label),
+        normalizeFlowMatchKey(f.fieldKey),
+      ]),
     );
-    const score = fieldKeys.filter((k) => keys.has(k)).length;
+    const score = respNorms.filter((r) =>
+      fieldNorms.some((fn) => fn === r || (r.length >= 3 && fn.startsWith(r))),
+    ).length;
     if (score > bestScore) {
       bestScore = score;
       best = flow;
     }
   }
 
-  return bestScore > 0 ? best : published[0] ?? null;
+  return bestScore > 0 ? best : pool[0] ?? null;
 }
 
 export type MetaFlowListItem = {

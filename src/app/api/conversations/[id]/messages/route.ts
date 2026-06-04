@@ -44,7 +44,31 @@ export type InboxMessageDto = {
   reactions?: ReactionDto[];
   sendStatus?: string;
   sendError?: string;
+  /**
+   * Status de entrega normalizado (estilo WhatsApp) — derivado de
+   * `sendStatus`. Apenas mensagens `out` o exibem. Alimenta os ticks
+   * (✓ / ✓✓ / ✓✓ azul) no balão do chat.
+   */
+  status?: "PENDING" | "SENT" | "DELIVERED" | "READ" | "FAILED";
 };
+
+/** Normaliza o `sendStatus` (string livre) para o enum de status do DTO. */
+function mapSendStatus(s: string | null | undefined): InboxMessageDto["status"] {
+  switch ((s ?? "").toLowerCase()) {
+    case "pending":
+      return "PENDING";
+    case "sent":
+      return "SENT";
+    case "delivered":
+      return "DELIVERED";
+    case "read":
+      return "READ";
+    case "failed":
+      return "FAILED";
+    default:
+      return undefined; // "draft" e outros — sem ticks.
+  }
+}
 
 // ── GET ──────────────────────────────────────
 
@@ -165,6 +189,7 @@ export async function GET(request: Request, context: RouteContext) {
       reactions: Array.isArray(r.reactions) ? (r.reactions as ReactionDto[]) : [],
       sendStatus: r.sendStatus,
       sendError: r.sendError ?? undefined,
+      status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
     }));
 
     return NextResponse.json({
@@ -401,6 +426,7 @@ export async function POST(request: Request, context: RouteContext) {
         senderName,
         replyToId: replyParentInternalId,
         replyToPreview,
+        status: sendErrorMsg ? "FAILED" : "SENT",
       } satisfies InboxMessageDto,
       ...(sendErrorMsg ? { metaError: sendErrorMsg } : {}),
     }, { status: 201 });

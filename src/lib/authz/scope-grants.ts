@@ -3,7 +3,11 @@ import { prismaBase } from "@/lib/prisma-base";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { parseScopeGrants, type ScopeGrants } from "@/lib/authz/scope-grants-shared";
 
-export type { ScopeGrants } from "@/lib/authz/scope-grants-shared";
+export type {
+  ScopeGrants,
+  CrmActionKey,
+  CrmActionGrants,
+} from "@/lib/authz/scope-grants-shared";
 export {
   canAccessField,
   canAccessScopedResource,
@@ -12,6 +16,8 @@ export {
   canSeeSidebarRoute,
   listAllowedInboxTabsForUser,
   parseScopeGrants,
+  readCrmActionGrant,
+  CRM_ACTION_KEYS,
 } from "@/lib/authz/scope-grants-shared";
 
 const SETTINGS_KEY = "permissions.scope.grants.v1";

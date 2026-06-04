@@ -40,6 +40,19 @@ export async function PUT(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }
 
+    // Tenancy (fix 29/mai/26 — IDOR P0): o update abaixo usava `where: { id }`
+    // sem escopo de org, entao um admin podia editar (nome/email/role/senha)
+    // um usuario de OUTRA organizacao apenas conhecendo o id. Espelha a
+    // checagem que o DELETE ja fazia. `userOrgFilter` agora escopa tambem
+    // super-admin com org ativa, fechando o vetor cross-org.
+    const scopedTarget = await prisma.user.findFirst({
+      where: { id, ...userOrgFilter(r.session) },
+      select: { id: true },
+    });
+    if (!scopedTarget) {
+      return NextResponse.json({ message: "Usuário não encontrado." }, { status: 404 });
+    }
+
     let body: unknown;
     try {
       body = await request.json();

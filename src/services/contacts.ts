@@ -1,5 +1,6 @@
 import type { LifecycleStage, Prisma } from "@prisma/client";
 
+import { resolveHighlight, type ResolvedHighlight } from "@/lib/highlight";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -333,6 +334,7 @@ export type InboxLeadPanelFieldRow = {
   type: string;
   options: string[];
   value: string | null;
+  highlight: ResolvedHighlight | null;
 };
 
 /** Campos de contato marcados para o painel Lead na Inbox (com valor ou vazio). */
@@ -357,14 +359,18 @@ export async function getInboxLeadPanelFieldsForContact(
   });
   const valueByField = new Map(values.map((v) => [v.customFieldId, v.value]));
 
-  return fields.map((f) => ({
-    fieldId: f.id,
-    name: f.name,
-    label: f.label,
-    type: f.type,
-    options: f.options,
-    value: valueByField.get(f.id) ?? null,
-  }));
+  return fields.map((f) => {
+    const value = valueByField.get(f.id) ?? null;
+    return {
+      fieldId: f.id,
+      name: f.name,
+      label: f.label,
+      type: f.type,
+      options: f.options,
+      value,
+      highlight: resolveHighlight(value, f.highlightRules),
+    };
+  });
 }
 
 /** Campos de negócio marcados para o painel lateral na Inbox (com valor ou vazio). */
@@ -389,14 +395,18 @@ export async function getInboxLeadPanelFieldsForDeal(
   });
   const valueByField = new Map(values.map((v) => [v.customFieldId, v.value]));
 
-  return fields.map((f) => ({
-    fieldId: f.id,
-    name: f.name,
-    label: f.label,
-    type: f.type,
-    options: f.options,
-    value: valueByField.get(f.id) ?? null,
-  }));
+  return fields.map((f) => {
+    const value = valueByField.get(f.id) ?? null;
+    return {
+      fieldId: f.id,
+      name: f.name,
+      label: f.label,
+      type: f.type,
+      options: f.options,
+      value,
+      highlight: resolveHighlight(value, f.highlightRules),
+    };
+  });
 }
 
 /**

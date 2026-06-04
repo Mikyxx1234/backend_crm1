@@ -5,6 +5,8 @@ import {
   canAccessField,
   canAccessScopedResource,
   getScopeGrants,
+  readCrmActionGrant,
+  type CrmActionKey,
   type ScopeGrants,
 } from "@/lib/authz/scope-grants";
 import { isFeatureEnabled } from "@/lib/feature-flags";
@@ -16,6 +18,37 @@ type UserLike = {
   isSuperAdmin?: boolean;
 };
 
+/**
+ * Mapeamento PermissionKey (RBAC tradicional) → CrmActionKey (toggles
+ * por usuário em /settings/permissions).
+ *
+ * Quando o RBAC nega uma dessas keys, o handler ainda consulta o
+ * `scopeGrants.crm.<crmAction>.users[userId]` da org. Se houver override
+ * `true`, libera; se houver `false`, mantém o 403; se ausente, mantém o
+ * 403 (default deny no backend — mais seguro que o `default true` da lib
+ * do frontend, que é só client-side gate).
+ *
+ * Mantido conservador (29/mai/26): cobre só o que efetivamente quebrava
+ * o fluxo do operador. Pra adicionar mais permissões à mesma ação,
+ * estender este map — sem precisar tocar o handler.
+ */
+const RBAC_TO_CRM_ACTION: Partial<Record<PermissionKey, CrmActionKey>> = {
+  "deal:change_stage": "editLeads",
+  "deal:edit": "editLeads",
+  "contact:edit": "editLeads",
+  "deal:transfer_owner": "assignOwner",
+};
+
+async function userHasCrmActionGrant(
+  user: UserLike,
+  action: CrmActionKey,
+): Promise<boolean> {
+  if (!user.organizationId) return false;
+  const grants = await getScopeGrants(user.organizationId);
+  const value = readCrmActionGrant(grants, action, user.id);
+  return value === true;
+}
+
 export async function requirePermissionForUser(
   user: UserLike,
   key: PermissionKey,
@@ -26,6 +59,16 @@ export async function requirePermissionForUser(
     isSuperAdmin: Boolean(user.isSuperAdmin),
   });
   if (can(ctx, key)) return null;
+
+  // Override por usuário via /settings/permissions (UI por toggle).
+  // Doc: scope-grants-shared.ts → CrmActionKey. Mapa em RBAC_TO_CRM_ACTION
+  // acima. ADMIN nunca cai aqui porque can() já libera tudo pra ele;
+  // este path só importa pra MANAGER/MEMBER que ganhou grant explícito.
+  const crmAction = RBAC_TO_CRM_ACTION[key];
+  if (crmAction && (await userHasCrmActionGrant(user, crmAction))) {
+    return null;
+  }
+
   return NextResponse.json({ message: "Acesso negado.", required: key }, { status: 403 });
 }
 

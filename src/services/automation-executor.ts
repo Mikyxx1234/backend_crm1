@@ -161,6 +161,87 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
   return undefined;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Webhook — interpolação de variáveis dotted-path no body/headers
+//
+// O step `webhook` aceita um `body` (string JSON) e `headers` custom com
+// tokens `{{caminho.pontilhado}}` (ex.: `{{contact.name}}`,
+// `{{contact.adCtwaClid}}`, `{{deal.id}}`, `{{event}}`, `{{timestamp}}`).
+// Resolvemos cada token contra um root montado a partir do RuntimeContext
+// e substituímos pelo valor escapado para JSON (sem aspas externas — o
+// template já as fornece em `"{{...}}"`). Token ausente vira string vazia.
+//
+// Backward-compat: se `body` não for configurado, mantemos o payload
+// legado `{ event, contactId, dealId, data }`.
+// ─────────────────────────────────────────────────────────────────
+
+function resolveDottedPath(root: Record<string, unknown>, path: string): unknown {
+  const parts = path.split(".").map((p) => p.trim()).filter(Boolean);
+  let cur: unknown = root;
+  for (const p of parts) {
+    if (cur === null || typeof cur !== "object") return undefined;
+    cur = (cur as Record<string, unknown>)[p];
+  }
+  return cur;
+}
+
+function webhookValueToString(v: unknown): string {
+  if (v === null || v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (v instanceof Date) return v.toISOString();
+  try {
+    return JSON.stringify(v);
+  } catch {
+    return String(v);
+  }
+}
+
+function jsonEscapeFragment(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
+}
+
+const WEBHOOK_TOKEN_RE = /\{\{\s*([\w.]+)\s*\}\}/g;
+
+function interpolateWebhookString(template: string, root: Record<string, unknown>): string {
+  return template.replace(WEBHOOK_TOKEN_RE, (_m, path: string) => {
+    const val = resolveDottedPath(root, path);
+    return jsonEscapeFragment(webhookValueToString(val));
+  });
+}
+
+function buildWebhookRoot(rt: RuntimeContext): Record<string, unknown> {
+  // 03/jun/26 — root expandido pra cobrir o que o construtor visual de
+  // body do step `webhook` lista no catálogo (ver
+  // `automation-webhook-variables.ts` no front). Antes só tinha
+  // `contact`/`deal`/`event`/`data`, então tokens como `{{contactTagNames}}`,
+  // `{{conversation.id}}` e `{{contactCustomFields.<nome>}}` apareciam na
+  // UI mas resolviam pra string vazia. Mantemos os campos existentes
+  // intactos pra não quebrar bodies salvos.
+  return {
+    event: rt.event,
+    automationId: rt.automationId,
+    timestamp: new Date().toISOString(),
+    contactId: rt.contactId ?? null,
+    dealId: rt.dealId ?? null,
+    contact: rt.contact ?? null,
+    deal: rt.deal ?? null,
+    conversation: rt.conversation ?? null,
+    data: rt.data ?? {},
+    contactTagIds: rt.contactTagIds ?? [],
+    contactTagNames: rt.contactTagNames ?? [],
+    dealTagIds: rt.dealTagIds ?? [],
+    dealTagNames: rt.dealTagNames ?? [],
+    contactCustomFields: rt.contactCustomFields ?? {},
+    dealCustomFields: rt.dealCustomFields ?? {},
+  };
+}
+
 function readBoolean(obj: Record<string, unknown>, key: string): boolean | undefined {
   const v = obj[key];
   if (typeof v === "boolean") return v;
@@ -303,6 +384,14 @@ type RuntimeContext = {
   contactTagNames: string[];
   dealTagIds: string[];
   dealTagNames: string[];
+  // 03/jun/26 — Snapshot de custom fields do contato/negócio. Usado
+  // pelo construtor visual do step `webhook` pra emitir tokens como
+  // `{{contactCustomFields.<nome>}}`. Chave é o `name` (slug) do
+  // CustomField; valor é o `String` armazenado em
+  // `*_custom_field_values.value` (todos os tipos serializam pra
+  // string no banco).
+  contactCustomFields: Record<string, string>;
+  dealCustomFields: Record<string, string>;
 };
 
 /**
@@ -313,6 +402,52 @@ type RuntimeContext = {
  * além de ser invocado dentro do loop após cada `add_tag`/`remove_tag`
  * pra que a próxima `condition` enxergue o estado atualizado das tags.
  */
+/**
+ * Snapshot dos custom fields do contato e do negócio (chave = `name` do
+ * CustomField, valor = string armazenada). Usado tanto na execução
+ * inicial quanto em `continueFromStep` pra que o webhook tenha a versão
+ * mais atual quando o operador montou um body que referencia
+ * `{{contactCustomFields.celular_55}}`, `{{dealCustomFields.observacao}}`
+ * etc. via construtor visual.
+ *
+ * Recarregamos depois de `update_field` (no loop principal) pra evitar
+ * que um webhook subsequente envie a versão antiga.
+ */
+async function loadAutomationCustomFieldsSnapshot(
+  contactId: string | undefined,
+  dealId: string | undefined,
+): Promise<{
+  contactCustomFields: Record<string, string>;
+  dealCustomFields: Record<string, string>;
+}> {
+  const contactCustomFields: Record<string, string> = {};
+  const dealCustomFields: Record<string, string> = {};
+
+  if (contactId) {
+    const rows = await prisma.contactCustomFieldValue.findMany({
+      where: { contactId },
+      select: { value: true, customField: { select: { name: true } } },
+    });
+    for (const r of rows) {
+      const name = r.customField?.name;
+      if (name) contactCustomFields[name] = r.value ?? "";
+    }
+  }
+
+  if (dealId) {
+    const rows = await prisma.dealCustomFieldValue.findMany({
+      where: { dealId },
+      select: { value: true, customField: { select: { name: true } } },
+    });
+    for (const r of rows) {
+      const name = r.customField?.name;
+      if (name) dealCustomFields[name] = r.value ?? "";
+    }
+  }
+
+  return { contactCustomFields, dealCustomFields };
+}
+
 async function loadAutomationTagSnapshot(
   contactId: string | undefined,
   dealId: string | undefined,
@@ -473,6 +608,11 @@ async function resolveRuntimeContext(
 
   const conversation = contactId ? await loadConversationSnapshot(contactId, data) : null;
 
+  const customFieldsSnapshot = await loadAutomationCustomFieldsSnapshot(
+    contactId,
+    dealId,
+  );
+
   return {
     automationId,
     contactId,
@@ -486,6 +626,8 @@ async function resolveRuntimeContext(
     contactTagNames,
     dealTagIds,
     dealTagNames,
+    contactCustomFields: customFieldsSnapshot.contactCustomFields,
+    dealCustomFields: customFieldsSnapshot.dealCustomFields,
   };
 }
 
@@ -1474,15 +1616,91 @@ async function executeStep(
       if (!url) throw new Error("webhook: url obrigatória");
       const method = (readString(cfg, "method") ?? "POST").toUpperCase();
       const headers = asRecord(cfg["headers"]) ?? {};
-      const bodyPayload = { event: rt.event, contactId: rt.contactId ?? null, dealId: rt.dealId ?? null, data: rt.data };
+
+      // Root pra resolver os tokens {{...}} do body/headers custom.
+      const root = buildWebhookRoot(rt);
+
       const h = new Headers({ "Content-Type": "application/json" });
-      for (const [k, v] of Object.entries(headers)) { if (typeof v === "string") h.set(k, v); }
+      for (const [k, v] of Object.entries(headers)) {
+        if (typeof v === "string") h.set(k, interpolateWebhookString(v, root));
+      }
+
+      // Body custom (com variáveis) tem prioridade. Sem ele, payload legado.
+      const customBody = readString(cfg, "body");
+      let bodyStr: string | undefined;
+      if (method === "GET" || method === "HEAD") {
+        bodyStr = undefined;
+      } else if (customBody && customBody.trim()) {
+        bodyStr = interpolateWebhookString(customBody, root);
+      } else {
+        bodyStr = JSON.stringify({
+          event: rt.event,
+          contactId: rt.contactId ?? null,
+          dealId: rt.dealId ?? null,
+          data: rt.data,
+        });
+      }
+
       const res = await fetch(url, {
-        method, headers: h,
-        body: method === "GET" || method === "HEAD" ? undefined : JSON.stringify(bodyPayload),
+        method,
+        headers: h,
+        body: bodyStr,
         signal: AbortSignal.timeout(30_000),
       });
       if (!res.ok) throw new Error(`webhook: HTTP ${res.status}`);
+      return {};
+    }
+
+    case "consume_stock":
+    case "decrement_stock": {
+      // Baixa de estoque OPT-IN: o operador adiciona este passo a uma
+      // automação (ex.: gatilho `deal_won` ou entrada em estágio) para
+      // reduzir o estoque dos produtos vinculados ao negócio. Só age em
+      // produtos com `trackStock=true`. BLOQUEIA (lança erro) se faltar
+      // estoque em qualquer item — não aplica baixa parcial nem deixa
+      // o estoque negativo.
+      let targetDealId = rt.dealId ?? readString(cfg, "dealId");
+      if (!targetDealId && rt.contactId) {
+        const openDeal = await prisma.deal.findFirst({
+          where: { contactId: rt.contactId, status: "OPEN" },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true },
+        });
+        targetDealId = openDeal?.id;
+      }
+      if (!targetDealId) throw new Error("consume_stock: dealId ausente no contexto");
+
+      const items = await prisma.dealProduct.findMany({
+        where: { dealId: targetDealId },
+        select: {
+          quantity: true,
+          product: { select: { id: true, name: true, trackStock: true, stock: true } },
+        },
+      });
+
+      const tracked = items.filter((it) => it.product.trackStock);
+      if (tracked.length === 0) return {};
+
+      // Pré-checagem de bloqueio: se algum produto não tem saldo, aborta
+      // tudo antes de qualquer escrita.
+      for (const it of tracked) {
+        const need = Number(it.quantity);
+        const have = Number(it.product.stock);
+        if (have < need) {
+          throw new Error(
+            `consume_stock: estoque insuficiente para "${it.product.name}" (disponível ${have}, necessário ${need})`,
+          );
+        }
+      }
+
+      await prisma.$transaction(
+        tracked.map((it) =>
+          prisma.product.update({
+            where: { id: it.product.id },
+            data: { stock: { decrement: Number(it.quantity) } },
+          }),
+        ),
+      );
       return {};
     }
 
@@ -2079,6 +2297,19 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
         rt.dealTagIds = snap.dealTagIds;
         rt.dealTagNames = snap.dealTagNames;
       }
+      // 03/jun/26 — Mesmo motivo das tags: se um `update_field` mudou
+      // um custom field (de contato ou negócio), um webhook subsequente
+      // que use `{{contactCustomFields.<x>}}` precisa enxergar o valor
+      // atualizado. Recarregamos só os custom fields (tags não mudam
+      // aqui) pra evitar query desnecessária.
+      if (step.type === "update_field") {
+        const snap = await loadAutomationCustomFieldsSnapshot(
+          rt.contactId,
+          rt.dealId,
+        );
+        rt.contactCustomFields = snap.contactCustomFields;
+        rt.dealCustomFields = snap.dealCustomFields;
+      }
       await logStep({
         automationId,
         contactId: rt.contactId,
@@ -2236,6 +2467,10 @@ export async function continueFromStep(
   // sempre caía no else (operador relatou: "selecionei CLT, condição
   // veio depois e foi ignorada").
   const tagSnapshot = await loadAutomationTagSnapshot(contactId, deal?.id);
+  const customFieldsSnapshot = await loadAutomationCustomFieldsSnapshot(
+    contactId,
+    deal?.id,
+  );
 
   const rt: RuntimeContext = {
     automationId,
@@ -2250,6 +2485,8 @@ export async function continueFromStep(
     contactTagNames: tagSnapshot.contactTagNames,
     dealTagIds: tagSnapshot.dealTagIds,
     dealTagNames: tagSnapshot.dealTagNames,
+    contactCustomFields: customFieldsSnapshot.contactCustomFields,
+    dealCustomFields: customFieldsSnapshot.dealCustomFields,
   };
 
   let contConvIdForMeta: string | undefined;
@@ -2318,6 +2555,14 @@ export async function continueFromStep(
         rt.contactTagNames = snap.contactTagNames;
         rt.dealTagIds = snap.dealTagIds;
         rt.dealTagNames = snap.dealTagNames;
+      }
+      if (step.type === "update_field") {
+        const snap = await loadAutomationCustomFieldsSnapshot(
+          rt.contactId,
+          rt.dealId,
+        );
+        rt.contactCustomFields = snap.contactCustomFields;
+        rt.dealCustomFields = snap.dealCustomFields;
       }
       await logStep({
         automationId,

@@ -60,6 +60,8 @@ export async function POST(request: Request) {
   const rawType = typeof body.type === "string" ? body.type.toUpperCase() : "PRODUCT";
   const type = rawType === "SERVICE" ? "SERVICE" : "PRODUCT";
 
+  const trackStock = type === "PRODUCT" && body.trackStock === true;
+
   const product = await prisma.product.create({
     data: withOrgFromCtx({
       name,
@@ -69,6 +71,8 @@ export async function POST(request: Request) {
       unit: type === "SERVICE" ? "serviço" : (typeof body.unit === "string" && body.unit.trim() ? body.unit.trim() : "un"),
       type,
       isActive: body.isActive !== false,
+      trackStock,
+      stock: trackStock ? Math.max(0, Number(body.stock) || 0) : 0,
     }),
   });
 
