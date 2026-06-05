@@ -1,7 +1,0 @@
-feat(import): suporte a XLSX, delimitador configuravel, tag e updateExisting
-
-- csv-parse: parser char-a-char com newline em quoted, delimitador configuravel, detectDelimiter()
-- novo lib/import-helpers: readUploadedTable (CSV+XLSX), upsertImportTag, attachTagToContact/Deal
-- contacts/import: aceita campos tag, updateExisting, delimiter; retorna skipped + tagId
-- deals/import: mesmo, mantendo RBAC duplo (deal:create)
-- dependencia: xlsx (SheetJS) adicionada
