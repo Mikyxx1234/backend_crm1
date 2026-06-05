@@ -50,7 +50,6 @@ export async function GET(request: Request) {
       });
 
       const baseHeaders = [
-        "id",
         "external_id",
         "name",
         "email",
@@ -58,7 +57,6 @@ export async function GET(request: Request) {
         "lifecycle_stage",
         "source",
         "company",
-        "assigned_to_id",
         "assigned_to_email",
         "tags",
         "ad_source_id",
@@ -73,7 +71,6 @@ export async function GET(request: Request) {
       const rows = contacts.map((c) => {
         const cfMap = new Map(c.customFields.map((v) => [v.customFieldId, v.value]));
         const row: Record<string, unknown> = {
-          id: c.id,
           external_id: c.externalId ?? "",
           name: c.name,
           email: c.email ?? "",
@@ -81,7 +78,6 @@ export async function GET(request: Request) {
           lifecycle_stage: c.lifecycleStage,
           source: c.source ?? "",
           company: c.company?.name ?? "",
-          assigned_to_id: c.assignedTo?.id ?? "",
           assigned_to_email: c.assignedTo?.email ?? "",
           tags: c.tags.map((t) => t.tag.name).join("; "),
           ad_source_id: c.adSourceId ?? "",

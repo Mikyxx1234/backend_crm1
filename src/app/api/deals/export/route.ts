@@ -78,20 +78,15 @@ export async function GET(request: Request) {
       });
 
       const baseHeaders = [
-        "id",
         "deal_number",
         "external_id",
         "title",
         "value",
         "status",
-        "pipeline_id",
         "pipeline_name",
-        "stage_id",
         "stage_name",
-        "owner_id",
         "owner_name",
         "owner_email",
-        "contact_id",
         "contact_external_id",
         "contact_name",
         "contact_email",
@@ -120,20 +115,15 @@ export async function GET(request: Request) {
         );
 
         const row: Record<string, unknown> = {
-          id: deal.id,
           deal_number: deal.number,
           external_id: deal.externalId ?? "",
           title: deal.title,
           value: deal.value != null ? deal.value.toString() : "",
           status: deal.status,
-          pipeline_id: deal.stage.pipeline.id,
           pipeline_name: deal.stage.pipeline.name,
-          stage_id: deal.stageId,
           stage_name: deal.stage.name,
-          owner_id: deal.owner?.id ?? "",
           owner_name: deal.owner?.name ?? "",
           owner_email: deal.owner?.email ?? "",
-          contact_id: deal.contact?.id ?? "",
           contact_external_id: deal.contact?.externalId ?? "",
           contact_name: deal.contact?.name ?? "",
           contact_email: deal.contact?.email ?? "",

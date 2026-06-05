@@ -11,7 +11,7 @@ import {
   upsertImportTag,
 } from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { enterRequestContext, getOrgIdOrThrow } from "@/lib/request-context";
 import { createContact, isValidLifecycleStage, updateContact } from "@/services/contacts";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -122,6 +122,29 @@ async function resolveContactUpsert(row: Record<string, string>): Promise<
     return { ok: true, target: { mode: "create", externalId: ext } };
   }
 
+  // Sem id e sem external_id: tenta casar por e-mail (chave humana). Permite
+  // re-importar um export sem CUIDs e ainda atualizar contatos existentes.
+  const email = row.email?.trim();
+  if (email) {
+    const orgId = getOrgIdOrThrow();
+    const c = await prisma.contact.findFirst({
+      where: { organizationId: orgId, email: { equals: email, mode: "insensitive" } },
+      select: { id: true },
+    });
+    if (c) return { ok: true, target: { mode: "update", id: c.id } };
+  }
+
+  // Último recurso: telefone.
+  const phone = row.phone?.trim();
+  if (phone) {
+    const orgId = getOrgIdOrThrow();
+    const c = await prisma.contact.findFirst({
+      where: { organizationId: orgId, phone },
+      select: { id: true },
+    });
+    if (c) return { ok: true, target: { mode: "update", id: c.id } };
+  }
+
   return { ok: true, target: { mode: "create" } };
 }
 
@@ -130,6 +153,16 @@ export async function POST(request: Request) {
     const session = await auth();
     const denied = assertImportPermission(session);
     if (denied) return denied;
+
+    // Populate AsyncLocalStorage para que getOrgIdOrThrow() funcione
+    // nas funcoes de resolucao (contact upsert por external_id) e no Prisma multi-tenant.
+    if (session?.user?.organizationId) {
+      enterRequestContext({
+        organizationId: session.user.organizationId,
+        userId: session.user.id,
+        isSuperAdmin: Boolean(session.user.isSuperAdmin),
+      });
+    }
 
     const formData = await request.formData();
     const file = formData.get("file");

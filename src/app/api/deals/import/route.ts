@@ -12,7 +12,8 @@ import {
   upsertImportTag,
 } from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { enterRequestContext, getOrgIdOrThrow } from "@/lib/request-context";
+import { createContact, updateContact } from "@/services/contacts";
 import { createDeal, isValidDealStatus, updateDeal } from "@/services/deals";
 
 function hasColumn(headers: string[], ...names: string[]) {
@@ -71,24 +72,104 @@ async function resolveStageId(row: Record<string, string>): Promise<string | nul
   return null;
 }
 
-async function resolveContactIdForDeal(row: Record<string, string>): Promise<string | undefined> {
+/**
+ * Resolve o contato de um deal. Estratégia em cascata:
+ *   1) contact_id direto (UUID) — só busca, não cria
+ *   2) contact_external_id (ou kommo_contact_id) — busca por (orgId, externalId);
+ *      se NÃO existir, cria o contato com os dados opcionais disponíveis no row
+ *      (contact_name, contact_email, contact_phone). Permite importar deals e
+ *      contatos numa única passada.
+ *   3) contact_email / contact_phone — busca por e-mail/telefone, sem criar.
+ */
+/**
+ * Resolve o contato de um deal. Em cascata:
+ *   1) contact_id (UUID/CUID) — busca, não cria/atualiza.
+ *   2) contact_external_id — busca por (orgId, externalId). Se NÃO existir cria
+ *      com contact_name/email/phone; se existir E updateExisting=true, atualiza
+ *      o contato com os campos vindos no row (sincroniza dados do contato).
+ *   3) contact_email / contact_phone — busca; não cria nem atualiza.
+ */
+async function resolveContactIdForDeal(
+  row: Record<string, string>,
+  updateExisting: boolean,
+): Promise<string | undefined> {
+  const contactName =
+    row.contact_name?.trim() || row.contactname?.trim() || row.contact?.trim() || "";
+  const contactEmail = row.contact_email?.trim() || row.contactemail?.trim() || "";
+  const contactPhone = row.contact_phone?.trim() || row.contactphone?.trim() || "";
+
+  const syncContactFields = async (id: string) => {
+    if (!updateExisting) return;
+    const patch: Record<string, string> = {};
+    if (contactName) patch.name = contactName;
+    if (contactEmail) patch.email = contactEmail;
+    if (contactPhone) patch.phone = contactPhone;
+    if (Object.keys(patch).length === 0) return;
+    try {
+      await updateContact(id, patch);
+    } catch {
+      // Ignora P2002 (e-mail/phone duplicado em outro contato): o link do deal
+      // não deve falhar por causa de uma atualização opcional do contato.
+    }
+  };
+
   const cid = row.contact_id?.trim() || row.contactid?.trim();
   if (cid) {
     const c = await prisma.contact.findUnique({ where: { id: cid }, select: { id: true } });
-    if (c) return c.id;
+    if (c) {
+      await syncContactFields(c.id);
+      return c.id;
+    }
   }
 
   const ext =
     row.contact_external_id?.trim() ||
     row.contact_externalid?.trim() ||
     row.kommo_contact_id?.trim();
+
   if (ext) {
     const orgId = getOrgIdOrThrow();
-    const c = await prisma.contact.findUnique({
+    const found = await prisma.contact.findUnique({
       where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
       select: { id: true },
     });
-    return c?.id;
+    if (found) {
+      await syncContactFields(found.id);
+      return found.id;
+    }
+
+    // Auto-criação: contato referenciado por external_id ainda não existe.
+    const created = await createContact({
+      name: contactName || `Contato ${ext}`,
+      ...(contactEmail ? { email: contactEmail } : {}),
+      ...(contactPhone ? { phone: contactPhone } : {}),
+      externalId: ext,
+    });
+    return (created as { id?: string })?.id;
+  }
+
+  // Fallback: busca por e-mail ou telefone — sem auto-criar.
+  if (contactEmail) {
+    const orgId = getOrgIdOrThrow();
+    const c = await prisma.contact.findFirst({
+      where: { organizationId: orgId, email: { equals: contactEmail, mode: "insensitive" } },
+      select: { id: true },
+    });
+    if (c) {
+      await syncContactFields(c.id);
+      return c.id;
+    }
+  }
+  if (contactPhone) {
+    const orgId = getOrgIdOrThrow();
+    const c = await prisma.contact.findFirst({
+      where: { organizationId: orgId, phone: contactPhone },
+      select: { id: true },
+    });
+    if (c) {
+      await syncContactFields(c.id);
+      return c.id;
+    }
   }
 
   return undefined;
@@ -110,37 +191,32 @@ async function resolveDealUpsert(row: Record<string, string>): Promise<
     row.lead_external_id?.trim();
   const numRaw = row.deal_number?.trim();
 
-  const candidates: { id: string }[] = [];
+  const orgId = getOrgIdOrThrow();
 
+  // Precedência: id interno (se vier) > deal_number > external_id.
+  // Em caso de conflito (ex.: usuário editou external_id no CSV apontando pra
+  // outro deal), a chave mais estável vence — o external_id é tratado como
+  // patch (atualiza o externalId do deal alvo). Evita rejeitar reimports
+  // simples quando o usuário só queria sobrescrever dados.
   if (id) {
     const d = await prisma.deal.findUnique({ where: { id }, select: { id: true } });
-    if (d) candidates.push(d);
+    if (d) return { ok: true, target: { mode: "update", id: d.id } };
   }
-  const orgId = getOrgIdOrThrow();
-  if (ext) {
-    const d = await prisma.deal.findUnique({
-      where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
-      select: { id: true },
-    });
-    if (d) candidates.push(d);
-  }
+
   if (numRaw && /^\d+$/.test(numRaw)) {
     const d = await prisma.deal.findUnique({
       where: { organizationId_number: { organizationId: orgId, number: parseInt(numRaw, 10) } },
       select: { id: true },
     });
-    if (d) candidates.push(d);
+    if (d) return { ok: true, target: { mode: "update", id: d.id } };
   }
 
-  const unique = [...new Set(candidates.map((c) => c.id))];
-  if (unique.length > 1) {
-    return {
-      ok: false,
-      message: "id, external_id e/ou deal_number apontam para negócios diferentes.",
-    };
-  }
-  if (unique.length === 1) {
-    return { ok: true, target: { mode: "update", id: unique[0] } };
+  if (ext) {
+    const d = await prisma.deal.findUnique({
+      where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
+      select: { id: true },
+    });
+    if (d) return { ok: true, target: { mode: "update", id: d.id } };
   }
 
   return {
@@ -165,6 +241,17 @@ export async function POST(request: Request) {
     const session = await auth();
     const denied = assertImportPermission(session);
     if (denied) return denied;
+
+    // Populate AsyncLocalStorage para que getOrgIdOrThrow() funcione
+    // nas funcoes de resolucao (stage/contact/deal) e no Prisma multi-tenant.
+    if (session?.user?.organizationId) {
+      enterRequestContext({
+        organizationId: session.user.organizationId,
+        userId: session.user.id,
+        isSuperAdmin: Boolean(session.user.isSuperAdmin),
+      });
+    }
+
     const permissionDenied = await requirePermissionForUser(
       (session?.user ?? {}) as { id: string; organizationId: string | null; role?: string | null; isSuperAdmin?: boolean },
       "deal:create",
@@ -276,7 +363,7 @@ export async function POST(request: Request) {
 
       let contactId: string | undefined;
       try {
-        contactId = await resolveContactIdForDeal(row);
+        contactId = await resolveContactIdForDeal(row, updateExisting);
       } catch {
         failed.push({ row: rowNumber, message: "Erro ao resolver contato." });
         continue;
