@@ -2,8 +2,15 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
-import { parseCsv } from "@/lib/csv-parse";
 import { assertImportPermission } from "@/lib/import-guard";
+import {
+  attachTagToDeal,
+  readDelimiterFlag,
+  readTagFlag,
+  readUpdateExistingFlag,
+  readUploadedTable,
+  upsertImportTag,
+} from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createDeal, isValidDealStatus, updateDeal } from "@/services/deals";
@@ -174,8 +181,11 @@ export async function POST(request: Request) {
       );
     }
 
-    const text = await file.text();
-    const { headers, rows } = parseCsv(text);
+    const delimiter = readDelimiterFlag(formData);
+    const updateExisting = readUpdateExistingFlag(formData);
+    const tagName = readTagFlag(formData);
+
+    const { headers, rows } = await readUploadedTable(file, delimiter);
 
     if (headers.length === 0 || !headers.includes("title")) {
       return NextResponse.json(
@@ -202,9 +212,20 @@ export async function POST(request: Request) {
       );
     }
 
+    let importTagId: string | null = null;
+    if (tagName) {
+      try {
+        const orgId = getOrgIdOrThrow();
+        importTagId = await upsertImportTag(orgId, tagName);
+      } catch {
+        importTagId = null;
+      }
+    }
+
     const failed: { row: number; message: string }[] = [];
     let created = 0;
     let updated = 0;
+    let skipped = 0;
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -272,7 +293,13 @@ export async function POST(request: Request) {
       const lostReason = row.lost_reason?.trim() || row.lostreason?.trim() || undefined;
 
       try {
+        let dealId: string | null = null;
         if (resolved.target.mode === "update") {
+          if (!updateExisting) {
+            skipped += 1;
+            if (importTagId) await attachTagToDeal(resolved.target.id, importTagId);
+            continue;
+          }
           await updateDeal(resolved.target.id, {
             title,
             stageId,
@@ -284,6 +311,7 @@ export async function POST(request: Request) {
             ...(ownerId !== undefined ? { ownerId } : {}),
             ...(externalPatch !== undefined ? { externalId: externalPatch } : {}),
           });
+          dealId = resolved.target.id;
           updated += 1;
         } else {
           let externalForCreate: string | null | undefined = undefined;
@@ -292,7 +320,7 @@ export async function POST(request: Request) {
           } else if (resolved.target.externalId !== undefined) {
             externalForCreate = resolved.target.externalId;
           }
-          await createDeal({
+          const d = await createDeal({
             ...(resolved.target.id ? { id: resolved.target.id } : {}),
             externalId: externalForCreate === undefined ? undefined : externalForCreate,
             title,
@@ -304,7 +332,12 @@ export async function POST(request: Request) {
             contactId: contactId ?? undefined,
             ownerId,
           });
+          dealId = (d as { id?: string })?.id ?? null;
           created += 1;
+        }
+
+        if (importTagId && dealId) {
+          await attachTagToDeal(dealId, importTagId);
         }
       } catch (e: unknown) {
         const code =
@@ -327,8 +360,10 @@ export async function POST(request: Request) {
       {
         created,
         updated,
+        skipped,
         failed,
         totalRows: rows.length,
+        tagId: importTagId,
       },
       { status: 201 },
     );

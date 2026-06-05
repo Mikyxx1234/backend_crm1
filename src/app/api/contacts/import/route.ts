@@ -1,8 +1,15 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
-import { parseCsv } from "@/lib/csv-parse";
 import { assertImportPermission } from "@/lib/import-guard";
+import {
+  attachTagToContact,
+  readDelimiterFlag,
+  readTagFlag,
+  readUpdateExistingFlag,
+  readUploadedTable,
+  upsertImportTag,
+} from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { createContact, isValidLifecycleStage, updateContact } from "@/services/contacts";
@@ -134,19 +141,35 @@ export async function POST(request: Request) {
       );
     }
 
-    const text = await file.text();
-    const { headers, rows } = parseCsv(text);
+    const delimiter = readDelimiterFlag(formData);
+    const updateExisting = readUpdateExistingFlag(formData);
+    const tagName = readTagFlag(formData);
+
+    const { headers, rows } = await readUploadedTable(file, delimiter);
 
     if (headers.length === 0 || !headers.includes("name")) {
       return NextResponse.json(
-        { message: "CSV inválido: é necessária uma coluna \"name\"." },
+        { message: "Arquivo inválido: é necessária uma coluna \"name\"." },
         { status: 400 },
       );
+    }
+
+    // Upsert da tag (uma única vez, fora do loop)
+    let importTagId: string | null = null;
+    if (tagName) {
+      try {
+        const orgId = getOrgIdOrThrow();
+        importTagId = await upsertImportTag(orgId, tagName);
+      } catch {
+        // se falhar o upsert da tag, seguimos a importação sem ela
+        importTagId = null;
+      }
     }
 
     const failed: { row: number; message: string }[] = [];
     let created = 0;
     let updated = 0;
+    let skipped = 0;
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
@@ -225,11 +248,19 @@ export async function POST(request: Request) {
       };
 
       try {
+        let contactId: string | null = null;
         if (resolved.target.mode === "update") {
+          if (!updateExisting) {
+            skipped += 1;
+            // ainda assim, vincular tag se requisitada
+            if (importTagId) await attachTagToContact(resolved.target.id, importTagId);
+            continue;
+          }
           await updateContact(resolved.target.id, {
             ...basePayload,
             ...(externalPatch !== undefined ? { externalId: externalPatch } : {}),
           });
+          contactId = resolved.target.id;
           updated += 1;
         } else {
           let externalForCreate: string | null | undefined = undefined;
@@ -238,12 +269,17 @@ export async function POST(request: Request) {
           } else if (resolved.target.mode === "create" && resolved.target.externalId !== undefined) {
             externalForCreate = resolved.target.externalId;
           }
-          await createContact({
+          const c = await createContact({
             ...(resolved.target.id ? { id: resolved.target.id } : {}),
             externalId: externalForCreate === undefined ? undefined : externalForCreate,
             ...basePayload,
           });
+          contactId = (c as { id?: string })?.id ?? null;
           created += 1;
+        }
+
+        if (importTagId && contactId) {
+          await attachTagToContact(contactId, importTagId);
         }
       } catch (e: unknown) {
         const code =
@@ -264,8 +300,10 @@ export async function POST(request: Request) {
       {
         created,
         updated,
+        skipped,
         failed,
         totalRows: rows.length,
+        tagId: importTagId,
       },
       { status: 201 },
     );
