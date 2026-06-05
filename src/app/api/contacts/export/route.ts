@@ -50,7 +50,6 @@ export async function GET(request: Request) {
       });
 
       const baseHeaders = [
-        "external_id",
         "name",
         "email",
         "phone",
@@ -71,7 +70,6 @@ export async function GET(request: Request) {
       const rows = contacts.map((c) => {
         const cfMap = new Map(c.customFields.map((v) => [v.customFieldId, v.value]));
         const row: Record<string, unknown> = {
-          external_id: c.externalId ?? "",
           name: c.name,
           email: c.email ?? "",
           phone: c.phone ?? "",

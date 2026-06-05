@@ -79,7 +79,6 @@ export async function GET(request: Request) {
 
       const baseHeaders = [
         "deal_number",
-        "external_id",
         "title",
         "value",
         "status",
@@ -87,7 +86,6 @@ export async function GET(request: Request) {
         "stage_name",
         "owner_name",
         "owner_email",
-        "contact_external_id",
         "contact_name",
         "contact_email",
         "contact_phone",
@@ -116,7 +114,6 @@ export async function GET(request: Request) {
 
         const row: Record<string, unknown> = {
           deal_number: deal.number,
-          external_id: deal.externalId ?? "",
           title: deal.title,
           value: deal.value != null ? deal.value.toString() : "",
           status: deal.status,
@@ -124,7 +121,6 @@ export async function GET(request: Request) {
           stage_name: deal.stage.name,
           owner_name: deal.owner?.name ?? "",
           owner_email: deal.owner?.email ?? "",
-          contact_external_id: deal.contact?.externalId ?? "",
           contact_name: deal.contact?.name ?? "",
           contact_email: deal.contact?.email ?? "",
           contact_phone: deal.contact?.phone ?? "",

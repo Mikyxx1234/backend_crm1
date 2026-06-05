@@ -148,7 +148,8 @@ async function resolveContactIdForDeal(
     return (created as { id?: string })?.id;
   }
 
-  // Fallback: busca por e-mail ou telefone — sem auto-criar.
+  // Fallback principal (quando não há external_id): identificar por email ou
+  // telefone. Se não encontrar e houver dados suficientes, cria o contato.
   if (contactEmail) {
     const orgId = getOrgIdOrThrow();
     const c = await prisma.contact.findFirst({
@@ -170,6 +171,18 @@ async function resolveContactIdForDeal(
       await syncContactFields(c.id);
       return c.id;
     }
+  }
+
+  // Auto-criar quando há dados mínimos para um contato novo. Requer pelo menos
+  // um nome OU email OU telefone — caso contrário não há como representar o
+  // contato no CRM.
+  if (contactName || contactEmail || contactPhone) {
+    const created = await createContact({
+      name: contactName || contactEmail || contactPhone || "Contato sem nome",
+      ...(contactEmail ? { email: contactEmail } : {}),
+      ...(contactPhone ? { phone: contactPhone } : {}),
+    });
+    return (created as { id?: string })?.id;
   }
 
   return undefined;
