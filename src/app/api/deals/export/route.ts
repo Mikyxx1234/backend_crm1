@@ -77,31 +77,36 @@ export async function GET(request: Request) {
         },
       });
 
+      // Headers em PT-BR natural. Custom fields exportados com o NOME do
+      // campo (sem prefixo cf_) — o auto-mapping do import casa por nome.
+      // Para evitar colisão com campos do sistema (ex.: campo customizado
+      // chamado "Origem" colidindo com `source`), os custom fields ficam
+      // ao final da lista de colunas.
       const baseHeaders = [
-        "deal_number",
-        "title",
-        "value",
-        "status",
-        "pipeline_name",
-        "stage_name",
-        "owner_name",
-        "owner_email",
-        "contact_name",
-        "contact_email",
-        "contact_phone",
-        "contact_company",
-        "contact_lifecycle_stage",
-        "contact_source",
-        "tags",
-        "expected_close",
-        "lost_reason",
-        "position",
-        "created_at",
-        "updated_at",
-        "closed_at",
+        "Número do negócio",
+        "Título",
+        "Valor",
+        "Status",
+        "Pipeline",
+        "Etapa",
+        "Responsável",
+        "E-mail do responsável",
+        "Nome do contato",
+        "E-mail do contato",
+        "Telefone do contato",
+        "Empresa do contato",
+        "Ciclo de vida do contato",
+        "Origem do contato",
+        "Tags",
+        "Previsão de fechamento",
+        "Motivo da perda",
+        "Posição",
+        "Criado em",
+        "Atualizado em",
+        "Fechado em",
       ];
-      const dealCfHeaders = dealFields.map((f) => `cf_${f.name}`);
-      const contactCfHeaders = contactFields.map((f) => `contact_cf_${f.name}`);
+      const dealCfHeaders = dealFields.map((f) => f.name);
+      const contactCfHeaders = contactFields.map((f) => `Contato — ${f.name}`);
       const headers = [...baseHeaders, ...dealCfHeaders, ...contactCfHeaders];
 
       const rows = deals.map((deal) => {
@@ -113,33 +118,33 @@ export async function GET(request: Request) {
         );
 
         const row: Record<string, unknown> = {
-          deal_number: deal.number,
-          title: deal.title,
-          value: deal.value != null ? deal.value.toString() : "",
-          status: deal.status,
-          pipeline_name: deal.stage.pipeline.name,
-          stage_name: deal.stage.name,
-          owner_name: deal.owner?.name ?? "",
-          owner_email: deal.owner?.email ?? "",
-          contact_name: deal.contact?.name ?? "",
-          contact_email: deal.contact?.email ?? "",
-          contact_phone: deal.contact?.phone ?? "",
-          contact_company: deal.contact?.company?.name ?? "",
-          contact_lifecycle_stage: deal.contact?.lifecycleStage ?? "",
-          contact_source: deal.contact?.source ?? "",
-          tags: deal.tags.map((t) => t.tag.name).join("; "),
-          expected_close: csvDate(deal.expectedClose),
-          lost_reason: deal.lostReason ?? "",
-          position: deal.position,
-          created_at: csvDate(deal.createdAt),
-          updated_at: csvDate(deal.updatedAt),
-          closed_at: csvDate(deal.closedAt),
+          "Número do negócio": deal.number,
+          "Título": deal.title,
+          "Valor": deal.value != null ? deal.value.toString() : "",
+          "Status": deal.status,
+          "Pipeline": deal.stage.pipeline.name,
+          "Etapa": deal.stage.name,
+          "Responsável": deal.owner?.name ?? "",
+          "E-mail do responsável": deal.owner?.email ?? "",
+          "Nome do contato": deal.contact?.name ?? "",
+          "E-mail do contato": deal.contact?.email ?? "",
+          "Telefone do contato": deal.contact?.phone ?? "",
+          "Empresa do contato": deal.contact?.company?.name ?? "",
+          "Ciclo de vida do contato": deal.contact?.lifecycleStage ?? "",
+          "Origem do contato": deal.contact?.source ?? "",
+          "Tags": deal.tags.map((t) => t.tag.name).join("; "),
+          "Previsão de fechamento": csvDate(deal.expectedClose),
+          "Motivo da perda": deal.lostReason ?? "",
+          "Posição": deal.position,
+          "Criado em": csvDate(deal.createdAt),
+          "Atualizado em": csvDate(deal.updatedAt),
+          "Fechado em": csvDate(deal.closedAt),
         };
         for (const f of dealFields) {
-          row[`cf_${f.name}`] = dealCfMap.get(f.id) ?? "";
+          row[f.name] = dealCfMap.get(f.id) ?? "";
         }
         for (const f of contactFields) {
-          row[`contact_cf_${f.name}`] = contactCfMap.get(f.id) ?? "";
+          row[`Contato — ${f.name}`] = contactCfMap.get(f.id) ?? "";
         }
         return row;
       });

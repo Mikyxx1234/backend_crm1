@@ -43,49 +43,53 @@ export async function GET(request: Request) {
         orderBy: [{ createdAt: "asc" }],
         include: {
           company: { select: { name: true } },
-          assignedTo: { select: { id: true, email: true } },
+          assignedTo: { select: { id: true, name: true, email: true } },
           tags: { include: { tag: { select: { name: true } } } },
           customFields: { select: { customFieldId: true, value: true } },
         },
       });
 
+      // Headers em PT-BR natural. Custom fields exportados com o nome real
+      // do campo (sem prefixo) — auto-mapping casa por nome.
       const baseHeaders = [
-        "name",
-        "email",
-        "phone",
-        "lifecycle_stage",
-        "source",
-        "company",
-        "assigned_to_email",
-        "tags",
-        "ad_source_id",
-        "ad_ctwa_clid",
-        "ad_resolved_campaign_name",
-        "created_at",
-        "updated_at",
+        "Nome",
+        "E-mail",
+        "Telefone",
+        "Ciclo de vida",
+        "Origem",
+        "Empresa",
+        "Responsável",
+        "E-mail do responsável",
+        "Tags",
+        "ID da fonte do anúncio",
+        "CTWA CLID",
+        "Campanha do anúncio",
+        "Criado em",
+        "Atualizado em",
       ];
-      const cfHeaders = contactFields.map((f) => `cf_${f.name}`);
+      const cfHeaders = contactFields.map((f) => f.name);
       const headers = [...baseHeaders, ...cfHeaders];
 
       const rows = contacts.map((c) => {
         const cfMap = new Map(c.customFields.map((v) => [v.customFieldId, v.value]));
         const row: Record<string, unknown> = {
-          name: c.name,
-          email: c.email ?? "",
-          phone: c.phone ?? "",
-          lifecycle_stage: c.lifecycleStage,
-          source: c.source ?? "",
-          company: c.company?.name ?? "",
-          assigned_to_email: c.assignedTo?.email ?? "",
-          tags: c.tags.map((t) => t.tag.name).join("; "),
-          ad_source_id: c.adSourceId ?? "",
-          ad_ctwa_clid: c.adCtwaClid ?? "",
-          ad_resolved_campaign_name: c.adResolvedCampaignName ?? "",
-          created_at: csvDate(c.createdAt),
-          updated_at: csvDate(c.updatedAt),
+          "Nome": c.name,
+          "E-mail": c.email ?? "",
+          "Telefone": c.phone ?? "",
+          "Ciclo de vida": c.lifecycleStage,
+          "Origem": c.source ?? "",
+          "Empresa": c.company?.name ?? "",
+          "Responsável": c.assignedTo?.name ?? "",
+          "E-mail do responsável": c.assignedTo?.email ?? "",
+          "Tags": c.tags.map((t) => t.tag.name).join("; "),
+          "ID da fonte do anúncio": c.adSourceId ?? "",
+          "CTWA CLID": c.adCtwaClid ?? "",
+          "Campanha do anúncio": c.adResolvedCampaignName ?? "",
+          "Criado em": csvDate(c.createdAt),
+          "Atualizado em": csvDate(c.updatedAt),
         };
         for (const f of contactFields) {
-          row[`cf_${f.name}`] = cfMap.get(f.id) ?? "";
+          row[f.name] = cfMap.get(f.id) ?? "";
         }
         return row;
       });
