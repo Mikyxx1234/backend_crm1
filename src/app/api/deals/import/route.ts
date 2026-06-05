@@ -192,7 +192,15 @@ type DealUpsert =
   | { mode: "update"; id: string }
   | { mode: "create"; id?: string; externalId?: string | null };
 
-async function resolveDealUpsert(row: Record<string, string>): Promise<
+async function resolveDealUpsert(
+  row: Record<string, string>,
+  /**
+   * Contexto resolvido nas etapas anteriores do loop. Usado como fallback
+   * de deduplicação quando o CSV não trouxe nenhuma chave técnica (id /
+   * deal_number / external_id) — comum em reimport de template sem editar.
+   */
+  ctx: { contactId?: string; stageId?: string | null; title?: string } = {},
+): Promise<
   | { ok: true; target: DealUpsert }
   | { ok: false; message: string }
 > {
@@ -206,11 +214,7 @@ async function resolveDealUpsert(row: Record<string, string>): Promise<
 
   const orgId = getOrgIdOrThrow();
 
-  // Precedência: id interno (se vier) > deal_number > external_id.
-  // Em caso de conflito (ex.: usuário editou external_id no CSV apontando pra
-  // outro deal), a chave mais estável vence — o external_id é tratado como
-  // patch (atualiza o externalId do deal alvo). Evita rejeitar reimports
-  // simples quando o usuário só queria sobrescrever dados.
+  // Precedência: id interno > deal_number > external_id.
   if (id) {
     const d = await prisma.deal.findUnique({ where: { id }, select: { id: true } });
     if (d) return { ok: true, target: { mode: "update", id: d.id } };
@@ -228,6 +232,24 @@ async function resolveDealUpsert(row: Record<string, string>): Promise<
     const d = await prisma.deal.findUnique({
       where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
       select: { id: true },
+    });
+    if (d) return { ok: true, target: { mode: "update", id: d.id } };
+  }
+
+  // Fallback de deduplicação: nenhuma chave técnica casou. Se temos contato
+  // resolvido + título, procuramos um deal existente da combinação
+  // (orgId, contactId, title). Isso evita duplicação ao reimportar o mesmo
+  // CSV sem editar (template tem deal_number vazio). Se houver mais de um
+  // deal idêntico, escolhe o mais recente — comportamento conservador.
+  if (ctx.contactId && ctx.title) {
+    const d = await prisma.deal.findFirst({
+      where: {
+        organizationId: orgId,
+        contactId: ctx.contactId,
+        title: ctx.title,
+      },
+      select: { id: true },
+      orderBy: { createdAt: "desc" },
     });
     if (d) return { ok: true, target: { mode: "update", id: d.id } };
   }
@@ -382,7 +404,11 @@ export async function POST(request: Request) {
         continue;
       }
 
-      const resolved = await resolveDealUpsert(row);
+      const resolved = await resolveDealUpsert(row, {
+        contactId,
+        stageId,
+        title,
+      });
       if (!resolved.ok) {
         failed.push({ row: rowNumber, message: resolved.message });
         continue;
