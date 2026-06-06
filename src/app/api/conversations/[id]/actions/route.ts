@@ -10,6 +10,7 @@ import {
   updateConversationStatusInDb,
 } from "@/services/conversations";
 import { createDealEvent } from "@/services/deals";
+import { logEvent } from "@/services/activity-log";
 
 async function logDealEventsForConversationContact(
   conversationId: string,
@@ -114,6 +115,24 @@ export async function POST(request: Request, context: RouteContext) {
             from: prev?.assignedTo ?? null,
             to: result.conversation.assignedTo ?? null,
           });
+          // Evento da própria conversa — independe de haver deal aberto.
+          // Reusa o tipo ASSIGNEE_CHANGED (já mapeado no EVENT_CONFIG do
+          // feed); o entityType=CONVERSATION distingue do escopo deal.
+          void logEvent({
+            type: "ASSIGNEE_CHANGED",
+            entityType: "CONVERSATION",
+            entityId: id,
+            entityLabel: result.conversation.externalId ?? null,
+            conversationId: id,
+            contactId: result.conversation.contactId ?? null,
+            field: "assignedTo",
+            oldValue: prev?.assignedTo?.name ?? null,
+            newValue: result.conversation.assignedTo?.name ?? null,
+            meta: {
+              fromUserId: prev?.assignedToId ?? null,
+              toUserId: result.conversation.assignedToId ?? null,
+            },
+          });
         }
 
         return NextResponse.json(
@@ -155,6 +174,27 @@ export async function POST(request: Request, context: RouteContext) {
           from: conv.status,
           to: updated.status,
           action,
+        });
+        // Evento da própria conversa — registra fechamento/reabertura no
+        // feed independentemente de haver deal. Tipo específico facilita
+        // o filtro e o EVENT_CONFIG no feed UI.
+        const convEventType =
+          updated.status === "RESOLVED"
+            ? "CONVERSATION_CLOSED"
+            : conv.status === "RESOLVED" && updated.status === "OPEN"
+              ? "CONVERSATION_REOPENED"
+              : "CONVERSATION_STATUS_CHANGED";
+        void logEvent({
+          type: convEventType,
+          entityType: "CONVERSATION",
+          entityId: id,
+          entityLabel: updated.externalId ?? null,
+          conversationId: id,
+          contactId: conv.contact?.id ?? null,
+          field: "status",
+          oldValue: conv.status,
+          newValue: updated.status,
+          meta: { action },
         });
       }
 

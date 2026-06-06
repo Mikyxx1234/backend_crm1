@@ -23,6 +23,7 @@ import type { AIAgentAutonomy, Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { runWithActor } from "@/lib/request-context";
 import { estimateCost } from "@/lib/ai-agents/pricing";
 import {
   normalizeOutputStyle,
@@ -74,6 +75,17 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
   });
   if (!agent) throw new Error("Agente não encontrado.");
   if (!agent.active) throw new Error("Agente inativo.");
+
+  // Todo o restante roda como ator AI — qualquer logEvent disparado por
+  // tool calls (move_stage, add_tag, transfer_to_human, etc.) sai
+  // imputado ao agente IA em vez do humano da sessao que originou.
+  return runWithActor(
+    {
+      type: "AI",
+      label: agent.user?.name ?? "IA",
+      ref: agent.id,
+    },
+    async () => {
 
   if (agent.dailyTokenCap > 0) {
     const since = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -272,6 +284,8 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       error: message,
     };
   }
+    },
+  ) as Promise<RunResult>;
 }
 
 async function loadHistoryFromConversation(

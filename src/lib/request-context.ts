@@ -19,6 +19,35 @@ import { AsyncLocalStorage } from "node:async_hooks";
  *   promise, o contexto se perde. Hoje o codebase eh 100% async/await.
  */
 
+/// Tipo de ator. Espelha `ActorType` do schema Prisma — duplicado aqui
+/// porque essa lib roda em paths sem dependencia no Prisma Client (evita
+/// ciclo com extension).
+export type ContextActorType =
+  | "HUMAN"
+  | "AI"
+  | "AUTOMATION"
+  | "INTEGRATION"
+  | "SYSTEM";
+
+/// Snapshot rico do ator para auditoria/feed de atividade (ActivityEvent).
+/// Resolvido nas portas de entrada (sessao/token/webhook/automation
+/// executor/agente IA) e propagado pelo AsyncLocalStorage junto do
+/// `userId`. O `logEvent()` central le este campo para preencher
+/// `actorType/actorLabel/actorSublabel/actorRef` sem que cada call site
+/// precise saber quem disparou a acao.
+export type ContextActor = {
+  type: ContextActorType;
+  /// Snapshot do nome a exibir no feed (ex.: "Felipe", "n8n_comercial",
+  /// "SalesBot", "Robo", "Sistema"). Imutavel — preserva o rotulo da
+  /// hora do evento mesmo se o User for renomeado depois.
+  label?: string | null;
+  /// Contexto secundario (ex.: nome do bloco da automacao
+  /// "RB - INICIO LICENCIADO", nome do agente, nome do token, etc.).
+  sublabel?: string | null;
+  /// Id externo do ator nao-humano (automationId, agentId, tokenId).
+  ref?: string | null;
+};
+
 export type RequestContext = {
   /// Id da organizacao atual. Null so em rotas expostas ao super-admin
   /// EduIT (ex.: /admin/organizations lista todas). Rotas scoped devem
@@ -29,6 +58,11 @@ export type RequestContext = {
   /// Flag de super-admin. Habilita bypass da RLS no Postgres quando a
   /// Prisma Extension seta `SET LOCAL app.is_super_admin`.
   isSuperAdmin: boolean;
+  /// Atribuicao rica de ator para o log de atividade (ActivityEvent).
+  /// Opcional para nao quebrar call sites existentes — quando ausente,
+  /// `logEvent()` deriva um ator default (HUMAN se houver userId real,
+  /// SYSTEM caso contrario).
+  actor?: ContextActor;
 };
 
 const storage = new AsyncLocalStorage<RequestContext>();
@@ -103,4 +137,31 @@ export function getOrgIdOrNull(): string | null {
 /** Retorna a flag super-admin (default false). */
 export function isSuperAdminContext(): boolean {
   return Boolean(storage.getStore()?.isSuperAdmin);
+}
+
+/// Retorna o ator atual (se algum porto de entrada o populou).
+export function getActorContext(): ContextActor | undefined {
+  return storage.getStore()?.actor;
+}
+
+/// Executa `fn` herdando o ctx atual mas sobrescrevendo o `actor`.
+/// Usado por automation-executor / agente IA / import worker quando
+/// querem que tudo que rodar dentro do step seja imputado a
+/// AUTOMATION/AI sem perder o organizationId/userId resolvidos antes.
+///
+/// Tolerante a contextless: se nao houver RequestContext ativo (ex.:
+/// worker/queue que perdeu o ALS por travessia de boundary), apenas
+/// executa `fn` sem sobrescrever ator. NAO joga erro — isso quebrava
+/// o fluxo de criacao de lead via webhook inbound do WhatsApp (worker
+/// chamava runAutomationInline sem envolver em withSystemContext).
+/// Sem ctx, `logEvent` ja faz fallback pra SYSTEM por conta propria.
+export function runWithActor<T>(
+  actor: ContextActor,
+  fn: () => T | Promise<T>,
+): T | Promise<T> {
+  const current = storage.getStore();
+  if (!current) {
+    return fn();
+  }
+  return storage.run({ ...current, actor }, fn);
 }

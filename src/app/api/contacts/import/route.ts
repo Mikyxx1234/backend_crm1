@@ -161,6 +161,14 @@ export async function POST(request: Request) {
         organizationId: session.user.organizationId,
         userId: session.user.id,
         isSuperAdmin: Boolean(session.user.isSuperAdmin),
+        // Atribuicao no feed: HUMAN que disparou + sublabel "Importacao"
+        // (para o operador distinguir, no feed, contatos criados via
+        // import dos criados manualmente em /contacts/new).
+        actor: {
+          type: "HUMAN",
+          label: session.user.name ?? session.user.email ?? session.user.id,
+          sublabel: "Importação",
+        },
       });
     }
 

@@ -12,6 +12,7 @@ import { processIncomingMessage as processSalesbotMessage } from "@/services/aut
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { getLogger } from "@/lib/logger";
+import { logEvent } from "@/services/activity-log";
 import { isLidJid, resolveJid } from "./lid-resolver";
 
 const log = getLogger("baileys-msg");
@@ -506,14 +507,14 @@ export async function handleBaileysMessage(
       log.debug("Falha ao sincronizar avatar (não-fatal):", err),
     );
 
-    await prisma.$transaction(async (tx) => {
+    const createdMessageId = await prisma.$transaction(async (tx) => {
       const dup = await tx.message.findFirst({
         where: { externalId: parsed.externalId },
         select: { id: true },
       });
-      if (dup) return;
+      if (dup) return null;
 
-      await tx.message.create({
+      const created = await tx.message.create({
         data: withOrgFromCtx({
           conversationId: conversation.id,
           content: parsed.text,
@@ -523,8 +524,49 @@ export async function handleBaileysMessage(
           senderName: msg.pushName ?? contact.name,
           mediaUrl: parsed.mediaUrl,
         }),
+        select: { id: true },
       });
+      return created.id;
     });
+
+    // Activity Log: registra a mensagem recebida no feed unificado.
+    // Resolve o deal aberto do contato em best-effort para enriquecer
+    // o evento (permite ver no /logs com filtro por deal).
+    if (createdMessageId) {
+      void (async () => {
+        const openDeal = await prisma.deal.findFirst({
+          where: { contactId: contact.id, status: "OPEN" },
+          select: { id: true },
+          orderBy: { updatedAt: "desc" },
+        }).catch(() => null);
+        await logEvent({
+          type: "MESSAGE_RECEIVED",
+          entityType: "MESSAGE",
+          entityId: createdMessageId,
+          entityLabel: msg.pushName ?? contact.name ?? "Mensagem recebida",
+          conversationId: conversation.id,
+          contactId: contact.id,
+          dealId: openDeal?.id ?? null,
+          // ActorType nao tem "CONTACT" — usamos INTEGRATION para
+          // mensagens entrantes (a integracao WhatsApp eh a fonte
+          // tecnica), mas preenchemos label/sublabel com a identidade
+          // do contato para a UI exibir corretamente.
+          actor: {
+            type: "INTEGRATION",
+            label: contact.name ?? msg.pushName ?? "Contato",
+            sublabel: contact.phone ?? "WhatsApp",
+            ref: contact.id,
+          },
+          meta: {
+            preview: (parsed.text ?? "").slice(0, 200),
+            channel: "WhatsApp",
+            via: "baileys",
+            messageType: parsed.messageType,
+            externalId: parsed.externalId,
+          },
+        });
+      })();
+    }
 
     await prisma.conversation.update({
       where: { id: conversation.id },

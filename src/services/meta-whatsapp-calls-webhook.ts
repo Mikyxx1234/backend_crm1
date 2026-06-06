@@ -4,6 +4,7 @@ import { prisma } from "@/lib/prisma";
 import { sseBus } from "@/lib/sse-bus";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { logEvent } from "@/services/activity-log";
 import { maybeSendMissedCallScheduleTemplate } from "@/services/missed-call-schedule-offer";
 import {
   buildConnectChatLine,
@@ -368,6 +369,56 @@ export async function processMetaWhatsappCallsWebhook(
       if (direction === "USER_INITIATED") {
         missedUserCallOffers.set(callId, { conversationId: conv.id, contactId: contact.id });
       }
+
+      // Activity Log: registra a chamada encerrada no feed unificado.
+      // `terminate` é o único evento com duração/status/gravação — é o
+      // ponto canônico pra auditoria (quem ligou, quem recebeu, duração,
+      // gravação). Faltava completamente no log antes.
+      //   - completed: houve áudio (durationSec > 0)
+      //   - missed:    encerrou sem conectar (durationSec 0/nulo)
+      // entityType=CONVERSATION (chamada é sub-evento da conversa) evita
+      // migration de enum; o `type` distingue a natureza.
+      const isCompleted = typeof durationSec === "number" && durationSec > 0;
+      const callType = isCompleted ? "CALL_COMPLETED" : "CALL_MISSED";
+      // Quem ligou / quem recebeu, do ponto de vista do CRM:
+      //   USER_INITIATED     → cliente ligou para a empresa
+      //   BUSINESS_INITIATED → agente ligou para o cliente
+      const initiatedByContact = direction === "USER_INITIATED";
+      void logEvent({
+        type: callType,
+        entityType: "CONVERSATION",
+        entityId: conv.id,
+        entityLabel: contact.name ?? contact.phone ?? "Chamada WhatsApp",
+        conversationId: conv.id,
+        contactId: contact.id,
+        // Chamada inbound do cliente: ator é a integração (origem técnica),
+        // mas rotulada com a identidade do contato. Chamada outbound do
+        // agente: se houver agentName no biz_opaque, atribui ao humano.
+        actor: initiatedByContact
+          ? {
+              type: "INTEGRATION",
+              label: contact.name ?? "Contato",
+              sublabel: contact.phone ?? "WhatsApp",
+              ref: contact.id,
+            }
+          : {
+              type: agentName?.trim() ? "HUMAN" : "INTEGRATION",
+              label: agentName?.trim() || "Empresa",
+              sublabel: "WhatsApp · saída",
+              ref: contact.id,
+            },
+        meta: {
+          callId,
+          direction,
+          initiatedBy: initiatedByContact ? "contact" : "business",
+          durationSec: durationSec ?? 0,
+          terminateStatus: terminateStatus || null,
+          startTime: startT ? new Date(Number(startT) * 1000).toISOString() : null,
+          endTime: endT ? new Date(Number(endT) * 1000).toISOString() : null,
+          recordingUrl: extractRecordingUrl(c) || null,
+          channel: "WhatsApp",
+        },
+      });
     }
 
     sseBus.publish("whatsapp_call", {

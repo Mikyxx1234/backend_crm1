@@ -12,7 +12,9 @@ import { Prisma } from "@prisma/client";
 import QRCode from "qrcode";
 
 import { prisma } from "@/lib/prisma";
+import { prismaBase } from "@/lib/prisma-base";
 import { sseBus } from "@/lib/sse-bus";
+import { withSystemContext } from "@/lib/webhook-context";
 import { usePostgresAuthState } from "./auth-state-postgres";
 import { handleBaileysMessage } from "./message-handler";
 import { registerLidMapping, getMapSize, clearChannelMap, loadPersistedMappings, fixLidContacts } from "./lid-resolver";
@@ -27,12 +29,31 @@ export class BaileysSession {
   private retryCount = 0;
   private qrTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
+  // Cacheado no `connect()` p/ que cada `messages.upsert` rode sob
+  // withSystemContext sem fazer roundtrip ao DB por mensagem. Sem o
+  // contexto, ensureOpenDealForContact falhava silenciosamente —
+  // contato + conversa criavam, mas o deal "Lead de Entrada" não.
+  private organizationId: string | null = null;
 
   constructor(channelId: string) {
     this.channelId = channelId;
   }
 
   async connect(): Promise<void> {
+    // Cache do organizationId do channel — usado em todo callback
+    // `messages.upsert` para garantir AsyncLocalStorage scope.
+    if (!this.organizationId) {
+      const ch = await prismaBase.channel.findUnique({
+        where: { id: this.channelId },
+        select: { organizationId: true },
+      });
+      if (!ch) {
+        console.error(`[baileys:${this.channelId}] channel não existe — abortando connect`);
+        return;
+      }
+      this.organizationId = ch.organizationId;
+    }
+
     if (this.destroyed) return;
 
     const loaded = await loadPersistedMappings(this.channelId);
@@ -100,10 +121,22 @@ export class BaileysSession {
 
     sock.ev.on("messages.upsert", ({ messages, type }) => {
       if (type !== "notify") return;
+      const orgId = this.organizationId;
+      if (!orgId) {
+        console.warn(`[baileys:${this.channelId}] mensagens recebidas sem organizationId cacheado — descartando`);
+        return;
+      }
       for (const msg of messages) {
         if (!msg.message) continue;
         if (msg.key.fromMe) continue;
-        void handleBaileysMessage(this.channelId, msg, sock);
+        // CRITICAL: o callback `sock.ev.on` é disparado fora do
+        // AsyncLocalStorage scope estabelecido em BaileysManager. Sem
+        // o `withSystemContext` aqui, queries scoped (prisma extension
+        // + withOrgFromCtx) e helpers que dependem de `getOrgIdOrThrow`
+        // (ex.: ensureOpenDealForContact → criação do deal "Lead de
+        // Entrada") falhavam silenciosamente — contato e conversa eram
+        // criados, mas o deal não.
+        void withSystemContext(orgId, () => handleBaileysMessage(this.channelId, msg, sock));
       }
     });
 

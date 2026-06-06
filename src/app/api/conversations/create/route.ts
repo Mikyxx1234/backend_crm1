@@ -9,6 +9,7 @@ import {
   getChannelById,
   parseChannelConfigDecrypted,
 } from "@/services/channels";
+import { logEvent } from "@/services/activity-log";
 
 function str(cfg: Record<string, unknown>, key: string): string | undefined {
   const v = cfg[key];
@@ -83,6 +84,15 @@ export async function POST(request: Request) {
               status: true, inboxName: true, createdAt: true, updatedAt: true,
             },
           });
+          void logEvent({
+            type: "CONVERSATION_CREATED",
+            entityType: "CONVERSATION",
+            entityId: conversation.id,
+            entityLabel: contact.name ?? contact.phone ?? null,
+            conversationId: conversation.id,
+            contactId: contact.id,
+            meta: { channel: "whatsapp", inboxName: channelName, source: "ui" },
+          });
         }
 
         return NextResponse.json({
@@ -151,6 +161,15 @@ export async function POST(request: Request) {
             contactId: contact.id,
             ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
           }),
+        });
+        void logEvent({
+          type: "CONVERSATION_CREATED",
+          entityType: "CONVERSATION",
+          entityId: conversation.id,
+          entityLabel: contact.name ?? contact.phone ?? null,
+          conversationId: conversation.id,
+          contactId: contact.id,
+          meta: { channel: "whatsapp", inboxName: channel.name, source: "ui" },
         });
       }
 

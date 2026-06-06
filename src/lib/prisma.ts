@@ -50,6 +50,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "Deal",
   "DealProduct",
   "DealEvent",
+  "ActivityEvent",
   "Product",
   "Activity",
   "Note",

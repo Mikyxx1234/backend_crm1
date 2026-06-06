@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { createDealEvent } from "@/services/deals";
+import { logEvent } from "@/services/activity-log";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -47,12 +47,28 @@ export async function POST(request: Request, ctx: Ctx) {
         include: { user: { select: { id: true, name: true } } },
       });
 
-      if (dealId) {
-        const uid = session.user.id as string;
-        createDealEvent(dealId, uid, "NOTE_ADDED", {
-          preview: content.slice(0, 100),
-        }).catch(() => {});
-      }
+      // Activity Log: sempre loga NOTE_ADDED, independente de ter
+      // dealId. O composer do contact-panel nao envia dealId no body,
+      // entao o branch antigo `if (dealId)` deixava nota orfa sem log.
+      // entityType segue o sujeito principal: DEAL quando vinculada,
+      // CONTACT caso contrario — feed filtra por entidade corretamente.
+      const contact = await prisma.contact.findUnique({
+        where: { id: contactId },
+        select: { name: true, phone: true, email: true },
+      });
+      void logEvent({
+        type: "NOTE_ADDED",
+        entityType: dealId ? "DEAL" : "CONTACT",
+        entityId: dealId || contactId,
+        entityLabel: contact?.name ?? contact?.phone ?? contact?.email ?? null,
+        contactId,
+        dealId: dealId || null,
+        meta: {
+          noteId: note.id,
+          preview: content.slice(0, 200),
+          source: dealId ? "deal_workspace" : "contact_panel",
+        },
+      });
 
       return NextResponse.json(note, { status: 201 });
     } catch (e) {

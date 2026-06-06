@@ -97,6 +97,10 @@ export async function withWebhookContext<T>(
     organizationId: resolved.organizationId,
     userId: "webhook",
     isSuperAdmin: false,
+    // Webhook entra como SYSTEM. Quando o handler descobre o ator real
+    // (ex.: agente IA tomou a acao, automacao foi disparada), pode
+    // sobrescrever com `runWithActor`.
+    actor: { type: "SYSTEM", label: "Webhook" },
   };
   return runWithContext(ctx, () => handler(resolved)) as Promise<T>;
 }
@@ -108,12 +112,20 @@ export async function withWebhookContext<T>(
 export function withSystemContext<T>(
   organizationId: string,
   handler: () => Promise<T> | T,
-  opts?: { userId?: string; isSuperAdmin?: boolean },
+  opts?: {
+    userId?: string;
+    isSuperAdmin?: boolean;
+    /// Sobrescreve o ator default ({ type: SYSTEM, label: "Sistema" }).
+    /// Use em workers/cron quando souber que a acao representa um
+    /// agente IA / automacao / integracao.
+    actor?: import("@/lib/request-context").ContextActor;
+  },
 ): Promise<T> {
   const ctx: RequestContext = {
     organizationId,
     userId: opts?.userId ?? "system",
     isSuperAdmin: Boolean(opts?.isSuperAdmin),
+    actor: opts?.actor ?? { type: "SYSTEM", label: "Sistema" },
   };
   return Promise.resolve(runWithContext(ctx, handler));
 }

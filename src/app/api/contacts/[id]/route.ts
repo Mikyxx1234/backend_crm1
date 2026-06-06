@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { getLogger } from "@/lib/logger";
+import { prisma } from "@/lib/prisma";
+import { logEvent } from "@/services/activity-log";
 import {
   type UpdateContactInput,
   contactExists,
@@ -189,11 +191,30 @@ export async function DELETE(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "Contato não encontrado." }, { status: 404 });
     }
 
+    // Snapshot do rótulo ANTES de excluir — deleteContact remove os
+    // logs do contato e a FK contactId é cascade.
+    const snap = await prisma.contact.findUnique({
+      where: { id },
+      select: { name: true, phone: true, email: true },
+    });
+
     // 27/mai/26 — Bloqueio por `dealCount > 0` removido. `deleteContact`
     // ja nulifica `contactId` nos deals (preserva historico no kanban) e
     // remove conversas, mensagens, notas, atividades e logs.
     await deleteContact(id);
     log.info(`contato ${id} excluído com sucesso`);
+
+    // IMPORTANTE: contactId=null (FK cascade já removeu o contato; setar
+    // a FK apagaria este próprio evento). id preservado em entityId/meta.
+    void logEvent({
+      type: "CONTACT_DELETED",
+      entityType: "CONTACT",
+      entityId: id,
+      entityLabel: snap?.name ?? snap?.phone ?? snap?.email ?? null,
+      contactId: null,
+      meta: { contactId: id, name: snap?.name ?? null, phone: snap?.phone ?? null },
+    });
+
     return NextResponse.json({ ok: true });
     });
   } catch (e: unknown) {

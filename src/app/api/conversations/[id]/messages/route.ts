@@ -14,6 +14,7 @@ import { sseBus } from "@/lib/sse-bus";
 import { getConversationLite } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import { logEvent } from "@/services/activity-log";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -296,6 +297,35 @@ export async function POST(request: Request, context: RouteContext) {
         }),
       });
 
+      // Activity Log: nota inserida pelo composer do Inbox. Antes deste
+      // bloco o `return` abaixo curto-circuitava o `logEvent` que vem
+      // depois (caminho de mensagem enviada), e a nota nao aparecia no
+      // /logs. Resolvendo dealId via conversation->contact->open deal
+      // para o feed conseguir filtrar pelo deal correspondente.
+      void (async () => {
+        const openDeal = conv.contactId
+          ? await prisma.deal.findFirst({
+              where: { contactId: conv.contactId, status: "OPEN" },
+              select: { id: true },
+              orderBy: { updatedAt: "desc" },
+            }).catch(() => null)
+          : null;
+        await logEvent({
+          type: "NOTE_ADDED",
+          entityType: "MESSAGE",
+          entityId: saved.id,
+          entityLabel: senderName ?? "Nota interna",
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          dealId: openDeal?.id ?? null,
+          meta: {
+            preview: content.slice(0, 200),
+            source: "inbox_composer",
+            isPrivate: true,
+          },
+        });
+      })();
+
       return NextResponse.json({
         message: {
           id: saved.id,
@@ -388,6 +418,23 @@ export async function POST(request: Request, context: RouteContext) {
       contactId: conv.contactId,
       data: { channel: "WhatsApp", content },
     }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+
+    // Log unificado de atividade (Activity Log) — fire-and-forget.
+    void logEvent({
+      type: "MESSAGE_SENT",
+      entityType: "MESSAGE",
+      entityId: saved.id,
+      entityLabel: senderName ?? "Mensagem enviada",
+      conversationId: conv.id,
+      contactId: conv.contactId,
+      meta: {
+        preview: content.slice(0, 200),
+        channel: "WhatsApp",
+        via: useBaileys ? "baileys" : localOnly ? "local" : "meta",
+        failed: sendFailed,
+        externalId,
+      },
+    });
 
     // Notifica abas/inboxes em tempo real: a conversa acabou de mudar de
     // 'esperando' para 'respondidas' (ou similar). Sem isso, a UI so

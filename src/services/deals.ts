@@ -3,6 +3,7 @@ import { Prisma, type DealStatus } from "@prisma/client";
 import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { logEvent } from "@/services/activity-log";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import {
@@ -14,16 +15,60 @@ export function isValidDealStatus(v: string): v is DealStatus {
   return v === "OPEN" || v === "WON" || v === "LOST";
 }
 
+/**
+ * Cria um `DealEvent` (log legado) E um `ActivityEvent` (log novo) para
+ * o mesmo evento. Mantida a assinatura original para nao quebrar os
+ * ~30 call sites existentes em routes/services.
+ *
+ * Quando todas as features da UI estiverem apontando para `activity_events`,
+ * a escrita em `deal_events` pode ser removida e este wrapper passa a
+ * delegar apenas para `logEvent`. Por ora mantemos os dois para que
+ * panels existentes (timeline) continuem funcionando durante o cutover.
+ *
+ * Extrai `field/oldValue/newValue` do `meta` (chaves `from`/`to`/`field`
+ * sao convencao em quase todos os call sites) para popular as colunas
+ * dedicadas do novo log.
+ */
 export function createDealEvent(
   dealId: string,
   userId: string | null,
   type: string,
   meta: Record<string, unknown> = {},
 ) {
-  // Prisma aceita `InputJsonValue` em campos Json; cast é seguro pq o
-  // caller sempre passa um objeto "plain JSON" (Date/undefined/funcs
-  // não passam no filtro; quando passarem, o DB lança runtime error).
   const metaJson = meta as Prisma.InputJsonValue;
+
+  // Extrai field/old/new do meta (convencao herdada do log antigo).
+  const field =
+    typeof meta.field === "string"
+      ? (meta.field as string)
+      : typeof meta.fieldKey === "string"
+        ? (meta.fieldKey as string)
+        : null;
+  const oldValue =
+    meta.from !== undefined && meta.from !== null
+      ? String(meta.from)
+      : meta.oldValue !== undefined && meta.oldValue !== null
+        ? String(meta.oldValue)
+        : null;
+  const newValue =
+    meta.to !== undefined && meta.to !== null
+      ? String(meta.to)
+      : meta.newValue !== undefined && meta.newValue !== null
+        ? String(meta.newValue)
+        : null;
+
+  // Fire-and-forget para o novo log — falhas nao afetam o legado.
+  void logEvent({
+    type,
+    entityType: "DEAL",
+    entityId: dealId,
+    dealId,
+    field,
+    oldValue,
+    newValue,
+    meta,
+  });
+
   return prisma.dealEvent
     .create({ data: withOrgFromCtx({ dealId, userId, type, meta: metaJson }) })
     .catch(() =>
@@ -748,8 +793,13 @@ export async function getBoardData(
     .filter((c): c is NonNullable<typeof c> => c !== null);
   await enrichContactsWithUserAvatarFallback(allContacts);
 
+  // Stage `isIncoming` (Leads de entrada) é a fase de captura e DEVE
+  // ficar sempre visível. Antes filtrávamos por `stage.deals.length > 0`,
+  // mas esse array é a slice PÓS-filtro (status=OPEN padrão, visibility,
+  // filtros avançados). Qualquer filtro ativo escondia a coluna inteira
+  // mesmo havendo leads no banco — bug reportado: "existem leads em
+  // leads de entrada, mas a fase do funil não aparece".
   return stages
-    .filter((stage) => !stage.isIncoming || stage.deals.length > 0)
     .map((stage) => {
       const metric = metricsMap.get(stage.id);
       const totalCount = totalsByStage.get(stage.id) ?? stage.deals.length;

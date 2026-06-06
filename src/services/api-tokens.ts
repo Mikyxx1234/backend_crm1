@@ -60,6 +60,7 @@ export async function validateToken(rawToken: string) {
     where: { tokenHash },
     select: {
       id: true,
+      name: true,
       userId: true,
       organizationId: true,
       expiresAt: true,
@@ -98,6 +99,7 @@ export async function validateToken(rawToken: string) {
   return {
     tokenId: record.id,
     tokenHash,
+    tokenName: record.name,
     organizationId: record.organizationId,
     user: record.user,
   };

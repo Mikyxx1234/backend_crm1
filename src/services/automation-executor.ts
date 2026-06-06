@@ -18,7 +18,7 @@ import {
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrNull } from "@/lib/request-context";
+import { getOrgIdOrNull, runWithActor } from "@/lib/request-context";
 import type { AutomationJobPayload } from "@/lib/queue";
 import { sseBus } from "@/lib/sse-bus";
 import {
@@ -2259,6 +2259,19 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     return;
   }
 
+  // A partir daqui qualquer escrita feita por executeStep/createDealEvent/
+  // logEvent eh imputada a AUTOMATION (label = nome da automacao). Antes
+  // ficava como SYSTEM ou herdava o ator do disparador (webhook/UI), o
+  // que confundia o feed (mostrava o user humano que enviou a mensagem
+  // como autor da troca de stage feita pelo bot).
+  await runWithActor(
+    {
+      type: "AUTOMATION",
+      label: automation.name,
+      ref: automation.id,
+    },
+    async () => {
+
   let stepsFailed = 0;
   const stepById = new Map(automation.steps.map((s) => [s.id, s]));
   const NONE_ID = "__none__";
@@ -2389,6 +2402,8 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       status,
     }).catch(() => {});
   }
+    },
+  );
 }
 
 const STEP_TYPE_LABELS: Record<string, string> = {
@@ -2521,6 +2536,11 @@ export async function continueFromStep(
     message: `${contactLabel} — continuando fluxo`,
   });
 
+  // Continuacao tambem roda como AUTOMATION (mesmo motivo do runAutomationInline).
+  await runWithActor(
+    { type: "AUTOMATION", label: automation.name, ref: automation.id },
+    async () => {
+
   const stepById = new Map(automation.steps.map((s) => [s.id, s]));
   const NONE_ID = "__none__";
   const MAX_ITER = automation.steps.length * 2 + 10;
@@ -2631,4 +2651,6 @@ export async function continueFromStep(
       status: "COMPLETED",
     }).catch(() => {});
   }
+    },
+  );
 }

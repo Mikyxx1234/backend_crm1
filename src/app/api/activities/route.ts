@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { createActivity, getActivities, isValidActivityType } from "@/services/activities";
 import { createDealEvent } from "@/services/deals";
+import { logEvent } from "@/services/activity-log";
 
 function parseIntParam(v: string | null, fallback: number) {
   if (v === null || v === "") return fallback;
@@ -135,6 +136,16 @@ export async function POST(request: Request) {
           activityType: b.type,
           title: b.title,
         }).catch(() => {});
+      } else {
+        // Tarefa criada ligada só a contato (ou solta) — também loga.
+        void logEvent({
+          type: "ACTIVITY_ADDED",
+          entityType: "ACTIVITY",
+          entityId: activity.id,
+          entityLabel: b.title,
+          contactId: typeof b.contactId === "string" ? b.contactId : null,
+          meta: { activityType: b.type, title: b.title },
+        });
       }
 
       return NextResponse.json(activity, { status: 201 });

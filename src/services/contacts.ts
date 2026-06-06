@@ -6,6 +6,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { getLogger } from "@/lib/logger";
+import { logEvent } from "@/services/activity-log";
 
 const log = getLogger("contacts-service");
 
@@ -535,7 +536,11 @@ export async function getContactById(id: string) {
           take: 20,
           orderBy: { updatedAt: "desc" },
           include: {
-            stage: { select: { id: true, name: true, color: true } },
+            // pipelineId é incluído via stage.pipelineId — Deal não tem
+            // pipelineId direto no schema. O frontend (contact-aside +
+            // inbox v2) usa `stageName`/`pipelineId` flat, então o map
+            // de retorno achata para esse formato.
+            stage: { select: { id: true, name: true, color: true, pipelineId: true } },
             owner: { select: assignedToSelect },
           },
         }),
@@ -543,7 +548,7 @@ export async function getContactById(id: string) {
         ReturnType<
           typeof prisma.deal.findMany<{
             include: {
-              stage: { select: { id: true; name: true; color: true } };
+              stage: { select: { id: true; name: true; color: true; pipelineId: true } };
               owner: { select: typeof assignedToSelect };
             };
           }>
@@ -626,9 +631,16 @@ export async function getContactById(id: string) {
     assignedTo,
     tags,
     activities,
+    // Achata `stage.{name,color,pipelineId}` para o formato esperado
+    // pelo frontend (`stageName`, `stageColor`, `pipelineId`). Sem isso
+    // o contact-aside / inbox sidebar mostrava "Sem estágio" mesmo
+    // quando o deal tinha stageId válido no banco.
     deals: deals.map((d) => ({
       ...d,
       value: dealValueToString(d.value),
+      stageName: d.stage?.name ?? null,
+      stageColor: d.stage?.color ?? null,
+      pipelineId: d.stage?.pipelineId ?? null,
     })),
     notes,
     conversations,
@@ -638,7 +650,7 @@ export async function getContactById(id: string) {
 }
 
 export async function createContact(data: CreateContactInput) {
-  return prisma.contact.create({
+  const created = await prisma.contact.create({
     data: withOrgFromCtx({
       ...(data.id ? { id: data.id } : {}),
       name: data.name,
@@ -658,10 +670,42 @@ export async function createContact(data: CreateContactInput) {
       assignedTo: { select: assignedToSelect },
     },
   });
+
+  void logEvent({
+    type: "CONTACT_CREATED",
+    entityType: "CONTACT",
+    entityId: created.id,
+    entityLabel: created.name ?? created.phone ?? created.email ?? null,
+    contactId: created.id,
+    meta: {
+      email: created.email,
+      phone: created.phone,
+      source: data.source ?? null,
+    },
+  });
+
+  return created;
 }
 
 export async function updateContact(id: string, data: UpdateContactInput) {
   const updateData: Prisma.ContactUpdateInput = {};
+
+  // Snapshot anterior para diff (somente os campos que podem mudar).
+  const prev = await prisma.contact.findUnique({
+    where: { id },
+    select: {
+      name: true,
+      email: true,
+      phone: true,
+      avatarUrl: true,
+      leadScore: true,
+      lifecycleStage: true,
+      source: true,
+      companyId: true,
+      assignedToId: true,
+      externalId: true,
+    },
+  });
 
   if (data.name !== undefined) updateData.name = data.name;
   if (data.email !== undefined) updateData.email = data.email;
@@ -682,7 +726,7 @@ export async function updateContact(id: string, data: UpdateContactInput) {
     updateData.externalId = data.externalId;
   }
 
-  return prisma.contact.update({
+  const updated = await prisma.contact.update({
     where: { id },
     data: updateData,
     include: {
@@ -691,6 +735,53 @@ export async function updateContact(id: string, data: UpdateContactInput) {
       assignedTo: { select: assignedToSelect },
     },
   });
+
+  // Diff -> 1 evento por campo alterado.
+  if (prev) {
+    const NATIVE_FIELDS: Array<{ key: keyof typeof prev; label: string }> = [
+      { key: "name", label: "Nome" },
+      { key: "email", label: "Email" },
+      { key: "phone", label: "Telefone" },
+      { key: "leadScore", label: "Lead score" },
+      { key: "lifecycleStage", label: "Estágio de ciclo" },
+      { key: "source", label: "Origem" },
+      { key: "companyId", label: "Empresa" },
+      { key: "externalId", label: "ID externo" },
+    ];
+    for (const f of NATIVE_FIELDS) {
+      const before = prev[f.key];
+      const after = (updated as Record<string, unknown>)[f.key as string];
+      if (before === after) continue;
+      if (before == null && after == null) continue;
+      void logEvent({
+        type: "CONTACT_FIELD_CHANGED",
+        entityType: "CONTACT",
+        entityId: id,
+        entityLabel: updated.name ?? updated.phone ?? updated.email ?? null,
+        contactId: id,
+        field: String(f.key),
+        oldValue: before == null ? null : String(before),
+        newValue: after == null ? null : String(after),
+        meta: { field: String(f.key), label: f.label },
+      });
+    }
+    // Mudanca de responsavel — evento dedicado.
+    if (data.assignedToId !== undefined && prev.assignedToId !== data.assignedToId) {
+      void logEvent({
+        type: "CONTACT_OWNER_CHANGED",
+        entityType: "CONTACT",
+        entityId: id,
+        entityLabel: updated.name ?? updated.phone ?? updated.email ?? null,
+        contactId: id,
+        field: "assignedToId",
+        oldValue: prev.assignedToId,
+        newValue: data.assignedToId ?? null,
+        meta: { from: prev.assignedToId, to: data.assignedToId ?? null },
+      });
+    }
+  }
+
+  return updated;
 }
 
 export async function checkContactDeals(id: string): Promise<{ hasDeals: boolean; dealCount: number }> {

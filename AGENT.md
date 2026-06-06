@@ -5,6 +5,168 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-06 — Activity Log: cobertura de eventos (G1–G5) + origem do lead (G4)
+
+**Decisão.** Fechados os gaps de instrumentação do log unificado:
+- **Chamadas WhatsApp** (`meta-whatsapp-calls-webhook`): no evento
+  `terminate` emite `CALL_COMPLETED`/`CALL_MISSED` com duração, status,
+  gravação e quem iniciou. `entityType=CONVERSATION` (chamada é sub-evento
+  da conversa) para **evitar migration de enum** com um tipo `CALL`.
+- **Mensagens recebidas** (Baileys + Meta webhook): `MESSAGE_RECEIVED`
+  com `actor=INTEGRATION` rotulado com a identidade do contato (o enum
+  `ActorType` não tem `CONTACT`; a origem técnica é a integração).
+- **Notas**: nota via composer do Inbox (`isPrivateNote`) e via
+  `contacts/[id]/notes` sem `dealId` passaram a logar `NOTE_ADDED` (antes
+  o `return` antecipado e o `if (dealId)` deixavam buracos).
+- **Conversa fechada/reaberta**: `CONVERSATION_CLOSED/REOPENED` na rota
+  single (`actions`) — o bulk já cobria. Emitido direto com
+  `entityType=CONVERSATION`, **independente de haver deal aberto** (antes
+  só logava via `createDealEvent`, que some quando não há deal).
+- **Tarefas granulares**: `ACTIVITY_DUE_CHANGED`, `ACTIVITY_DESCRIPTION_CHANGED`,
+  `ACTIVITY_RENAMED`, e `ACTIVITY_COMPLETED` com `result`. Tarefas ligadas
+  só a contato (sem deal) agora logam via `logEvent(entityType=ACTIVITY)`.
+- **Delete**: `DEAL_DELETED`/`CONTACT_DELETED`. **Crítico:** NÃO preencher
+  a FK (`dealId`/`contactId`) nesses eventos — `onDelete: Cascade` apagaria
+  o próprio registro de auditoria. O id vai em `entityId` (string livre) +
+  `meta`. Restore inexiste (deletes são hard-delete, sem soft-delete).
+- **Origem do lead (G4)**: o ator `INTEGRATION` do Bearer token era
+  **perdido** porque `runWithApiUserContext` sobrescrevia o actor para
+  `HUMAN`. Corrigido propagando `actor` via `ApiUser` (resolvido em
+  `authenticateApiRequest`). Lead via n8n/API agora aparece com o nome do
+  token, não do usuário técnico; `CREATED` carrega `source` do payload.
+
+**Por quê.** Reclamação do usuário: "nem todas as atividades estão sendo
+logadas, notas e mensagens recebidas". A causa raiz era dupla: (a) caminhos
+de escrita sem `logEvent`, e (b) dependência de `createDealEvent` (entity
+DEAL) que silenciava eventos quando não havia deal vinculado.
+
+**Convenção firmada.** `entityType` segue o sujeito visível (DEAL > CONTACT
+> CONVERSATION > ACTIVITY > MESSAGE). Inbound resolve o deal aberto do
+contato em best-effort para enriquecer o filtro. Tudo fire-and-forget
+(`void`) — log nunca derruba a operação principal.
+
+---
+
+### 2026-06-06 — Fase 1 DW: `activity_events` particionada por mês (mesmo Postgres)
+
+**Decisão.** Em vez de criar uma instância/DB separada agora, `activity_events`
+foi convertida em **tabela particionada por RANGE (`occurredAt`), mensal**,
+no mesmo Postgres. PK passou a ser composta `(id, occurredAt)` (exigência do
+Postgres: chave de partição em toda PK/UNIQUE). Migration
+`20260606170000_partition_activity_events` (idempotente, com guarda via
+`pg_partitioned_table`). Funções `logs_ensure_activity_events_partition()` e
+`logs_drop_old_activity_events_partitions()` + script
+`scripts/activity-events-partitions.ts` (cron) para criar partição do mês
+seguinte e aplicar retenção (default 24 meses).
+
+**Por quê.** Tabela append-only que cresce com o tráfego. Particionar dá
+partition pruning nas queries de DW, vacuum isolado das tabelas quentes e
+DROP de partição antiga metadata-only (sem WAL bloat). Feito agora porque a
+tabela é nova/pequena — menor risco de conversão.
+
+**Alternativas descartadas.**
+- *Instância Postgres dedicada já.* Op cost 2x, dual-write frágil, cross-DB
+  joins quebram. Reservado para Fase 2 (logical replication para réplica
+  read-only) quando passar de ~5M eventos.
+- *`multiSchema` do Prisma (schema `logs`).* Exigiria `@@schema` em ~100
+  models — invasivo e arriscado com o drift de migration atual.
+
+**Pontos de atenção.**
+- PK composta é compatível porque o código só faz `create()`/`findMany()`
+  (nenhum `findUnique`/`update`/`delete` por `id` isolado em `activityEvent`).
+- A migration recria a tabela (rename → cria particionada → copia → dropa
+  legado). **Aplicar deliberadamente** dado o drift local↔remoto: rodar o
+  SQL via `prisma db execute`, depois `migrate resolve --applied`, depois
+  `generate` — mesma sequência usada na migration base do activity_events.
+- Partição `DEFAULT` é rede de segurança; o cron deve manter as mensais à
+  frente para que ela fique vazia (não dá pra criar partição de um range
+  que já tenha linhas na DEFAULT).
+
+---
+
+### 2026-06-06 — Callbacks de socket Baileys precisam de `withSystemContext` explícito (perda de AsyncLocalStorage)
+
+**Decisão.** Toda mensagem inbound no `BaileysSession` é processada
+dentro de `withSystemContext(orgId, () => handleBaileysMessage(...))`.
+O `organizationId` do channel é resolvido uma única vez no `connect()`
+e cacheado na propriedade `this.organizationId` para evitar roundtrip
+por mensagem.
+
+**Por quê.** O `BaileysManager.startAll()` envolve o `connect()` em
+`withSystemContext`, mas o `AsyncLocalStorage` **não atravessa o
+boundary do EventEmitter do socket**. O callback `sock.ev.on("messages.upsert", ...)`
+dispara em outro tick fora do scope original, então o store fica
+`undefined` no momento da execução.
+
+Consequência observada (relato do usuário "existem leads em conversa
+mas a fase do funil não aparece"): contatos eram criados (porque
+`prisma.contact.create` com `withOrgFromCtx` aparentemente herdava
+contexto por outras vias — `parseMessage` faz pré-fetch e isso
+parece preservar o frame), mas `ensureOpenDealForContact` falhava
+no `getOrgIdOrThrow()` interno (criação fallback da stage `isIncoming`)
+ou no `withOrgFromCtx` da criação do deal. O `.catch` interno era
+`log.warn` apenas, então **falhava silenciosamente**.
+
+**Alternativas descartadas.**
+- *Resolver `organizationId` por mensagem dentro do handler.* Roundtrip
+  extra ao DB por inbound, e mantém a ergonomia ruim de "qualquer
+  função chamada precisa lembrar de re-estabelecer contexto".
+- *Tornar `runWithActor` / helpers tolerantes a contexto ausente
+  (fallback global).* Mascararia o bug e abriria espaço para vazamento
+  cross-tenant em outras superfícies.
+
+**Pontos de atenção.** Todo `sock.ev.on(...)` novo no `BaileysSession`
+(connection.update, contacts.upsert, messages.update já existentes)
+está hoje OK porque não toca em modelos scoped — mas qualquer novo
+handler que vá escrever no Prisma scoped precisa do mesmo envelope.
+
+**Arquivos.** `src/workers/baileys/baileys-session.ts` (envelope +
+cache), `src/services/auto-deals.ts` (sem alteração — já estava
+correto, apenas dependia de contexto válido).
+
+**Remediação histórica.** `src/scripts/backfill-inbox-deals.ts` cria
+deals para contatos órfãos retroativamente (idempotente via
+`ensureOpenDealForContact`). Já executado em prod (3 deals criados).
+
+---
+
+### 2026-06-06 — Stage `isIncoming` sempre visível no Kanban
+
+**Decisão.** Em `getBoardData` (`src/services/deals.ts`), removida a
+regra `filter((s) => !s.isIncoming || s.deals.length > 0)`. A stage
+de entrada (Lead de Entrada) agora **sempre renderiza** como coluna.
+
+**Por quê.** O `stage.deals` é a slice **pós-filtro** (status=OPEN
+padrão + visibility do usuário + filtros avançados / busca). Qualquer
+filtro ativo zerava o array de deals da incoming e a coluna sumia —
+mesmo havendo leads reais no banco. Bug reportado como "existem leads
+mas a fase do funil não aparece". A regra antiga existia para evitar
+coluna vazia inútil; o trade-off não compensa o risco de esconder a
+porta de entrada do funil sob qualquer filtro.
+
+**Arquivos.** `src/services/deals.ts` (~linha 796).
+
+---
+
+### 2026-06-06 — `getContactById` achata `stage.{name,color,pipelineId}` para o formato esperado pelo frontend
+
+**Decisão.** O retorno de `getContactById` agora expõe `stageName`,
+`stageColor` e `pipelineId` flat em cada deal (além do `stage` objeto
+preservado por compatibilidade).
+
+**Por quê.** O contrato `ContactDetail` no frontend
+(`features/inbox-v2/api/misc.ts`) declara `deals[].stageName?: string`.
+O backend só retornava `deals[].stage: { id, name, color }`. O adapter
+`toContactAside` lia `d.stageName ?? null` → null → contact-aside
+mostrava "Sem estágio" mesmo com `stageId` válido. Achatar no
+backend (em vez de mudar o adapter ou todo o frontend) é o caminho
+de menor risco.
+
+**Arquivos.** `src/services/contacts.ts` (include do stage com
+`pipelineId` + map de retorno).
+
+---
+
 ### 2026-05-29 — Tenancy P0: `userOrgFilter` escopa super-admin à org ativa + fecha IDOR no `PUT /api/users/[id]`
 
 **Decisão.** Inverter a ordem das checagens em `userOrgFilter`

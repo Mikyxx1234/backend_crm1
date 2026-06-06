@@ -5,6 +5,7 @@ import type { Prisma } from "@prisma/client";
 import { auth } from "@/lib/auth";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { prisma } from "@/lib/prisma";
+import { logEvent } from "@/services/activity-log";
 
 export async function POST(request: Request) {
   try {
@@ -33,19 +34,67 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "Máximo 200 conversas por vez." }, { status: 400 });
     }
 
+    const logBulkStatus = async (
+      changedIds: string[],
+      from: string,
+      to: string,
+      type: "CONVERSATION_CLOSED" | "CONVERSATION_REOPENED",
+    ) => {
+      const convs = await prisma.conversation.findMany({
+        where: { id: { in: changedIds } },
+        select: { id: true, contactId: true, contact: { select: { name: true } } },
+      });
+      await Promise.all(
+        convs.map((c) =>
+          logEvent({
+            type,
+            entityType: "CONVERSATION",
+            entityId: c.id,
+            entityLabel: c.contact?.name ?? null,
+            conversationId: c.id,
+            contactId: c.contactId,
+            field: "status",
+            oldValue: from,
+            newValue: to,
+            meta: { from, to, source: "bulk" },
+          }),
+        ),
+      );
+    };
+
     switch (action) {
       case "resolve": {
+        const toChange = await prisma.conversation.findMany({
+          where: scopedWhere(ids, { status: { not: "RESOLVED" } }),
+          select: { id: true },
+        });
         const result = await prisma.conversation.updateMany({
           where: scopedWhere(ids, { status: { not: "RESOLVED" } }),
           data: { status: "RESOLVED" },
         });
+        void logBulkStatus(
+          toChange.map((c) => c.id),
+          "OPEN",
+          "RESOLVED",
+          "CONVERSATION_CLOSED",
+        );
         return NextResponse.json({ updated: result.count });
       }
       case "reopen": {
+        const toChange = await prisma.conversation.findMany({
+          where: scopedWhere(ids, { status: "RESOLVED" }),
+          select: { id: true },
+        });
         const result = await prisma.conversation.updateMany({
           where: scopedWhere(ids, { status: "RESOLVED" }),
           data: { status: "OPEN" },
         });
+        void logBulkStatus(
+          toChange.map((c) => c.id),
+          "RESOLVED",
+          "OPEN",
+          "CONVERSATION_REOPENED",
+        );
         return NextResponse.json({ updated: result.count });
       }
       default:

@@ -5,6 +5,8 @@ import {
   getContactCustomFieldValues,
   upsertContactCustomFieldValues,
 } from "@/services/custom-fields";
+import { prisma } from "@/lib/prisma";
+import { logEvent } from "@/services/activity-log";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -47,8 +49,51 @@ export async function PUT(request: Request, ctx: Ctx) {
           typeof (v as Record<string, unknown>).fieldId === "string" &&
           typeof (v as Record<string, unknown>).value === "string",
       );
+      const prev = await getContactCustomFieldValues(id);
+      const prevByField = new Map(
+        prev.map((v) => [
+          (v as { fieldId?: string }).fieldId ?? "",
+          (v as { value?: string }).value ?? "",
+        ]),
+      );
+
       await upsertContactCustomFieldValues(id, cleaned);
       const updated = await getContactCustomFieldValues(id);
+
+      // Emite 1 evento por campo que realmente mudou.
+      const fieldIds = cleaned.map((c) => c.fieldId);
+      const fields =
+        fieldIds.length > 0
+          ? await prisma.customField.findMany({
+              where: { id: { in: fieldIds } },
+              select: { id: true, label: true },
+            })
+          : [];
+      const labelById = new Map(fields.map((f) => [f.id, f.label]));
+      const contact = await prisma.contact.findUnique({
+        where: { id },
+        select: { name: true, phone: true, email: true },
+      });
+      for (const c of cleaned) {
+        const before = prevByField.get(c.fieldId) ?? "";
+        if (before === c.value) continue;
+        void logEvent({
+          type: "CONTACT_FIELD_CHANGED",
+          entityType: "CONTACT",
+          entityId: id,
+          entityLabel: contact?.name ?? contact?.phone ?? contact?.email ?? null,
+          contactId: id,
+          field: labelById.get(c.fieldId) ?? c.fieldId,
+          oldValue: before || null,
+          newValue: c.value || null,
+          meta: {
+            fieldId: c.fieldId,
+            fieldLabel: labelById.get(c.fieldId) ?? null,
+            custom: true,
+          },
+        });
+      }
+
       return NextResponse.json(updated);
     });
   } catch (e) {

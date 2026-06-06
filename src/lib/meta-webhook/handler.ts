@@ -47,6 +47,7 @@ void META_WEBHOOK_BUILD_MARKER;
 const log = getLogger("meta-webhook");
 import { processMetaWhatsappCallsWebhook } from "@/services/meta-whatsapp-calls-webhook";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
+import { logEvent } from "@/services/activity-log";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import {
@@ -1755,6 +1756,42 @@ async function executePostBody(
           });
 
           if (!msgCreated) continue;
+
+          // Activity Log: registra MESSAGE_RECEIVED no feed unificado.
+          // Mensagens "system" do WhatsApp (ex.: user_changed_number)
+          // tambem entram para auditoria — actor INTEGRATION nos dois
+          // casos (no system, sublabel reflete a origem).
+          if (!isSystemMessage) {
+            void (async () => {
+              const openDeal = await prisma.deal.findFirst({
+                where: { contactId: contact.id, status: "OPEN" },
+                select: { id: true },
+                orderBy: { updatedAt: "desc" },
+              }).catch(() => null);
+              await logEvent({
+                type: "MESSAGE_RECEIVED",
+                entityType: "MESSAGE",
+                entityId: msgCreated.id,
+                entityLabel: profileName || contact.name || "Mensagem recebida",
+                conversationId: conversation.id,
+                contactId: contact.id,
+                dealId: openDeal?.id ?? null,
+                actor: {
+                  type: "INTEGRATION",
+                  label: contact.name ?? profileName ?? "Contato",
+                  sublabel: contact.phone ?? "WhatsApp",
+                  ref: contact.id,
+                },
+                meta: {
+                  preview: (parsed.text ?? "").slice(0, 200),
+                  channel: "WhatsApp",
+                  via: "meta_cloud_api",
+                  messageType: inboundMsgType,
+                  externalId: parsed.waMessageId,
+                },
+              });
+            })();
+          }
 
           if (parsed.flowPayload && Object.keys(parsed.flowPayload).length > 0) {
             try {

@@ -32,14 +32,68 @@ export async function GET(_req: Request, ctx: Ctx) {
         { status: 404 },
       );
 
-    const events = await prisma.dealEvent.findMany({
-      where: { dealId: existing.id },
-      orderBy: { createdAt: "desc" },
-      take: 200,
-      include: {
-        user: { select: { id: true, name: true, avatarUrl: true } },
-      },
-    });
+    // Le do novo log unificado (activity_events). Para nao quebrar o
+    // contrato consumido pelo timeline-panel.tsx (que espera
+    // { id, type, meta, createdAt, user }), mapeamos os campos de
+    // volta. Durante o cutover, se nao houver activity_events para
+    // este deal (backfill nao rodou ainda), cai no deal_events legado.
+    type LegacyShape = {
+      id: string;
+      type: string;
+      meta: Record<string, unknown>;
+      createdAt: Date;
+      user: { id: string; name: string; avatarUrl: string | null } | null;
+    };
+
+    let events: LegacyShape[] = (
+      await prisma.activityEvent.findMany({
+        where: { dealId: existing.id },
+        orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+        take: 200,
+        include: {
+          actorUser: { select: { id: true, name: true, avatarUrl: true } },
+        },
+      })
+    ).map((a) => ({
+      id: a.id,
+      type: a.type,
+      meta: (a.meta ?? {}) as Record<string, unknown>,
+      createdAt: a.occurredAt,
+      user: a.actorUser
+        ? {
+            id: a.actorUser.id,
+            name: a.actorUser.name ?? a.actorLabel ?? "—",
+            avatarUrl: a.actorUser.avatarUrl ?? null,
+          }
+        : a.actorLabel
+          ? { id: a.actorRef ?? a.id, name: a.actorLabel, avatarUrl: null }
+          : null,
+    }));
+
+    if (events.length === 0) {
+      events = (
+        await prisma.dealEvent.findMany({
+          where: { dealId: existing.id },
+          orderBy: { createdAt: "desc" },
+          take: 200,
+          include: {
+            user: { select: { id: true, name: true, avatarUrl: true } },
+          },
+        })
+      ).map((e) => ({
+        id: e.id,
+        type: e.type,
+        meta: (e.meta ?? {}) as Record<string, unknown>,
+        createdAt: e.createdAt,
+        user: e.user
+          ? {
+              id: e.user.id,
+              name: e.user.name ?? "—",
+              avatarUrl: e.user.avatarUrl ?? null,
+            }
+          : null,
+      }));
+    }
 
     const stageIds = new Set<string>();
     const fieldIds = new Set<string>();

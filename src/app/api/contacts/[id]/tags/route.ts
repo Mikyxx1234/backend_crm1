@@ -5,6 +5,7 @@ import type { AppUserRole } from "@/lib/auth-types";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { logEvent } from "@/services/activity-log";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -46,11 +47,33 @@ export async function POST(request: Request, ctx: Ctx) {
         }
       }
 
+      const existed = await prisma.tagOnContact.findUnique({
+        where: { contactId_tagId: { contactId, tagId: resolvedTagId } },
+      });
       await prisma.tagOnContact.upsert({
         where: { contactId_tagId: { contactId, tagId: resolvedTagId } },
         update: {},
         create: { contactId, tagId: resolvedTagId },
       });
+      if (!existed) {
+        const tag = await prisma.tag.findUnique({
+          where: { id: resolvedTagId },
+          select: { name: true },
+        });
+        const contact = await prisma.contact.findUnique({
+          where: { id: contactId },
+          select: { name: true, phone: true, email: true },
+        });
+        void logEvent({
+          type: "CONTACT_TAG_ADDED",
+          entityType: "CONTACT",
+          entityId: contactId,
+          entityLabel: contact?.name ?? contact?.phone ?? contact?.email ?? null,
+          contactId,
+          newValue: tag?.name ?? resolvedTagId,
+          meta: { tagId: resolvedTagId, tagName: tag?.name ?? null },
+        });
+      }
 
       return NextResponse.json({ ok: true });
     } catch (e) {
@@ -67,9 +90,28 @@ export async function DELETE(request: Request, ctx: Ctx) {
       const tagId = typeof body.tagId === "string" ? body.tagId : "";
       if (!tagId) return NextResponse.json({ message: "tagId obrigatório." }, { status: 400 });
 
-      await prisma.tagOnContact.delete({
+      const tag = await prisma.tag.findUnique({
+        where: { id: tagId },
+        select: { name: true },
+      });
+      const removed = await prisma.tagOnContact.delete({
         where: { contactId_tagId: { contactId, tagId } },
-      }).catch(() => {});
+      }).catch(() => null);
+      if (removed) {
+        const contact = await prisma.contact.findUnique({
+          where: { id: contactId },
+          select: { name: true, phone: true, email: true },
+        });
+        void logEvent({
+          type: "CONTACT_TAG_REMOVED",
+          entityType: "CONTACT",
+          entityId: contactId,
+          entityLabel: contact?.name ?? contact?.phone ?? contact?.email ?? null,
+          contactId,
+          oldValue: tag?.name ?? tagId,
+          meta: { tagId, tagName: tag?.name ?? null },
+        });
+      }
 
       return NextResponse.json({ ok: true });
     } catch (e) {

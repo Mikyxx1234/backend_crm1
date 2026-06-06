@@ -7,6 +7,7 @@ import { validateToken } from "@/services/api-tokens";
 import {
   enterRequestContext,
   runWithContext,
+  type ContextActor,
   type RequestContext,
 } from "@/lib/request-context";
 
@@ -19,6 +20,12 @@ export type ApiUser = {
   /// Null so quando o caller e super-admin global (sem vinculo com org).
   organizationId: string | null;
   isSuperAdmin: boolean;
+  /// Ator rico resolvido na autenticacao. Bearer token -> INTEGRATION
+  /// (com nome do token); sessao NextAuth -> HUMAN (com nome do user).
+  /// Propagado para `runWithApiUserContext` para que o activity log
+  /// atribua corretamente a ORIGEM (ex.: lead criado via n8n aparece
+  /// como integracao, nao como o usuario tecnico dono do token).
+  actor?: ContextActor;
 };
 
 export type ApiAuthResult =
@@ -60,10 +67,19 @@ export async function authenticateApiRequest(
     // Ativa o ctx ja aqui pra qualquer prisma.* seguinte no handler
     // funcionar sem precisar envolver em `withApiAuthContext`. Rotas
     // que usam a forma nova (runWithContext) sobrescrevem idempotente.
+    // Bearer token -> ator INTEGRATION com o nome do token como label.
+    // Permite que o feed mostre "n8n_comercial" em vez do email do user
+    // tecnico dono do token.
+    const tokenActor: ContextActor = {
+      type: "INTEGRATION",
+      label: result.tokenName ?? "API Token",
+      ref: result.tokenId,
+    };
     enterRequestContext({
       organizationId: result.organizationId,
       userId: result.user.id,
       isSuperAdmin: result.user.isSuperAdmin,
+      actor: tokenActor,
     });
 
     return {
@@ -75,6 +91,7 @@ export async function authenticateApiRequest(
         role: result.user.role,
         organizationId: result.organizationId,
         isSuperAdmin: result.user.isSuperAdmin,
+        actor: tokenActor,
       },
       viaToken: true,
       tokenHash: result.tokenHash,
@@ -128,6 +145,10 @@ export async function authenticateApiRequest(
       role: sessionUser.role ?? "MEMBER",
       organizationId: sessionUser.organizationId ?? null,
       isSuperAdmin: Boolean(sessionUser.isSuperAdmin),
+      actor: {
+        type: "HUMAN",
+        label: sessionUser.name ?? sessionUser.email ?? sessionUser.id,
+      },
     },
     viaToken: false,
   };
@@ -156,10 +177,18 @@ export async function withApiAuthContext<T>(
 ): Promise<NextResponse | T> {
   const r = await authenticateApiRequest(request);
   if (!r.ok) return r.response;
+  const actor: ContextActor = r.viaToken
+    ? {
+        type: "INTEGRATION",
+        label: r.tokenHash ? `API Token (${r.user.name || r.user.email})` : "API Token",
+        ref: r.tokenHash,
+      }
+    : { type: "HUMAN", label: r.user.name || r.user.email || r.user.id };
   const ctx: RequestContext = {
     organizationId: r.user.organizationId,
     userId: r.user.id,
     isSuperAdmin: r.user.isSuperAdmin,
+    actor,
   };
   const method = request.method;
   let path = "";
@@ -208,11 +237,19 @@ export function runWithApiUserContext<T>(
   user: ApiUser,
   fn: () => T | Promise<T>,
 ): T | Promise<T> {
+  // Usa o ator resolvido na autenticacao (INTEGRATION p/ Bearer token,
+  // HUMAN p/ sessao). Fallback HUMAN apenas se o user vier sem actor
+  // (callers legados que montam ApiUser na mao). Isso preserva a ORIGEM
+  // do lead no activity log — lead via n8n aparece como integracao.
   return runWithContext(
     {
       organizationId: user.organizationId,
       userId: user.id,
       isSuperAdmin: user.isSuperAdmin,
+      actor: user.actor ?? {
+        type: "HUMAN",
+        label: user.name || user.email || user.id,
+      },
     },
     fn,
   );

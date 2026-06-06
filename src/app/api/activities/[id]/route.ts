@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { deleteActivity, getActivityById, isValidActivityType, updateActivity } from "@/services/activities";
 import { createDealEvent } from "@/services/deals";
+import { logEvent } from "@/services/activity-log";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -130,30 +131,111 @@ export async function PUT(request: Request, context: RouteContext) {
       const activity = await updateActivity(id, payload);
 
       const targetDealId = typeof b.dealId === "string" ? b.dealId : existing.dealId;
+      const targetContactId =
+        typeof b.contactId === "string" ? b.contactId : existing.contactId;
       const uid = session.user.id as string;
 
-      if (targetDealId && b.completed === true && !existing.completed) {
-        createDealEvent(targetDealId, uid, "ACTIVITY_COMPLETED", {
+      // Emissor granular de eventos de tarefa. Antes só logávamos quando
+      // havia deal (createDealEvent), e com um único ACTIVITY_UPDATED
+      // genérico. Agora:
+      //   - deal-bound  → createDealEvent (preserva a timeline do deal)
+      //   - contato-only→ logEvent(entityType=ACTIVITY) — antes ficava
+      //                   sem nenhum log
+      // E separamos por natureza (prazo, descrição, título, resultado)
+      // conforme pedido (granularidade estilo Kommo).
+      const emitActivityEvent = (
+        type: string,
+        meta: Record<string, unknown>,
+        field?: string,
+        oldV?: string | null,
+        newV?: string | null,
+      ) => {
+        if (targetDealId) {
+          createDealEvent(targetDealId, uid, type, {
+            ...meta,
+            ...(field ? { field } : {}),
+            ...(oldV !== undefined ? { from: oldV } : {}),
+            ...(newV !== undefined ? { to: newV } : {}),
+          }).catch(() => {});
+        } else {
+          void logEvent({
+            type,
+            entityType: "ACTIVITY",
+            entityId: id,
+            entityLabel: activity.title,
+            contactId: targetContactId ?? null,
+            field: field ?? null,
+            oldValue: oldV ?? null,
+            newValue: newV ?? null,
+            meta,
+          });
+        }
+      };
+
+      const justCompleted = b.completed === true && !existing.completed;
+      if (justCompleted) {
+        // "Resultado registrado na tarefa": no nosso modelo o resultado
+        // é a descrição preenchida ao concluir. Vai no meta pra auditoria.
+        emitActivityEvent("ACTIVITY_COMPLETED", {
           title: activity.title,
           activityType: activity.type,
-        }).catch(() => {});
-      } else if (targetDealId) {
-        // Log ACTIVITY_UPDATED para qualquer outra edição (título,
-        // descrição, tipo, scheduledAt, etc.). Ignora quando a única
-        // mudança foi concluir (já coberto acima).
-        const fieldsChanged: string[] = [];
-        if (typeof b.title === "string" && b.title !== existing.title) fieldsChanged.push("title");
-        if (typeof b.type === "string" && b.type !== existing.type) fieldsChanged.push("type");
-        if (typeof b.description === "string" && b.description !== existing.description) fieldsChanged.push("description");
-        if (b.scheduledAt !== undefined) fieldsChanged.push("scheduledAt");
+          result: activity.description ?? null,
+        });
+      }
 
-        if (fieldsChanged.length > 0) {
-          createDealEvent(targetDealId, uid, "ACTIVITY_UPDATED", {
-            title: activity.title,
-            activityType: activity.type,
-            fields: fieldsChanged,
-          }).catch(() => {});
+      // Alteração de prazo
+      if (b.scheduledAt !== undefined) {
+        const oldISO = existing.scheduledAt
+          ? new Date(existing.scheduledAt).toISOString()
+          : null;
+        const newISO = activity.scheduledAt
+          ? new Date(activity.scheduledAt).toISOString()
+          : null;
+        if (oldISO !== newISO) {
+          emitActivityEvent(
+            "ACTIVITY_DUE_CHANGED",
+            { title: activity.title },
+            "scheduledAt",
+            oldISO,
+            newISO,
+          );
         }
+      }
+
+      // Alteração de descrição
+      if (
+        typeof b.description === "string" &&
+        b.description !== existing.description
+      ) {
+        emitActivityEvent(
+          "ACTIVITY_DESCRIPTION_CHANGED",
+          { title: activity.title },
+          "description",
+          existing.description ?? null,
+          activity.description ?? null,
+        );
+      }
+
+      // Renomeação
+      if (typeof b.title === "string" && b.title !== existing.title) {
+        emitActivityEvent(
+          "ACTIVITY_RENAMED",
+          { activityType: activity.type },
+          "title",
+          existing.title,
+          activity.title,
+        );
+      }
+
+      // Mudança de tipo
+      if (typeof b.type === "string" && b.type !== existing.type) {
+        emitActivityEvent(
+          "ACTIVITY_UPDATED",
+          { title: activity.title },
+          "type",
+          existing.type,
+          activity.type,
+        );
       }
 
       return NextResponse.json(activity);
@@ -202,12 +284,22 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
     await deleteActivity(id);
 
+    const uid = session.user.id as string;
     if (existing.dealId) {
-      const uid = session.user.id as string;
       createDealEvent(existing.dealId, uid, "ACTIVITY_DELETED", {
         title: existing.title,
         activityType: existing.type,
       }).catch(() => {});
+    } else {
+      // Tarefa ligada apenas a contato (ou solta) também é auditada.
+      void logEvent({
+        type: "ACTIVITY_DELETED",
+        entityType: "ACTIVITY",
+        entityId: id,
+        entityLabel: existing.title,
+        contactId: existing.contactId ?? null,
+        meta: { title: existing.title, activityType: existing.type },
+      });
     }
 
     return NextResponse.json({ ok: true });

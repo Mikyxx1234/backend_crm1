@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent, deleteDeal, getDealById, isValidDealStatus, updateDeal } from "@/services/deals";
+import { logEvent } from "@/services/activity-log";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -272,7 +273,34 @@ export async function DELETE(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
     }
 
+    // Captura o ator antes de excluir (após o delete o ctx ainda vale,
+    // mas garantimos o label do sujeito a partir do snapshot `existing`).
+    const dealLabel =
+      (existing as { title?: string | null }).title ??
+      ((existing as { number?: number | null }).number != null
+        ? `#${(existing as { number?: number | null }).number}`
+        : null);
+    const dealContactId =
+      (existing as { contact?: { id?: string } | null }).contact?.id ??
+      (existing as { contactId?: string | null }).contactId ??
+      null;
+
     await deleteDeal(existing.id);
+
+    // IMPORTANTE: NÃO preencher `dealId` aqui — a FK tem onDelete:Cascade
+    // e o deal acabou de ser removido, então o próprio evento seria
+    // apagado. O id vai em `entityId` (string livre, sem FK) e em meta,
+    // preservando a auditoria da exclusão.
+    void logEvent({
+      type: "DEAL_DELETED",
+      entityType: "DEAL",
+      entityId: existing.id,
+      entityLabel: dealLabel,
+      dealId: null,
+      contactId: dealContactId,
+      meta: { dealId: existing.id, title: dealLabel },
+    });
+
     return NextResponse.json({ ok: true });
     });
   } catch (e: unknown) {

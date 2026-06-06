@@ -440,6 +440,10 @@ export async function POST(request: Request) {
         createDealEvent(dealResult.id, authResult.user.id, "CREATED", {
           stageId: deal.stageId,
           via: "api/leads",
+          // Origem do lead (form, chatbot, anúncio, etc.) — vinda no
+          // payload como contact.source. Combinado ao actor INTEGRATION
+          // (nome do token), o feed responde "de onde veio cada lead".
+          source: contact.source ?? null,
         }).catch(() => {});
         fireTrigger("deal_created", {
           dealId: dealResult.id,
