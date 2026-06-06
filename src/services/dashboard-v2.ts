@@ -105,7 +105,11 @@ export interface DealStageFlow {
 
 export interface DealsOverviewResult {
   stages: DealStageFlow[];
-  /** Negócios CRIADOS dentro do período selecionado (1º card do carrossel). */
+  /**
+   * Pessoas (contatos) que entraram no CRM no período — org inteira,
+   * independente do pipeline. `count` = contatos distintos criados;
+   * `value` = total em negócios criados no período (referência).
+   */
   newInPeriod: { count: number; value: number };
   summary: {
     totalValue: number;
@@ -195,22 +199,28 @@ export async function getDealsOverview(
     GROUP BY d."stageId"
   `);
 
-  // Novos do período: negócios CRIADOS na janela (entrada de leads),
-  // independente do status atual. Escopo = estágios do pipeline ativo.
-  const newRows = stageIds.length
-    ? await prisma.$queryRaw<{ cnt: bigint; val: unknown }[]>(Prisma.sql`
-        SELECT COUNT(*)::bigint AS cnt,
-               COALESCE(SUM(CAST(d.value AS DECIMAL)), 0) AS val
-        FROM deals d
-        WHERE d."organizationId" = ${orgId}
-          AND d."stageId" IN (${Prisma.join(stageIds)})
-          AND d."createdAt" >= ${period.from} AND d."createdAt" <= ${period.to}
-          ${ownerFilter}
-      `)
-    : [];
+  // Novos do período: PESSOAS (contatos) que entraram no CRM na janela.
+  // Escopo = organização inteira — NÃO depende do pipeline selecionado.
+  // `count` = contatos distintos criados no período (cada contato = 1 pessoa).
+  // `value` = total em negócios criados no mesmo período (org), como
+  // referência do valor gerado pelas entradas.
+  const [newContactRows, newDealValueRows] = await Promise.all([
+    prisma.$queryRaw<{ cnt: bigint }[]>(Prisma.sql`
+      SELECT COUNT(*)::bigint AS cnt
+      FROM contacts c
+      WHERE c."organizationId" = ${orgId}
+        AND c."createdAt" >= ${period.from} AND c."createdAt" <= ${period.to}
+    `),
+    prisma.$queryRaw<{ val: unknown }[]>(Prisma.sql`
+      SELECT COALESCE(SUM(CAST(d.value AS DECIMAL)), 0) AS val
+      FROM deals d
+      WHERE d."organizationId" = ${orgId}
+        AND d."createdAt" >= ${period.from} AND d."createdAt" <= ${period.to}
+    `),
+  ]);
   const newInPeriod = {
-    count: newRows[0] ? Number(newRows[0].cnt) : 0,
-    value: newRows[0] ? toNumber(newRows[0].val) : 0,
+    count: newContactRows[0] ? Number(newContactRows[0].cnt) : 0,
+    value: newDealValueRows[0] ? toNumber(newDealValueRows[0].val) : 0,
   };
 
   const snapMap = new Map(snapshotRows.map((r) => [r.stageId, r]));

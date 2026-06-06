@@ -163,7 +163,6 @@ function buildDestination(): NodeJS.WritableStream | undefined {
   if (!shouldUsePretty()) return undefined;
   try {
     // Import dinâmico pra não puxar pino-pretty no bundle de prod.
-    /* eslint-disable @typescript-eslint/no-require-imports */
     const prettyFactory = require("pino-pretty") as (
       opts?: Record<string, unknown>,
     ) => NodeJS.WritableStream;

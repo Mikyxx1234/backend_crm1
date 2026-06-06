@@ -1,6 +1,56 @@
 import type { Prisma } from "@prisma/client";
 
 import { invalidateAuthzForUser } from "@/lib/authz";
+import {
+  PRESET_DESCRIPTION,
+  PRESET_LABEL,
+  PRESET_PERMISSIONS,
+} from "@/lib/authz/presets";
+
+const SYSTEM_PRESETS = ["ADMIN", "MANAGER", "MEMBER"] as const;
+
+/**
+ * Garante que os 3 presets de sistema (ADMIN/MANAGER/MEMBER) existam na
+ * organizacao. Idempotente e NAO-destrutivo: cria apenas os que faltam,
+ * preservando permissions customizadas de presets ja existentes.
+ *
+ * Motivacao (bug 2026-06): orgs criadas via `registerOrganization`
+ * (onboarding/signup) nasciam SEM nenhuma Role de preset — apenas a
+ * migration de RBAC semeava os presets. Resultado: criar um usuario
+ * MANAGER/MEMBER via UI nao encontrava a Role preset e o usuario ficava
+ * com `permissions = []` (barrado em toda rota com `can()`). Chamar isto
+ * antes de atribuir torna o fluxo auto-curavel pra qualquer org.
+ *
+ * Race-safe via `createMany({ skipDuplicates })` apoiado no unique index
+ * `roles_organizationId_systemPreset_key`.
+ */
+export async function ensureSystemPresetRoles(
+  tx: Prisma.TransactionClient,
+  organizationId: string,
+): Promise<void> {
+  const existing = await tx.role.findMany({
+    where: {
+      organizationId,
+      systemPreset: { in: ["ADMIN", "MANAGER", "MEMBER"] },
+    },
+    select: { systemPreset: true },
+  });
+  const have = new Set(existing.map((r) => r.systemPreset));
+  const missing = SYSTEM_PRESETS.filter((p) => !have.has(p));
+  if (missing.length === 0) return;
+
+  await tx.role.createMany({
+    data: missing.map((preset) => ({
+      organizationId,
+      name: PRESET_LABEL[preset],
+      description: PRESET_DESCRIPTION[preset],
+      systemPreset: preset,
+      isSystem: true,
+      permissions: [...PRESET_PERMISSIONS[preset]],
+    })),
+    skipDuplicates: true,
+  });
+}
 
 /**
  * Sincroniza UserRoleAssignment do usuario com o preset legado
@@ -35,6 +85,10 @@ export async function syncUserRoleAssignment(
     assignedById?: string | null;
   },
 ): Promise<boolean> {
+  // Auto-cura: garante os presets da org antes de procurar o alvo. Cobre
+  // orgs criadas sem seed de RBAC (onboarding/signup) — ver doc da funcao.
+  await ensureSystemPresetRoles(tx, args.organizationId);
+
   const presetRole = await tx.role.findFirst({
     where: {
       organizationId: args.organizationId,

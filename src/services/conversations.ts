@@ -44,18 +44,6 @@ export type GetConversationsParams = {
   sortOrder?: "asc" | "desc";
 };
 
-const listInclude = {
-  contact: {
-    select: {
-      id: true,
-      name: true,
-      email: true,
-      phone: true,
-      avatarUrl: true,
-    },
-  },
-} satisfies Prisma.ConversationInclude;
-
 const listSelect = {
   id: true,
   externalId: true,

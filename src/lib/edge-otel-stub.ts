@@ -134,7 +134,6 @@ function makeDeepProxy(description: string): unknown {
 // pra que call-sites compile. Valores em runtime são todos Proxies.
 // =====================================================================
 
-/* eslint-disable @typescript-eslint/no-explicit-any */
 export const trace: any = makeDeepProxy("trace");
 export const metrics: any = makeDeepProxy("metrics");
 export const context: any = makeDeepProxy("context");

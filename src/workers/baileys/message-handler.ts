@@ -268,7 +268,6 @@ type ParsedMsg = {
   externalId: string;
 };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyMsg = Record<string, any>;
 
 const MIME_TO_EXT: Record<string, string> = {

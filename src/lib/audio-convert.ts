@@ -19,7 +19,6 @@ function resolveFFmpeg(): string {
   } catch { /* not in PATH, try static */ }
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
     const staticBin = require("ffmpeg-static") as string;
     if (staticBin && existsSync(staticBin)) {
       console.log("[audio-convert] Usando ffmpeg-static (fallback):", staticBin);
