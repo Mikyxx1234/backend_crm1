@@ -34,6 +34,7 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
   { key: "inbox", title: "Inbox", href: "/inbox", locked: false },
   { key: "activities", title: "Atividades", href: "/activities", locked: false },
   { key: "automations", title: "Automações", href: "/automations", locked: false },
+  { key: "logs", title: "Logs", href: "/logs", locked: false },
   { key: "widgets", title: "Widgets", href: "/widgets", locked: false },
 ] as const;
 
