@@ -78,7 +78,6 @@ function getRedisOrNull(): import("ioredis").Redis | null {
   const url = process.env.REDIS_URL?.trim();
   if (!url) return null;
   try {
-    /* eslint-disable @typescript-eslint/no-require-imports */
     const IORedis = require("ioredis").default ?? require("ioredis");
     sharedRedis = new IORedis(url, {
       maxRetriesPerRequest: null,

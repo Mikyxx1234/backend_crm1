@@ -1835,10 +1835,6 @@ async function executeStep(
           }
         }
       }
-      const automation = await prisma.automation.findUnique({
-        where: { id: rt.automationId },
-        include: { steps: { orderBy: { position: "asc" }, select: { id: true, type: true } } },
-      });
       const questionStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
       const questionTimeoutMs = readNumber(cfg, "timeoutMs");
       if (questionStepId && rt.contactId) {

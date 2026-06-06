@@ -404,7 +404,7 @@ function normalizeForSearch(s: string | null | undefined): string {
     .trim();
 }
 
-function searchProductsTool(ctx: RunContext) {
+function searchProductsTool(_ctx: RunContext) {
   return tool({
     description:
       "Busca produtos, serviços ou cursos no catálogo interno por nome, SKU, descrição ou atributos. Use SEMPRE antes de responder sobre preço, modalidade, duração, características ou disponibilidade — nunca invente esses dados. Busca tolera acentos e múltiplas palavras. Retorna até 5 itens com preço formatado em BRL e campos personalizados (modalidade, carga horária, etc.).",
@@ -602,7 +602,6 @@ function transferToHumanTool(ctx: RunContext) {
 // Usamos `any` pro Tool porque cada tool tem um inputSchema e output
 // diferentes; o ToolSet do AI SDK aceita tools heterogêneas, mas
 // TypeScript não consegue inferir isso automaticamente sem este cast.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyTool = ReturnType<typeof tool<any, any>>;
 
 const FACTORY_MAP: Record<string, (ctx: RunContext) => AnyTool> = {

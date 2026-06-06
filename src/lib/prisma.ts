@@ -3,7 +3,6 @@ import { Prisma } from "@prisma/client";
 import { prismaBase } from "@/lib/prisma-base";
 import {
   deepInjectOrgId,
-  mergeData,
   mergeWhere,
 } from "@/lib/prisma-tenant-helpers";
 import {
@@ -72,6 +71,8 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "WhatsappFlowDefinition",
   "DistributionRule",
   "DistributionMember",
+  "DistributionResponsible",
+  "DistributionLog",
   "Segment",
   "Campaign",
   "CampaignRecipient",
@@ -95,6 +96,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "Role",
   "UserRoleAssignment",
   "OrganizationSetting",
+  "OrganizationWidget",
   "SavedFilter",
   // BulkOperation tem organizationId NOT NULL no schema. Sem entrar
   // aqui:

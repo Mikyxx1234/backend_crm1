@@ -1,6 +1,6 @@
 import { UserRole } from "@prisma/client";
 
-import type { SettingsNavGroup, SettingsNavItem } from "./settings-nav";
+import type { SettingsNavGroup } from "./settings-nav";
 
 /**
  * Regras de visibilidade do menu — funcao pura, sem dependencias de

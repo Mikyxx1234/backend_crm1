@@ -36,7 +36,6 @@ function getProvider(): SecretsProvider {
       break;
     case "infisical": {
       // Lazy import pra evitar custo quando nao usado.
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
       const mod = require("./infisical-provider");
       provider = mod.createInfisicalProvider();
       break;

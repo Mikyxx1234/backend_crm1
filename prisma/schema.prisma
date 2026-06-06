@@ -78,6 +78,8 @@ model Organization {
   whatsappFlowDefinitions     WhatsappFlowDefinition[]
   distributionRules        DistributionRule[]
   distributionMembers      DistributionMember[]
+  distributionResponsibles DistributionResponsible[]
+  distributionLogs         DistributionLog[]
   segments                 Segment[]
   campaigns                Campaign[]
   campaignRecipients       CampaignRecipient[]
@@ -104,6 +106,7 @@ model Organization {
   roleAssignments          UserRoleAssignment[]
   organizationSettings     OrganizationSetting[]
   savedFilters             SavedFilter[]
+  organizationWidgets      OrganizationWidget[]
 
   @@index([status])
   @@map("organizations")
@@ -137,6 +140,36 @@ model OrganizationFeatureFlag {
   @@unique([organizationId, key])
   @@index([organizationId])
   @@map("organization_feature_flags")
+}
+
+/// Estado de instalacao dos widgets (extensoes internas) por organizacao.
+///
+/// A DEFINICAO de cada widget (nome, descricao, features, icone) NAO vive
+/// aqui — fica no catalogo estatico em `src/lib/widget-catalog.ts`. Esta
+/// tabela guarda apenas o estado por org: instalado/inativo, quem instalou
+/// e config futura opcional. Tenant-scoped (ver `SCOPED_MODELS` em
+/// `src/lib/prisma.ts`).
+model OrganizationWidget {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Slug do widget. Convencao snake_case. Lista canonica (whitelist) em
+  /// `src/lib/widget-catalog.ts` — o backend valida contra ela.
+  widgetSlug     String
+  /// "ACTIVE" (instalado) | "INACTIVE" (desativado, sem delete fisico).
+  status         String       @default("ACTIVE")
+  /// userId de quem instalou/reativou por ultimo — audit trail.
+  installedById  String?
+  /// JSON livre pra configuracao futura por org (ainda nao usado).
+  config         Json?
+  installedAt    DateTime     @default(now())
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, widgetSlug])
+  @@index([organizationId])
+  @@index([widgetSlug])
+  @@map("organization_widgets")
 }
 
 enum OrgStatus {
@@ -325,6 +358,7 @@ model User {
   notes                          Note[]
   assignedLeads                  Contact[]               @relation("AssignedTo")
   distributionMembers            DistributionMember[]
+  distributionResponsibles       DistributionResponsible[]
   schedule                       AgentSchedule?
   agentStatus                    AgentStatus?
   presenceLogs                   AgentPresenceLog[]
@@ -341,6 +375,7 @@ model User {
   bulkOperationsCreated          BulkOperation[]         @relation("BulkOperationCreatedBy")
   dashboardLayouts               UserDashboardLayout[]
   fieldLayoutConfigs             FieldLayoutConfig[]
+  preferences                    UserPreference?
   mfaBackupCodes                 UserMfaBackupCode[]
   loginAttempts                  LoginAttempt[]
   dataRequests                   DataRequest[]
@@ -374,6 +409,31 @@ model UserMfaBackupCode {
 
   @@index([userId])
   @@map("user_mfa_backup_codes")
+}
+
+/// Preferencias pessoais do usuario (por-usuario, NAO por-organizacao).
+///
+/// Diferente de OrganizationWidget/UserDashboardLayout, este modelo NAO eh
+/// tenant-scoped: a chave eh `userId` e ele NAO entra em SCOPED_MODELS
+/// (mesmo padrao de UserMfaBackupCode). Toda query filtra por
+/// `session.user.id` na camada de aplicacao.
+///
+/// `sidebar` guarda { items: [{ key, enabled, order }] } — a DEFINICAO dos
+/// itens (titulo, href, icone, locked) vive no catalogo de codigo
+/// (`src/lib/sidebar-catalog.ts`), nunca aqui. Campo JSON livre pra evoluir
+/// sem migration; validado no runtime.
+model UserPreference {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// { items: [{ key, enabled, order }] } — personalizacao da sidebar.
+  sidebar   Json?
+  /// { blocks: [{ key, enabled, order }] } — layout do dashboard comercial.
+  dashboard Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("user_preferences")
 }
 
 /// AuditLog (PR 4.2) — registro central de eventos sensiveis.
@@ -1845,6 +1905,56 @@ enum DistributionMode {
   ROUND_ROBIN
   RULE_BASED
   MANUAL
+}
+
+/// Responsavel do motor novo de distribuicao (widget `smart_distribution`).
+/// Modelo FLAT por usuario. Distingue estado ADMINISTRATIVO (`participates`)
+/// de estados OPERACIONAIS (online via AgentStatus, pausa via `paused`/AWAY,
+/// expediente via AgentSchedule). Nao substitui DistributionRule/Member ainda.
+model DistributionResponsible {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Estado administrativo: false = INATIVO (bloqueado pelo admin).
+  participates   Boolean      @default(true)
+  /// 0 = SEM limite de fila. >0 bloqueia quando filaAtual >= queueLimit.
+  queueLimit     Int          @default(0)
+  /// Peso/volume exibido na v2 (default 1). Nao altera a selecao v1.
+  volume         Int          @default(1)
+  /// Tipo/segmento opcional para compatibilidade de distribuicao.
+  type           String?
+  /// Pausa temporaria dedicada (alem de AgentStatus.AWAY).
+  paused         Boolean      @default(false)
+  /// Ultima vez que recebeu lead pelo motor (desempate da selecao).
+  lastExecutionAt DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@map("distribution_responsibles")
+}
+
+/// Log de execucao do motor de distribuicao (real e por automacao).
+/// Simulacao NAO grava aqui. `evaluated` guarda o diagnostico resumido (JSON).
+model DistributionLog {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  triggerSource  String
+  dealId         String?
+  contactId      String?
+  conversationId String?
+  selectedUserId String?
+  success        Boolean
+  reason         String
+  evaluated      Json         @default("[]")
+  createdAt      DateTime     @default(now())
+
+  @@index([organizationId, createdAt])
+  @@map("distribution_logs")
 }
 
 // ── Automation Context (Salesbot) ─────────────────

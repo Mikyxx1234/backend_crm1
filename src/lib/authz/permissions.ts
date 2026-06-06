@@ -115,6 +115,16 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
     ],
   },
   {
+    resource: "distribution",
+    label: "Distribuição de Leads",
+    description: "Módulo Distribuição Inteligente (widget smart_distribution).",
+    actions: [
+      { action: "view", label: "Visualizar distribuição" },
+      { action: "manage", label: "Gerenciar responsáveis e regras de distribuição" },
+      { action: "execute", label: "Executar distribuição manualmente" },
+    ],
+  },
+  {
     resource: "ai_agent",
     label: "Agentes de IA",
     actions: [

@@ -50,22 +50,6 @@ async function resolveBizOpaqueForCall(callId: string, incoming: string): Promis
   return o || null;
 }
 
-async function resolveNoteUserId(bizUserId: string | undefined, conversationId: string): Promise<string | null> {
-  if (bizUserId) {
-    const u = await prisma.user.findUnique({ where: { id: bizUserId }, select: { id: true } });
-    if (u) return u.id;
-  }
-  const conv = await prisma.conversation.findUnique({
-    where: { id: conversationId },
-    select: { assignedToId: true },
-  });
-  if (conv?.assignedToId) {
-    const u = await prisma.user.findUnique({ where: { id: conv.assignedToId }, select: { id: true } });
-    if (u) return u.id;
-  }
-  return null;
-}
-
 /**
  * Processa webhooks com `field: "calls"` (WhatsApp Cloud API Calling).
  * @see https://developers.facebook.com/docs/whatsapp/cloud-api/calling

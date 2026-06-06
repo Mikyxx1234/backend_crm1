@@ -39,6 +39,8 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   // Automation / AI
   "automation:view", "automation:create", "automation:edit", "automation:publish", "automation:delete",
   "ai_agent:view", "ai_agent:create", "ai_agent:edit", "ai_agent:delete",
+  // Distribution (módulo smart_distribution)
+  "distribution:view", "distribution:manage", "distribution:execute",
   // Campaign
   "campaign:view", "campaign:create", "campaign:edit", "campaign:send", "campaign:cancel",
   // Reports
@@ -66,6 +68,9 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   "tag:view",
   "task:view", "task:create", "task:edit",
   "report:view",
+  // Distribution: operador só visualiza (e altera o próprio online/offline,
+  // controlado fora do RBAC via ownership na rota de status do agente).
+  "distribution:view",
 ];
 
 export const PRESET_PERMISSIONS: Record<UserRole, readonly string[]> = {
