@@ -69,6 +69,7 @@ export const ACTION_STEP_TYPES = [
   "business_hours",
   "ask_ai_agent",
   "transfer_to_ai_agent",
+  "execute_distribution",
 ] as const;
 
 export type ActionStepType = (typeof ACTION_STEP_TYPES)[number];
@@ -121,6 +122,7 @@ export function stepTypeLabel(t: string): string {
     business_hours: "Horário comercial",
     ask_ai_agent: "Perguntar ao agente IA",
     transfer_to_ai_agent: "Transferir para agente IA",
+    execute_distribution: "Executar distribuição",
   };
   return map[t] ?? t;
 }
@@ -295,6 +297,10 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
         ? `ID: ${String(c.agentUserId).slice(0, 8)}…`
         : "Selecionar agente IA";
     }
+    case "execute_distribution": {
+      const t = c.distributionType ? String(c.distributionType) : "";
+      return t ? `Distribuição: ${t}` : "Distribuição padrão";
+    }
     default:
       return "—";
   }
@@ -429,6 +435,10 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
         // olha pra decidir se assume a conversa.
         target: "deal",
       };
+    case "execute_distribution":
+      // v1: "executar distribuição padrão". distributionType opcional
+      // (avalia TYPE_INCOMPATIBLE no motor). Sem fallback complexo.
+      return { distributionType: "" };
     default:
       return {};
   }

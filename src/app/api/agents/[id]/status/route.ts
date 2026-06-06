@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
+import { retryPendingDistributions } from "@/services/distribution";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -65,6 +66,27 @@ export async function PUT(req: Request, ctx: Ctx) {
       if (statusChanged) {
         await recordPresenceTransition({ userId: id, nextStatus: status });
         sseBus.publish("presence_update", { organizationId: getOrgIdOrNull(), userId: id, status });
+
+        // Alguém voltou a ficar ONLINE: drena a fila de espera da
+        // Distribuição (leads que ficaram sem responsável elegível).
+        // Best-effort — nunca derruba a atualização de status.
+        if (status === "ONLINE") {
+          try {
+            const drain = await retryPendingDistributions();
+            if (drain.resolved > 0 || drain.cancelled > 0) {
+              sseBus.publish("presence_update", {
+                organizationId: getOrgIdOrNull(),
+                userId: id,
+                status,
+              });
+            }
+          } catch (e) {
+            console.warn(
+              "[/api/agents/[id]/status] retryPendingDistributions falhou:",
+              e instanceof Error ? e.message : e,
+            );
+          }
+        }
       }
 
       return NextResponse.json(agentStatus);

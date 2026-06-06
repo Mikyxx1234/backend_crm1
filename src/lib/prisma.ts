@@ -74,6 +74,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "DistributionMember",
   "DistributionResponsible",
   "DistributionLog",
+  "DistributionPending",
   "Segment",
   "Campaign",
   "CampaignRecipient",

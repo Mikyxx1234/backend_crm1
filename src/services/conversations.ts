@@ -433,16 +433,33 @@ export async function assignConversationAssignedTo(
   // dispare saudação de novo.
   const shouldResetGreeted = (conv.assignedToId ?? null) !== (newAssigneeId ?? null);
 
-  const updated = await prisma.conversation.update({
-    where: { id: conversationId },
-    data: {
-      assignedToId: newAssigneeId,
-      ...(shouldResetGreeted ? { aiGreetedAt: null } : {}),
-    },
-    include: {
-      contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } },
-      assignedTo: { select: { id: true, name: true, email: true } },
-    },
+  // Atribuir/remover pelo inbox SINCRONIZA tudo: conversa + contato +
+  // negócios abertos do contato. Sem isso, "Remover responsável" limpava só
+  // a conversa e o contato/negócio continuavam atribuídos (inconsistente) —
+  // dava a impressão de que não removeu. Tudo numa transação (atômico).
+  const updated = await prisma.$transaction(async (tx) => {
+    const conv = await tx.conversation.update({
+      where: { id: conversationId },
+      data: {
+        assignedToId: newAssigneeId,
+        ...(shouldResetGreeted ? { aiGreetedAt: null } : {}),
+      },
+      include: {
+        contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } },
+        assignedTo: { select: { id: true, name: true, email: true } },
+      },
+    });
+    if (conv.contactId) {
+      await tx.contact.update({
+        where: { id: conv.contactId },
+        data: { assignedToId: newAssigneeId },
+      });
+      await tx.deal.updateMany({
+        where: { contactId: conv.contactId, status: "OPEN" },
+        data: { ownerId: newAssigneeId },
+      });
+    }
+    return conv;
   });
 
   return { ok: true, conversation: updated };

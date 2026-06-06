@@ -29,6 +29,8 @@ import {
 } from "@/services/deals";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
 import { updateContactScore } from "@/services/lead-scoring";
+import { executeDistribution } from "@/services/distribution";
+import { logEvent } from "@/services/activity-log";
 import {
   createContext,
   advanceContext,
@@ -240,6 +242,42 @@ function buildWebhookRoot(rt: RuntimeContext): Record<string, unknown> {
     contactCustomFields: rt.contactCustomFields ?? {},
     dealCustomFields: rt.dealCustomFields ?? {},
   };
+}
+
+/**
+ * Interpola tokens `{{...}}` de uma MENSAGEM de texto livre enviada ao
+ * cliente (send_whatsapp_message, question, interactive).
+ *
+ * Diferente do `interpolateVariables` legado (que só aceita chaves planas
+ * `[a-zA-Z0-9_]+` e mantém o literal `{{x}}` quando a variável não existe),
+ * aqui usamos o MESMO root do Webhook (`buildWebhookRoot`) + as flow
+ * variables, resolvendo caminhos com ponto (`contact.name`,
+ * `contactCustomFields.cpf`, `conversation.id`, ...). Assim o atalho `[`
+ * lista exatamente os mesmos campos do Webhook. Token ausente vira string
+ * VAZIA — comportamento pedido pelo operador: "se o cliente não tem o
+ * campo, envia vazio". Suporta o filtro `|first_name`.
+ */
+function interpolateContextVariables(
+  template: string,
+  rt: RuntimeContext,
+  flowVars: Record<string, unknown> | undefined,
+): string {
+  const root: Record<string, unknown> = {
+    ...buildWebhookRoot(rt),
+    ...(flowVars ?? {}),
+  };
+  return template.replace(
+    /\{\{\s*([\w.]+)(?:\s*\|\s*([a-zA-Z0-9_]+))?\s*\}\}/g,
+    (_m, path: string, transform?: string) => {
+      const value = webhookValueToString(resolveDottedPath(root, path));
+      if (!transform) return value;
+      const t = transform.trim().toLowerCase();
+      if (t === "first" || t === "first_name" || t === "primeiro_nome") {
+        return value.trim().split(/\s+/)[0] ?? "";
+      }
+      return value;
+    },
+  );
 }
 
 function readBoolean(obj: Record<string, unknown>, key: string): boolean | undefined {
@@ -547,7 +585,20 @@ async function resolveRuntimeContext(
   const ctx = payload.context;
   const data = asRecord(ctx.data) ?? {};
   let contactId = ctx.contactId;
-  const dealId = ctx.dealId;
+  let dealId = ctx.dealId;
+
+  // Sem dealId explícito mas com contato (ex.: execução manual disparada
+  // pela conversa, ou gatilhos de contato): resolve o negócio ABERTO mais
+  // recente do contato pra que `{{deal.*}}` e os passos de negócio tenham
+  // contexto. Mesmo padrão já usado por `consume_stock`/distribuição.
+  if (!dealId && contactId) {
+    const openDeal = await prisma.deal.findFirst({
+      where: { contactId, status: "OPEN" },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true },
+    });
+    if (openDeal) dealId = openDeal.id;
+  }
 
   let deal: DealWithNames | null = null;
   let dealTagIds: string[] = [];
@@ -796,6 +847,46 @@ async function executeStep(
         );
       }
       return {};
+    }
+
+    case "execute_distribution": {
+      // Distribuição Inteligente como ação de automação. Funciona como um IF
+      // (estilo n8n) de DUAS saídas, baseado em "havia agente disponível?":
+      //   • SIM  → distribuiu com sucesso → segue o fluxo linear (nextStepId).
+      //   • NÃO  → nenhum responsável elegível (ou módulo desabilitado) →
+      //            roteia pro ramo `elseStepId` (handle "false" no canvas).
+      // Usa SOMENTE o motor único (`executeDistribution`) — mesma regra da
+      // tela/simulação. Quando NÃO há elegível, o motor já enfileira o lead
+      // em `distribution_pending` (rede de segurança p/ redistribuir depois);
+      // aqui só decidimos qual ramo do fluxo seguir. Não lançamos erro: a
+      // ausência de agente é um resultado de negócio esperado, não falha.
+      const distributionType = readString(cfg, "distributionType") ?? null;
+      const conversationId =
+        rt.conversation && typeof rt.conversation === "object"
+          ? ((rt.conversation as { id?: string }).id ?? null)
+          : null;
+
+      const result = await executeDistribution({
+        dealId: rt.dealId ?? null,
+        contactId: rt.contactId ?? null,
+        conversationId,
+        triggerSource: "AUTOMATION",
+        distributionType,
+      });
+
+      if (result.success) {
+        // Saída SIM = fluxo linear (próximo passo).
+        return {};
+      }
+
+      // Saída NÃO = sem agente elegível / módulo off. Roteia pro ramo "false".
+      const elseStepId = readString(cfg, "elseStepId");
+      if (elseStepId) {
+        return { skipRemaining: true, gotoStepId: elseStepId };
+      }
+      // Sem ramo "Não" conectado: encerra este ramo (lead já foi enfileirado
+      // pelo motor quando o motivo foi NO_ELIGIBLE_RESPONSIBLE).
+      return { skipRemaining: true };
     }
 
     case "transfer_to_ai_agent": {
@@ -1091,7 +1182,9 @@ async function executeStep(
         cfgRecipient || rt.contact?.whatsappBsuid?.trim() || undefined;
       const contentRaw = readString(cfg, "content");
       const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
-      const content = contentRaw && vars ? interpolateVariables(contentRaw, vars) : contentRaw;
+      const content = contentRaw
+        ? interpolateContextVariables(contentRaw, rt, vars)
+        : contentRaw;
 
       log.debug(`Enviando WhatsApp: contato=${rt.contactId ?? "—"} destino=${to ?? recipient ?? "—"} texto="${content?.slice(0, 60) ?? "(vazio)"}"`);
 
@@ -1512,8 +1605,10 @@ async function executeStep(
       const recipient = readString(cfg, "recipient")?.trim() || rt.contact?.whatsappBsuid?.trim() || undefined;
       if (!to && !recipient) throw new Error("send_whatsapp_interactive: sem destino");
 
-      const body = readString(cfg, "body");
-      if (!body) throw new Error("send_whatsapp_interactive: body obrigatório");
+      const interactiveVars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
+      const bodyRaw = readString(cfg, "body");
+      if (!bodyRaw) throw new Error("send_whatsapp_interactive: body obrigatório");
+      const body = interpolateContextVariables(bodyRaw, rt, interactiveVars);
 
       const rawButtons = Array.isArray(cfg.buttons) ? cfg.buttons as { id?: string; title?: string; text?: string; gotoStepId?: string }[] : [];
       const buttons = rawButtons.slice(0, 3).map((b, i) => ({
@@ -1522,8 +1617,10 @@ async function executeStep(
       }));
       if (buttons.length === 0) throw new Error("send_whatsapp_interactive: pelo menos 1 botão obrigatório");
 
-      const header = readString(cfg, "header");
-      const footer = readString(cfg, "footer");
+      const headerRaw = readString(cfg, "header");
+      const footerRaw = readString(cfg, "footer");
+      const header = headerRaw ? interpolateContextVariables(headerRaw, rt, interactiveVars) : headerRaw;
+      const footer = footerRaw ? interpolateContextVariables(footerRaw, rt, interactiveVars) : footerRaw;
 
       const btnLabels = buttons.map((b) => b.title).join(", ");
       const displayContent = `${body}\n[Botões: ${btnLabels}]`;
@@ -1808,7 +1905,7 @@ async function executeStep(
         const recipient = rt.contact?.whatsappBsuid?.trim() || undefined;
         if (to || recipient) {
           const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
-          const interpolated = vars ? interpolateVariables(content, vars) : content;
+          const interpolated = interpolateContextVariables(content, rt, vars);
 
           const conv = await prisma.conversation.findFirst({
             where: { contactId: rt.contactId, channel: "whatsapp" },
@@ -2397,6 +2494,61 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       stepsFailed,
       status,
     }).catch(() => {});
+  } else if (rt.contactId) {
+    // Sem deal: ainda registramos no feed (/logs) pra dar visibilidade da
+    // execução — importante para automações manuais disparadas pela conversa.
+    logEvent({
+      type: "AUTOMATION_EXECUTED",
+      entityType: "CONTACT",
+      entityId: rt.contactId,
+      entityLabel: automation.name,
+      contactId: rt.contactId,
+      conversationId: rt.conversation?.id ?? null,
+      meta: {
+        automationId,
+        automationName: automation.name,
+        event: context.event,
+        stepsTotal: automation.steps.length,
+        stepsFailed,
+        status,
+      },
+    }).catch(() => {});
+  }
+
+  // Visibilidade no chat: quando o operador dispara MANUALMENTE pela conversa,
+  // postamos uma nota interna (não enviada ao cliente) confirmando a execução.
+  if (context.event === "manual" && rt.conversation?.id) {
+    const note =
+      stepsFailed > 0
+        ? `⚙️ Automação "${automation.name}" executada com ${stepsFailed} erro(s).`
+        : `⚙️ Automação "${automation.name}" executada.`;
+    void (async () => {
+      try {
+        const conversationId = rt.conversation!.id;
+        const saved = await prisma.message.create({
+          data: withOrgFromCtx({
+            conversationId,
+            content: note,
+            direction: "out",
+            messageType: "note",
+            isPrivate: true,
+            senderName: "Automação",
+          }),
+        });
+        await prisma.conversation
+          .update({ where: { id: conversationId }, data: { updatedAt: new Date() } })
+          .catch(() => {});
+        sseBus.publish("new_message", {
+          organizationId: getOrgIdOrNull(),
+          conversationId,
+          direction: "out",
+          content: note,
+          timestamp: saved.createdAt,
+        });
+      } catch (e) {
+        log.warn(`[${traceId}] falha ao postar nota de automação manual: ${String(e)}`);
+      }
+    })();
   }
     },
   );
@@ -2426,6 +2578,7 @@ const STEP_TYPE_LABELS: Record<string, string> = {
   create_deal: "Criar negócio",
   finish_conversation: "Encerrar conversa",
   business_hours: "Horário comercial",
+  execute_distribution: "Executar distribuição",
 };
 
 export async function continueFromStep(

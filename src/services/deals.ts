@@ -440,8 +440,22 @@ export async function propagateOwnerToContactAndChat(
   });
   // Só reseta aiGreetedAt quando o assignedToId MUDA — evita flush
   // acidental quando a automação roda sem alteração real.
+  //
+  // IMPORTANTE (bug de NULL/SQL): tanto `NOT: { assignedToId: ownerId }`
+  // quanto `assignedToId: { not: ownerId }` EXCLUEM linhas com
+  // `assignedToId = NULL` (semântica de três valores do SQL: `NULL <> 'x'`
+  // não é TRUE). Resultado do bug: conversa SEM responsável nunca recebia o
+  // assignee da distribuição/automação → inbox seguia "Sem responsável".
+  // Por isso incluímos explicitamente as conversas com `assignedToId = NULL`.
+  const changedWhere: Prisma.ConversationWhereInput =
+    ownerId === null
+      ? { contactId, assignedToId: { not: null } }
+      : {
+          contactId,
+          OR: [{ assignedToId: null }, { assignedToId: { not: ownerId } }],
+        };
   await tx.conversation.updateMany({
-    where: { contactId, NOT: { assignedToId: ownerId } },
+    where: changedWhere,
     data: { assignedToId: ownerId, aiGreetedAt: null },
   });
 }

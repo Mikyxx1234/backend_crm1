@@ -81,6 +81,7 @@ model Organization {
   distributionMembers      DistributionMember[]
   distributionResponsibles DistributionResponsible[]
   distributionLogs         DistributionLog[]
+  distributionPending      DistributionPending[]
   segments                 Segment[]
   campaigns                Campaign[]
   campaignRecipients       CampaignRecipient[]
@@ -2060,6 +2061,34 @@ model DistributionLog {
 
   @@index([organizationId, createdAt])
   @@map("distribution_logs")
+}
+
+/// Fila de espera da Distribuicao Inteligente: leads que NAO puderam ser
+/// distribuidos porque nenhum responsavel estava elegivel no momento
+/// (NO_ELIGIBLE_RESPONSIBLE). Sao redistribuidos automaticamente quando
+/// alguem volta a ficar ONLINE (drenagem em retryPendingDistributions).
+model DistributionPending {
+  id               String       @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  dealId           String?
+  contactId        String?
+  conversationId   String?
+  distributionType String?
+  triggerSource    String
+  /// PENDING | RESOLVED | CANCELLED
+  status           String       @default("PENDING")
+  /// Quantas vezes ja tentamos distribuir este lead.
+  attempts         Int          @default(1)
+  lastAttemptAt    DateTime     @default(now())
+  /// Preenchido quando RESOLVED (responsavel que recebeu).
+  resolvedUserId   String?
+  resolvedAt       DateTime?
+  createdAt        DateTime     @default(now())
+  updatedAt        DateTime     @updatedAt
+
+  @@index([organizationId, status])
+  @@map("distribution_pending")
 }
 
 // ── Automation Context (Salesbot) ─────────────────

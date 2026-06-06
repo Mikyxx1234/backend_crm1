@@ -23,6 +23,10 @@ export interface SidebarCatalogItem {
   href: string;
   locked: boolean;
   requiredPermission?: PermissionKey;
+  /** Slug de widget que precisa estar ATIVO na org para o item existir.
+   *  Itens com este campo so entram em `availableKeys` se o widget estiver
+   *  instalado (ex.: "smart_distribution" habilita o item "distribution"). */
+  requiredWidgetSlug?: string;
 }
 
 /** Ordem do array = ordem padrao da sidebar. */
@@ -34,6 +38,14 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
   { key: "inbox", title: "Inbox", href: "/inbox", locked: false },
   { key: "activities", title: "Atividades", href: "/activities", locked: false },
   { key: "automations", title: "Automações", href: "/automations", locked: false },
+  {
+    key: "distribution",
+    title: "Distribuição",
+    href: "/widgets/distribution",
+    locked: false,
+    requiredPermission: "distribution:view",
+    requiredWidgetSlug: "smart_distribution",
+  },
   { key: "logs", title: "Logs", href: "/logs", locked: false },
   { key: "widgets", title: "Widgets", href: "/widgets", locked: false },
 ] as const;

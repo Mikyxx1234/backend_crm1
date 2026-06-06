@@ -33,17 +33,28 @@ export interface SidebarPreferences {
 }
 
 /**
- * Conjunto de keys disponiveis para o usuario. Hoje nenhum item do catalogo
- * exige permission, entao retorna todas. Quando algum item ganhar
- * `requiredPermission`, o caller passa um predicado vindo do authz (`can`).
+ * Conjunto de keys disponiveis para o usuario.
+ *
+ * Um item entra em `availableKeys` somente se:
+ *  - nao exige permission, OU o `hasPermission` confirma a permission; E
+ *  - nao exige widget, OU o `hasWidget` confirma o widget ATIVO na org.
+ *
+ * Sem predicados, itens gateados (com `requiredPermission`/`requiredWidgetSlug`)
+ * ficam de fora — fail-closed. O caller (rota) injeta os predicados a partir
+ * do authz (`can`) e do estado de widgets da org (`getActiveWidgetSlugs`).
  */
 export function computeAvailableKeys(
   hasPermission?: (key: PermissionKey) => boolean,
+  hasWidget?: (slug: string) => boolean,
 ): Set<string> {
   return new Set(
-    SIDEBAR_CATALOG.filter(
-      (i) => !i.requiredPermission || (hasPermission?.(i.requiredPermission) ?? false),
-    ).map((i) => i.key),
+    SIDEBAR_CATALOG.filter((i) => {
+      const permOk =
+        !i.requiredPermission || (hasPermission?.(i.requiredPermission) ?? false);
+      const widgetOk =
+        !i.requiredWidgetSlug || (hasWidget?.(i.requiredWidgetSlug) ?? false);
+      return permOk && widgetOk;
+    }).map((i) => i.key),
   );
 }
 

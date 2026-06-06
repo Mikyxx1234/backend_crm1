@@ -114,3 +114,41 @@ export async function hasOrganizationWidget(slug: string): Promise<boolean> {
   });
   return Boolean(row);
 }
+
+/**
+ * Conjunto de slugs de widgets ATIVOS na org atual. Use para gatear varios
+ * itens de uma vez (ex.: `computeAvailableKeys` da sidebar) com UMA query.
+ * `organizationId` vem do contexto (org-scope).
+ */
+export async function getActiveWidgetSlugs(): Promise<Set<string>> {
+  const rows = await prisma.organizationWidget.findMany({
+    where: { status: "ACTIVE" },
+    select: { widgetSlug: true },
+  });
+  return new Set(rows.map((r) => r.widgetSlug));
+}
+
+/** Lancado quando uma feature gateada por widget e usada sem o widget ativo.
+ *  O route handler mapeia para HTTP 403. */
+export class WidgetNotEnabledError extends Error {
+  constructor(public readonly slug: string) {
+    super(`Widget não habilitado para esta organização: ${slug}`);
+    this.name = "WidgetNotEnabledError";
+  }
+}
+
+/**
+ * Gate generico: garante que o widget `slug` esta ativo na org atual.
+ * Lanca `WidgetNotEnabledError` caso contrario. Deve rodar dentro de
+ * `withOrgContext` (precisa do org-scope para a query).
+ */
+export async function assertWidgetEnabled(slug: string): Promise<void> {
+  if (!(await hasOrganizationWidget(slug))) {
+    throw new WidgetNotEnabledError(slug);
+  }
+}
+
+/** Gate dedicado da Distribuição Inteligente (`smart_distribution`). */
+export async function assertSmartDistributionEnabled(): Promise<void> {
+  await assertWidgetEnabled("smart_distribution");
+}
