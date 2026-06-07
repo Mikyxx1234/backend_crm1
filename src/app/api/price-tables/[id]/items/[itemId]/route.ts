@@ -15,6 +15,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
+import { fireTrigger } from "@/services/automation-triggers";
 
 type RouteParams = { params: Promise<{ id: string; itemId: string }> };
 
@@ -97,6 +98,20 @@ export async function PUT(request: Request, { params }: RouteParams) {
       data,
       include: { product: { select: { id: true, name: true, sku: true, unit: true } } },
     });
+
+    if (data.price !== undefined && Number(data.price) !== Number(existing.price)) {
+      fireTrigger("price_changed", {
+        data: {
+          organizationId: session.user.organizationId,
+          priceTableId: id,
+          productId: item.productId,
+          productName: item.product.name,
+          previousPrice: Number(existing.price),
+          newPrice: Number(item.price),
+          userId: session.user.id,
+        },
+      }).catch(() => {});
+    }
 
     return NextResponse.json({ item });
   });

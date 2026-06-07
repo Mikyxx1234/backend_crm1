@@ -1,8 +1,10 @@
+import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { fireTrigger } from "@/services/automation-triggers";
 
 export async function GET(request: Request) {
   const authResult = await authenticateApiRequest(request);
@@ -62,6 +64,24 @@ export async function POST(request: Request) {
 
   const trackStock = type === "PRODUCT" && body.trackStock === true;
 
+  // Novos campos opcionais do Modulo Catalogo Comercial (aditivo)
+  const code = typeof body.code === "string" ? body.code.trim() || null : null;
+  const attributes =
+    body.attributes === undefined || body.attributes === null
+      ? null
+      : (body.attributes as Prisma.InputJsonValue);
+  let discountMax: number | null = null;
+  if (body.discountMax !== undefined && body.discountMax !== null) {
+    const dm = Number(body.discountMax);
+    if (Number.isFinite(dm) && dm >= 0 && dm <= 100) discountMax = dm;
+  }
+  const discountRequiresApproval = body.discountRequiresApproval === true;
+  let stockAlertAt: number | null = null;
+  if (body.stockAlertAt !== undefined && body.stockAlertAt !== null) {
+    const sa = Number(body.stockAlertAt);
+    if (Number.isFinite(sa) && sa >= 0) stockAlertAt = sa;
+  }
+
   const product = await prisma.product.create({
     data: withOrgFromCtx({
       name,
@@ -73,8 +93,23 @@ export async function POST(request: Request) {
       isActive: body.isActive !== false,
       trackStock,
       stock: trackStock ? Math.max(0, Number(body.stock) || 0) : 0,
+      code,
+      attributes: attributes ?? Prisma.JsonNull,
+      discountMax,
+      discountRequiresApproval,
+      stockAlertAt,
     }),
   });
+
+  // Evento de automacao: offer_created (novo no Modulo Catalogo Comercial).
+  fireTrigger("offer_created", {
+    data: {
+      organizationId: product.organizationId,
+      productId: product.id,
+      productName: product.name,
+      userId: authResult.user.id ?? null,
+    },
+  }).catch(() => {});
 
   return NextResponse.json({ product }, { status: 201 });
   });

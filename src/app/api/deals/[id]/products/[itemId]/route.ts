@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { createDealEvent, getDealById } from "@/services/deals";
+import { recordStockMovement } from "@/services/stock";
 
 type RouteContext = { params: Promise<{ id: string; itemId: string }> };
 
@@ -127,16 +128,66 @@ export async function DELETE(_request: Request, context: RouteContext) {
   try {
     const item = await prisma.dealProduct.findUnique({
       where: { id: itemId, dealId },
-      include: { product: { select: { name: true } } },
+      include: {
+        product: { select: { id: true, name: true, organizationId: true, trackStock: true } },
+      },
     });
-    await prisma.dealProduct.delete({ where: { id: itemId, dealId } });
-    await recalcDealValue(dealId);
+    if (!item) {
+      return NextResponse.json({ message: "Item não encontrado." }, { status: 404 });
+    }
 
     const uid = (session.user as { id: string }).id;
-    createDealEvent(dealId, uid, "PRODUCT_REMOVED", { productName: item?.product?.name ?? "?" }).catch(() => {});
+
+    await prisma.$transaction(async (tx) => {
+      // Se havia RESERVE pendente desse deal/produto (RESERVE - CANCELLATION > 0),
+      // gera CANCELLATION pelo saldo liquido para liberar o estoque reservado.
+      if (item.product.trackStock) {
+        const [reserved, canceled] = await Promise.all([
+          tx.stockMovement.aggregate({
+            where: { dealId, productId: item.productId, type: "RESERVE" },
+            _sum: { quantity: true },
+          }),
+          tx.stockMovement.aggregate({
+            where: { dealId, productId: item.productId, type: "CANCELLATION" },
+            _sum: { quantity: true },
+          }),
+        ]);
+        const net =
+          Number(reserved._sum.quantity ?? 0) - Number(canceled._sum.quantity ?? 0);
+        if (net > 0) {
+          await recordStockMovement(tx, {
+            organizationId: item.product.organizationId,
+            productId: item.productId,
+            dealId,
+            userId: uid,
+            type: "CANCELLATION",
+            quantity: net,
+            reason: "deal_product_removed",
+          });
+        }
+      }
+
+      // DiscountRequests PENDING ligadas a este DealProduct -> REJECTED
+      // (motivo: deal_product_removed). Caso o gestor ainda nao tenha agido.
+      await tx.discountRequest.updateMany({
+        where: { dealProductId: itemId, status: "PENDING" },
+        data: {
+          status: "REJECTED",
+          reviewNote: "deal_product_removed",
+          resolvedAt: new Date(),
+        },
+      });
+
+      await tx.dealProduct.delete({ where: { id: itemId, dealId } });
+    });
+
+    await recalcDealValue(dealId);
+
+    createDealEvent(dealId, uid, "PRODUCT_REMOVED", { productName: item.product.name }).catch(() => {});
 
     return NextResponse.json({ ok: true });
-  } catch {
+  } catch (e) {
+    console.error("[DELETE /api/deals/[id]/products/[itemId]]", e);
     return NextResponse.json({ message: "Item não encontrado." }, { status: 404 });
   }
 }

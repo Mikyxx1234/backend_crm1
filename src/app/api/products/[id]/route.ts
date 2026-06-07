@@ -1,7 +1,9 @@
+import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
+import { fireTrigger } from "@/services/automation-triggers";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -55,8 +57,44 @@ export async function PUT(request: Request, context: RouteContext) {
     if (t === "PRODUCT" || t === "SERVICE") data.type = t;
   }
 
+  // Novos campos do Modulo Catalogo Comercial (aditivos, nao-quebra):
+  if (typeof body.code === "string") data.code = body.code.trim() || null;
+  if (body.attributes !== undefined) {
+    data.attributes = body.attributes === null ? Prisma.JsonNull : (body.attributes as Prisma.InputJsonValue);
+  }
+  if (body.discountMax !== undefined) {
+    if (body.discountMax === null) {
+      data.discountMax = null;
+    } else {
+      const dm = Number(body.discountMax);
+      if (Number.isFinite(dm) && dm >= 0 && dm <= 100) data.discountMax = dm;
+    }
+  }
+  if (typeof body.discountRequiresApproval === "boolean") {
+    data.discountRequiresApproval = body.discountRequiresApproval;
+  }
+  if (body.stockAlertAt !== undefined) {
+    if (body.stockAlertAt === null) {
+      data.stockAlertAt = null;
+    } else {
+      const sa = Number(body.stockAlertAt);
+      if (Number.isFinite(sa) && sa >= 0) data.stockAlertAt = sa;
+    }
+  }
+  if (typeof body.trackStock === "boolean") data.trackStock = body.trackStock;
+
   try {
     const product = await prisma.product.update({ where: { id }, data });
+    // Evento de automacao: offer_updated.
+    fireTrigger("offer_updated", {
+      data: {
+        organizationId: product.organizationId,
+        productId: product.id,
+        productName: product.name,
+        userId: (session.user as { id?: string }).id ?? null,
+        changedFields: Object.keys(data),
+      },
+    }).catch(() => {});
     return NextResponse.json({ product });
   } catch {
     return NextResponse.json({ message: "Produto não encontrado." }, { status: 404 });

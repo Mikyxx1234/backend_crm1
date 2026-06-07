@@ -19,6 +19,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
+import { fireTrigger } from "@/services/automation-triggers";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
@@ -144,6 +145,17 @@ export async function POST(request: Request, { params }: RouteParams) {
           product: { select: { id: true, name: true, sku: true, unit: true } },
         },
       });
+      fireTrigger("price_changed", {
+        data: {
+          organizationId: session.user.organizationId,
+          priceTableId: id,
+          productId,
+          productName: item.product.name,
+          previousPrice: null,
+          newPrice: price,
+          userId: session.user.id,
+        },
+      }).catch(() => {});
       return NextResponse.json({ item }, { status: 201 });
     } catch (e) {
       if (

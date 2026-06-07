@@ -27,6 +27,7 @@ import { can, loadAuthzContext } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getRequestContext } from "@/lib/request-context";
+import { fireTrigger } from "@/services/automation-triggers";
 import { recordStockMovement } from "@/services/stock";
 
 export async function GET(request: Request) {
@@ -205,6 +206,21 @@ export async function POST(request: Request) {
         },
       });
     });
+
+    if (contract) {
+      fireTrigger("contract_created", {
+        dealId: contract.dealId ?? undefined,
+        data: {
+          organizationId,
+          contractId: contract.id,
+          dealId: contract.dealId,
+          companyId: contract.companyId,
+          contactId: contract.contactId,
+          itemCount: contract.items.length,
+          userId,
+        },
+      }).catch(() => {});
+    }
 
     return NextResponse.json({ contract }, { status: 201 });
   });

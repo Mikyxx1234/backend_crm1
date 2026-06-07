@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
@@ -17,6 +18,21 @@ function parseNum(v: string | undefined, fallback = 0): number {
   if (v == null || v.trim() === "") return fallback;
   const n = Number(v.replace(/\s/g, "").replace(",", "."));
   return Number.isFinite(n) ? n : fallback;
+}
+
+function parseOptionalNum(v: string | undefined): number | null {
+  if (v == null || v.trim() === "") return null;
+  const n = Number(v.replace(/\s/g, "").replace(",", "."));
+  return Number.isFinite(n) ? n : null;
+}
+
+function parseAttributes(v: string | undefined): Prisma.InputJsonValue | null {
+  if (v == null || v.trim() === "") return null;
+  try {
+    return JSON.parse(v) as Prisma.InputJsonValue;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -116,6 +132,17 @@ export async function POST(request: Request) {
             data.trackStock = effType === "SERVICE" ? false : track;
           }
           if ("stock" in row) data.stock = parseNum(row.stock);
+          // Novos campos do Modulo Catalogo Comercial (aditivos):
+          if ("code" in row) data.code = row.code?.trim() || null;
+          if ("discount_max" in row) data.discountMax = parseOptionalNum(row.discount_max);
+          if ("discount_requires_approval" in row) {
+            data.discountRequiresApproval = parseBool(row.discount_requires_approval);
+          }
+          if ("stock_alert_at" in row) data.stockAlertAt = parseOptionalNum(row.stock_alert_at);
+          if ("attributes" in row) {
+            const attrs = parseAttributes(row.attributes);
+            data.attributes = attrs === null ? Prisma.JsonNull : attrs;
+          }
           if (data.type === "SERVICE") {
             data.trackStock = false;
             data.stock = 0;
@@ -131,6 +158,7 @@ export async function POST(request: Request) {
           }
           const finalType = type ?? "PRODUCT";
           const track = finalType === "SERVICE" ? false : parseBool(row.track_stock);
+          const attrs = parseAttributes(row.attributes);
           const cr = await prisma.product.create({
             data: withOrgFromCtx({
               name,
@@ -142,6 +170,11 @@ export async function POST(request: Request) {
               isActive: parseBool(row.is_active, true),
               trackStock: track,
               stock: track ? parseNum(row.stock) : 0,
+              code: row.code?.trim() || null,
+              discountMax: parseOptionalNum(row.discount_max),
+              discountRequiresApproval: parseBool(row.discount_requires_approval),
+              stockAlertAt: parseOptionalNum(row.stock_alert_at),
+              attributes: attrs === null ? Prisma.JsonNull : attrs,
             }),
           });
           productId = cr.id;

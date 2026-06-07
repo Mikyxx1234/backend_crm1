@@ -54,6 +54,7 @@ export async function GET(request: Request) {
       const baseHeaders = [
         "id",
         "sku",
+        "code",
         "name",
         "description",
         "type",
@@ -62,6 +63,11 @@ export async function GET(request: Request) {
         "is_active",
         "track_stock",
         "stock",
+        "stock_alert_at",
+        "stock_reserved",
+        "discount_max",
+        "discount_requires_approval",
+        "attributes",
         "created_at",
         "updated_at",
       ];
@@ -73,6 +79,7 @@ export async function GET(request: Request) {
         const row: Record<string, unknown> = {
           id: p.id,
           sku: p.sku ?? "",
+          code: p.code ?? "",
           name: p.name,
           description: p.description ?? "",
           type: p.type,
@@ -81,6 +88,11 @@ export async function GET(request: Request) {
           is_active: p.isActive ? "true" : "false",
           track_stock: p.trackStock ? "true" : "false",
           stock: p.stock != null ? p.stock.toString() : "0",
+          stock_alert_at: p.stockAlertAt != null ? p.stockAlertAt.toString() : "",
+          stock_reserved: p.stockReserved != null ? p.stockReserved.toString() : "0",
+          discount_max: p.discountMax != null ? p.discountMax.toString() : "",
+          discount_requires_approval: p.discountRequiresApproval ? "true" : "false",
+          attributes: p.attributes != null ? JSON.stringify(p.attributes) : "",
           created_at: csvDate(p.createdAt),
           updated_at: csvDate(p.updatedAt),
         };

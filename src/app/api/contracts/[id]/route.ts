@@ -18,6 +18,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { getRequestContext } from "@/lib/request-context";
+import { fireTrigger } from "@/services/automation-triggers";
 import { recordStockMovement } from "@/services/stock";
 
 type RouteParams = { params: Promise<{ id: string }> };
@@ -114,6 +115,11 @@ export async function PUT(request: Request, { params }: RouteParams) {
       data.ownerId = body.ownerId || null;
     }
 
+    const prevStatus = (await prisma.contract.findUnique({
+      where: { id },
+      select: { status: true },
+    }))?.status;
+
     const contract = await prisma.contract.update({
       where: { id },
       data,
@@ -125,6 +131,23 @@ export async function PUT(request: Request, { params }: RouteParams) {
         owner: { select: { id: true, name: true } },
       },
     });
+
+    const closedNow =
+      (contract.status === "COMPLETED" || contract.status === "CANCELLED") &&
+      prevStatus !== contract.status;
+    if (closedNow) {
+      fireTrigger("contract_closed", {
+        dealId: contract.dealId ?? undefined,
+        data: {
+          organizationId: session.user.organizationId,
+          contractId: contract.id,
+          dealId: contract.dealId,
+          status: contract.status,
+          userId: session.user.id,
+        },
+      }).catch(() => {});
+    }
+
     return NextResponse.json({ contract });
   });
 }
@@ -182,6 +205,17 @@ export async function DELETE(_req: Request, { params }: RouteParams) {
         data: { status: "CANCELLED" },
       });
     });
+
+    fireTrigger("contract_closed", {
+      dealId: existing.dealId ?? undefined,
+      data: {
+        organizationId,
+        contractId: existing.id,
+        dealId: existing.dealId,
+        status: "CANCELLED",
+        userId,
+      },
+    }).catch(() => {});
 
     return NextResponse.json({ ok: true, cancelled: true });
   });
