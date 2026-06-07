@@ -2,8 +2,9 @@ import { Prisma, type DealStatus } from "@prisma/client";
 
 import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
+import { consumeDealProductsOnWon, fireConsumptionEvents } from "@/services/stock";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import {
@@ -555,14 +556,59 @@ export async function moveDeal(dealId: string, targetStageId: string, position: 
 }
 
 export async function markDealWon(id: string) {
-  return prisma.deal.update({
-    where: { id },
-    data: {
-      status: "WON",
-      closedAt: new Date(),
+  // Hook do Modulo Catalogo Comercial: ao fechar deal em WON, consome estoque
+  // dos DealProducts com trackStock=true e dispara eventos resource_consumed
+  // / balance_low / balance_zero. Tudo dentro da MESMA transacao do update
+  // do deal para garantir atomicidade. Eventos sao disparados APOS o commit.
+  const { deal, consumptionSummary, organizationId, userId } = await prisma.$transaction(
+    async (tx) => {
+      const dealBefore = await tx.deal.findUnique({
+        where: { id },
+        select: { organizationId: true, status: true },
+      });
+      if (!dealBefore) throw new Error("DEAL_NOT_FOUND");
+
+      const reqCtx = getRequestContext();
+      const ctxOrgId = reqCtx?.organizationId ?? null;
+      const ctxUserId = reqCtx?.userId ?? null;
+
+      const updatedDeal = await tx.deal.update({
+        where: { id },
+        data: {
+          status: "WON",
+          closedAt: new Date(),
+        },
+        include: listInclude,
+      });
+
+      let summary: Awaited<ReturnType<typeof consumeDealProductsOnWon>> = [];
+      // Idempotencia: so processa estoque na PRIMEIRA transicao para WON.
+      if (dealBefore.status !== "WON") {
+        summary = await consumeDealProductsOnWon(tx, {
+          dealId: id,
+          organizationId: dealBefore.organizationId,
+          userId: ctxUserId,
+        });
+      }
+
+      return {
+        deal: updatedDeal,
+        consumptionSummary: summary,
+        organizationId: ctxOrgId ?? dealBefore.organizationId,
+        userId: ctxUserId,
+      };
     },
-    include: listInclude,
-  });
+  );
+
+  if (consumptionSummary.length > 0) {
+    await fireConsumptionEvents(consumptionSummary, {
+      organizationId,
+      dealId: id,
+      userId,
+    });
+  }
+
+  return deal;
 }
 
 export async function markDealLost(id: string, lostReason: string) {
