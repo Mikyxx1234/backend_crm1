@@ -74,9 +74,9 @@ model Organization {
   channels                 Channel[]
   baileysAuthKeys          BaileysAuthKey[]
   quickReplies             QuickReply[]
-  messageTemplates          MessageTemplate[]
-  whatsappTemplateConfigs   WhatsAppTemplateConfig[]
-  whatsappFlowDefinitions     WhatsappFlowDefinition[]
+  messageTemplates         MessageTemplate[]
+  whatsappTemplateConfigs  WhatsAppTemplateConfig[]
+  whatsappFlowDefinitions  WhatsappFlowDefinition[]
   distributionRules        DistributionRule[]
   distributionMembers      DistributionMember[]
   distributionResponsibles DistributionResponsible[]
@@ -109,6 +109,10 @@ model Organization {
   organizationSettings     OrganizationSetting[]
   savedFilters             SavedFilter[]
   organizationWidgets      OrganizationWidget[]
+  priceTables              PriceTable[]
+  contracts                Contract[]
+  stockMovements           StockMovement[]
+  discountRequests         DiscountRequest[]
 
   @@index([status])
   @@map("organizations")
@@ -358,24 +362,24 @@ model User {
   deals                          Deal[]
   activities                     Activity[]
   notes                          Note[]
-  assignedLeads                  Contact[]               @relation("AssignedTo")
+  assignedLeads                  Contact[]                 @relation("AssignedTo")
   distributionMembers            DistributionMember[]
   distributionResponsibles       DistributionResponsible[]
   schedule                       AgentSchedule?
   agentStatus                    AgentStatus?
   presenceLogs                   AgentPresenceLog[]
-  assignedConversations          Conversation[]          @relation("ConversationAssignedTo")
-  scheduledWhatsappCallsAssigned ScheduledWhatsappCall[] @relation("ScheduledWhatsappCallAssignee")
+  assignedConversations          Conversation[]            @relation("ConversationAssignedTo")
+  scheduledWhatsappCallsAssigned ScheduledWhatsappCall[]   @relation("ScheduledWhatsappCallAssignee")
   dealEvents                     DealEvent[]
-  activityEvents                 ActivityEvent[]         @relation("ActivityEventActor")
+  activityEvents                 ActivityEvent[]           @relation("ActivityEventActor")
   apiTokens                      ApiToken[]
   campaigns                      Campaign[]
   webPushSubscriptions           WebPushSubscription[]
   aiAgentConfig                  AIAgentConfig?
-  aiAgentMessages                Message[]               @relation("MessageAIAgent")
-  scheduledMessagesCreated       ScheduledMessage[]      @relation("ScheduledMessageCreatedBy")
-  scheduledMessagesCancelled     ScheduledMessage[]      @relation("ScheduledMessageCancelledBy")
-  bulkOperationsCreated          BulkOperation[]         @relation("BulkOperationCreatedBy")
+  aiAgentMessages                Message[]                 @relation("MessageAIAgent")
+  scheduledMessagesCreated       ScheduledMessage[]        @relation("ScheduledMessageCreatedBy")
+  scheduledMessagesCancelled     ScheduledMessage[]        @relation("ScheduledMessageCancelledBy")
+  bulkOperationsCreated          BulkOperation[]           @relation("BulkOperationCreatedBy")
   dashboardLayouts               UserDashboardLayout[]
   fieldLayoutConfigs             FieldLayoutConfig[]
   preferences                    UserPreference?
@@ -383,13 +387,18 @@ model User {
   loginAttempts                  LoginAttempt[]
   dataRequests                   DataRequest[]
   roleAssignments                UserRoleAssignment[]
-  savedFilters                   SavedFilter[]           @relation("UserSavedFilters")
+  savedFilters                   SavedFilter[]             @relation("UserSavedFilters")
+  stockMovements                 StockMovement[]
+  discountRequests               DiscountRequest[]         @relation("DiscountRequests")
+  discountApprovals              DiscountRequest[]         @relation("DiscountApprovals2")
+  dealProductApprovals           DealProduct[]             @relation("DiscountApprovals")
+  contractsOwned                 Contract[]
   erasedAt                       DateTime?
   /// Marca usuario anonimizado pela rotina LGPD (PR 4.3). O registro
   /// nao e deletado pra preservar FKs (AuditLog, mensagens). Apos
   /// erase: name = "Usuario removido", email = "erased+<id>@anon.local",
   /// hashedPassword = NULL, phone/avatarUrl/signature = NULL.
-  isErased                       Boolean                 @default(false)
+  isErased                       Boolean                   @default(false)
 
   @@index([type])
   @@index([organizationId])
@@ -769,44 +778,44 @@ model OrganizationSetting {
 // ──────────────────────────────────────────────
 
 model Contact {
-  id             String         @id @default(cuid())
+  id                     String         @id @default(cuid())
   /// ID no sistema de origem (ex.: Kommo) — reimportação atualiza o mesmo registro.
   /// Unicidade é por organização (cada empresa pode importar Kommos diferentes).
-  externalId     String?        @map("external_id")
-  name           String
-  email          String?
-  phone          String?
-  avatarUrl      String?
-  leadScore      Int            @default(0)
-  lifecycleStage LifecycleStage @default(SUBSCRIBER)
-  source         String?
+  externalId             String?        @map("external_id")
+  name                   String
+  email                  String?
+  phone                  String?
+  avatarUrl              String?
+  leadScore              Int            @default(0)
+  lifecycleStage         LifecycleStage @default(SUBSCRIBER)
+  source                 String?
   /// Tracking de anúncios Click-to-WhatsApp (Meta referral)
-  adSourceId     String?        @map("ad_source_id")
-  adSourceType   String?        @map("ad_source_type")
-  adCtwaClid     String?        @map("ad_ctwa_clid")
-  adHeadline     String?        @map("ad_headline")
+  adSourceId             String?        @map("ad_source_id")
+  adSourceType           String?        @map("ad_source_type")
+  adCtwaClid             String?        @map("ad_ctwa_clid")
+  adHeadline             String?        @map("ad_headline")
   /// Resolução do post→ad via Marketing API (quando sourceType=="post").
   /// Preenchido async pelo resolver; status="ok"/"not_found"/"no_access"/"error".
-  adResolvedId       String?        @map("ad_resolved_id")
-  adResolvedName     String?        @map("ad_resolved_name")
-  adResolvedAdsetId    String?      @map("ad_resolved_adset_id")
-  adResolvedAdsetName  String?      @map("ad_resolved_adset_name")
-  adResolvedCampaignId    String?   @map("ad_resolved_campaign_id")
-  adResolvedCampaignName  String?   @map("ad_resolved_campaign_name")
-  adResolvedAt       DateTime?      @map("ad_resolved_at")
-  adResolveStatus    String?        @map("ad_resolve_status")
-  adResolveError     String?        @map("ad_resolve_error")
+  adResolvedId           String?        @map("ad_resolved_id")
+  adResolvedName         String?        @map("ad_resolved_name")
+  adResolvedAdsetId      String?        @map("ad_resolved_adset_id")
+  adResolvedAdsetName    String?        @map("ad_resolved_adset_name")
+  adResolvedCampaignId   String?        @map("ad_resolved_campaign_id")
+  adResolvedCampaignName String?        @map("ad_resolved_campaign_name")
+  adResolvedAt           DateTime?      @map("ad_resolved_at")
+  adResolveStatus        String?        @map("ad_resolve_status")
+  adResolveError         String?        @map("ad_resolve_error")
   /// UTMs estruturados extraídos do campo `url_tags` do Ad (Marketing API).
   /// Preenchidos junto da resolução post→ad quando o anúncio define parâmetros de URL.
-  adUtmSource        String?        @map("ad_utm_source")
-  adUtmMedium        String?        @map("ad_utm_medium")
-  adUtmCampaign      String?        @map("ad_utm_campaign")
-  adUtmContent       String?        @map("ad_utm_content")
-  adUtmTerm          String?        @map("ad_utm_term")
-  whatsappJid    String?
+  adUtmSource            String?        @map("ad_utm_source")
+  adUtmMedium            String?        @map("ad_utm_medium")
+  adUtmCampaign          String?        @map("ad_utm_campaign")
+  adUtmContent           String?        @map("ad_utm_content")
+  adUtmTerm              String?        @map("ad_utm_term")
+  whatsappJid            String?
   /// Meta WhatsApp business-scoped user ID (BSUID), ex. US.xxx — ver doc Meta / usernames.
   /// Unicidade por org (WABAs diferentes têm espaços de BSUID independentes).
-  whatsappBsuid  String?        @map("whatsapp_bsuid")
+  whatsappBsuid          String?        @map("whatsapp_bsuid")
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -828,6 +837,7 @@ model Contact {
   campaignRecipients     CampaignRecipient[]
   phoneChanges           ContactPhoneChange[]
   activityEvents         ActivityEvent[]
+  contracts              Contract[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -922,7 +932,8 @@ model Company {
   address        String?
   notes          String?
 
-  contacts Contact[]
+  contacts  Contact[]
+  contracts Contract[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -988,9 +999,9 @@ model CustomField {
   /// `src/lib/highlight.ts`. Null/[] = sem destaque.
   highlightRules       Json?
 
-  values        ContactCustomFieldValue[]
-  dealValues    DealCustomFieldValue[]
-  productValues ProductCustomFieldValue[]
+  values            ContactCustomFieldValue[]
+  dealValues        DealCustomFieldValue[]
+  productValues     ProductCustomFieldValue[]
   flowFieldMappings WhatsappFlowFieldMapping[]
 
   @@unique([organizationId, name, entity])
@@ -1129,13 +1140,15 @@ model Deal {
   ownerId   String?
   owner     User?    @relation(fields: [ownerId], references: [id])
 
-  activities   Activity[]
-  notes        Note[]
-  customFields DealCustomFieldValue[]
-  products     DealProduct[]
-  tags         TagOnDeal[]
-  events       DealEvent[]
+  activities     Activity[]
+  notes          Note[]
+  customFields   DealCustomFieldValue[]
+  products       DealProduct[]
+  tags           TagOnDeal[]
+  events         DealEvent[]
   activityEvents ActivityEvent[]
+  contracts      Contract[]
+  stockMovements StockMovement[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1182,8 +1195,29 @@ model Product {
   /// Quantidade disponível em estoque (relevante só com trackStock=true).
   stock          Decimal      @default(0) @db.Decimal(12, 2)
 
-  dealProducts DealProduct[]
-  customValues ProductCustomFieldValue[]
+  /// Código legível pelo agente (ex.: "VAGA-SP-01"). Diferente do `sku`
+  /// que tende a ser técnico/integração externa.
+  code                     String?
+  /// Atributos dinâmicos por tipo de produto/oferta (JSONB).
+  /// Ex.: { "modalidade": "EAD", "duracao": "4 semestres" }
+  attributes               Json?
+  /// Desconto máximo permitido ao agente sem aprovação (em %). NULL = sem limite.
+  discountMax              Decimal? @map("discount_max") @db.Decimal(5, 2)
+  /// Se true e o desconto solicitado em DealProduct exceder `discountMax`,
+  /// gera DiscountRequest com status PENDING_APPROVAL.
+  discountRequiresApproval Boolean  @default(false) @map("discount_requires_approval")
+  /// Alerta de saldo: dispara evento `balance_low` quando `stock <= stockAlertAt`.
+  stockAlertAt             Decimal? @map("stock_alert_at") @db.Decimal(12, 2)
+  /// Saldo reservado (deals em aberto). Mantido pelo motor de movimentos —
+  /// NUNCA editar diretamente; sempre via StockMovement RESERVE/CANCELLATION.
+  stockReserved            Decimal  @default(0) @map("stock_reserved") @db.Decimal(12, 2)
+
+  dealProducts     DealProduct[]
+  customValues     ProductCustomFieldValue[]
+  priceTables      PriceTableItem[]
+  movements        StockMovement[]
+  discountRequests DiscountRequest[]
+  contracts        ContractItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1193,6 +1227,7 @@ model Product {
   @@index([organizationId, isActive])
   @@index([organizationId, name])
   @@index([organizationId, type])
+  @@index([organizationId, code])
   @@map("products")
 }
 
@@ -1222,14 +1257,210 @@ model DealProduct {
   product        Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
   quantity       Decimal      @default(1) @db.Decimal(12, 2)
   unitPrice      Decimal      @default(0) @db.Decimal(12, 2)
+  /// Desconto efetivamente aplicado (% — 0..100). Quando há aprovação
+  /// pendente, fica em 0 até o gestor aprovar (vira `discountRequested`).
   discount       Decimal      @default(0) @db.Decimal(5, 2)
+
+  /// Desconto solicitado pelo agente (% — antes da aprovação).
+  /// Quando <= product.discountMax, vira `discount` direto (status = NA).
+  discountRequested    Decimal?  @default(0) @map("discount_requested") @db.Decimal(5, 2)
+  /// PENDING_APPROVAL | APPROVED | REJECTED | NA (default — sem fluxo).
+  discountStatus       String    @default("NA") @map("discount_status")
+  /// Justificativa do agente ao solicitar desconto fora da política.
+  discountNote         String?   @map("discount_note")
+  discountApprovedById String?   @map("discount_approved_by_id")
+  discountApprovedBy   User?     @relation("DiscountApprovals", fields: [discountApprovedById], references: [id])
+  discountApprovedAt   DateTime? @map("discount_approved_at")
+
+  discountRequests DiscountRequest[]
 
   createdAt DateTime @default(now())
 
   @@index([organizationId])
   @@index([dealId])
   @@index([productId])
+  @@index([organizationId, discountStatus])
   @@map("deal_products")
+}
+
+// ──────────────────────────────────────────────
+// Catalog Module — Price Tables, Contracts,
+// Stock Movements, Discount Requests
+// ──────────────────────────────────────────────
+
+/// Tabela de preço (regional, segmento, parceiro, etc.). Cada item amarra
+/// produto -> preço com desconto-máx e janela de validade.
+model PriceTable {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  isDefault      Boolean      @default(false) @map("is_default")
+  isActive       Boolean      @default(true) @map("is_active")
+
+  items     PriceTableItem[]
+  contracts Contract[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([organizationId, isActive])
+  @@map("price_tables")
+}
+
+model PriceTableItem {
+  id           String     @id @default(cuid())
+  priceTableId String     @map("price_table_id")
+  priceTable   PriceTable @relation(fields: [priceTableId], references: [id], onDelete: Cascade)
+  productId    String     @map("product_id")
+  product      Product    @relation(fields: [productId], references: [id], onDelete: Cascade)
+  price        Decimal    @db.Decimal(12, 2)
+  discountMax  Decimal?   @map("discount_max") @db.Decimal(5, 2)
+  validFrom    DateTime?  @map("valid_from")
+  validUntil   DateTime?  @map("valid_until")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([priceTableId, productId])
+  @@index([priceTableId])
+  @@index([productId])
+  @@map("price_table_items")
+}
+
+/// Contrato comercial: pool isolado de saldo (ContractItem.balance) que
+/// NÃO mexe em Product.stock global. Deal vinculado a contrato consome
+/// do pool do contrato; deal sem contrato consome de Product.stock.
+model Contract {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  dealId         String?      @map("deal_id")
+  deal           Deal?        @relation(fields: [dealId], references: [id])
+  companyId      String?      @map("company_id")
+  company        Company?     @relation(fields: [companyId], references: [id])
+  contactId      String?      @map("contact_id")
+  contact        Contact?     @relation(fields: [contactId], references: [id])
+  priceTableId   String?      @map("price_table_id")
+  priceTable     PriceTable?  @relation(fields: [priceTableId], references: [id])
+  ownerId        String?      @map("owner_id")
+  owner          User?        @relation(fields: [ownerId], references: [id])
+
+  code      String?
+  /// ACTIVE | SUSPENDED | CANCELLED | COMPLETED
+  status    String    @default("ACTIVE")
+  startDate DateTime? @map("start_date")
+  endDate   DateTime? @map("end_date")
+  notes     String?
+
+  items     ContractItem[]
+  movements StockMovement[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@index([dealId])
+  @@index([companyId])
+  @@index([contactId])
+  @@map("contracts")
+}
+
+model ContractItem {
+  id         String   @id @default(cuid())
+  contractId String   @map("contract_id")
+  contract   Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  productId  String   @map("product_id")
+  product    Product  @relation(fields: [productId], references: [id])
+  quantity   Decimal  @db.Decimal(12, 2)
+  unitPrice  Decimal  @map("unit_price") @db.Decimal(12, 2)
+  discount   Decimal  @default(0) @db.Decimal(5, 2)
+  /// Saldo contratado disponível (pode diferir de `quantity` após ajustes).
+  balance    Decimal  @db.Decimal(12, 2)
+  /// Total já consumido (deals WON usando este contrato).
+  consumed   Decimal  @default(0) @db.Decimal(12, 2)
+  /// Reservado por deals OPEN ainda não fechados.
+  reserved   Decimal  @default(0) @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([contractId])
+  @@index([productId])
+  @@map("contract_items")
+}
+
+/// Livro-razão de saldo. CADA mutação de Product.stock OU ContractItem.balance
+/// é precedida de um StockMovement. `balanceAfter` é o snapshot do saldo
+/// resultante NO ESCOPO do movimento: se `contractId` presente, é o saldo
+/// do ContractItem; senão é o saldo do Product.
+model StockMovement {
+  id             String       @id @default(cuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  productId      String       @map("product_id")
+  product        Product      @relation(fields: [productId], references: [id])
+  contractId     String?      @map("contract_id")
+  contract       Contract?    @relation(fields: [contractId], references: [id])
+  dealId         String?      @map("deal_id")
+  deal           Deal?        @relation(fields: [dealId], references: [id])
+  userId         String?      @map("user_id")
+  user           User?        @relation(fields: [userId], references: [id])
+
+  /// ENTRY | EXIT | ADJUSTMENT | RESERVE | CANCELLATION
+  type         String
+  /// Quantidade absoluta da movimentação (sempre >= 0). O sinal está implícito
+  /// no `type` (ENTRY/RESERVE aumentam; EXIT/CANCELLATION ajustam consumo).
+  quantity     Decimal @db.Decimal(12, 2)
+  /// Saldo resultante após este movimento (snapshot do produto OU do contrato,
+  /// dependendo de `contractId` presente).
+  balanceAfter Decimal @map("balance_after") @db.Decimal(12, 2)
+  reason       String?
+  metadata     Json?
+
+  createdAt DateTime @default(now())
+
+  @@index([organizationId])
+  @@index([organizationId, createdAt])
+  @@index([productId])
+  @@index([contractId])
+  @@index([dealId])
+  @@map("stock_movements")
+}
+
+/// Solicitação de desconto fora da política (quando agente pede mais que
+/// `discountMax`). Vinculada 1:1 ao DealProduct que originou.
+model DiscountRequest {
+  id             String       @id @default(cuid())
+  organizationId String       @map("organization_id")
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  dealProductId  String       @map("deal_product_id")
+  dealProduct    DealProduct  @relation(fields: [dealProductId], references: [id], onDelete: Cascade)
+  productId      String       @map("product_id")
+  product        Product      @relation(fields: [productId], references: [id])
+  requestedById  String       @map("requested_by_id")
+  requestedBy    User         @relation("DiscountRequests", fields: [requestedById], references: [id])
+  approvedById   String?      @map("approved_by_id")
+  approvedBy     User?        @relation("DiscountApprovals2", fields: [approvedById], references: [id])
+
+  discountRequested Decimal   @map("discount_requested") @db.Decimal(5, 2)
+  discountMax       Decimal   @map("discount_max") @db.Decimal(5, 2)
+  /// PENDING | APPROVED | REJECTED
+  status            String    @default("PENDING")
+  note              String?
+  reviewNote        String?   @map("review_note")
+  resolvedAt        DateTime? @map("resolved_at")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@index([dealProductId])
+  @@map("discount_requests")
 }
 
 // ──────────────────────────────────────────────
@@ -1264,24 +1495,24 @@ model ActivityEvent {
   // Ver migration 20260606170000_partition_activity_events. O código só
   // faz create()/findMany() — nenhum findUnique por id isolado — então a
   // aridade composta da PK não afeta os call sites.
-  id             String            @default(cuid())
+  id             String   @default(cuid())
   organizationId String
-  occurredAt     DateTime          @default(now())
+  occurredAt     DateTime @default(now())
 
   /// Tipo do evento. String livre (sem enum) pra suportar adicao de
   /// novos tipos sem migration — convencao SCREAMING_SNAKE_CASE
   /// (ex.: STAGE_CHANGED, MESSAGE_SENT, FIELD_CHANGED, OWNER_CHANGED,
   /// CONTACT_CREATED, CONVERSATION_CLOSED, TAG_ADDED, NOTE_ADDED,
   /// ACTIVITY_COMPLETED, AUTOMATION_EXECUTED, AI_AGENT_ACTION).
-  type           String
+  type String
 
   // ── Sujeito (entidade que sofreu a acao) ─────────────────────────
-  entityType     EventEntityType
-  entityId       String
+  entityType  EventEntityType
+  entityId    String
   /// Snapshot textual do sujeito (titulo do lead, nome do contato,
   /// codigo da conversa, etc.). Imutavel — preserva o rotulo na hora
   /// do evento, evita join custoso na listagem do feed.
-  entityLabel    String?
+  entityLabel String?
 
   // FKs opcionais para escopo secundario / filtros rapidos. Quando
   // um evento toca multiplas entidades (ex.: mensagem num deal aberto
@@ -1291,27 +1522,27 @@ model ActivityEvent {
   conversationId String?
 
   // ── Ator (quem fez) ──────────────────────────────────────────────
-  actorType      ActorType
-  actorUserId    String?
-  actorLabel     String?
-  actorSublabel  String?
-  actorRef       String?
+  actorType     ActorType
+  actorUserId   String?
+  actorLabel    String?
+  actorSublabel String?
+  actorRef      String?
 
   // ── Conteudo (old/new + meta livre) ──────────────────────────────
   /// Identificador do campo alterado (ex.: "stage", "status", "owner",
   /// "title", "value", "lostReason", ou label do custom field).
-  field          String?
-  oldValue       String?
-  newValue       String?
+  field    String?
+  oldValue String?
+  newValue String?
   /// JSON livre para detalhes adicionais (preview de mensagem, IDs
   /// auxiliares, payload do step de automacao, etc.).
-  meta           Json              @default("{}")
+  meta     Json    @default("{}")
 
-  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  actorUser      User?             @relation("ActivityEventActor", fields: [actorUserId], references: [id])
-  deal           Deal?             @relation(fields: [dealId], references: [id], onDelete: Cascade)
-  contact        Contact?          @relation(fields: [contactId], references: [id], onDelete: Cascade)
-  conversation   Conversation?     @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  actorUser    User?         @relation("ActivityEventActor", fields: [actorUserId], references: [id])
+  deal         Deal?         @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  contact      Contact?      @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  conversation Conversation? @relation(fields: [conversationId], references: [id], onDelete: Cascade)
 
   @@id([id, occurredAt])
   @@index([organizationId, occurredAt(sort: Desc)])
@@ -1536,32 +1767,32 @@ model WhatsappCallEvent {
 }
 
 model Message {
-  id             String            @id @default(cuid())
-  organizationId String
-  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  conversationId String
-  conversation   Conversation      @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  content        String
-  direction      String
-  messageType    String            @default("text")
+  id               String                  @id @default(cuid())
+  organizationId   String
+  organization     Organization            @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversationId   String
+  conversation     Conversation            @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  content          String
+  direction        String
+  messageType      String                  @default("text")
   /// Distingue quem autorou a mensagem: agente humano, automação/bot ou evento de sistema.
   /// Usado no dashboard de supervisão (/monitor) para separar processamento humano vs automação.
-  authorType     MessageAuthorType @default(human)
-  isPrivate      Boolean           @default(false)
-  externalId     String?
-  senderName     String?
+  authorType       MessageAuthorType       @default(human)
+  isPrivate        Boolean                 @default(false)
+  externalId       String?
+  senderName       String?
   /// Quando a mensagem foi gerada por um agente de IA (authorType=bot),
   /// aponta para o User virtual (type=AI). Permite filtrar trace/custo por agente.
-  aiAgentUserId  String?
-  aiAgentUser    User?             @relation("MessageAIAgent", fields: [aiAgentUserId], references: [id], onDelete: SetNull)
-  mediaUrl       String?
-  replyToId      String?
-  replyToPreview String?
-  reactions      Json              @default("[]")
-  sendStatus     String            @default("sent")
-  sendError      String?
+  aiAgentUserId    String?
+  aiAgentUser      User?                   @relation("MessageAIAgent", fields: [aiAgentUserId], references: [id], onDelete: SetNull)
+  mediaUrl         String?
+  replyToId        String?
+  replyToPreview   String?
+  reactions        Json                    @default("[]")
+  sendStatus       String                  @default("sent")
+  sendError        String?
   /// Token do botão Flow (Cloud API) por envio — correlaciona com webhook de retorno.
-  flowToken      String?           @map("flow_token")
+  flowToken        String?                 @map("flow_token")
   /// Template config usado no envio outbound (FK). Permite ao webhook
   /// inbound de Flow resolver o `WhatsappFlowDefinition` correto via
   /// `templateConfig.flowId` — sem isso, em organizações com 2+ templates
@@ -1569,9 +1800,9 @@ model Message {
   /// e gravava as respostas no flow errado (= não preenchia o negócio).
   /// Nullable: mensagens não-template, históricas, ou envios sem
   /// vínculo identificado mantêm NULL.
-  templateConfigId String?         @map("template_config_id")
+  templateConfigId String?                 @map("template_config_id")
   templateConfig   WhatsAppTemplateConfig? @relation(fields: [templateConfigId], references: [id], onDelete: SetNull)
-  createdAt      DateTime          @default(now())
+  createdAt        DateTime                @default(now())
 
   @@index([organizationId])
   @@index([organizationId, createdAt])
@@ -1666,20 +1897,20 @@ model AutomationStep {
 }
 
 model AutomationLog {
-  id                  String            @id @default(cuid())
-  organizationId      String
-  organization        Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  automationId        String
-  contactId           String?
-  dealId              String?
-  stepId              String?
-  stepType            String?
-  status              String
-  message             String?
-  payload             Json?
-  executedAt          DateTime          @default(now())
-  metaWebhookEventId  String?
-  metaWebhookEvent    MetaWebhookEvent? @relation(fields: [metaWebhookEventId], references: [id], onDelete: SetNull)
+  id                 String            @id @default(cuid())
+  organizationId     String
+  organization       Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  automationId       String
+  contactId          String?
+  dealId             String?
+  stepId             String?
+  stepType           String?
+  status             String
+  message            String?
+  payload            Json?
+  executedAt         DateTime          @default(now())
+  metaWebhookEventId String?
+  metaWebhookEvent   MetaWebhookEvent? @relation(fields: [metaWebhookEventId], references: [id], onDelete: SetNull)
 
   @@index([organizationId])
   @@index([automationId])
@@ -1701,12 +1932,12 @@ model AutomationLog {
 // ──────────────────────────────────────────────
 
 model MetaWebhookEvent {
-  id              String          @id @default(cuid())
+  id              String        @id @default(cuid())
   organizationId  String?
-  organization    Organization?   @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  organization    Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
   channelId       String?
-  channel         Channel?        @relation(fields: [channelId], references: [id], onDelete: SetNull)
-  receivedAt      DateTime        @default(now())
+  channel         Channel?      @relation(fields: [channelId], references: [id], onDelete: SetNull)
+  receivedAt      DateTime      @default(now())
   signatureValid  Boolean
   objectType      String?
   eventType       String
@@ -1715,10 +1946,10 @@ model MetaWebhookEvent {
   fromPhone       String?
   rawBody         Json
   headers         Json?
-  processed       Boolean         @default(false)
+  processed       Boolean       @default(false)
   processingError String?
 
-  automationLogs  AutomationLog[]
+  automationLogs AutomationLog[]
 
   @@index([organizationId, receivedAt(sort: Desc)])
   @@index([waMessageId])
@@ -1746,9 +1977,9 @@ model Channel {
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
-  conversations   Conversation[]
-  baileysAuthKeys BaileysAuthKey[]
-  campaigns       Campaign[]
+  conversations     Conversation[]
+  baileysAuthKeys   BaileysAuthKey[]
+  campaigns         Campaign[]
   metaWebhookEvents MetaWebhookEvent[]
 
   @@index([organizationId])
@@ -1846,33 +2077,33 @@ model MessageTemplate {
 /// apenas dentro de uma org (a Meta gera ids distintos por WABA, mas o id
 /// em si não tem prefixo org, então precisa do composite unique).
 model WhatsAppTemplateConfig {
-  id               String       @id @default(cuid())
-  organizationId   String
-  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  metaTemplateId   String       @map("meta_template_id")
-  metaTemplateName String       @map("meta_template_name")
-  label            String       @default("")
-  agentEnabled     Boolean      @default(false) @map("agent_enabled")
-  language         String       @default("pt_BR")
-  category         String?
-  bodyPreview      String       @default("") @map("body_preview")
+  id                String       @id @default(cuid())
+  organizationId    String
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  metaTemplateId    String       @map("meta_template_id")
+  metaTemplateName  String       @map("meta_template_name")
+  label             String       @default("")
+  agentEnabled      Boolean      @default(false) @map("agent_enabled")
+  language          String       @default("pt_BR")
+  category          String?
+  bodyPreview       String       @default("") @map("body_preview")
   /// True se existir secção BUTTONS com pelo menos um botão (FLOW, URL, QUICK_REPLY, …).
-  hasButtons       Boolean      @default(false) @map("has_buttons")
+  hasButtons        Boolean      @default(false) @map("has_buttons")
   /// Tipos distintos de botão na definição Graph (ex.: FLOW, URL, QUICK_REPLY).
-  buttonTypes      String[]     @default([]) @map("button_types")
+  buttonTypes       String[]     @default([]) @map("button_types")
   /// True se o corpo/cabeçalho tiver placeholders {{…}} ou template NAMED.
-  hasVariables     Boolean      @default(false) @map("has_variables")
+  hasVariables      Boolean      @default(false) @map("has_variables")
   /// `flow_action` do primeiro botão FLOW (ex.: NAVIGATE, DATA_EXCHANGE).
-  flowAction       String?      @map("flow_action")
+  flowAction        String?      @map("flow_action")
   /// `flow_id` do primeiro botão FLOW (string para compatibilidade com Graph).
-  flowId           String?      @map("flow_id")
+  flowId            String?      @map("flow_id")
   /// Variáveis do corpo/cabeçalho que o operador preenche no envio (ex.: [{"key":"1","label":"Dia"}]).
-  operatorVariables Json?      @map("operator_variables")
+  operatorVariables Json?        @map("operator_variables")
   /// Mensagens outbound enviadas com este template — relação inversa
   /// usada pelo resolver de Flow inbound para identificar o flow correto.
-  messages         Message[]
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  messages          Message[]
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
 
   @@unique([organizationId, metaTemplateId])
   @@index([organizationId])
@@ -1907,30 +2138,30 @@ model WhatsappFlowDefinition {
 }
 
 model WhatsappFlowScreen {
-  id           String               @id @default(cuid())
-  flowId       String               @map("flow_id")
-  flow         WhatsappFlowDefinition @relation(fields: [flowId], references: [id], onDelete: Cascade)
-  sortOrder    Int                  @default(0) @map("sort_order")
-  title        String
-  fields       WhatsappFlowField[]
+  id        String                 @id @default(cuid())
+  flowId    String                 @map("flow_id")
+  flow      WhatsappFlowDefinition @relation(fields: [flowId], references: [id], onDelete: Cascade)
+  sortOrder Int                    @default(0) @map("sort_order")
+  title     String
+  fields    WhatsappFlowField[]
 
   @@index([flowId])
   @@map("whatsapp_flow_screens")
 }
 
 model WhatsappFlowField {
-  id        String @id @default(cuid())
-  screenId  String @map("screen_id")
-  screen    WhatsappFlowScreen @relation(fields: [screenId], references: [id], onDelete: Cascade)
+  id        String                    @id @default(cuid())
+  screenId  String                    @map("screen_id")
+  screen    WhatsappFlowScreen        @relation(fields: [screenId], references: [id], onDelete: Cascade)
   /// Slug estável usado como `name` no TextInput Meta (`${form.fieldKey}`).
-  fieldKey  String @map("field_key")
+  fieldKey  String                    @map("field_key")
   label     String
   /// TEXT | EMAIL | PHONE | TEXTAREA | DROPDOWN | RADIO | MULTI_SELECT | DATE
-  fieldType String @default("TEXT") @map("field_type")
+  fieldType String                    @default("TEXT") @map("field_type")
   /// Opções exibidas em Dropdown / RadioButtonsGroup / CheckboxGroup.
-  options   String[] @default([])
-  required  Boolean @default(false)
-  sortOrder Int     @default(0) @map("sort_order")
+  options   String[]                  @default([])
+  required  Boolean                   @default(false)
+  sortOrder Int                       @default(0) @map("sort_order")
   mapping   WhatsappFlowFieldMapping?
 
   @@unique([screenId, fieldKey])
@@ -1939,14 +2170,14 @@ model WhatsappFlowField {
 }
 
 model WhatsappFlowFieldMapping {
-  id             String                   @id @default(cuid())
-  fieldId        String                   @unique @map("field_id")
-  field          WhatsappFlowField        @relation(fields: [fieldId], references: [id], onDelete: Cascade)
-  targetKind     FlowFieldMappingTargetKind @map("target_kind")
+  id            String                     @id @default(cuid())
+  fieldId       String                     @unique @map("field_id")
+  field         WhatsappFlowField          @relation(fields: [fieldId], references: [id], onDelete: Cascade)
+  targetKind    FlowFieldMappingTargetKind @map("target_kind")
   /// CONTACT_NATIVE: name | phone | email | source — DEAL_NATIVE: title | value | expectedClose
-  nativeKey      String?                  @map("native_key")
-  customFieldId  String?                  @map("custom_field_id")
-  customField    CustomField?             @relation(fields: [customFieldId], references: [id], onDelete: SetNull)
+  nativeKey     String?                    @map("native_key")
+  customFieldId String?                    @map("custom_field_id")
+  customField   CustomField?               @relation(fields: [customFieldId], references: [id], onDelete: SetNull)
 
   @@index([customFieldId])
   @@map("whatsapp_flow_field_mappings")
@@ -2018,25 +2249,25 @@ enum DistributionMode {
 /// de estados OPERACIONAIS (online via AgentStatus, pausa via `paused`/AWAY,
 /// expediente via AgentSchedule). Nao substitui DistributionRule/Member ainda.
 model DistributionResponsible {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  userId         String
-  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id              String       @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   /// Estado administrativo: false = INATIVO (bloqueado pelo admin).
-  participates   Boolean      @default(true)
+  participates    Boolean      @default(true)
   /// 0 = SEM limite de fila. >0 bloqueia quando filaAtual >= queueLimit.
-  queueLimit     Int          @default(0)
+  queueLimit      Int          @default(0)
   /// Peso/volume exibido na v2 (default 1). Nao altera a selecao v1.
-  volume         Int          @default(1)
+  volume          Int          @default(1)
   /// Tipo/segmento opcional para compatibilidade de distribuicao.
-  type           String?
+  type            String?
   /// Pausa temporaria dedicada (alem de AgentStatus.AWAY).
-  paused         Boolean      @default(false)
+  paused          Boolean      @default(false)
   /// Ultima vez que recebeu lead pelo motor (desempate da selecao).
   lastExecutionAt DateTime?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
   @@unique([organizationId, userId])
   @@index([organizationId])

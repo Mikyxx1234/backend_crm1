@@ -186,12 +186,24 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
   },
   {
     resource: "product",
-    label: "Produtos",
+    label: "Produtos / Catálogo",
+    description: "Catálogo comercial: produtos, tabelas de preço, contratos e movimentos de saldo.",
     actions: [
       { action: "view", label: "Visualizar produtos" },
       { action: "create", label: "Criar produto" },
       { action: "edit", label: "Editar produto" },
       { action: "delete", label: "Excluir produto", destructive: true },
+      { action: "manage", label: "Gerenciar tabelas de preço, contratos e ajustes de saldo" },
+    ],
+  },
+  {
+    resource: "discount",
+    label: "Descontos",
+    description: "Solicitações e aprovações de desconto fora da política do produto.",
+    actions: [
+      { action: "view", label: "Visualizar solicitações de desconto" },
+      { action: "request", label: "Solicitar desconto fora da política" },
+      { action: "approve", label: "Aprovar/rejeitar solicitações de desconto" },
     ],
   },
   {
