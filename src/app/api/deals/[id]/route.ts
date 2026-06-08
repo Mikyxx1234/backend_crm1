@@ -42,7 +42,26 @@ export async function GET(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
 
-    return NextResponse.json(deal);
+    // Achata as relações N:N de tags para o formato { id, name, color }[]
+    // que o frontend consome (key={t.id}). O include do Prisma devolve
+    // { tag: {...} }[], e sem o flatten o painel renderizava chips vazios
+    // e disparava o warning de "unique key" no React.
+    type NestedTag = { tag: { id: string; name: string; color: string | null } };
+    const flattenTags = (arr?: NestedTag[] | null) => (arr ?? []).map((t) => t.tag);
+    const responseDeal = {
+      ...deal,
+      tags: flattenTags(deal.tags as unknown as NestedTag[]),
+      contact: deal.contact
+        ? {
+            ...deal.contact,
+            tags: flattenTags(
+              (deal.contact as { tags?: NestedTag[] }).tags,
+            ),
+          }
+        : deal.contact,
+    };
+
+    return NextResponse.json(responseDeal);
     });
   } catch (e) {
     console.error(e);

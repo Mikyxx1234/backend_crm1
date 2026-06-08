@@ -39,6 +39,13 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
   { key: "activities", title: "Atividades", href: "/activities", locked: false },
   { key: "automations", title: "Automações", href: "/automations", locked: false },
   {
+    key: "campaigns",
+    title: "Campanhas",
+    href: "/campaigns",
+    locked: false,
+    requiredPermission: "campaign:view",
+  },
+  {
     key: "distribution",
     title: "Distribuição",
     href: "/widgets/distribution",

@@ -274,8 +274,10 @@ async function handleSend(
       throw err;
     }
 
-    await prisma.campaignRecipient.update({
-      where: { id: recipientId },
+    // Update condicional (status != FAILED) para evitar double-count caso o
+    // webhook Meta `failed` já tenha marcado este destinatário como FAILED.
+    const failedUpdate = await prisma.campaignRecipient.updateMany({
+      where: { id: recipientId, status: { not: "FAILED" } },
       data: {
         status: "FAILED",
         errorMessage: windowExpired
@@ -283,10 +285,12 @@ async function handleSend(
           : errorMsg,
       },
     });
-    await prisma.campaign.update({
-      where: { id: campaignId },
-      data: { failedCount: { increment: 1 } },
-    });
+    if (failedUpdate.count > 0) {
+      await prisma.campaign.update({
+        where: { id: campaignId },
+        data: { failedCount: { increment: 1 } },
+      });
+    }
     metrics.messages.outbound.inc({
       channel_provider: campaign.channel.provider,
       status: "failed",

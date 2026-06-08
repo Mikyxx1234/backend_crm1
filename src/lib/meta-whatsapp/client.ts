@@ -1,5 +1,6 @@
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
+import { metaErrorReason } from "@/lib/meta-whatsapp/error-catalog";
 
 const GRAPH_VERSION = "v21.0";
 
@@ -152,10 +153,14 @@ export class MetaGraphError extends Error {
    * a parte acionável antes dos metadados técnicos.
    */
   toPersistedString(): string {
-    const human =
+    const rawHuman =
       this.details ||
       this.userMsg ||
       this.message.replace(/\s*\(code [^)]+\)\s*$/i, "");
+    // Prefixa o motivo PT-BR catalogado (quando o code e conhecido) para
+    // que o operador entenda a causa sem consultar a doc da Meta.
+    const ptReason = metaErrorReason(this.code);
+    const human = ptReason ? `${ptReason} (Meta: ${rawHuman})` : rawHuman;
     const meta: string[] = [];
     if (this.code != null) {
       meta.push(`code ${this.code}${this.subcode != null ? `/${this.subcode}` : ""}`);

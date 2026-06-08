@@ -23,6 +23,10 @@
 # production
 /build
 
+# workers compilados via esbuild (scripts/build-workers.mjs) — gerados no
+# deploy/Docker, nao versionados.
+/dist/
+
 # misc
 .DS_Store
 *.pem
@@ -52,6 +56,10 @@ next-env.d.ts
 # uploads / media
 /public/uploads/
 /uploads/
+
+# storage local de runtime (conteúdo por organização gerado em dev) —
+# o storage real fica em volume/DB, não deve ser versionado.
+/storage/
 
 # prisma local db
 *.db

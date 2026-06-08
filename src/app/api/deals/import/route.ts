@@ -10,10 +10,68 @@ import {
   readUploadedTable,
   upsertImportTag,
 } from "@/lib/import-helpers";
+import { buildCustomFieldHeaderMap } from "@/lib/contact-import-core";
 import { prisma } from "@/lib/prisma";
 import { enterRequestContext, getOrgIdOrThrow } from "@/lib/request-context";
 import { createContact, updateContact } from "@/services/contacts";
+import { getCustomFields, upsertDealCustomFieldValues } from "@/services/custom-fields";
 import { createDeal, isValidDealStatus, updateDeal } from "@/services/deals";
+
+/** Cabeçalhos padrão do negócio — não viram campo personalizado por nome. */
+const DEAL_RESERVED_HEADERS = new Set<string>([
+  "id",
+  "external_id",
+  "externalid",
+  "kommo_lead_id",
+  "lead_external_id",
+  "deal_number",
+  "title",
+  "value",
+  "status",
+  "pipeline",
+  "pipeline_name",
+  "stage",
+  "stage_name",
+  "stage_id",
+  "stageid",
+  "contact_id",
+  "contactid",
+  "contact_name",
+  "contactname",
+  "contact",
+  "contact_email",
+  "contactemail",
+  "contact_phone",
+  "contactphone",
+  "contact_external_id",
+  "contact_externalid",
+  "kommo_contact_id",
+  "owner_id",
+  "ownertoid",
+  "owner_email",
+  "owneremail",
+  "expected_close",
+  "expectedclose",
+  "lost_reason",
+  "lostreason",
+]);
+
+/** Grava os valores de campos personalizados do negócio a partir da linha. */
+async function applyDealCustomFields(
+  dealId: string,
+  row: Record<string, string>,
+  map: Map<string, string> | undefined,
+): Promise<void> {
+  if (!map || map.size === 0) return;
+  const values: { fieldId: string; value: string }[] = [];
+  for (const [header, fieldId] of map) {
+    const raw = row[header]?.trim();
+    if (raw) values.push({ fieldId, value: raw });
+  }
+  if (values.length > 0) {
+    await upsertDealCustomFieldValues(dealId, values);
+  }
+}
 
 function hasColumn(headers: string[], ...names: string[]) {
   return names.some((n) => headers.includes(n));
@@ -428,6 +486,21 @@ export async function POST(request: Request) {
       }
     }
 
+    // Campos personalizados de negócio: casa colunas cf:<id> (remapeadas pelo
+    // wizard) ou por nome/label com CustomFields existentes (entity "deal").
+    let dealCustomFieldMap: Map<string, string> | undefined;
+    try {
+      const defs = (await getCustomFields("deal")) as Array<{
+        id: string;
+        name: string;
+        label?: string | null;
+      }>;
+      const map = buildCustomFieldHeaderMap(headers, defs, DEAL_RESERVED_HEADERS);
+      if (map.size > 0) dealCustomFieldMap = map;
+    } catch {
+      dealCustomFieldMap = undefined;
+    }
+
     const failed: { row: number; message: string }[] = [];
     let created = 0;
     let updated = 0;
@@ -606,6 +679,8 @@ export async function POST(request: Request) {
         // Cada tag é upsertada e vinculada ao deal. Falha em uma tag não
         // bloqueia as demais nem o deal — apenas loga.
         if (dealId) {
+          await applyDealCustomFields(dealId, row, dealCustomFieldMap);
+
           const rowTags = splitTags(row.tags?.trim());
           if (rowTags.length > 0) {
             const orgId = getOrgIdOrThrow();
