@@ -151,7 +151,7 @@ async function resolveContactUpsert(row: Record<string, string>): Promise<
 export async function POST(request: Request) {
   try {
     const session = await auth();
-    const denied = assertImportPermission(session);
+    const denied = await assertImportPermission(session, "contact");
     if (denied) return denied;
 
     // Populate AsyncLocalStorage para que getOrgIdOrThrow() funcione

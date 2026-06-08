@@ -57,6 +57,37 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   "template:view", "template:create", "template:edit",
   // Tasks
   "task:view", "task:create", "task:edit", "task:delete", "task:complete_others",
+
+  // ── Permissions v2 (Sprint 1) — extensão ──
+  // Deals
+  "deal:import", "deal:export", "deal:view_all",
+  // Conversas (escopo + ações novas)
+  "conversation:view_all", "conversation:view_unassigned",
+  "conversation:assign", "conversation:reassign",
+  "conversation:close", "conversation:reopen",
+  "conversation:transfer", "conversation:send_template",
+  "conversation:send_media", "conversation:view_internal_notes",
+  // Canais específicos
+  "channel:whatsapp", "channel:instagram", "channel:email",
+  // Pipeline (kanban)
+  "pipeline:view_cards_all", "pipeline:move_cards",
+  // Contatos (escopo)
+  "contact:view_all",
+  // Empresas
+  "company:export",
+  // Relatórios (escopo)
+  "report:view_team", "report:view_all",
+  // Configurações (atalhos)
+  "settings:view", "settings:pipelines", "settings:import_export",
+  // Grupos
+  "group:view", "group:manage",
+  // Catálogo
+  "product:import", "product:export",
+  "price_table:view", "price_table:manage",
+  "contract:view_all", "contract:manage",
+  "discount:approve",
+  // Dados sensíveis
+  "data:view_phone", "data:view_email",
 ];
 
 export const MEMBER_PERMISSIONS: readonly string[] = [
@@ -71,6 +102,29 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   // Distribution: operador só visualiza (e altera o próprio online/offline,
   // controlado fora do RBAC via ownership na rota de status do agente).
   "distribution:view",
+
+  // ── Permissions v2 (Sprint 1) — extensão ──
+  // Deals (apenas próprios)
+  "deal:view_own",
+  // Conversas (próprias + sem responsável)
+  "conversation:view_own", "conversation:view_unassigned",
+  "conversation:assign", "conversation:close",
+  "conversation:send_template", "conversation:send_media",
+  // Canais
+  "channel:whatsapp",
+  // Pipeline (apenas próprios)
+  "pipeline:view_cards_own", "pipeline:move_cards",
+  // Contatos (apenas próprios)
+  "contact:view_own",
+  // Configurações (atalho de visualização)
+  "settings:view",
+  // Catálogo
+  "product:view",
+  "price_table:view",
+  "contract:view_own",
+  "discount:request",
+  // Dados sensíveis
+  "data:view_phone", "data:view_email",
 ];
 
 export const PRESET_PERMISSIONS: Record<UserRole, readonly string[]> = {

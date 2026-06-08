@@ -73,6 +73,12 @@ export const FLAGS = {
       "Ativa o novo wizard de campanhas com fluxo em 4 passos.",
     defaultEnabled: false,
   },
+  permissions_v2_enabled: {
+    key: "permissions_v2_enabled",
+    description:
+      "Habilita o RBAC v2 (Sprint 3+): escopo de inbox/deals, canais e fases. Sprint 1 (catálogo + presets + import-guard) é sempre ON.",
+    defaultEnabled: false,
+  },
 } as const;
 
 export type FlagKey = keyof typeof FLAGS;

@@ -113,6 +113,7 @@ model Organization {
   contracts                Contract[]
   stockMovements           StockMovement[]
   discountRequests         DiscountRequest[]
+  userGroups               UserGroup[]
 
   @@index([status])
   @@map("organizations")
@@ -387,6 +388,7 @@ model User {
   loginAttempts                  LoginAttempt[]
   dataRequests                   DataRequest[]
   roleAssignments                UserRoleAssignment[]
+  groupMemberships               UserGroupMember[]         @relation("UserGroupMemberships")
   savedFilters                   SavedFilter[]             @relation("UserSavedFilters")
   stockMovements                 StockMovement[]
   discountRequests               DiscountRequest[]         @relation("DiscountRequests")
@@ -715,7 +717,9 @@ model Role {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
-  assignments UserRoleAssignment[]
+  assignments  UserRoleAssignment[]
+  groups       UserGroup[]          @relation("GroupRole")
+  groupMembers UserGroupMember[]    @relation("GroupMemberRole")
 
   @@unique([organizationId, name])
   @@unique([organizationId, systemPreset])
@@ -744,6 +748,62 @@ model UserRoleAssignment {
   @@index([userId])
   @@index([roleId])
   @@map("user_role_assignments")
+}
+
+/// Grupo de usuários (time/equipe) — Permissions v2 (Sprint 1, Fase 2).
+///
+/// Permite agregar permissões coletivas via `Role` opcional e definir
+/// canais/fases compartilhados pelos membros. A herança segue ADR-3:
+///   - UserRoleAssignment direto no usuário PREVALECE sobre o role do grupo.
+///   - `channelGrants` e `stageGrants` são UNIÃO entre todos os grupos do
+///     usuário (array vazio = sem restrição).
+model UserGroup {
+  id             String            @id @default(cuid())
+  organizationId String            @map("organization_id")
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  /// Cor hex (#RRGGBB) para a UI distinguir grupos no chat/kanban.
+  color          String?
+  isActive       Boolean           @default(true) @map("is_active")
+  /// Role padrão herdada pelos membros (override por membro via
+  /// UserGroupMember.roleId). Null = grupo sem role padrão.
+  roleId         String?           @map("role_id")
+  role           Role?             @relation("GroupRole", fields: [roleId], references: [id])
+  /// Lista de canais permitidos: ["whatsapp"], ["whatsapp:ch_abc123"], ou
+  /// [] = sem restrição (acesso a todos os canais da org).
+  channelGrants  String[]          @default([]) @map("channel_grants")
+  /// Lista de stageIds visíveis. [] = todas as fases visíveis.
+  stageGrants    String[]          @default([]) @map("stage_grants")
+  members        UserGroupMember[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("user_groups")
+}
+
+/// Vínculo usuário↔grupo com override opcional de role.
+///
+/// Se `roleId` for null, o membro herda o `UserGroup.roleId`. Se ambos
+/// forem null, o membro só carrega `channelGrants`/`stageGrants` do grupo.
+model UserGroupMember {
+  id       String    @id @default(cuid())
+  groupId  String    @map("group_id")
+  group    UserGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  userId   String    @map("user_id")
+  user     User      @relation("UserGroupMemberships", fields: [userId], references: [id], onDelete: Cascade)
+  /// Override individual da role do grupo (null = herda do grupo).
+  roleId   String?   @map("role_id")
+  role     Role?     @relation("GroupMemberRole", fields: [roleId], references: [id])
+  joinedAt DateTime  @default(now()) @map("joined_at")
+
+  @@unique([groupId, userId])
+  @@index([groupId])
+  @@index([userId])
+  @@map("user_group_members")
 }
 
 /// Configs por organizacao (substitui SystemSetting global pra dados

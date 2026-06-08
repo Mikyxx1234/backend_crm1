@@ -50,6 +50,14 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "edit", label: "Editar funil" },
       { action: "delete", label: "Excluir funil", destructive: true },
       { action: "manage_stages", label: "Gerenciar etapas (criar/editar/excluir)" },
+      // ── Permissions v2 (Sprint 1) — visibilidade no kanban ──
+      // ADR-1: granulares (create/edit/delete/manage_stages) permanecem.
+      // `pipeline:manage` é alias semântico do conjunto acima (resolvido
+      // no código que consome — não armazenado como chave separada).
+      { action: "view_cards_all", label: "Ver todos os cards do kanban" },
+      { action: "view_cards_own", label: "Ver apenas cards próprios (onde é responsável)" },
+      { action: "view_cards_group", label: "Ver cards do próprio grupo/time" },
+      { action: "move_cards", label: "Mover cards entre etapas (drag)" },
     ],
   },
   {
@@ -64,6 +72,9 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "import", label: "Importar contatos" },
       { action: "merge", label: "Mesclar contatos duplicados" },
       { action: "bulk_edit", label: "Editar em lote" },
+      // ── Permissions v2 (Sprint 1) — visibilidade escopada ──
+      { action: "view_all", label: "Ver todos os contatos" },
+      { action: "view_own", label: "Ver apenas contatos próprios (onde é responsável)" },
     ],
   },
   {
@@ -74,6 +85,8 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "create", label: "Criar empresa" },
       { action: "edit", label: "Editar empresa" },
       { action: "delete", label: "Excluir empresa", destructive: true },
+      // ── Permissions v2 (Sprint 1) ──
+      { action: "export", label: "Exportar empresas" },
     ],
   },
   {
@@ -88,6 +101,12 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "change_stage", label: "Mover entre etapas" },
       { action: "set_won", label: "Marcar como ganho" },
       { action: "set_lost", label: "Marcar como perdido" },
+      // ── Permissions v2 (Sprint 1) ──
+      { action: "import", label: "Importar negócios em massa via CSV" },
+      { action: "export", label: "Exportar negócios via CSV" },
+      { action: "view_all", label: "Ver todos os negócios (sem restrição de responsável)" },
+      { action: "view_own", label: "Ver apenas negócios próprios (onde é responsável)" },
+      { action: "view_group", label: "Ver negócios do próprio grupo/time" },
     ],
   },
   {
@@ -101,6 +120,18 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "delete_messages", label: "Excluir mensagens", destructive: true },
       { action: "send_template", label: "Enviar template WhatsApp" },
       { action: "transfer_channel", label: "Transferir entre canais" },
+      // ── Permissions v2 (Sprint 1) — visibilidade escopada ──
+      { action: "view_all", label: "Ver todas as conversas (sem restrição de atribuição)" },
+      { action: "view_own", label: "Ver apenas conversas atribuídas ao próprio agente" },
+      { action: "view_group", label: "Ver conversas do próprio grupo/time" },
+      { action: "view_unassigned", label: "Ver conversas sem responsável" },
+      { action: "assign", label: "Atribuir conversa (a si ou a outro agente)" },
+      { action: "reassign", label: "Reatribuir conversa de outro agente" },
+      { action: "close", label: "Encerrar conversa" },
+      { action: "reopen", label: "Reabrir conversa encerrada" },
+      { action: "transfer", label: "Transferir para outro agente/grupo" },
+      { action: "send_media", label: "Enviar mídia (áudio, vídeo, arquivo)" },
+      { action: "view_internal_notes", label: "Ver notas internas" },
     ],
   },
   {
@@ -162,6 +193,9 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
     actions: [
       { action: "view", label: "Visualizar relatórios" },
       { action: "export", label: "Exportar relatórios" },
+      // ── Permissions v2 (Sprint 1) — escopo de relatórios ──
+      { action: "view_team", label: "Visualizar relatórios do próprio time" },
+      { action: "view_all", label: "Visualizar relatórios de toda a organização" },
     ],
   },
   {
@@ -194,6 +228,9 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "edit", label: "Editar produto" },
       { action: "delete", label: "Excluir produto", destructive: true },
       { action: "manage", label: "Gerenciar tabelas de preço, contratos e ajustes de saldo" },
+      // ── Permissions v2 (Sprint 1) ──
+      { action: "import", label: "Importar produtos em massa via CSV" },
+      { action: "export", label: "Exportar produtos via CSV" },
     ],
   },
   {
@@ -214,6 +251,11 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "create", label: "Conectar novo canal" },
       { action: "edit", label: "Editar canal" },
       { action: "delete", label: "Desconectar canal", destructive: true },
+      // ── Permissions v2 (Sprint 1) — operar canal específico ──
+      { action: "whatsapp", label: "Operar canal WhatsApp" },
+      { action: "instagram", label: "Operar canal Instagram" },
+      { action: "email", label: "Operar canal Email" },
+      { action: "meta", label: "Operar canal Meta Ads" },
     ],
   },
   {
@@ -243,6 +285,55 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "integrations", label: "Integrações externas (Kommo, etc.)" },
       { action: "lgpd", label: "Privacidade / LGPD" },
       { action: "groups", label: "Grupos e filas (Fase 3)" },
+      // ── Permissions v2 (Sprint 1) — atalhos genéricos ──
+      { action: "view", label: "Ver página de configurações (acesso geral)" },
+      { action: "users", label: "Gerenciar usuários" },
+      { action: "roles", label: "Gerenciar roles e permissões" },
+      { action: "pipelines", label: "Configurar pipelines e fases" },
+      { action: "automations", label: "Gerenciar automações" },
+      { action: "security", label: "Configurações de segurança (MFA, etc.)" },
+      { action: "import_export", label: "Acesso à área de importação/exportação" },
+    ],
+  },
+  // ── Permissions v2 (Sprint 1) — novos recursos ──
+  {
+    resource: "group",
+    label: "Grupos de Usuários",
+    description: "Times/equipes com canais e fases compartilhados.",
+    actions: [
+      { action: "view", label: "Visualizar grupos" },
+      { action: "manage", label: "Criar/editar grupos e membros" },
+    ],
+  },
+  {
+    resource: "price_table",
+    label: "Tabelas de Preço",
+    description: "Tabelas comerciais com itens e descontos por produto.",
+    actions: [
+      { action: "view", label: "Visualizar tabelas de preço" },
+      { action: "manage", label: "Criar/editar tabelas de preço e itens" },
+    ],
+  },
+  {
+    resource: "contract",
+    label: "Contratos",
+    description: "Vínculos comerciais com saldo, itens e movimentos.",
+    actions: [
+      { action: "view_all", label: "Ver todos os contratos da organização" },
+      { action: "view_own", label: "Ver apenas contratos próprios (vinculado como responsável)" },
+      { action: "manage", label: "Criar/editar/cancelar contratos" },
+    ],
+  },
+  {
+    resource: "data",
+    label: "Dados Sensíveis",
+    description:
+      "Visualização e exportação de dados pessoais sensíveis (LGPD). Chaves reservadas — mascaramento será aplicado em fase posterior.",
+    actions: [
+      { action: "view_phone", label: "Ver telefone completo (vs mascarado)" },
+      { action: "view_email", label: "Ver e-mail completo (vs mascarado)" },
+      { action: "view_cpf", label: "Ver CPF completo (vs mascarado)" },
+      { action: "export_sensitive", label: "Exportar dados sensíveis", destructive: true },
     ],
   },
 ];

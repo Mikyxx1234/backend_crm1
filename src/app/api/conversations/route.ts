@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server";
 
 import { withApiAuthContext } from "@/lib/api-auth";
+import { buildConversationWhere } from "@/lib/authz/conversation-scope";
+import { isPermissionsV2Enabled } from "@/lib/authz/feature-flags";
+import { getEffectivePerms } from "@/lib/authz/ctx-permissions";
+import { denyAccess } from "@/lib/authz/deny-access";
 import { canSeeInboxTab, getScopeGrants } from "@/lib/authz/scope-grants";
 import { getVisibilityFilter } from "@/lib/visibility";
+import type { Prisma } from "@prisma/client";
 import {
   getConversations,
   getTabCounts,
@@ -95,7 +100,22 @@ export async function GET(request: Request) {
       const search =
         typeof searchRaw === "string" && searchRaw.trim().length > 0 ? searchRaw.trim() : undefined;
 
-      const visibility = await getVisibilityFilter(user);
+      // ── Visibilidade v2 vs legado ─────────────────────────────────────
+      const orgId = apiUser.organizationId;
+      const v2 = orgId ? await isPermissionsV2Enabled(orgId) : false;
+
+      let convWhere: Prisma.ConversationWhereInput;
+
+      if (v2 && orgId) {
+        const perms = await getEffectivePerms(apiUser.id, orgId);
+        const where = await buildConversationWhere(apiUser.id, orgId, perms);
+        if (where === null) return denyAccess("Sem permissão para visualizar conversas.");
+        convWhere = where;
+      } else {
+        const visibility = await getVisibilityFilter(user);
+        convWhere = visibility.conversationWhere;
+      }
+      // ──────────────────────────────────────────────────────────────────
 
       const memberTodosCategories: InboxCategoryTab[] | undefined =
         tab === "todos" && user.role === "MEMBER"
@@ -116,7 +136,7 @@ export async function GET(request: Request) {
         search,
         page,
         perPage,
-        visibilityWhere: visibility.conversationWhere,
+        visibilityWhere: convWhere,
         ownerId,
         stageId,
         tagIds,

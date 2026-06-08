@@ -50,7 +50,7 @@ function parseAttributes(v: string | undefined): Prisma.InputJsonValue | null {
 export async function POST(request: Request) {
   try {
     const session = await auth();
-    const denied = assertImportPermission(session);
+    const denied = await assertImportPermission(session, "product");
     if (denied) return denied;
 
     const formData = await request.formData();

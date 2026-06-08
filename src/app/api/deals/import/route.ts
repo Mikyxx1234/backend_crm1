@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
-import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { assertImportPermission } from "@/lib/import-guard";
 import {
   attachTagToDeal,
@@ -266,15 +265,103 @@ async function resolveDealUpsert(
 
 function parseExpectedClose(raw: string | undefined): Date | null | undefined {
   if (!raw?.trim()) return undefined;
-  const d = new Date(raw.trim());
-  if (Number.isNaN(d.getTime())) return null;
+  // Aceita BR (DD/MM/AAAA [HH:mm]) e ISO. `parseDateFlexible` retorna null se inválido.
+  const d = parseDateFlexible(raw.trim());
+  if (!d) return null;
   return d;
+}
+
+/**
+ * Aceita datas em formato brasileiro (DD/MM/AAAA [HH:mm]) e ISO/Date-parseable.
+ * Retorna null quando não conseguir parsear.
+ */
+function parseDateFlexible(raw: string): Date | null {
+  // DD/MM/AAAA [HH:mm] — formato Kommo PT-BR
+  const br = /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/;
+  const m = br.exec(raw);
+  if (m) {
+    const [, dd, mm, yyyy, hh = "0", mi = "0"] = m;
+    const d = new Date(
+      Number(yyyy),
+      Number(mm) - 1,
+      Number(dd),
+      Number(hh),
+      Number(mi),
+    );
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * Parser de valor monetário tolerante:
+ *  - "100.000,00" (BR com separador de milhar)
+ *  - "100000,00"  (BR sem milhar)
+ *  - "100000.00"  (ISO)
+ *  - "100000"     (inteiro)
+ * Retorna null quando não for um número válido.
+ */
+function parseValueFlexible(raw: string): number | null {
+  const s = raw.trim();
+  if (!s) return null;
+  const hasComma = s.includes(",");
+  const hasDot = s.includes(".");
+  let normalized: string;
+  if (hasComma && hasDot) {
+    // Assume BR: "." milhar, "," decimal
+    normalized = s.replace(/\./g, "").replace(",", ".");
+  } else if (hasComma) {
+    // "100000,00" → BR decimal
+    normalized = s.replace(",", ".");
+  } else {
+    normalized = s;
+  }
+  const n = Number.parseFloat(normalized);
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Divide uma string de tags em lista, aceitando separadores `,` e `;`.
+ * Filtra entradas vazias.
+ */
+function splitTags(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw
+    .split(/[,;]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0);
+}
+
+/**
+ * Resolve ou cria a Company por nome dentro da organização.
+ * Retorna o id ou undefined se nenhuma coluna de empresa for fornecida.
+ */
+async function resolveOrCreateCompany(row: Record<string, string>): Promise<string | undefined> {
+  const name =
+    row.company_name?.trim() ||
+    row.companyname?.trim() ||
+    row.company?.trim();
+  if (!name) return undefined;
+
+  const orgId = getOrgIdOrThrow();
+  const existing = await prisma.company.findFirst({
+    where: { organizationId: orgId, name: { equals: name, mode: "insensitive" } },
+    select: { id: true },
+  });
+  if (existing) return existing.id;
+
+  const created = await prisma.company.create({
+    data: { organizationId: orgId, name },
+    select: { id: true },
+  });
+  return created.id;
 }
 
 export async function POST(request: Request) {
   try {
     const session = await auth();
-    const denied = assertImportPermission(session);
+    const denied = await assertImportPermission(session, "deal");
     if (denied) return denied;
 
     // Populate AsyncLocalStorage para que getOrgIdOrThrow() funcione
@@ -287,11 +374,8 @@ export async function POST(request: Request) {
       });
     }
 
-    const permissionDenied = await requirePermissionForUser(
-      (session?.user ?? {}) as { id: string; organizationId: string | null; role?: string | null; isSuperAdmin?: boolean },
-      "deal:create",
-    );
-    if (permissionDenied) return permissionDenied;
+    // Permissions v2 (Sprint 1): `deal:import` é guard único e suficiente
+    // — o duplo check com `deal:create` foi removido (ADR-1).
 
     const formData = await request.formData();
     const file = formData.get("file");
@@ -374,12 +458,32 @@ export async function POST(request: Request) {
       let value: number | undefined;
       const valRaw = row.value?.trim();
       if (valRaw) {
-        const n = Number.parseFloat(valRaw.replace(",", "."));
-        if (!Number.isFinite(n)) {
+        const n = parseValueFlexible(valRaw);
+        if (n === null) {
           failed.push({ row: rowNumber, message: "value inválido." });
           continue;
         }
         value = n;
+      }
+
+      // ── Validação obrigatória de contato (alinha com regra "deal precisa de
+      // contato com pelo menos nome OU email OU telefone"). Linha falha cedo se
+      // nenhum dos três foi informado, antes de criar/atualizar deal.
+      const hasContactKey =
+        !!row.contact_id?.trim() ||
+        !!row.contact_external_id?.trim() ||
+        !!row.contact_name?.trim() ||
+        !!row.contactname?.trim() ||
+        !!row.contact_email?.trim() ||
+        !!row.contactemail?.trim() ||
+        !!row.contact_phone?.trim() ||
+        !!row.contactphone?.trim();
+      if (!hasContactKey) {
+        failed.push({
+          row: rowNumber,
+          message: "Contato ausente: informe nome, e-mail ou telefone do contato.",
+        });
+        continue;
       }
 
       const expectedClose = parseExpectedClose(row.expected_close?.trim() || row.expectedclose?.trim());
@@ -396,12 +500,44 @@ export async function POST(request: Request) {
         continue;
       }
 
+      // Resolve a empresa ANTES do contato — se "Nome da empresa" vier no row,
+      // garante que a Company exista (cria se necessário) para que o contato
+      // recém-criado já saia vinculado a ela. Falhar aqui não bloqueia o deal:
+      // logamos como aviso e seguimos sem company.
+      let companyIdForRow: string | undefined;
+      try {
+        companyIdForRow = await resolveOrCreateCompany(row);
+      } catch (e) {
+        console.warn("[deals/import] falha ao resolver/criar empresa:", e);
+      }
+
+      // Injeta company_id no row antes da resolução do contato para que
+      // resolveContactIdForDeal use o helper interno (resolveCompanyId não
+      // existe aqui; createContact aceita companyId via basePayload abaixo).
+      if (companyIdForRow) {
+        row.company_id = companyIdForRow;
+      }
+
       let contactId: string | undefined;
       try {
         contactId = await resolveContactIdForDeal(row, updateExisting);
       } catch {
         failed.push({ row: rowNumber, message: "Erro ao resolver contato." });
         continue;
+      }
+
+      // Garante o vínculo Contact→Company quando o contato veio de busca
+      // (cascata de email/phone) e ainda não tinha companyId, ou quando a
+      // empresa do row é diferente da atual. Tolerante a falha — não bloqueia.
+      if (contactId && companyIdForRow) {
+        try {
+          await prisma.contact.update({
+            where: { id: contactId },
+            data: { companyId: companyIdForRow },
+          });
+        } catch (e) {
+          console.warn("[deals/import] falha ao vincular contato à empresa:", e);
+        }
       }
 
       const resolved = await resolveDealUpsert(row, {
@@ -464,6 +600,24 @@ export async function POST(request: Request) {
 
         if (importTagId && dealId) {
           await attachTagToDeal(dealId, importTagId);
+        }
+
+        // Tags por linha (coluna `tags` separada por vírgula ou ponto-e-vírgula).
+        // Cada tag é upsertada e vinculada ao deal. Falha em uma tag não
+        // bloqueia as demais nem o deal — apenas loga.
+        if (dealId) {
+          const rowTags = splitTags(row.tags?.trim());
+          if (rowTags.length > 0) {
+            const orgId = getOrgIdOrThrow();
+            for (const tagName of rowTags) {
+              try {
+                const tagId = await upsertImportTag(orgId, tagName);
+                await attachTagToDeal(dealId, tagId);
+              } catch (e) {
+                console.warn(`[deals/import] falha ao vincular tag "${tagName}":`, e);
+              }
+            }
+          }
         }
       } catch (e: unknown) {
         const code =

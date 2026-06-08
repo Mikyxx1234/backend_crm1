@@ -1,10 +1,15 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { buildDealWhere } from "@/lib/authz/deal-scope";
+import { isPermissionsV2Enabled } from "@/lib/authz/feature-flags";
+import { getEffectivePerms } from "@/lib/authz/ctx-permissions";
 import { requirePermissionForUser, requirePipelineScope, requireStageScope } from "@/lib/authz/resource-policy";
+import { denyAccess } from "@/lib/authz/deny-access";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, getDeals, isValidDealStatus } from "@/services/deals";
+import type { Prisma } from "@prisma/client";
 
 function parseIntParam(v: string | null, fallback: number) {
   if (v === null || v === "") return fallback;
@@ -37,8 +42,27 @@ export async function GET(request: Request) {
     const page = parseIntParam(searchParams.get("page"), 1);
     const perPage = parseIntParam(searchParams.get("perPage"), 20);
 
-    const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
-    const visibility = await getVisibilityFilter(user);
+    const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER"; organizationId: string | null };
+
+    // ── Visibilidade v2 vs legado ───────────────────────────────────────
+    const orgId = authResult.user.organizationId;
+    const v2 = orgId ? await isPermissionsV2Enabled(orgId) : false;
+
+    let dealWhere: Prisma.DealWhereInput;
+    let useV2ScopeFilter = false;
+
+    if (v2 && orgId) {
+      const perms = await getEffectivePerms(authResult.user.id, orgId);
+      const where = await buildDealWhere(authResult.user.id, orgId, perms);
+      if (where === null) return denyAccess("Sem permissão para visualizar negócios.");
+      dealWhere = where;
+      useV2ScopeFilter = true;
+    } else {
+      // Legado: getVisibilityFilter + requireStageScope/requirePipelineScope abaixo
+      const visibility = await getVisibilityFilter(user);
+      dealWhere = visibility.dealWhere;
+    }
+    // ────────────────────────────────────────────────────────────────────
 
     const result = await getDeals({
       pipelineId,
@@ -51,15 +75,19 @@ export async function GET(request: Request) {
       contactPhone,
       page,
       perPage,
-      visibilityWhere: visibility.dealWhere,
+      visibilityWhere: dealWhere,
     });
 
+    // No v2, stageGrants já foram aplicados via buildDealWhere.
+    // No legado, aplicar requireStageScope/requirePipelineScope por item.
     const items = await Promise.all(
       result.items.map(async (deal) => {
-        const stageDenied = await requireStageScope(authResult.user, "view", deal.stageId);
-        if (stageDenied) return null;
-        const pipelineDenied = await requirePipelineScope(authResult.user, "view", deal.stage.pipelineId);
-        if (pipelineDenied) return null;
+        if (!useV2ScopeFilter) {
+          const stageDenied = await requireStageScope(authResult.user, "view", deal.stageId);
+          if (stageDenied) return null;
+          const pipelineDenied = await requirePipelineScope(authResult.user, "view", deal.stage.pipelineId);
+          if (pipelineDenied) return null;
+        }
         return deal;
       }),
     );
