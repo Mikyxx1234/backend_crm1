@@ -74,11 +74,10 @@ export async function POST(request: Request) {
       if (b.triggerConfig === undefined) {
         return NextResponse.json({ message: "triggerConfig é obrigatório." }, { status: 400 });
       }
-      if (!Array.isArray(b.steps)) {
-        return NextResponse.json({ message: "steps deve ser um array." }, { status: 400 });
-      }
 
-      for (const step of b.steps) {
+      // steps é opcional no wizard de criação — o builder adiciona depois
+      const steps = Array.isArray(b.steps) ? b.steps : [];
+      for (const step of steps) {
         if (!step || typeof step !== "object") {
           return NextResponse.json({ message: "Passo de automação inválido." }, { status: 400 });
         }
@@ -113,10 +112,10 @@ export async function POST(request: Request) {
           // as pernas do fluxo — sintoma reportado pelo operador como "as
           // pernas estao ficando perdidas depois de salvar". `s.id` precisa
           // sobreviver round-trip pra preservar a topologia do grafo.
-          steps: (b.steps as { id?: string; type: string; config: unknown }[]).map((s) => ({
-            id: typeof s.id === "string" && s.id ? s.id : undefined,
-            type: s.type,
-            config: s.config as Parameters<typeof createAutomation>[0]["steps"][number]["config"],
+          steps: steps.map((s) => ({
+            id: typeof (s as Record<string, unknown>).id === "string" && (s as Record<string, unknown>).id ? (s as Record<string, unknown>).id as string : undefined,
+            type: (s as Record<string, unknown>).type as string,
+            config: (s as Record<string, unknown>).config as Parameters<typeof createAutomation>[0]["steps"][number]["config"],
           })),
         });
         return NextResponse.json(automation, { status: 201 });
