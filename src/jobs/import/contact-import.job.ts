@@ -1,6 +1,7 @@
 import type { Job } from "bullmq";
 
 import {
+  buildCustomFieldHeaderMap,
   processContactRow,
   validateContactImportHeaders,
   type ContactImportOptions,
@@ -8,6 +9,7 @@ import {
 import { readTableFromBuffer, upsertImportTag } from "@/lib/import-helpers";
 import { getLogger } from "@/lib/logger";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getCustomFields } from "@/services/custom-fields";
 import { readStoredFile } from "@/lib/storage/local";
 import type { ContactImportPayload } from "@/lib/queue";
 
@@ -89,9 +91,35 @@ export async function processContactImport(
     }
   }
 
+  // Campos personalizados: casa colunas do arquivo com CustomFields (entity
+  // "contact") existentes e grava os valores. Colunas sem campo correspondente
+  // são ignoradas silenciosamente (comportamento padrão de import).
+  let customFieldHeaderMap: Map<string, string> | undefined;
+  try {
+    const defs = (await getCustomFields("contact")) as Array<{
+      id: string;
+      name: string;
+      label?: string | null;
+    }>;
+    const map = buildCustomFieldHeaderMap(headers, defs);
+    if (map.size > 0) {
+      customFieldHeaderMap = map;
+      ctx.info(
+        { mappedCustomFields: [...map.keys()] },
+        "Campos personalizados mapeados na importação",
+      );
+    }
+  } catch (err) {
+    ctx.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      "Falha ao carregar campos personalizados — seguindo só com campos padrão",
+    );
+  }
+
   const opts: ContactImportOptions = {
     updateExisting: payload.updateExisting,
     importTagId,
+    customFieldHeaderMap,
   };
 
   // 4. Processa em lotes, atualizando progresso a cada chunk.

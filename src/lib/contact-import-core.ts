@@ -15,6 +15,7 @@ import {
   isValidLifecycleStage,
   updateContact,
 } from "@/services/contacts";
+import { upsertContactCustomFieldValues } from "@/services/custom-fields";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -25,7 +26,105 @@ export type ContactRowResult =
 export type ContactImportOptions = {
   updateExisting: boolean;
   importTagId: string | null;
+  /**
+   * Mapa cabeçalho-normalizado → id do CustomField (entity "contact").
+   * Quando presente, colunas que casam com um campo personalizado existente
+   * têm seus valores gravados via upsertContactCustomFieldValues. Construído
+   * uma vez por importação com `buildCustomFieldHeaderMap`.
+   */
+  customFieldHeaderMap?: Map<string, string>;
 };
+
+/**
+ * Normaliza um texto para o mesmo formato dos cabeçalhos do parser
+ * (minúsculas, espaços/hífens → "_"). Usado para casar nome/label de
+ * CustomField com a coluna do arquivo.
+ */
+export function normalizeHeaderKey(s: string): string {
+  return s.trim().toLowerCase().replace(/\s+/g, "_").replace(/-/g, "_");
+}
+
+/**
+ * Cabeçalhos reservados aos campos padrão do contato. Um CustomField com
+ * o mesmo nome NÃO sombreia a coluna padrão (ex.: um campo "email").
+ */
+const RESERVED_HEADERS = new Set<string>([
+  "id",
+  "name",
+  "email",
+  "phone",
+  "avatar_url",
+  "avatarurl",
+  "source",
+  "lead_score",
+  "leadscore",
+  "score",
+  "lifecycle_stage",
+  "lifecyclestage",
+  "lifecycle",
+  "company",
+  "company_id",
+  "companyid",
+  "assigned_to_id",
+  "assignedtoid",
+  "owner_id",
+  "ownertoid",
+  "assigned_to_email",
+  "assignedtoemail",
+  "owner_email",
+  "owneremail",
+  "external_id",
+  "externalid",
+  "kommo_contact_id",
+  "contact_external_id",
+]);
+
+/**
+ * Monta o mapa cabeçalho → id do CustomField a partir das definições de
+ * campos personalizados (entity "contact") e dos cabeçalhos do arquivo.
+ * Casa por `name` e por `label` (ambos normalizados). Ignora cabeçalhos
+ * reservados a campos padrão.
+ */
+export function buildCustomFieldHeaderMap(
+  headers: string[],
+  defs: Array<{ id: string; name: string; label?: string | null }>,
+): Map<string, string> {
+  const byKey = new Map<string, string>();
+  for (const d of defs) {
+    const nameKey = normalizeHeaderKey(d.name);
+    if (nameKey) byKey.set(nameKey, d.id);
+    if (d.label) {
+      const labelKey = normalizeHeaderKey(d.label);
+      // `name` tem prioridade — só usa label se ainda não mapeado.
+      if (labelKey && !byKey.has(labelKey)) byKey.set(labelKey, d.id);
+    }
+  }
+
+  const map = new Map<string, string>();
+  for (const h of headers) {
+    if (RESERVED_HEADERS.has(h)) continue;
+    const fieldId = byKey.get(h);
+    if (fieldId) map.set(h, fieldId);
+  }
+  return map;
+}
+
+/** Grava os valores de campos personalizados do contato a partir da linha. */
+async function applyContactCustomFields(
+  contactId: string,
+  row: Record<string, string>,
+  map: Map<string, string> | undefined,
+): Promise<void> {
+  if (!map || map.size === 0) return;
+  const values: { fieldId: string; value: string }[] = [];
+  for (const [header, fieldId] of map) {
+    const raw = row[header]?.trim();
+    if (raw) values.push({ fieldId, value: raw });
+  }
+  if (values.length > 0) {
+    await upsertContactCustomFieldValues(contactId, values);
+  }
+}
 
 function hasColumn(headers: string[], ...names: string[]) {
   return names.some((n) => headers.includes(n));
@@ -262,6 +361,7 @@ export async function processContactRow(
       });
       contactId = resolved.target.id;
       if (opts.importTagId && contactId) await attachTagToContact(contactId, opts.importTagId);
+      await applyContactCustomFields(contactId, row, opts.customFieldHeaderMap);
       return { status: "updated" };
     }
 
@@ -281,6 +381,7 @@ export async function processContactRow(
     });
     contactId = (c as { id?: string })?.id ?? null;
     if (opts.importTagId && contactId) await attachTagToContact(contactId, opts.importTagId);
+    if (contactId) await applyContactCustomFields(contactId, row, opts.customFieldHeaderMap);
     return { status: "created" };
   } catch (e: unknown) {
     const code =
