@@ -259,7 +259,8 @@ export async function getAutomations(params: GetAutomationsParams = {}) {
   const perPage = Math.min(100, Math.max(1, params.perPage ?? 20));
   const skip = (page - 1) * perPage;
 
-  const where: Prisma.AutomationWhereInput = {};
+  const organizationId = getOrgIdOrThrow();
+  const where: Prisma.AutomationWhereInput = { organizationId };
   if (params.active !== undefined) {
     where.active = params.active;
   }
@@ -426,7 +427,7 @@ export type CreateAutomationInput = {
   triggerType: string;
   triggerConfig: Prisma.InputJsonValue;
   active?: boolean;
-  steps: CreateAutomationStepInput[];
+  steps?: CreateAutomationStepInput[];
 };
 
 export async function createAutomation(
@@ -447,7 +448,7 @@ export async function createAutomation(
       triggerConfig: data.triggerConfig,
       active: data.active ?? false,
       steps: {
-        create: data.steps.map((s, index) => ({
+        create: (data.steps ?? []).map((s, index) => ({
           ...(s.id ? { id: s.id } : {}),
           type: s.type,
           config: s.config,
