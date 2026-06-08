@@ -88,6 +88,7 @@ const RESERVED_HEADERS = new Set<string>([
 export function buildCustomFieldHeaderMap(
   headers: string[],
   defs: Array<{ id: string; name: string; label?: string | null }>,
+  reserved: Set<string> = RESERVED_HEADERS,
 ): Map<string, string> {
   const byKey = new Map<string, string>();
   for (const d of defs) {
@@ -111,7 +112,7 @@ export function buildCustomFieldHeaderMap(
       if (byId.has(id)) map.set(h, id);
       continue;
     }
-    if (RESERVED_HEADERS.has(h)) continue;
+    if (reserved.has(h)) continue;
     // Casamento por nome/label normalizado (uploads diretos sem remapeamento).
     const fieldId = byKey.get(h);
     if (fieldId) map.set(h, fieldId);
