@@ -23,6 +23,10 @@
 # production
 /build
 
+# workers compilados via esbuild (scripts/build-workers.mjs) — gerados no
+# deploy/Docker, nao versionados.
+/dist/
+
 # misc
 .DS_Store
 *.pem
