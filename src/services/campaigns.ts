@@ -151,6 +151,7 @@ export async function getCampaignStats(id: string) {
       deliveredCount: true,
       failedCount: true,
       readCount: true,
+      repliedCount: true,
       status: true,
       startedAt: true,
       completedAt: true,
@@ -161,7 +162,73 @@ export async function getCampaignStats(id: string) {
   const pendingCount =
     campaign.totalRecipients - campaign.sentCount - campaign.failedCount;
 
-  return { ...campaign, pendingCount: Math.max(0, pendingCount) };
+  // Top motivos de falha (agrupado por errorMessage) para a UI de monitoramento.
+  const failureGroups = await prisma.campaignRecipient.groupBy({
+    by: ["errorMessage"],
+    where: { campaignId: id, status: "FAILED" },
+    _count: { _all: true },
+    orderBy: { _count: { errorMessage: "desc" } },
+    take: 10,
+  });
+  const failureReasons = failureGroups.map((g) => ({
+    reason: g.errorMessage ?? "Desconhecido",
+    count: g._count._all,
+  }));
+
+  const pct = (n: number) =>
+    campaign.sentCount > 0 ? Math.round((n / campaign.sentCount) * 100) : 0;
+
+  return {
+    ...campaign,
+    pendingCount: Math.max(0, pendingCount),
+    deliveryRate: pct(campaign.deliveredCount),
+    readRate: pct(campaign.readCount),
+    replyRate: pct(campaign.repliedCount),
+    failureReasons,
+  };
+}
+
+/** Janela (dias) para atribuir uma resposta inbound a um disparo de campanha. */
+const CAMPAIGN_REPLY_WINDOW_DAYS = 7;
+
+/**
+ * Correlaciona uma mensagem inbound de um contato ao disparo de campanha mais
+ * recente (dentro da janela) e marca como respondido. Idempotente: só conta a
+ * PRIMEIRA resposta por destinatário (filtro `repliedAt: null` + update
+ * condicional). Multi-tenant: usa o `prisma` scoped do contexto atual.
+ */
+export async function markCampaignReplyByContact(
+  contactId: string,
+  repliedAt: Date = new Date(),
+): Promise<void> {
+  const windowStart = new Date(
+    repliedAt.getTime() - CAMPAIGN_REPLY_WINDOW_DAYS * 24 * 60 * 60 * 1000,
+  );
+
+  const recipient = await prisma.campaignRecipient.findFirst({
+    where: {
+      contactId,
+      repliedAt: null,
+      status: { in: ["SENT", "DELIVERED", "READ"] },
+      sentAt: { not: null, gte: windowStart },
+    },
+    orderBy: { sentAt: "desc" },
+    select: { id: true, campaignId: true },
+  });
+  if (!recipient) return;
+
+  // Update condicional (repliedAt ainda null) evita double-count em respostas
+  // concorrentes para o mesmo destinatário.
+  const updated = await prisma.campaignRecipient.updateMany({
+    where: { id: recipient.id, repliedAt: null },
+    data: { repliedAt },
+  });
+  if (updated.count === 0) return;
+
+  await prisma.campaign.update({
+    where: { id: recipient.campaignId },
+    data: { repliedCount: { increment: 1 } },
+  });
 }
 
 export type GetRecipientsParams = {

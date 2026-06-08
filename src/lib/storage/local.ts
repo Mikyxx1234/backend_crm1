@@ -52,6 +52,9 @@ export const BUCKETS = [
   // PR 4.3 — exports LGPD/GDPR. Auto-deletado pelo job de limpeza
   // depois de DataRequest.expiresAt (default +7 dias).
   "data-exports",
+  // ETL — arquivos de importação (CSV/XLSX) enviados pela tela de contatos.
+  // Lidos pelo etl-worker via readStoredFile no volume compartilhado.
+  "imports",
 ] as const;
 export type StorageBucket = (typeof BUCKETS)[number];
 

@@ -42,6 +42,12 @@ export async function POST(
           { status: 403 },
         );
       }
+      if (error instanceof Error && error.message === "QUEUE_UNAVAILABLE") {
+        return NextResponse.json(
+          { error: { code: "QUEUE_UNAVAILABLE", message: "Fila de disparo indisponível (Redis). O rascunho foi mantido — tente novamente em instantes." } },
+          { status: 503 },
+        );
+      }
       return NextResponse.json(
         { error: { code: "DRAFT_LAUNCH_ERROR", message: error instanceof Error ? error.message : "Falha no lançamento do rascunho." } },
         { status: 500 },

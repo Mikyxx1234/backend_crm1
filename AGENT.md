@@ -5,6 +5,68 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-06 — Importação assíncrona (ETL) via worker dedicado [DECISÃO — implementação pendente]
+
+**Decisão (arquitetura, agente OPUS).** Migrar a importação de CSV/XLSX do
+fluxo **síncrono na request HTTP** (`POST /api/contacts/import` e similares)
+para um pipeline **ETL assíncrono** processado por um **worker dedicado**,
+reusando a infraestrutura existente (BullMQ + `BulkOperation` + polling).
+
+Quatro escolhas travadas (defaults recomendados; usuário optou por seguir os
+recomendados ao pular as perguntas):
+
+1. **Transporte do arquivo → worker: parse na request + linhas no Postgres
+   (Opção B).** A rota faz o *Extract* (parse via `readUploadedTable`, que já
+   suporta CSV/XLSX) ainda na request e persiste as linhas normalizadas no
+   banco; o worker faz só *Transform + Load* (os upserts pesados) lendo do
+   Postgres em chunks. **Por quê:** o storage é disco local
+   (`@/lib/storage/local.ts`, `STORAGE_ROOT`) e os workers atuais
+   (`leads`, `whatsapp`) **não montam esse volume**. A Opção B evita exigir
+   volume compartilhado no EasyPanel (menor risco operacional). A Opção A
+   (arquivo num bucket `imports` + volume compartilhado, streaming) fica
+   reservada para quando houver arquivos grandes demais para materializar
+   linhas no DB.
+
+2. **Fila/worker dedicado `import-etl` (não estender `leads-bulk`).** ETL é
+   long-running e I/O/CPU pesado; isolar evita travar as bulk-ops rápidas
+   (`move_stage`/`update_fields`) e permite afinar concorrência/escala de
+   forma independente. Reusa `withSystemContext`, validação de org por
+   `prismaBase` e o padrão de retries do `leads-worker.ts`.
+
+3. **Estado/progresso: reusar `BulkOperation`** estendendo o enum
+   `BulkOperationType` com `CONTACT_IMPORT` (depois `DEAL_IMPORT`,
+   `PRODUCT_IMPORT`). O endpoint genérico `GET /api/bulk-operations/[id]` e o
+   `BulkOperationProgressDialog` do frontend já servem a barra de progresso
+   sem código novo.
+
+4. **Escopo v1: Contatos.** Engine generalizável (Transform/Load por entidade)
+   para plugar Deals/Produtos depois. **Mapeamento de colunas:** manter o
+   auto-map por nome de header já existente (menor risco); UI de mapeamento
+   manual (extract→preview→map→confirm) fica como follow-up.
+
+**Plano de implementação (a executar em SONNET — código repetitivo c/ spec):**
+- `prisma/schema.prisma`: + valores no enum `BulkOperationType` + tabela
+  `ImportRow` (ou coluna JSON em chunks no `BulkOperation.payload`) +
+  migration.
+- `src/lib/queue.ts`: `IMPORT_ETL_QUEUE_NAME`, payload `ImportEtlPayload`,
+  `enqueueImportEtl(...)` (espelha `enqueueLeadsBulk`).
+- `src/workers/etl-worker.ts`: consumidor da fila (espelha `leads-worker.ts`)
+  + `src/jobs/import/contact-import.job.ts` (Transform+Load em chunks,
+  reaproveitando a lógica de upsert hoje inline em `contacts/import/route.ts`).
+- Refatorar `POST /api/contacts/import` → 202 `{ operationId, total }`
+  (extract + cria `BulkOperation` PENDING + grava linhas + enfileira). Manter
+  fallback síncrono se Redis indisponível (como `enqueueLeadsBulk`).
+- `package.json`: `start:worker:etl`(:prod) + entrada no
+  `scripts/build-workers.mjs`. EasyPanel: 1 processo novo (sem volume extra).
+- Frontend: a tela de import passa a abrir o `BulkOperationProgressDialog`
+  (infra já pronta) quando a resposta for 202.
+
+**Compat retroativa.** Imports de Deals/Produtos seguem síncronos até serem
+portados. O contrato de resposta do import de contatos muda (201→202): o
+frontend precisa tratar os dois (`res.status`), igual já faz no bulk de deals.
+
+---
+
 ### 2026-06-06 — Activity Log: cobertura de eventos (G1–G5) + origem do lead (G4)
 
 **Decisão.** Fechados os gaps de instrumentação do log unificado:

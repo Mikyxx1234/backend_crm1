@@ -12,13 +12,27 @@ export async function readUploadedTable(
   file: File,
   explicitDelimiter?: CsvDelimiter,
 ): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
-  const name = file.name.toLowerCase();
+  const buffer = Buffer.from(await file.arrayBuffer());
+  return readTableFromBuffer(buffer, file.name, explicitDelimiter);
+}
+
+/**
+ * Variante de `readUploadedTable` que recebe um Buffer + nome do arquivo.
+ * Usada pelo etl-worker, que lê o arquivo do storage (volume) e não tem um
+ * objeto `File` do FormData. Detecta XLSX/CSV pela extensão do nome.
+ */
+export async function readTableFromBuffer(
+  buffer: Buffer,
+  fileName: string,
+  explicitDelimiter?: CsvDelimiter,
+): Promise<{ headers: string[]; rows: Record<string, string>[] }> {
+  const name = fileName.toLowerCase();
   const isSpreadsheet =
     name.endsWith(".xlsx") || name.endsWith(".xls") || name.endsWith(".ods");
 
   if (isSpreadsheet) {
     const XLSX = await import("xlsx");
-    const buf = Buffer.from(await file.arrayBuffer());
+    const buf = buffer;
     const wb = XLSX.read(buf, { type: "buffer" });
     const firstSheetName = wb.SheetNames[0];
     if (!firstSheetName) return { headers: [], rows: [] };
@@ -50,7 +64,7 @@ export async function readUploadedTable(
     return { headers, rows };
   }
 
-  const text = await file.text();
+  const text = buffer.toString("utf-8");
   const delimiter = explicitDelimiter ?? detectDelimiter(text);
   return parseCsv(text, delimiter);
 }

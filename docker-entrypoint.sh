@@ -119,9 +119,13 @@ case "$APP_MODE" in
     echo "[entrypoint] starting Leads worker..."
     exec node dist/workers/leads-worker.js
     ;;
+  worker-etl)
+    echo "[entrypoint] starting ETL worker (import-etl)..."
+    exec node dist/workers/etl-worker.js
+    ;;
   *)
     echo "[entrypoint] !! ERRO: APP_MODE='${APP_MODE}' não reconhecido."
-    echo "[entrypoint] !! Valores válidos: api | worker-whatsapp | worker-leads"
+    echo "[entrypoint] !! Valores válidos: api | worker-whatsapp | worker-leads | worker-etl"
     exit 1
     ;;
 esac

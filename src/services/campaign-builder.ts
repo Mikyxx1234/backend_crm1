@@ -150,7 +150,15 @@ export async function launchDraft(id: string, actor: Actor) {
     where: { id },
     data: { status },
   });
-  await enqueueCampaignDispatch({ campaignId: id }, delay);
+  const job = await enqueueCampaignDispatch({ campaignId: id }, delay);
+  if (!job) {
+    // Redis indisponível: reverter para DRAFT (não deixar preso sem consumidor).
+    await prisma.campaign.update({
+      where: { id },
+      data: { status: "DRAFT" },
+    });
+    throw new Error("QUEUE_UNAVAILABLE");
+  }
 
   return { campaignId: id, status };
 }

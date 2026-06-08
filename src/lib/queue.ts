@@ -16,6 +16,21 @@ export const CAMPAIGN_SEND_QUEUE_NAME = "campaign-send" as const;
  */
 export const LEADS_BULK_QUEUE_NAME = "leads-bulk" as const;
 
+/**
+ * Fila de ETL de importação (arquivos CSV/XLSX). O produtor (rota
+ * /api/contacts/import) salva o arquivo no bucket `imports` do storage
+ * compartilhado e enfileira o job; o `etl-worker` lê o arquivo via
+ * `readStoredFile` e processa linha a linha, atualizando o `BulkOperation`.
+ */
+export const IMPORT_ETL_QUEUE_NAME = "import-etl" as const;
+
+/** Nomes de job da fila `import-etl`. */
+export const IMPORT_ETL_JOB_NAMES = {
+  contactImport: "contact-import",
+} as const;
+export type ImportEtlJobName =
+  (typeof IMPORT_ETL_JOB_NAMES)[keyof typeof IMPORT_ETL_JOB_NAMES];
+
 const AUTOMATION_JOB_NAME = "run" as const;
 
 /** Nomes de job da fila `leads-bulk`. */
@@ -103,6 +118,31 @@ export type BulkMoveStagePayload = LeadsBulkBasePayload & {
 
 export type LeadsBulkPayload = BulkUpdateFieldsPayload | BulkMoveStagePayload;
 
+// ── Import ETL payloads ──────────────────────────────────
+//
+// Mesma convenção dos leads-bulk: o `BulkOperation` no Postgres é a fonte da
+// verdade do progresso; o payload carrega apenas a referência ao arquivo no
+// storage (bucket + fileName) e os parâmetros de parsing/upsert.
+
+export type ContactImportPayload = {
+  /** ID do `BulkOperation` que rastreia este job. */
+  operationId: string;
+  /** Tenant — usado para `withSystemContext` e para resolver o storage path. */
+  organizationId: string;
+  /** User que iniciou a importação (audit). */
+  initiatedByUserId: string | null;
+  /** Nome do arquivo salvo no bucket `imports`. */
+  fileName: string;
+  /** Nome original (para detectar CSV vs XLSX pela extensão). */
+  originalName: string;
+  /** Delimitador forçado (CSV). Se ausente, é detectado. */
+  delimiter?: "," | ";" | "\t";
+  /** Atualizar contatos existentes (default true). */
+  updateExisting: boolean;
+  /** Tag opcional a aplicar em todos os contatos importados. */
+  tagName?: string;
+};
+
 const redisUrl = process.env.REDIS_URL;
 
 const globalForQueue = globalThis as unknown as {
@@ -113,6 +153,7 @@ const globalForQueue = globalThis as unknown as {
   campaignDispatchQueue?: Queue<CampaignDispatchPayload>;
   campaignSendQueue?: Queue<CampaignSendPayload>;
   leadsBulkQueue?: Queue<LeadsBulkPayload>;
+  importEtlQueue?: Queue<ContactImportPayload>;
 };
 
 function getQueueRedis(): IORedis | null {
@@ -328,6 +369,52 @@ export async function enqueueLeadsBulk<P extends LeadsBulkPayload>(
     process.env.LEADS_BULK_BACKOFF_DELAY,
     5000,
   );
+  const opts: JobsOptions = {
+    removeOnComplete: true,
+    removeOnFail: false,
+    attempts,
+    backoff: { type: "exponential", delay: backoffDelay },
+    ...overrides,
+  };
+  return queue.add(jobName, payload, opts);
+}
+
+// ── Import ETL queue ─────────────────────────────────────
+
+function getImportEtlQueue(): Queue<ContactImportPayload> | null {
+  const redis = getQueueRedis();
+  if (!redis) return null;
+  if (!globalForQueue.importEtlQueue) {
+    globalForQueue.importEtlQueue = new Queue<ContactImportPayload>(
+      IMPORT_ETL_QUEUE_NAME,
+      { connection: redis },
+    );
+  }
+  return globalForQueue.importEtlQueue;
+}
+
+/**
+ * Enfileira um job de importação ETL.
+ *
+ * Retorna `null` se Redis estiver indisponível — o caller deve marcar o
+ * `BulkOperation` como FAILED e responder 503 (não deixar PENDING órfão).
+ *
+ * Defaults: 3 tentativas com backoff exponencial iniciando em 10s. Falhas
+ * por-linha são registradas em `BulkOperation.errors` e NÃO causam retry do
+ * job inteiro — o handler continua processando as demais linhas.
+ */
+export async function enqueueImportEtl(
+  jobName: ImportEtlJobName,
+  payload: ContactImportPayload,
+  overrides?: JobsOptions,
+) {
+  const queue = getImportEtlQueue();
+  if (!queue) {
+    console.warn("[queue] Redis indisponível — não é possível enfileirar import-etl");
+    return null;
+  }
+  const attempts = readPositiveInt(process.env.IMPORT_ETL_MAX_ATTEMPTS, 3);
+  const backoffDelay = readPositiveInt(process.env.IMPORT_ETL_BACKOFF_DELAY, 10000);
   const opts: JobsOptions = {
     removeOnComplete: true,
     removeOnFail: false,

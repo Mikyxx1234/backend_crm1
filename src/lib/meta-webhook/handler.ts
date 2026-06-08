@@ -50,6 +50,7 @@ import { processIncomingMessage as processSalesbotMessage } from "@/services/aut
 import { logEvent } from "@/services/activity-log";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import { markCampaignReplyByContact } from "@/services/campaigns";
 import {
   formatWhatsappFlowResponse,
   parseWhatsappFlowResponsePayload,
@@ -1791,6 +1792,16 @@ async function executePostBody(
                 },
               });
             })();
+          }
+
+          // Campanhas: correlaciona a resposta inbound ao disparo de campanha
+          // mais recente do contato (marca repliedAt + incrementa repliedCount).
+          // Fire-and-forget — não bloqueia o processamento da mensagem.
+          if (!isSystemMessage) {
+            markCampaignReplyByContact(contact.id, parsed.timestamp ?? new Date()).catch(
+              (err) =>
+                log.warn("Falha ao correlacionar resposta de campanha:", err),
+            );
           }
 
           if (parsed.flowPayload && Object.keys(parsed.flowPayload).length > 0) {

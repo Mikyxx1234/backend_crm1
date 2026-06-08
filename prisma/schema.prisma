@@ -2335,6 +2335,9 @@ model Campaign {
   deliveredCount  Int @default(0)
   failedCount     Int @default(0)
   readCount       Int @default(0)
+  /// Quantos destinatários responderam (1ª resposta inbound correlacionada).
+  /// Não regride o status de entrega — é métrica de engajamento separada.
+  repliedCount    Int @default(0)
 
   createdById String
   createdBy   User   @relation(fields: [createdById], references: [id])
@@ -2370,6 +2373,9 @@ model CampaignRecipient {
   sentAt      DateTime?
   deliveredAt DateTime?
   readAt      DateTime?
+  /// 1ª resposta inbound do contato correlacionada a este disparo.
+  /// Independente de status (entregue/lido). Idempotente: só seta uma vez.
+  repliedAt   DateTime?
 
   createdAt DateTime @default(now())
 
@@ -2377,6 +2383,7 @@ model CampaignRecipient {
   @@index([organizationId])
   @@index([campaignId, status])
   @@index([contactId])
+  @@index([contactId, sentAt])
   @@index([metaMessageId])
   @@map("campaign_recipients")
 }
@@ -2934,6 +2941,8 @@ enum BulkOperationType {
   DEAL_BULK_MARK_WON
   DEAL_BULK_MARK_LOST
   DEAL_BULK_DELETE
+  /// Importação de contatos via arquivo (CSV/XLSX) processada pelo etl-worker.
+  CONTACT_IMPORT
 }
 
 enum BulkOperationStatus {

@@ -123,6 +123,8 @@ const entries = [
   "src/workers/campaign-worker.ts",
   // Leads (Deals) — worker novo.
   "src/workers/leads-worker.ts",
+  // ETL — importação de contatos via arquivo (CSV/XLSX).
+  "src/workers/etl-worker.ts",
 ];
 
 await build({

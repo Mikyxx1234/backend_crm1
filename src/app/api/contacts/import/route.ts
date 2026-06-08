@@ -3,167 +3,42 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { assertImportPermission } from "@/lib/import-guard";
 import {
-  attachTagToContact,
   readDelimiterFlag,
   readTagFlag,
   readUpdateExistingFlag,
   readUploadedTable,
-  upsertImportTag,
 } from "@/lib/import-helpers";
+import { validateContactImportHeaders } from "@/lib/contact-import-core";
 import { prisma } from "@/lib/prisma";
-import { enterRequestContext, getOrgIdOrThrow } from "@/lib/request-context";
-import { createContact, isValidLifecycleStage, updateContact } from "@/services/contacts";
+import { IMPORT_ETL_JOB_NAMES, enqueueImportEtl } from "@/lib/queue";
+import { enterRequestContext } from "@/lib/request-context";
+import { generateFileName, saveFile } from "@/lib/storage/local";
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-function hasColumn(headers: string[], ...names: string[]) {
-  return names.some((n) => headers.includes(n));
-}
-
-function pickContactExternalId(
-  headers: string[],
-  row: Record<string, string>,
-): string | null | undefined {
-  if (
-    !hasColumn(headers, "external_id", "externalid", "kommo_contact_id", "contact_external_id")
-  ) {
-    return undefined;
-  }
-  const v =
-    row.external_id?.trim() ||
-    row.externalid?.trim() ||
-    row.kommo_contact_id?.trim() ||
-    row.contact_external_id?.trim() ||
-    "";
-  return v === "" ? null : v;
-}
-
-async function resolveCompanyId(row: Record<string, string>): Promise<string | undefined> {
-  const direct = row.company_id?.trim() || row.companyid?.trim();
-  if (direct) return direct;
-
-  const name = row.company?.trim();
-  if (!name) return undefined;
-
-  const found = await prisma.company.findFirst({
-    where: { name: { equals: name, mode: "insensitive" } },
-    select: { id: true },
-  });
-  return found?.id;
-}
-
-async function resolveAssignedToId(row: Record<string, string>): Promise<string | undefined> {
-  const id =
-    row.assigned_to_id?.trim() ||
-    row.assignedtoid?.trim() ||
-    row.owner_id?.trim() ||
-    row.ownertoid?.trim();
-  if (id) return id;
-
-  const emailRaw =
-    row.assigned_to_email?.trim() ||
-    row.assignedtoemail?.trim() ||
-    row.owner_email?.trim() ||
-    row.owneremail?.trim();
-  if (!emailRaw) return undefined;
-  const email = emailRaw.toLowerCase();
-  const u = await prisma.user.findFirst({
-    where: { email: { equals: email, mode: "insensitive" } },
-    select: { id: true },
-  });
-  return u?.id;
-}
-
-type UpsertTarget =
-  | { mode: "update"; id: string }
-  | { mode: "create"; id?: string; externalId?: string | null };
-
-async function resolveContactUpsert(row: Record<string, string>): Promise<
-  | { ok: true; target: UpsertTarget }
-  | { ok: false; message: string }
-> {
-  const id = row.id?.trim();
-  const ext =
-    row.external_id?.trim() ||
-    row.externalid?.trim() ||
-    row.kommo_contact_id?.trim() ||
-    row.contact_external_id?.trim();
-
-  if (id && ext) {
-    const orgId = getOrgIdOrThrow();
-    const [byId, byExt] = await Promise.all([
-      prisma.contact.findUnique({ where: { id }, select: { id: true } }),
-      prisma.contact.findUnique({
-        where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
-        select: { id: true },
-      }),
-    ]);
-    if (byId && byExt && byId.id !== byExt.id) {
-      return { ok: false, message: "id e external_id referem contatos diferentes." };
-    }
-    if (byId) return { ok: true, target: { mode: "update", id: byId.id } };
-    if (byExt) return { ok: true, target: { mode: "update", id: byExt.id } };
-    return { ok: true, target: { mode: "create", id, externalId: ext } };
-  }
-
-  if (id) {
-    const c = await prisma.contact.findUnique({ where: { id }, select: { id: true } });
-    if (c) return { ok: true, target: { mode: "update", id: c.id } };
-    return { ok: true, target: { mode: "create", id, externalId: ext ?? undefined } };
-  }
-
-  if (ext) {
-    const orgId = getOrgIdOrThrow();
-    const c = await prisma.contact.findUnique({
-      where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
-      select: { id: true },
-    });
-    if (c) return { ok: true, target: { mode: "update", id: c.id } };
-    return { ok: true, target: { mode: "create", externalId: ext } };
-  }
-
-  // Sem id e sem external_id: tenta casar por e-mail (chave humana). Permite
-  // re-importar um export sem CUIDs e ainda atualizar contatos existentes.
-  const email = row.email?.trim();
-  if (email) {
-    const orgId = getOrgIdOrThrow();
-    const c = await prisma.contact.findFirst({
-      where: { organizationId: orgId, email: { equals: email, mode: "insensitive" } },
-      select: { id: true },
-    });
-    if (c) return { ok: true, target: { mode: "update", id: c.id } };
-  }
-
-  // Último recurso: telefone.
-  const phone = row.phone?.trim();
-  if (phone) {
-    const orgId = getOrgIdOrThrow();
-    const c = await prisma.contact.findFirst({
-      where: { organizationId: orgId, phone },
-      select: { id: true },
-    });
-    if (c) return { ok: true, target: { mode: "update", id: c.id } };
-  }
-
-  return { ok: true, target: { mode: "create" } };
-}
-
+/**
+ * Importação de contatos — fluxo ASSÍNCRONO (ETL worker).
+ *
+ * Antes esta rota processava o arquivo inteiro de forma síncrona dentro do
+ * request HTTP (timeout em arquivos grandes). Agora:
+ *   1. valida permissão + parseia para validar cabeçalho e contar linhas;
+ *   2. salva o arquivo no bucket `imports` do storage compartilhado;
+ *   3. cria um `BulkOperation` PENDING (fonte da verdade do progresso);
+ *   4. enfileira o job na fila `import-etl` e responde 202 { operationId };
+ *   5. o etl-worker lê o arquivo do volume e processa linha a linha.
+ *
+ * O frontend acompanha o progresso via GET /api/bulk-operations/[id]
+ * (BulkOperationProgressDialog).
+ */
 export async function POST(request: Request) {
   try {
     const session = await auth();
     const denied = assertImportPermission(session);
     if (denied) return denied;
 
-    // Populate AsyncLocalStorage para que getOrgIdOrThrow() funcione
-    // nas funcoes de resolucao (contact upsert por external_id) e no Prisma multi-tenant.
     if (session?.user?.organizationId) {
       enterRequestContext({
         organizationId: session.user.organizationId,
         userId: session.user.id,
         isSuperAdmin: Boolean(session.user.isSuperAdmin),
-        // Atribuicao no feed: HUMAN que disparou + sublabel "Importacao"
-        // (para o operador distinguir, no feed, contatos criados via
-        // import dos criados manualmente em /contacts/new).
         actor: {
           type: "HUMAN",
           label: session.user.name ?? session.user.email ?? session.user.id,
@@ -172,12 +47,18 @@ export async function POST(request: Request) {
       });
     }
 
+    if (!session?.user?.organizationId) {
+      return NextResponse.json({ message: "Sessão sem organização." }, { status: 401 });
+    }
+    const organizationId = session.user.organizationId;
+    const userId = session.user.id;
+
     const formData = await request.formData();
     const file = formData.get("file");
 
     if (!(file instanceof File)) {
       return NextResponse.json(
-        { message: "Envie o arquivo CSV no campo \"file\" (multipart/form-data)." },
+        { message: 'Envie o arquivo CSV no campo "file" (multipart/form-data).' },
         { status: 400 },
       );
     }
@@ -186,167 +67,91 @@ export async function POST(request: Request) {
     const updateExisting = readUpdateExistingFlag(formData);
     const tagName = readTagFlag(formData);
 
+    // Parseia uma vez para validar o cabeçalho e contar as linhas (total do
+    // BulkOperation). O worker re-parseia o arquivo salvo no storage.
     const { headers, rows } = await readUploadedTable(file, delimiter);
-
-    if (headers.length === 0 || !headers.includes("name")) {
+    const headerError = validateContactImportHeaders(headers);
+    if (headerError) {
+      return NextResponse.json({ message: headerError }, { status: 400 });
+    }
+    if (rows.length === 0) {
       return NextResponse.json(
-        { message: "Arquivo inválido: é necessária uma coluna \"name\"." },
+        { message: "Arquivo sem linhas de dados." },
         { status: 400 },
       );
     }
 
-    // Upsert da tag (uma única vez, fora do loop)
-    let importTagId: string | null = null;
-    if (tagName) {
-      try {
-        const orgId = getOrgIdOrThrow();
-        importTagId = await upsertImportTag(orgId, tagName);
-      } catch {
-        // se falhar o upsert da tag, seguimos a importação sem ela
-        importTagId = null;
-      }
-    }
+    // Salva o arquivo no bucket `imports` do storage compartilhado.
+    const ext = file.name.toLowerCase().endsWith(".xlsx")
+      ? "xlsx"
+      : file.name.toLowerCase().endsWith(".xls")
+        ? "xls"
+        : file.name.toLowerCase().endsWith(".ods")
+          ? "ods"
+          : "csv";
+    const fileName = generateFileName({ prefix: "contacts", ext });
+    const buffer = Buffer.from(await file.arrayBuffer());
+    await saveFile({ orgId: organizationId, bucket: "imports", fileName, buffer });
 
-    const failed: { row: number; message: string }[] = [];
-    let created = 0;
-    let updated = 0;
-    let skipped = 0;
+    // Cria o BulkOperation (fonte da verdade do progresso).
+    const operation = await prisma.bulkOperation.create({
+      data: {
+        type: "CONTACT_IMPORT",
+        status: "PENDING",
+        total: rows.length,
+        payload: {
+          fileName,
+          originalName: file.name,
+          updateExisting,
+          ...(delimiter ? { delimiter } : {}),
+          ...(tagName ? { tagName } : {}),
+        },
+        createdById: userId,
+      },
+      select: { id: true },
+    });
 
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const rowNumber = i + 2;
+    // Enfileira o job ETL.
+    const job = await enqueueImportEtl(IMPORT_ETL_JOB_NAMES.contactImport, {
+      operationId: operation.id,
+      organizationId,
+      initiatedByUserId: userId,
+      fileName,
+      originalName: file.name,
+      delimiter,
+      updateExisting,
+      tagName,
+    });
 
-      const name = row.name?.trim();
-      if (!name) {
-        failed.push({ row: rowNumber, message: "Nome vazio." });
-        continue;
-      }
-
-      const emailRaw = row.email?.trim();
-      if (emailRaw && !EMAIL_RE.test(emailRaw.toLowerCase())) {
-        failed.push({ row: rowNumber, message: "E-mail inválido." });
-        continue;
-      }
-
-      const lifecycleRaw =
-        row.lifecycle_stage?.trim() ||
-        row.lifecyclestage?.trim() ||
-        row.lifecycle?.trim();
-      if (lifecycleRaw && !isValidLifecycleStage(lifecycleRaw)) {
-        failed.push({ row: rowNumber, message: "Estágio do ciclo inválido." });
-        continue;
-      }
-
-      let leadScore: number | undefined;
-      const ls =
-        row.lead_score?.trim() ||
-        row.leadscore?.trim() ||
-        row.score?.trim();
-      if (ls) {
-        const n = Number.parseInt(ls, 10);
-        if (!Number.isFinite(n)) {
-          failed.push({ row: rowNumber, message: "leadScore inválido." });
-          continue;
-        }
-        leadScore = n;
-      }
-
-      let companyId: string | undefined;
-      try {
-        companyId = await resolveCompanyId(row);
-      } catch {
-        failed.push({ row: rowNumber, message: "Erro ao resolver empresa." });
-        continue;
-      }
-
-      let assignedToId: string | undefined;
-      try {
-        assignedToId = await resolveAssignedToId(row);
-      } catch {
-        failed.push({ row: rowNumber, message: "Erro ao resolver responsável." });
-        continue;
-      }
-
-      const resolved = await resolveContactUpsert(row);
-      if (!resolved.ok) {
-        failed.push({ row: rowNumber, message: resolved.message });
-        continue;
-      }
-
-      const externalPatch = pickContactExternalId(headers, row);
-
-      const basePayload = {
-        name,
-        email: emailRaw ? emailRaw.toLowerCase() : undefined,
-        phone: row.phone?.trim() || undefined,
-        avatarUrl: row.avatar_url?.trim() || row.avatarurl?.trim() || undefined,
-        source: row.source?.trim() || undefined,
-        leadScore,
-        lifecycleStage:
-          lifecycleRaw && isValidLifecycleStage(lifecycleRaw) ? lifecycleRaw : undefined,
-        companyId: companyId ?? undefined,
-        assignedToId,
-      };
-
-      try {
-        let contactId: string | null = null;
-        if (resolved.target.mode === "update") {
-          if (!updateExisting) {
-            skipped += 1;
-            // ainda assim, vincular tag se requisitada
-            if (importTagId) await attachTagToContact(resolved.target.id, importTagId);
-            continue;
-          }
-          await updateContact(resolved.target.id, {
-            ...basePayload,
-            ...(externalPatch !== undefined ? { externalId: externalPatch } : {}),
-          });
-          contactId = resolved.target.id;
-          updated += 1;
-        } else {
-          let externalForCreate: string | null | undefined = undefined;
-          if (externalPatch !== undefined) {
-            externalForCreate = externalPatch;
-          } else if (resolved.target.mode === "create" && resolved.target.externalId !== undefined) {
-            externalForCreate = resolved.target.externalId;
-          }
-          const c = await createContact({
-            ...(resolved.target.id ? { id: resolved.target.id } : {}),
-            externalId: externalForCreate === undefined ? undefined : externalForCreate,
-            ...basePayload,
-          });
-          contactId = (c as { id?: string })?.id ?? null;
-          created += 1;
-        }
-
-        if (importTagId && contactId) {
-          await attachTagToContact(contactId, importTagId);
-        }
-      } catch (e: unknown) {
-        const code =
-          typeof e === "object" && e !== null && "code" in e
-            ? String((e as { code: string }).code)
-            : "";
-        const msg =
-          code === "P2002"
-            ? "Violação de unicidade (e-mail/telefone/id externo duplicado)."
-            : code === "P2003"
-              ? "Referência inválida (empresa ou usuário)."
-              : "Erro ao salvar contato.";
-        failed.push({ row: rowNumber, message: msg });
-      }
+    if (!job) {
+      await prisma.bulkOperation.update({
+        where: { id: operation.id },
+        data: {
+          status: "FAILED",
+          finishedAt: new Date(),
+          errors: [
+            {
+              itemId: "__operation__",
+              message: "Fila de jobs indisponível (Redis offline)",
+              attempt: 0,
+              at: new Date().toISOString(),
+            },
+          ],
+        },
+      });
+      return NextResponse.json(
+        { message: "Fila de importação indisponível.", operationId: operation.id },
+        { status: 503 },
+      );
     }
 
     return NextResponse.json(
       {
-        created,
-        updated,
-        skipped,
-        failed,
-        totalRows: rows.length,
-        tagId: importTagId,
+        message: "Importação enfileirada.",
+        operationId: operation.id,
+        total: rows.length,
       },
-      { status: 201 },
+      { status: 202 },
     );
   } catch (e) {
     console.error(e);

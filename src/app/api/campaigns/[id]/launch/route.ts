@@ -77,7 +77,23 @@ export async function POST(
       data: { status: newStatus },
     });
 
-    await enqueueCampaignDispatch({ campaignId: id }, delay);
+    const job = await enqueueCampaignDispatch({ campaignId: id }, delay);
+    if (!job) {
+      // Redis indisponível: o enqueue retorna null em silêncio. Reverter o
+      // status para DRAFT em vez de deixar a campanha presa em PROCESSING/
+      // SCHEDULED sem nenhum worker para consumir o job.
+      await prisma.campaign.update({
+        where: { id },
+        data: { status: "DRAFT" },
+      });
+      return NextResponse.json(
+        {
+          message:
+            "Fila de disparo indisponível (Redis). A campanha continua como rascunho — tente lançar novamente em instantes.",
+        },
+        { status: 503 },
+      );
+    }
 
     return NextResponse.json({
       message: isScheduled
