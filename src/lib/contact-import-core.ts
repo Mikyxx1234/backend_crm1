@@ -100,9 +100,19 @@ export function buildCustomFieldHeaderMap(
     }
   }
 
+  const byId = new Set(defs.map((d) => d.id));
+
   const map = new Map<string, string>();
   for (const h of headers) {
+    // Coluna mapeada explicitamente pelo frontend como `cf:<fieldId>`.
+    const cfMatch = /^cf:(.+)$/.exec(h);
+    if (cfMatch) {
+      const id = cfMatch[1];
+      if (byId.has(id)) map.set(h, id);
+      continue;
+    }
     if (RESERVED_HEADERS.has(h)) continue;
+    // Casamento por nome/label normalizado (uploads diretos sem remapeamento).
     const fieldId = byKey.get(h);
     if (fieldId) map.set(h, fieldId);
   }
