@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { getDealById } from "@/services/deals";
 
@@ -19,11 +19,8 @@ function needsName(ref: { id?: string; name?: string } | undefined): boolean {
 }
 
 export async function GET(_req: Request, ctx: Ctx) {
-  try {
-    const session = await auth();
-    if (!session?.user)
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-
+  return withOrgContext(async () => {
+    try {
     const { id } = await ctx.params;
     const existing = await getDealById(id);
     if (!existing)
@@ -192,4 +189,5 @@ export async function GET(_req: Request, ctx: Ctx) {
       { status: 500 },
     );
   }
+  });
 }
