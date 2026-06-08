@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePermission } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { evaluateTrigger, type AutomationJobContext } from "@/services/automations";
 
 export async function POST(request: Request) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:edit");
+    if (denied) return denied;
     const trace: string[] = [];
     const log = (msg: string) => {
       trace.push(`[${new Date().toISOString()}] ${msg}`);

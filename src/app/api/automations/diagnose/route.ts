@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePermission } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
@@ -8,7 +9,9 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 // (direto ou via service), avaliado ANTES da Prisma extension popular
 // o ctx. Migrado para withOrgContext.
 export async function GET() {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:view");
+    if (denied) return denied;
     try {
       const checks: Record<string, unknown> = {};
 

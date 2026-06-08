@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePermission } from "@/lib/authz";
 import { deleteAutomation, getAutomationById, updateAutomation } from "@/services/automations";
 
 // Bug 27/abr/26: usavamos `auth()` direto. updateAutomation chama
@@ -14,7 +15,9 @@ import { deleteAutomation, getAutomationById, updateAutomation } from "@/service
 type RouteContext = { params: Promise<{ id: string }> };
 
 export async function GET(_request: Request, context: RouteContext) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:view");
+    if (denied) return denied;
     try {
       const { id } = await context.params;
       if (!id) {
@@ -35,7 +38,9 @@ export async function GET(_request: Request, context: RouteContext) {
 }
 
 export async function PUT(request: Request, context: RouteContext) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:edit");
+    if (denied) return denied;
     try {
       const { id } = await context.params;
       if (!id) {
@@ -131,7 +136,9 @@ export async function PUT(request: Request, context: RouteContext) {
 }
 
 export async function DELETE(_request: Request, context: RouteContext) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:delete");
+    if (denied) return denied;
     try {
       const { id } = await context.params;
       if (!id) {

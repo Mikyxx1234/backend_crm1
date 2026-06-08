@@ -10,6 +10,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePermission } from "@/lib/authz";
 import {
   auditAutomation,
   detectCrossConflictCandidates,
@@ -18,7 +19,9 @@ import {
 import { prisma } from "@/lib/prisma";
 
 export async function GET(request: Request) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:view");
+    if (denied) return denied;
     try {
       const url = new URL(request.url);
       const includeInactive = url.searchParams.get("includeInactive") === "true";

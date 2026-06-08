@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePermission } from "@/lib/authz";
 import { createAutomation, getAutomations } from "@/services/automations";
 
 // Bug 27/abr/26: usavamos `auth()` direto. createAutomation chama
@@ -26,7 +27,9 @@ function parseBoolParam(v: string | null): boolean | undefined {
 }
 
 export async function GET(request: Request) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:view");
+    if (denied) return denied;
     try {
       const { searchParams } = new URL(request.url);
       const active = parseBoolParam(searchParams.get("active"));
@@ -45,7 +48,9 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:create");
+    if (denied) return denied;
     try {
       let body: unknown;
       try {

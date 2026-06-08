@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { Prisma } from "@prisma/client";
 
-import { auth } from "@/lib/auth";
+import { requireManager } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 
@@ -25,10 +25,10 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
  */
 export async function GET(req: Request) {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
+    // Stats de logs: restrito a gestão (ADMIN/MANAGER). requireManager
+    // também ativa o RequestContext usado por getOrgIdOrThrow() abaixo.
+    const r = await requireManager();
+    if (!r.ok) return r.response;
 
     const orgId = getOrgIdOrThrow();
     const url = new URL(req.url);

@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import type { Prisma } from "@prisma/client";
 
-import { auth } from "@/lib/auth";
+import { requireManager } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -53,10 +53,10 @@ function parseCsv(raw: string | null): string[] | null {
 
 export async function GET(req: Request) {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
+    // Logs são restritos a gestão (ADMIN/MANAGER). requireManager também
+    // configura o RequestContext, então o prisma scoped abaixo funciona.
+    const r = await requireManager();
+    if (!r.ok) return r.response;
 
     const url = new URL(req.url);
     const sp = url.searchParams;

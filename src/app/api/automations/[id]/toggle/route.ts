@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePermission } from "@/lib/authz";
 import { getAutomationById, toggleAutomation } from "@/services/automations";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
 export async function POST(_request: Request, context: RouteContext) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:edit");
+    if (denied) return denied;
     try {
       const { id } = await context.params;
       if (!id) {

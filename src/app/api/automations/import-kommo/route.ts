@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePermission } from "@/lib/authz";
 import { parseKommoBot } from "@/lib/kommo-bot-parser";
 import { createAutomation, updateAutomation } from "@/services/automations";
 import type { Prisma } from "@prisma/client";
@@ -113,7 +114,9 @@ function parseImportPayload(json: Record<string, unknown>): ParsedImport {
 }
 
 export async function POST(request: Request) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:create");
+    if (denied) return denied;
     try {
       let body: unknown;
       try {

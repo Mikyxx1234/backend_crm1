@@ -20,6 +20,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePermission } from "@/lib/authz";
 // Copilot roda no Anthropic (Claude) — checar a key correta. Se o
 // admin tiver só OPENAI_API_KEY, o copilot fica indisponível mas o
 // agente de conversa com contato segue funcionando normalmente.
@@ -36,7 +37,9 @@ import {
 // sugerir patches) — sem o ctx essas tools quebrariam silenciosamente
 // no fallback de cookie quando rodando em um worker (futuramente).
 export async function POST(request: Request) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
+    const denied = await requirePermission(session.user, "automation:edit");
+    if (denied) return denied;
     try {
       if (!(await isAnthropicConfigured())) {
         return NextResponse.json(
