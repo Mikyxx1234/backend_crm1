@@ -94,6 +94,12 @@ export async function POST(request: Request) {
     await saveFile({ orgId: organizationId, bucket: "imports", fileName, buffer });
 
     // Cria o BulkOperation (fonte da verdade do progresso).
+    //
+    // O conteúdo do arquivo vai embutido em `payload.fileContentB64` (base64).
+    // Assim o worker-etl lê o arquivo do PRÓPRIO banco (já compartilhado entre
+    // backend e worker), sem depender de volume/storage compartilhado entre os
+    // containers. O arquivo em disco continua salvo (acima) como referência/
+    // fallback legado. Limite de 10 MB já é garantido na UI.
     const operation = await prisma.bulkOperation.create({
       data: {
         type: "CONTACT_IMPORT",
@@ -103,6 +109,7 @@ export async function POST(request: Request) {
           fileName,
           originalName: file.name,
           updateExisting,
+          fileContentB64: buffer.toString("base64"),
           ...(delimiter ? { delimiter } : {}),
           ...(tagName ? { tagName } : {}),
         },
