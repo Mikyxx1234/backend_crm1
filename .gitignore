@@ -57,6 +57,10 @@ next-env.d.ts
 /public/uploads/
 /uploads/
 
+# storage local de runtime (conteúdo por organização gerado em dev) —
+# o storage real fica em volume/DB, não deve ser versionado.
+/storage/
+
 # prisma local db
 *.db
 *.db-journal
