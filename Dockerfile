@@ -6,7 +6,14 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends openssl ca-c
 
 COPY package.json ./
 COPY prisma ./prisma
-RUN npm install
+# `npm install` com retry + backoff: o postinstall do `ffmpeg-static` baixa um
+# binario do GitHub Releases, que intermitentemente responde 504 (gateway
+# timeout) e quebra o build inteiro. Re-tentamos algumas vezes com espera
+# crescente para neutralizar a flakiness de rede sem precisar de cache.
+RUN npm install --no-audit --no-fund \
+ || (echo "[npm install] falhou — retry 1/3 em 15s..." && sleep 15 && npm install --no-audit --no-fund) \
+ || (echo "[npm install] falhou — retry 2/3 em 30s..." && sleep 30 && npm install --no-audit --no-fund) \
+ || (echo "[npm install] falhou — retry 3/3 em 60s..." && sleep 60 && npm install --no-audit --no-fund)
 
 COPY . .
 # Pasta `public` pode não existir no clone (vazia não vai pro Git); o runner precisa dela.
