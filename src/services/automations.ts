@@ -252,6 +252,10 @@ const automationListSelect = {
   createdAt: true,
   updatedAt: true,
   _count: { select: { steps: true } },
+  // Tipos dos passos (na ordem) para o mini-fluxo do card refletir o
+  // workflow real — antes a UI caía num fluxo mock fixo. Só `type` é
+  // selecionado (payload mínimo); a config completa fica no detalhe.
+  steps: { select: { type: true }, orderBy: { position: "asc" } },
 } satisfies Prisma.AutomationSelect;
 
 export async function getAutomations(params: GetAutomationsParams = {}) {
@@ -297,9 +301,10 @@ export async function getAutomations(params: GetAutomationsParams = {}) {
   const stats = await buildAutomationListStats(items.map((i) => i.id));
 
   return {
-    items: items.map(({ _count, ...rest }) => ({
+    items: items.map(({ _count, steps, ...rest }) => ({
       ...rest,
       stepCount: _count.steps,
+      stepTypes: steps.map((s) => s.type),
       ...(stats.get(rest.id) ?? EMPTY_AUTOMATION_STATS),
     })),
     total,
