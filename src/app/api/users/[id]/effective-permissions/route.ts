@@ -15,7 +15,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { loadAuthzContext } from "@/lib/authz";
+import { can, loadAuthzContext } from "@/lib/authz";
 import { prismaBase } from "@/lib/prisma-base";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -25,10 +25,14 @@ export async function GET(_req: Request, ctx: Ctx) {
     try {
       const { id } = await ctx.params;
 
-      // Somente o próprio usuário ou um ADMIN pode ler as permissões.
       const requesterId = session.user.id;
-      const requesterRole = session.user.role;
-      if (requesterId !== id && requesterRole !== "ADMIN") {
+      const requesterCtx = await loadAuthzContext({
+        userId: requesterId,
+        organizationId: session.user.organizationId,
+        isSuperAdmin: session.user.isSuperAdmin,
+      });
+      const canAuditOthers = can(requesterCtx, "settings:permissions");
+      if (requesterId !== id && !canAuditOthers) {
         return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
       }
 

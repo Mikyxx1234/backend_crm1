@@ -2,6 +2,10 @@ import { UserRole } from "@prisma/client";
 import { hash } from "bcryptjs";
 import crypto from "node:crypto";
 
+import {
+  ensureSystemPresetRoles,
+  syncUserRoleAssignment,
+} from "@/lib/authz/sync-user-role";
 import { prismaBase } from "@/lib/prisma-base";
 import { logAudit } from "@/lib/audit/log";
 import {
@@ -383,6 +387,14 @@ export async function signupOrganizationWithAdmin(input: {
       await tx.organization.update({
         where: { id: org.id },
         data: { createdById: user.id },
+      });
+
+      // RBAC: presets + assignment do admin — sem isso `can()` barra tudo.
+      await ensureSystemPresetRoles(tx, org.id);
+      await syncUserRoleAssignment(tx, {
+        userId: user.id,
+        organizationId: org.id,
+        role: UserRole.ADMIN,
       });
 
       return { org, user };

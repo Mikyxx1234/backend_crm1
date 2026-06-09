@@ -33,13 +33,14 @@
  */
 
 import { NextResponse } from "next/server";
-import type { UserRole } from "@prisma/client";
+import { UserRole, type UserRole as UserRoleEnum } from "@prisma/client";
 
 import { cache } from "@/lib/cache";
 import { getLogger } from "@/lib/logger";
 import { prismaBase } from "@/lib/prisma-base";
 
 import { isValidPermissionKey, type PermissionKey } from "./permissions";
+import { PRESET_PERMISSIONS } from "./presets";
 
 const log = getLogger("authz");
 
@@ -89,6 +90,55 @@ function cacheKey(userId: string): string {
  * ou hot-path antes do scope estar configurado). A query restringe
  * por organizationId pra defesa em profundidade.
  */
+const LEGACY_ROLES = new Set<UserRoleEnum>([
+  UserRole.ADMIN,
+  UserRole.MANAGER,
+  UserRole.MEMBER,
+]);
+
+/**
+ * Fallback quando `user_role_assignments` está vazio (org criada após
+ * signup sem seed, migration não rodada, ou bug antigo no POST /users).
+ * Usa `User.role` legado + preset da org (ou constante TS) pra não
+ * barrar operação em produção — DNA e demais orgs continuam funcionando.
+ */
+async function applyLegacyRoleFallback(
+  userId: string,
+  organizationId: string,
+  merged: Set<string>,
+  isAdmin: boolean,
+): Promise<{ permissions: Set<string>; isAdmin: boolean }> {
+  if (merged.size > 0 || isAdmin) {
+    return { permissions: merged, isAdmin };
+  }
+
+  const user = await prismaBase.user.findUnique({
+    where: { id: userId },
+    select: { role: true },
+  });
+  const legacy = user?.role;
+  if (!legacy || !LEGACY_ROLES.has(legacy)) {
+    return { permissions: merged, isAdmin };
+  }
+
+  if (legacy === UserRole.ADMIN) {
+    return { permissions: merged, isAdmin: true };
+  }
+
+  const presetRow = await prismaBase.role.findFirst({
+    where: { organizationId, systemPreset: legacy },
+    select: { permissions: true },
+  });
+  const source = presetRow?.permissions?.length
+    ? presetRow.permissions
+    : [...PRESET_PERMISSIONS[legacy]];
+
+  for (const p of source) {
+    if (isValidPermissionKey(p)) merged.add(p);
+  }
+  return { permissions: merged, isAdmin };
+}
+
 async function loadFromDb(
   userId: string,
   organizationId: string,
@@ -114,10 +164,17 @@ async function loadFromDb(
     }
   }
 
+  const fallback = await applyLegacyRoleFallback(
+    userId,
+    organizationId,
+    merged,
+    isAdmin,
+  );
+
   return {
     organizationId,
-    isAdmin,
-    permissions: Array.from(merged),
+    isAdmin: fallback.isAdmin,
+    permissions: Array.from(fallback.permissions),
   };
 }
 

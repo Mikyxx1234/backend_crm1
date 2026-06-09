@@ -140,3 +140,43 @@ export async function syncUserRoleAssignment(
   await invalidateAuthzForUser(args.userId);
   return true;
 }
+
+const VALID_LEGACY_ROLES = ["ADMIN", "MANAGER", "MEMBER"] as const;
+
+/**
+ * Auto-cura: usuários HUMAN da org sem nenhum assignment recebem o preset
+ * compatível com `User.role`. Idempotente — só cria o que falta. Chamado
+ * ao listar roles (admin abre /settings/permissions) pra DNA/prod não
+ * ficarem com operadores barrados após deploy.
+ */
+export async function syncMissingUserRoleAssignments(
+  tx: Prisma.TransactionClient,
+  organizationId: string,
+): Promise<number> {
+  await ensureSystemPresetRoles(tx, organizationId);
+
+  const users = await tx.user.findMany({
+    where: { organizationId, type: "HUMAN", isErased: false },
+    select: { id: true, role: true },
+  });
+
+  let healed = 0;
+  for (const u of users) {
+    if (!VALID_LEGACY_ROLES.includes(u.role as (typeof VALID_LEGACY_ROLES)[number])) {
+      continue;
+    }
+    const hasAny = await tx.userRoleAssignment.findFirst({
+      where: { userId: u.id, organizationId },
+      select: { id: true },
+    });
+    if (hasAny) continue;
+
+    const ok = await syncUserRoleAssignment(tx, {
+      userId: u.id,
+      organizationId,
+      role: u.role as "ADMIN" | "MANAGER" | "MEMBER",
+    });
+    if (ok) healed++;
+  }
+  return healed;
+}

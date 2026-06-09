@@ -2,7 +2,10 @@ import type { Prisma } from "@prisma/client";
 
 import { invalidateAuthzForOrg } from "@/lib/authz";
 import { sanitizePermissions } from "@/lib/authz/permissions";
-import { ensureSystemPresetRoles } from "@/lib/authz/sync-user-role";
+import {
+  ensureSystemPresetRoles,
+  syncMissingUserRoleAssignments,
+} from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 
@@ -62,7 +65,10 @@ function mapRoleDetail(
 /** Lista roles da org. Auto-cura presets ausentes (orgs criadas pós-migration). */
 export async function listRoles() {
   const orgId = getOrgIdOrThrow();
-  await prisma.$transaction((tx) => ensureSystemPresetRoles(tx, orgId));
+  await prisma.$transaction(async (tx) => {
+    await ensureSystemPresetRoles(tx, orgId);
+    await syncMissingUserRoleAssignments(tx, orgId);
+  });
 
   const rows = await prisma.role.findMany({
     where: { organizationId: orgId },
@@ -134,9 +140,12 @@ export async function updateRole(
   }
 
   if (input.permissions !== undefined) {
-    const permissions = sanitizePermissions(input.permissions);
-    if (existing.systemPreset === "ADMIN" && permissions.length === 0) {
-      throw new Error("O preset Administrador não pode ficar sem permissões.");
+    let permissions = sanitizePermissions(input.permissions);
+    // Preset ADMIN sempre mantém wildcard — kill switch do authz.
+    if (existing.systemPreset === "ADMIN") {
+      permissions = ["*"];
+    } else if (permissions.length === 0) {
+      throw new Error("O role precisa ter ao menos uma permissão.");
     }
     data.permissions = permissions;
   }
