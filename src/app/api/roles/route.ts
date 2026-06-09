@@ -1,0 +1,80 @@
+import { NextResponse } from "next/server";
+import { z } from "zod";
+
+import { withOrgContext } from "@/lib/auth-helpers";
+import { can, loadAuthzContext } from "@/lib/authz";
+import { createRole, listRoles } from "@/services/roles";
+
+const createSchema = z.object({
+  name: z.string().min(1).max(120),
+  description: z.string().max(500).nullable().optional(),
+  permissions: z.array(z.string()).default([]),
+});
+
+export async function GET() {
+  return withOrgContext(async (session) => {
+    const ctx = await loadAuthzContext({
+      userId: session.user.id,
+      organizationId: session.user.organizationId,
+      isSuperAdmin: session.user.isSuperAdmin,
+    });
+    if (!can(ctx, "settings:permissions")) {
+      return NextResponse.json(
+        { message: "Acesso negado.", required: "settings:permissions" },
+        { status: 403 },
+      );
+    }
+
+    try {
+      const roles = await listRoles();
+      return NextResponse.json(roles);
+    } catch (e) {
+      console.error("[GET /api/roles]", e);
+      return NextResponse.json(
+        { message: e instanceof Error ? e.message : "Erro ao listar roles." },
+        { status: 500 },
+      );
+    }
+  });
+}
+
+export async function POST(request: Request) {
+  return withOrgContext(async (session) => {
+    const ctx = await loadAuthzContext({
+      userId: session.user.id,
+      organizationId: session.user.organizationId,
+      isSuperAdmin: session.user.isSuperAdmin,
+    });
+    if (!can(ctx, "settings:permissions")) {
+      return NextResponse.json(
+        { message: "Acesso negado.", required: "settings:permissions" },
+        { status: 403 },
+      );
+    }
+
+    let json: unknown;
+    try {
+      json = await request.json();
+    } catch {
+      return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
+    }
+
+    const parsed = createSchema.safeParse(json);
+    if (!parsed.success) {
+      return NextResponse.json(
+        { message: "Dados inválidos.", issues: parsed.error.flatten() },
+        { status: 400 },
+      );
+    }
+
+    try {
+      const role = await createRole(parsed.data);
+      return NextResponse.json(role, { status: 201 });
+    } catch (e) {
+      console.error("[POST /api/roles]", e);
+      const msg = e instanceof Error ? e.message : "Erro ao criar role.";
+      const status = msg.includes("Unique constraint") ? 409 : 500;
+      return NextResponse.json({ message: msg }, { status });
+    }
+  });
+}
