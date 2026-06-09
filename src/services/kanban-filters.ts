@@ -86,6 +86,9 @@ export type AdvancedDealFilters = {
   /** Filtros por origem (Contact.source). */
   sources?: string[];
 
+  /** Motivos de perda (Deal.lostReason) — match exato com a tabulação. */
+  lostReasons?: string[];
+
   /** Tags do deal. */
   tagIds?: string[];
   /** any (qualquer) | all (todas) | none (sem nenhuma das informadas). */
@@ -385,6 +388,10 @@ export async function buildDealWhereFromFilters(
     conditions.push({ contact: { is: { source: { in: filters.sources } } } });
   }
 
+  if (filters.lostReasons && filters.lostReasons.length > 0) {
+    conditions.push({ lostReason: { in: filters.lostReasons } });
+  }
+
   // Tags
   if (filters.withoutTags) {
     conditions.push({ tags: { none: {} } });
@@ -611,6 +618,9 @@ export function parseAdvancedDealFilters(input: unknown): AdvancedDealFilters {
 
   const sources = asStringArray(o.sources);
   if (sources) out.sources = sources;
+
+  const lostReasons = asStringArray(o.lostReasons);
+  if (lostReasons) out.lostReasons = lostReasons;
 
   const tagIds = asStringArray(o.tagIds);
   if (tagIds) out.tagIds = tagIds;

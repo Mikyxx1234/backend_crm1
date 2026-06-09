@@ -11,7 +11,7 @@ import { prisma } from "@/lib/prisma";
 export async function GET() {
   return withOrgContext(async (session) => {
     try {
-      const [pipelines, users, tags, customFields, sources] = await Promise.all([
+      const [pipelines, users, tags, customFields, sources, lossReasonCatalog, usedLostReasons] = await Promise.all([
         prisma.pipeline.findMany({
           orderBy: { name: "asc" },
           select: {
@@ -55,10 +55,32 @@ export async function GET() {
           select: { source: true },
           take: 200,
         }),
+        // Motivos de perda: catálogo configurado + motivos livres ("Outro…")
+        // já usados em deals — união alimenta o filtro por motivo.
+        prisma.lossReason.findMany({
+          where: { isActive: true },
+          orderBy: { position: "asc" },
+          select: { label: true },
+        }),
+        prisma.deal.findMany({
+          where: { lostReason: { not: null } },
+          distinct: ["lostReason"],
+          select: { lostReason: true },
+          take: 200,
+        }),
       ]);
 
       const dealCustomFields = customFields.filter((cf) => cf.entity === "deal");
       const contactCustomFields = customFields.filter((cf) => cf.entity === "contact");
+
+      const lossReasons = Array.from(
+        new Set([
+          ...lossReasonCatalog.map((r) => r.label),
+          ...usedLostReasons
+            .map((d) => d.lostReason)
+            .filter((r): r is string => !!r?.trim()),
+        ]),
+      );
 
       return NextResponse.json({
         pipelines,
@@ -67,6 +89,7 @@ export async function GET() {
         dealCustomFields,
         contactCustomFields,
         sources: sources.map((s) => s.source).filter((s): s is string => !!s),
+        lossReasons,
       });
     } catch (e) {
       console.error(e);
