@@ -5,6 +5,47 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-09 — Promoção dev→prod: aplicar as 9 migrations no `db_crm` manualmente, mantendo `SKIP_PRISMA_MIGRATE=1` [DECISÃO — agente OPUS]
+
+**Decisão.** Para subir a `DEV_BRANCH` para `main` (deploy EasyPanel da org
+**Dna Work**, banco `db_crm`), as 9 migrations pendentes foram aplicadas
+**manualmente** via SQL (script Node + driver `pg`), **sem remover** o
+`SKIP_PRISMA_MIGRATE=1`, e registradas à mão no `_prisma_migrations`.
+
+**Contexto.** `db_crm` (Postgres 17.9, 187.127.27.39) tem drift conhecido no
+histórico: `20240101000000_init` aparece **duas vezes** (uma com `finished_at`
+nulo = FALHOU) e há 3 variantes de `add_contact_ad_tracking` que o repo não
+tem. Com isso, deixar o entrypoint rodar `prisma migrate deploy` **aborta com
+P3009** (failed migration) e cai no fallback bruto (`db execute` em todos os
+`.sql`, sem registrar nada). As 9 migrations (`20260602*`..`20260608*`) eram
+todas **aditivas** (novas tabelas/colunas, `ADD VALUE` em enum, particionamento
+de `activity_events` que nasce vazia) — schema diff +253/-0, zero `DROP`/`ALTER`
+em objeto existente.
+
+**Procedimento executado (em janela de baixo tráfego, ~04h).**
+1. Backup lógico completo (`db_crm-backup.ndjson`, 55.473 linhas) + baseline de
+   contagens por tabela (`prod-rowcounts-before.txt`), ambos fora dos repos.
+2. Aplicação das 9 `.sql` em ordem cronológica, cada uma atômica (rollback
+   automático em erro). Todas idempotentes (`IF NOT EXISTS`/`DO` guards).
+3. Registro das 9 em `_prisma_migrations` com `checksum` = sha256 do arquivo.
+4. Verificação pós: 6 tabelas novas presentes, `activity_events` com 49
+   partições, `campaigns.repliedCount` e enum `CONTACT_IMPORT` presentes,
+   contagens de dados existentes **inalteradas**.
+
+**Alternativas descartadas.** Remover `SKIP_PRISMA_MIGRATE` (cairia no fallback
+bruto por causa do P3009); reconciliar todo o histórico do `_prisma_migrations`
+(frágil, fica para o cutover definitivo).
+
+**Impacto / pendências.**
+- Manter `SKIP_PRISMA_MIGRATE=1` no EasyPanel (prod compartilha o drift).
+- Subir worker ETL no EasyPanel (`APP_MODE=worker-etl`) — senão importação de
+  contatos e progresso de campanha não processam.
+- Drift do `_prisma_migrations` (init duplicado + `add_contact_ad_tracking`)
+  ainda precisa ser reconciliado num cutover futuro.
+- Rotacionar a senha do Postgres (trafegou em chat durante a operação).
+
+---
+
 ### 2026-06-06 — Importação assíncrona (ETL) via worker dedicado [DECISÃO — implementação pendente]
 
 **Decisão (arquitetura, agente OPUS).** Migrar a importação de CSV/XLSX do
