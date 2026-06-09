@@ -231,6 +231,26 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "integrations", label: "Integrações externas (Kommo, etc.)" },
       { action: "lgpd", label: "Privacidade / LGPD" },
       { action: "groups", label: "Grupos e filas (Fase 3)" },
+      { action: "security", label: "Segurança / RBAC avançado" },
+    ],
+  },
+  {
+    resource: "nav",
+    label: "Navegação (sidebar principal)",
+    description:
+      "Controla quais ícones da sidebar principal cada role enxerga. Espelha o catálogo do frontend em `src/lib/sidebar-catalog.ts` — a `action` aqui é a `key` do item no catálogo. Item sem a permission correspondente fica oculto da sidebar (fail-closed). ADMIN bypass via `*`.",
+    actions: [
+      { action: "dashboard",    label: "Dashboard" },
+      { action: "pipeline",     label: "Pipeline (funil)" },
+      { action: "contacts",     label: "Contatos" },
+      { action: "companies",    label: "Empresas" },
+      { action: "inbox",        label: "Inbox (conversas)" },
+      { action: "activities",   label: "Atividades" },
+      { action: "automations",  label: "Automações" },
+      { action: "campaigns",    label: "Campanhas" },
+      { action: "distribution", label: "Distribuição de leads" },
+      { action: "logs",         label: "Logs" },
+      { action: "widgets",      label: "Widgets" },
     ],
   },
 ];

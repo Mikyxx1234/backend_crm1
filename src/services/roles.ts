@@ -196,6 +196,7 @@ export async function addRoleAssignment(roleId: string, userId: string) {
     update: {},
   });
 
+  await invalidateAuthzForOrg(orgId);
   return getRoleById(roleId);
 }
 
