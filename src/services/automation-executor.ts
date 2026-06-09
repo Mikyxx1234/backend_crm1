@@ -821,7 +821,28 @@ async function executeStep(
         targetDealId = openDeal?.id;
       }
       if (!targetDealId) throw new Error("move_stage: dealId ausente no contexto");
-      await prisma.deal.update({ where: { id: targetDealId }, data: { stageId } });
+      // Estágios terminais fixos (Ganho/Perdido) sincronizam Deal.status
+      // — mesma regra do moveDeal manual no Kanban.
+      const targetStage = await prisma.stage.findUnique({
+        where: { id: stageId },
+        select: { isWon: true, isLost: true },
+      });
+      const currentDeal = await prisma.deal.findUnique({
+        where: { id: targetDealId },
+        select: { status: true },
+      });
+      const statusPatch = targetStage?.isWon
+        ? currentDeal?.status === "WON"
+          ? {}
+          : { status: "WON" as const, closedAt: new Date(), lostReason: null }
+        : targetStage?.isLost
+          ? currentDeal?.status === "LOST"
+            ? {}
+            : { status: "LOST" as const, closedAt: new Date() }
+          : currentDeal?.status === "OPEN" || !currentDeal
+            ? {}
+            : { status: "OPEN" as const, closedAt: null, lostReason: null };
+      await prisma.deal.update({ where: { id: targetDealId }, data: { stageId, ...statusPatch } });
       return {};
     }
 

@@ -2,9 +2,29 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getVisibilityFilter } from "@/lib/visibility";
-import { getBoardData, isValidDealStatus } from "@/services/deals";
+import {
+  getBoardData,
+  isValidDealStatus,
+  type BoardSortDirection,
+  type BoardSortField,
+} from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
 import { getPipelineMeta } from "@/services/pipelines";
+
+/**
+ * Aceita `sort` e `direction` vindos do client (GET via query string ou
+ * POST via body). Retorna `undefined` quando o valor é omitido/inválido
+ * pra que o serviço caia no default `position asc` (comportamento atual).
+ */
+function parseBoardSortField(raw: unknown): BoardSortField | undefined {
+  return raw === "createdAt" || raw === "position" || raw === "lastInteraction"
+    ? raw
+    : undefined;
+}
+
+function parseBoardSortDirection(raw: unknown): BoardSortDirection | undefined {
+  return raw === "asc" || raw === "desc" ? raw : undefined;
+}
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -41,8 +61,13 @@ export async function GET(request: Request, context: RouteContext) {
       const perStageRaw = url.searchParams.get("perStage");
       const perStage = perStageRaw ? Math.max(1, parseInt(perStageRaw, 10) || 0) : undefined;
 
+      const sortField = parseBoardSortField(url.searchParams.get("sort"));
+      const sortDirection = parseBoardSortDirection(url.searchParams.get("direction"));
+
       const board = await getBoardData(pipelineId, visibilityOwnerId, statusFilter, undefined, {
         perStage,
+        sortField,
+        sortDirection,
       });
       return NextResponse.json(board);
     } catch (e) {
@@ -108,6 +133,8 @@ export async function POST(request: Request, context: RouteContext) {
           typeof (body as { offsetByStage?: Record<string, number> }).offsetByStage === "object"
             ? ((body as { offsetByStage: Record<string, number> }).offsetByStage)
             : undefined,
+        sortField: parseBoardSortField((body as { sort?: unknown }).sort),
+        sortDirection: parseBoardSortDirection((body as { direction?: unknown }).direction),
       };
       const board = await getBoardData(
         pipelineId,

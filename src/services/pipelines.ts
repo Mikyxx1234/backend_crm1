@@ -11,6 +11,29 @@ const DEFAULT_STAGES: Omit<Prisma.StageCreateWithoutPipelineInput, "pipeline" | 
   { name: "Fechamento", position: 4, color: "#22c55e", winProbability: 90, rottingDays: 7 },
 ];
 
+/**
+ * Estágios terminais fixos (estilo Kommo): TODO pipeline termina em
+ * "Ganho" e "Perdido", nessa ordem. Mover um deal para eles fecha o
+ * negócio (`Deal.status` sincronizado em `moveDeal`). Protegidos contra
+ * delete e reorder; estágios novos sempre entram ANTES deles.
+ * `rottingDays` alto evita marcar deals fechados como "apodrecendo".
+ */
+export const TERMINAL_STAGES: Omit<Prisma.StageCreateWithoutPipelineInput, "pipeline" | "organization" | "position">[] = [
+  { name: "Ganho", color: "#16a34a", winProbability: 100, rottingDays: 3650, isWon: true },
+  { name: "Perdido", color: "#ef4444", winProbability: 0, rottingDays: 3650, isLost: true },
+];
+
+/** Stages default + terminais com positions sequenciais, prontos pro create. */
+function buildDefaultStageCreates(organizationId: string) {
+  const base = DEFAULT_STAGES.map((s) => ({ ...s, organizationId }));
+  const terminals = TERMINAL_STAGES.map((s, i) => ({
+    ...s,
+    position: DEFAULT_STAGES.length + i,
+    organizationId,
+  }));
+  return [...base, ...terminals];
+}
+
 const stageWithCountSelect = {
   id: true,
   name: true,
@@ -19,6 +42,8 @@ const stageWithCountSelect = {
   winProbability: true,
   rottingDays: true,
   isIncoming: true,
+  isWon: true,
+  isLost: true,
   pipelineId: true,
   _count: { select: { deals: true } },
 } satisfies Prisma.StageSelect;
@@ -33,7 +58,7 @@ export async function ensureDefaultPipeline() {
       isDefault: true,
       organizationId,
       stages: {
-        create: DEFAULT_STAGES.map((s) => ({ ...s, organizationId })),
+        create: buildDefaultStageCreates(organizationId),
       },
     },
   });
@@ -103,7 +128,7 @@ export async function createPipeline(data: { name: string }) {
       name,
       organizationId,
       stages: {
-        create: DEFAULT_STAGES.map((s) => ({ ...s, organizationId })),
+        create: buildDefaultStageCreates(organizationId),
       },
     },
     include: {
@@ -176,13 +201,29 @@ export async function createStage(pipelineId: string, data: CreateStageInput) {
       _max: { position: true },
     });
     const maxPos = max._max.position ?? -1;
-    const next = maxPos + 1;
-    const position = data.position !== undefined ? data.position : next;
+    // Estágios novos NUNCA entram depois dos terminais fixos (Ganho/
+    // Perdido) — o default é "antes do primeiro terminal" e posições
+    // explícitas são clampadas pra esse limite.
+    const firstTerminal = await tx.stage.findFirst({
+      where: { pipelineId, OR: [{ isWon: true }, { isLost: true }] },
+      orderBy: { position: "asc" },
+      select: { position: true },
+    });
+    const next = firstTerminal ? firstTerminal.position : maxPos + 1;
+    const position =
+      data.position !== undefined ? Math.min(data.position, next) : next;
 
-    if (data.position !== undefined && data.position < next) {
+    if (position <= maxPos) {
+      // Shift em 2 passos (offset alto) pra não violar a unique
+      // (pipelineId, position) durante o updateMany — mesmo truque
+      // do reorderStages.
       await tx.stage.updateMany({
         where: { pipelineId, position: { gte: position } },
-        data: { position: { increment: 1 } },
+        data: { position: { increment: 10_000 } },
+      });
+      await tx.stage.updateMany({
+        where: { pipelineId, position: { gte: 10_000 } },
+        data: { position: { decrement: 9_999 } },
       });
     }
 
@@ -219,6 +260,11 @@ export async function updateStage(id: string, data: UpdateStageInput) {
 
   const stage = await prisma.stage.findUnique({ where: { id } });
   if (!stage) throw new Error("NOT_FOUND");
+
+  // Terminais fixos (Ganho/Perdido) não saem do fim do pipeline.
+  if ((stage.isWon || stage.isLost) && data.position !== undefined && data.position !== stage.position) {
+    throw new Error("CANNOT_MOVE_TERMINAL_STAGE");
+  }
 
   if (data.position !== undefined && data.position !== stage.position) {
     const stages = await prisma.stage.findMany({
@@ -263,9 +309,15 @@ export async function getStageInPipeline(pipelineId: string, stageId: string) {
 }
 
 export async function deleteStage(id: string) {
-  const stage = await prisma.stage.findUnique({ where: { id }, select: { isIncoming: true } });
+  const stage = await prisma.stage.findUnique({
+    where: { id },
+    select: { isIncoming: true, isWon: true, isLost: true },
+  });
   if (stage?.isIncoming) {
     throw new Error("CANNOT_DELETE_INCOMING_STAGE");
+  }
+  if (stage?.isWon || stage?.isLost) {
+    throw new Error("CANNOT_DELETE_TERMINAL_STAGE");
   }
   const count = await prisma.deal.count({ where: { stageId: id } });
   if (count > 0) {
@@ -277,7 +329,7 @@ export async function deleteStage(id: string) {
 export async function reorderStages(pipelineId: string, stageIds: string[]) {
   const stages = await prisma.stage.findMany({
     where: { pipelineId },
-    select: { id: true },
+    select: { id: true, isWon: true, isLost: true },
     orderBy: { position: "asc" },
   });
 
@@ -286,18 +338,30 @@ export async function reorderStages(pipelineId: string, stageIds: string[]) {
     throw new Error("INVALID_STAGE_ORDER");
   }
 
+  // Terminais fixos sempre fecham o pipeline na ordem Ganho → Perdido,
+  // independente da ordem pedida. Normaliza em vez de rejeitar pra
+  // manter compat com clientes que enviam a lista completa.
+  const wonIds = stages.filter((s) => s.isWon).map((s) => s.id);
+  const lostIds = stages.filter((s) => s.isLost).map((s) => s.id);
+  const terminalSet = new Set([...wonIds, ...lostIds]);
+  const ordered = [
+    ...stageIds.filter((id) => !terminalSet.has(id)),
+    ...wonIds,
+    ...lostIds,
+  ];
+
   const offset = 10_000;
 
   await prisma.$transaction(async (tx) => {
-    for (let i = 0; i < stageIds.length; i++) {
+    for (let i = 0; i < ordered.length; i++) {
       await tx.stage.update({
-        where: { id: stageIds[i] },
+        where: { id: ordered[i] },
         data: { position: offset + i },
       });
     }
-    for (let i = 0; i < stageIds.length; i++) {
+    for (let i = 0; i < ordered.length; i++) {
       await tx.stage.update({
-        where: { id: stageIds[i] },
+        where: { id: ordered[i] },
         data: { position: i },
       });
     }

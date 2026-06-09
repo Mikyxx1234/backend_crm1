@@ -6,7 +6,7 @@ import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
 import { fireTrigger } from "@/services/automation-triggers";
-import { assignDealOwner, createDealEvent } from "@/services/deals";
+import { assignDealOwner, createDealEvent, markDealLost, markDealWon } from "@/services/deals";
 
 const VALID_ACTIONS = ["move_stage", "change_owner", "mark_won", "mark_lost", "delete"] as const;
 type BulkAction = (typeof VALID_ACTIONS)[number];
@@ -63,6 +63,9 @@ export async function POST(request: Request) {
       if (action === "move_stage") {
         const stageId = typeof body.stageId === "string" ? body.stageId : "";
         if (!stageId) return NextResponse.json({ message: "stageId é obrigatório." }, { status: 400 });
+        // Motivo da perda — usado quando o destino é o estágio Perdido.
+        const moveLostReason =
+          typeof body.lostReason === "string" ? body.lostReason.trim() || null : null;
 
         const stage = await prisma.stage.findUnique({ where: { id: stageId }, select: { id: true, name: true } });
         if (!stage) return NextResponse.json({ message: "Etapa não encontrada." }, { status: 404 });
@@ -87,7 +90,7 @@ export async function POST(request: Request) {
               type: "DEAL_BULK_MOVE_STAGE",
               status: "PENDING",
               total: dealIds.length,
-              payload: { dealIds, targetStageId: stageId },
+              payload: { dealIds, targetStageId: stageId, lostReason: moveLostReason },
               createdById: uid,
             },
             select: { id: true },
@@ -98,6 +101,7 @@ export async function POST(request: Request) {
             initiatedByUserId: uid,
             dealIds,
             targetStageId: stageId,
+            lostReason: moveLostReason,
           });
           if (!job) {
             await prisma.bulkOperation.update({
@@ -134,14 +138,33 @@ export async function POST(request: Request) {
           );
         }
 
+        const targetFlags = await prisma.stage.findUnique({
+          where: { id: stageId },
+          select: { isWon: true, isLost: true },
+        });
+
         const deals = await prisma.deal.findMany({
           where: { id: { in: dealIds } },
-          select: { id: true, stageId: true, stage: { select: { name: true } } },
+          select: { id: true, stageId: true, status: true, stage: { select: { name: true } } },
         });
 
         for (const deal of deals) {
           if (deal.stageId !== stageId) {
-            await prisma.deal.update({ where: { id: deal.id }, data: { stageId } });
+            // Estágios terminais (Ganho/Perdido) sincronizam Deal.status
+            // — mesma regra do moveDeal single.
+            const statusPatch = targetFlags?.isWon
+              ? deal.status === "WON"
+                ? {}
+                : { status: "WON" as const, closedAt: new Date(), lostReason: null }
+              : targetFlags?.isLost
+                ? deal.status === "LOST"
+                  ? {}
+                  : { status: "LOST" as const, closedAt: new Date(), lostReason: moveLostReason }
+                : deal.status === "OPEN"
+                  ? {}
+                  : { status: "OPEN" as const, closedAt: null, lostReason: null };
+
+            await prisma.deal.update({ where: { id: deal.id }, data: { stageId, ...statusPatch } });
             createDealEvent(deal.id, uid, "STAGE_CHANGED", {
               from: { id: deal.stageId, name: deal.stage.name },
               to: { id: stage.id, name: stage.name },
@@ -150,6 +173,14 @@ export async function POST(request: Request) {
               dealId: deal.id,
               data: { fromStageId: deal.stageId, toStageId: stageId },
             }).catch(() => {});
+            if ("status" in statusPatch && statusPatch.status && statusPatch.status !== deal.status) {
+              createDealEvent(deal.id, uid, "STATUS_CHANGED", { from: deal.status, to: statusPatch.status }).catch(() => {});
+              if (statusPatch.status === "WON") {
+                fireTrigger("deal_won", { dealId: deal.id, data: { fromStatus: deal.status } }).catch(() => {});
+              } else if (statusPatch.status === "LOST") {
+                fireTrigger("deal_lost", { dealId: deal.id, data: { fromStatus: deal.status } }).catch(() => {});
+              }
+            }
             affected++;
           }
         }
@@ -183,14 +214,17 @@ export async function POST(request: Request) {
       }
 
       if (action === "mark_won") {
-        const result = await prisma.deal.updateMany({
+        // markDealWon move o deal pro estágio terminal Ganho do pipeline
+        // e sincroniza status/closedAt — mesma semântica do single.
+        const deals = await prisma.deal.findMany({
           where: { id: { in: dealIds }, status: { not: "WON" } },
-          data: { status: "WON", closedAt: new Date() },
+          select: { id: true, status: true },
         });
-        affected = result.count;
-        for (const id of dealIds) {
-          createDealEvent(id, uid, "STATUS_CHANGED", { from: "OPEN", to: "WON" }).catch(() => {});
-          fireTrigger("deal_won", { dealId: id, data: { fromStatus: "OPEN" } }).catch(() => {});
+        for (const deal of deals) {
+          await markDealWon(deal.id);
+          createDealEvent(deal.id, uid, "STATUS_CHANGED", { from: deal.status, to: "WON" }).catch(() => {});
+          fireTrigger("deal_won", { dealId: deal.id, data: { fromStatus: deal.status } }).catch(() => {});
+          affected++;
         }
       }
 
@@ -202,14 +236,15 @@ export async function POST(request: Request) {
           return NextResponse.json({ message: "Motivo da perda é obrigatório." }, { status: 400 });
         }
 
-        const result = await prisma.deal.updateMany({
+        const deals = await prisma.deal.findMany({
           where: { id: { in: dealIds }, status: { not: "LOST" } },
-          data: { status: "LOST", closedAt: new Date(), lostReason: lostReason || null },
+          select: { id: true, status: true },
         });
-        affected = result.count;
-        for (const id of dealIds) {
-          createDealEvent(id, uid, "STATUS_CHANGED", { from: "OPEN", to: "LOST", lostReason }).catch(() => {});
-          fireTrigger("deal_lost", { dealId: id, data: { fromStatus: "OPEN", lostReason } }).catch(() => {});
+        for (const deal of deals) {
+          await markDealLost(deal.id, lostReason);
+          createDealEvent(deal.id, uid, "STATUS_CHANGED", { from: deal.status, to: "LOST", lostReason }).catch(() => {});
+          fireTrigger("deal_lost", { dealId: deal.id, data: { fromStatus: deal.status, lostReason } }).catch(() => {});
+          affected++;
         }
       }
 

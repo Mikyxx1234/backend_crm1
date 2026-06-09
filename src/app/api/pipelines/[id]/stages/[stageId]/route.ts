@@ -155,6 +155,12 @@ export async function PUT(request: Request, context: RouteContext) {
               { status: 400 }
             );
           }
+          if (err.message === "CANNOT_MOVE_TERMINAL_STAGE") {
+            return NextResponse.json(
+              { message: "Os estágios Ganho e Perdido são fixos no fim do funil." },
+              { status: 409 }
+            );
+          }
         }
         throw err;
       }
@@ -213,6 +219,18 @@ export async function DELETE(_request: Request, context: RouteContext) {
         if (err instanceof Error && err.message === "STAGE_HAS_DEALS") {
           return NextResponse.json(
             { message: "Não é possível excluir: existem negócios neste estágio." },
+            { status: 409 }
+          );
+        }
+        if (err instanceof Error && err.message === "CANNOT_DELETE_INCOMING_STAGE") {
+          return NextResponse.json(
+            { message: "O estágio de entrada não pode ser excluído." },
+            { status: 409 }
+          );
+        }
+        if (err instanceof Error && err.message === "CANNOT_DELETE_TERMINAL_STAGE") {
+          return NextResponse.json(
+            { message: "Os estágios Ganho e Perdido são fixos e não podem ser excluídos." },
             { status: 409 }
           );
         }

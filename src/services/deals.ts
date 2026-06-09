@@ -490,7 +490,48 @@ function addDays(d: Date, days: number): Date {
   return out;
 }
 
-export async function moveDeal(dealId: string, targetStageId: string, position: number) {
+/**
+ * Sincroniza `Deal.status` com o estágio de destino (modelo Kommo):
+ *   - estágio `isWon`  → status WON  + closedAt
+ *   - estágio `isLost` → status LOST + closedAt (+ lostReason se vier)
+ *   - estágio comum    → status OPEN (reabre se estava fechado)
+ * Retorna o patch a aplicar junto com a mudança de stage (vazio se o
+ * status já está coerente).
+ */
+function buildStatusSyncPatch(
+  currentStatus: DealStatus,
+  targetStage: { isWon: boolean; isLost: boolean },
+  lostReason?: string | null,
+): Prisma.DealUncheckedUpdateInput {
+  if (targetStage.isWon) {
+    return currentStatus === "WON"
+      ? {}
+      : { status: "WON", closedAt: new Date(), lostReason: null };
+  }
+  if (targetStage.isLost) {
+    const reason = lostReason?.trim() || null;
+    if (currentStatus === "LOST") {
+      // Já perdido: só atualiza o motivo se um novo foi informado.
+      return reason ? { lostReason: reason } : {};
+    }
+    return { status: "LOST", closedAt: new Date(), lostReason: reason };
+  }
+  return currentStatus === "OPEN"
+    ? {}
+    : { status: "OPEN", closedAt: null, lostReason: null };
+}
+
+export type MoveDealOptions = {
+  /** Motivo da perda — usado quando o destino é o estágio Perdido. */
+  lostReason?: string | null;
+};
+
+export async function moveDeal(
+  dealId: string,
+  targetStageId: string,
+  position: number,
+  options?: MoveDealOptions,
+) {
   if (!Number.isInteger(position) || position < 0) {
     throw new Error("INVALID_POSITION");
   }
@@ -509,6 +550,7 @@ export async function moveDeal(dealId: string, targetStageId: string, position: 
 
     const oldStageId = deal.stageId;
     const oldPos = deal.position;
+    const statusPatch = buildStatusSyncPatch(deal.status, targetStage, options?.lostReason);
 
     if (oldStageId === targetStageId) {
       const deals = await tx.deal.findMany({
@@ -522,7 +564,7 @@ export async function moveDeal(dealId: string, targetStageId: string, position: 
       for (let i = 0; i < ordered.length; i++) {
         await tx.deal.update({
           where: { id: ordered[i].id },
-          data: { position: i },
+          data: ordered[i].id === dealId ? { position: i, ...statusPatch } : { position: i },
         });
       }
 
@@ -539,7 +581,7 @@ export async function moveDeal(dealId: string, targetStageId: string, position: 
 
     await tx.deal.update({
       where: { id: dealId },
-      data: { stageId: targetStageId, position },
+      data: { stageId: targetStageId, position, ...statusPatch },
     });
 
     await tx.deal.updateMany({
@@ -554,41 +596,114 @@ export async function moveDeal(dealId: string, targetStageId: string, position: 
   });
 }
 
+/**
+ * Resolve o estágio terminal (Ganho ou Perdido) do pipeline do deal e o
+ * patch de movimentação pra ele (append no fim da coluna). Retorna {}
+ * quando o deal já está no terminal certo ou o pipeline (legado) não
+ * tem o estágio fixo.
+ */
+async function buildTerminalStageMovePatch(
+  tx: ScopedTx,
+  deal: { stageId: string },
+  kind: "won" | "lost",
+): Promise<Prisma.DealUncheckedUpdateInput> {
+  const current = await tx.stage.findUnique({
+    where: { id: deal.stageId },
+    select: { pipelineId: true, isWon: true, isLost: true },
+  });
+  if (!current) return {};
+  if (kind === "won" ? current.isWon : current.isLost) return {};
+
+  const target = await tx.stage.findFirst({
+    where: { pipelineId: current.pipelineId, ...(kind === "won" ? { isWon: true } : { isLost: true }) },
+    select: { id: true },
+  });
+  if (!target) return {};
+
+  const max = await tx.deal.aggregate({
+    where: { stageId: target.id },
+    _max: { position: true },
+  });
+  return { stageId: target.id, position: (max._max.position ?? -1) + 1 };
+}
+
 export async function markDealWon(id: string) {
-  return prisma.deal.update({
-    where: { id },
-    data: {
-      status: "WON",
-      closedAt: new Date(),
-    },
-    include: listInclude,
+  return prisma.$transaction(async (tx) => {
+    const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
+    if (!deal) throw new Error("NOT_FOUND");
+    const movePatch = await buildTerminalStageMovePatch(tx, deal, "won");
+    return tx.deal.update({
+      where: { id },
+      data: {
+        status: "WON",
+        closedAt: new Date(),
+        lostReason: null,
+        ...movePatch,
+      },
+      include: listInclude,
+    });
   });
 }
 
-export async function markDealLost(id: string, lostReason: string) {
-  const reason = lostReason.trim();
-  if (!reason) throw new Error("INVALID_LOST_REASON");
+export async function markDealLost(id: string, lostReason?: string | null) {
+  // Obrigatoriedade do motivo é decidida na rota (org setting
+  // `deals.loss_reason_required`); aqui aceitamos vazio → null.
+  const reason = lostReason?.trim() || null;
 
-  return prisma.deal.update({
-    where: { id },
-    data: {
-      status: "LOST",
-      closedAt: new Date(),
-      lostReason: reason,
-    },
-    include: listInclude,
+  return prisma.$transaction(async (tx) => {
+    const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
+    if (!deal) throw new Error("NOT_FOUND");
+    const movePatch = await buildTerminalStageMovePatch(tx, deal, "lost");
+    return tx.deal.update({
+      where: { id },
+      data: {
+        status: "LOST",
+        closedAt: new Date(),
+        lostReason: reason,
+        ...movePatch,
+      },
+      include: listInclude,
+    });
   });
 }
 
 export async function reopenDeal(id: string) {
-  return prisma.deal.update({
-    where: { id },
-    data: {
-      status: "OPEN",
-      closedAt: null,
-      lostReason: null,
-    },
-    include: listInclude,
+  return prisma.$transaction(async (tx) => {
+    const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
+    if (!deal) throw new Error("NOT_FOUND");
+
+    // Se o deal está num estágio terminal, reabrir o devolve pro último
+    // estágio operacional do pipeline (o mais próximo do fechamento).
+    let movePatch: Prisma.DealUncheckedUpdateInput = {};
+    const current = await tx.stage.findUnique({
+      where: { id: deal.stageId },
+      select: { pipelineId: true, isWon: true, isLost: true },
+    });
+    if (current && (current.isWon || current.isLost)) {
+      const target = await tx.stage.findFirst({
+        where: { pipelineId: current.pipelineId, isWon: false, isLost: false },
+        orderBy: { position: "desc" },
+        select: { id: true },
+      });
+      if (target) {
+        const max = await tx.deal.aggregate({
+          where: { stageId: target.id },
+          _max: { position: true },
+        });
+        movePatch = { stageId: target.id, position: (max._max.position ?? -1) + 1 };
+      }
+    }
+
+    return tx.deal.update({
+      where: { id },
+      data: {
+        status: "OPEN",
+        closedAt: null,
+        lostReason: null,
+        ...movePatch,
+      },
+      include: listInclude,
+    });
   });
 }
 
@@ -596,11 +711,187 @@ export async function reopenDeal(id: string) {
 const DEFAULT_BOARD_COLUMN_LIMIT = 100;
 const MAX_BOARD_COLUMN_LIMIT = 500;
 
+/**
+ * Critério de ordenação dos cards dentro de cada coluna do board.
+ *
+ * - `position` (default): ordem manual definida por drag-and-drop.
+ *   Preserva o comportamento histórico do Kanban (cada deal carrega
+ *   um inteiro `position` mantido pelas mutações de DnD).
+ * - `createdAt`: ordena pelo timestamp de criação do deal. Usado pelas
+ *   opções "Criação: mais recente" / "Criação: mais antigo" do menu
+ *   kebab do Kanban no frontend (`_v2-client.tsx`). Cobre TODOS os
+ *   cards da coluna porque o orderBy roda antes do `take` do Prisma —
+ *   ao contrário do sort client-side antigo, que só ordenava os deals
+ *   já carregados (default 100 por coluna).
+ * - `lastInteraction`: ordena pela última interação na conversa do
+ *   contato vinculado ao deal (`MAX(Conversation.updatedAt)` do
+ *   contato). Como o Deal não tem campo desnormalizado, esse sort
+ *   percorre um caminho próprio (`loadBoardStagesByLastInteraction`):
+ *   busca IDs leves de todos os deals que casam com o filtro,
+ *   agrega o último `updatedAt` por contato via `groupBy`, ordena
+ *   e pagina em memória, e só então faz o `findMany` completo dos
+ *   IDs paginados. Deals sem contato/conversa ficam no fim
+ *   (`nulls last`) em ambas as direções; `position` é tiebreaker.
+ */
+export type BoardSortField = "position" | "createdAt" | "lastInteraction";
+export type BoardSortDirection = "asc" | "desc";
+
+function buildBoardDealOrderBy(
+  sortField: BoardSortField | undefined,
+  sortDirection: BoardSortDirection | undefined,
+): Prisma.DealOrderByWithRelationInput[] {
+  if (sortField === "createdAt") {
+    const dir: BoardSortDirection = sortDirection === "desc" ? "desc" : "asc";
+    // `position` como tiebreaker mantém ordem estável quando vários
+    // deals têm o mesmo timestamp (importações em lote, seeds).
+    return [{ createdAt: dir }, { position: "asc" }];
+  }
+  // `lastInteraction` não cai aqui — segue por caminho próprio em
+  // `loadBoardStagesByLastInteraction`. Fallback estável.
+  return [{ position: "asc" }];
+}
+
+/** Campos do Deal incluídos em cada card do board. Reusado pelo caminho
+ *  default (Prisma include) e pelo caminho `lastInteraction`
+ *  (findMany separado dos IDs paginados). */
+const BOARD_DEAL_INCLUDE = {
+  contact: {
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      phone: true,
+      avatarUrl: true,
+    },
+  },
+  owner: { select: { id: true, name: true, avatarUrl: true } },
+  tags: { select: { tag: { select: { id: true, name: true, color: true } } } },
+  activities: {
+    where: { completed: false },
+    select: { id: true, scheduledAt: true },
+    take: 5,
+  },
+} satisfies Prisma.DealInclude;
+
+type BoardStageWithDeals = Prisma.StageGetPayload<{
+  include: { deals: { include: typeof BOARD_DEAL_INCLUDE } };
+}>;
+
+/**
+ * Caminho alternativo do board quando `sortField === "lastInteraction"`.
+ *
+ * Por que separado: o Prisma não suporta ordenar `Deal` por agregação
+ * de uma relação distante (`Deal → Contact → Conversations`). A
+ * solução é fazer em 3 passos:
+ *
+ *   1) Lista leve de IDs candidatos por stage (apenas
+ *      `id, stageId, contactId, position`) respeitando o `where`.
+ *   2) `groupBy contactId _max: updatedAt` em `Conversation` para
+ *      obter o último timestamp por contato.
+ *   3) Ordenar/paginar em memória por stage e buscar os deals
+ *      completos via `findMany({ where: { id: { in: ids } } })`.
+ *
+ * Custos: 3 queries Prisma (vs 1 do caminho default), mas a 1ª e a 2ª
+ * trazem só colunas leves. Para até alguns milhares de deals por org
+ * o overhead é desprezível. Se ficar pesado, o passo recomendado é
+ * desnormalizar `Deal.lastInteractionAt` e migrar pro caminho default.
+ */
+async function loadBoardStagesByLastInteraction(
+  pipelineId: string,
+  dealWhere: Prisma.DealWhereInput,
+  perStage: number,
+  offsetByStage: Record<string, number>,
+  direction: BoardSortDirection,
+): Promise<BoardStageWithDeals[]> {
+  const stagesRaw = await prisma.stage.findMany({
+    where: { pipelineId },
+    orderBy: { position: "asc" },
+  });
+  if (stagesRaw.length === 0) return [];
+
+  const stageIds = stagesRaw.map((s) => s.id);
+  const candidates = await prisma.deal.findMany({
+    where: { ...dealWhere, stageId: { in: stageIds } },
+    select: { id: true, stageId: true, contactId: true, position: true },
+  });
+
+  const contactIds = Array.from(
+    new Set(
+      candidates
+        .map((c) => c.contactId)
+        .filter((id): id is string => id !== null),
+    ),
+  );
+
+  const lastByContact = new Map<string, Date>();
+  if (contactIds.length > 0) {
+    const groups = await prisma.conversation.groupBy({
+      by: ["contactId"],
+      where: { contactId: { in: contactIds } },
+      _max: { updatedAt: true },
+    });
+    for (const g of groups) {
+      if (g._max.updatedAt) lastByContact.set(g.contactId, g._max.updatedAt);
+    }
+  }
+
+  // Agrupa candidatos por stage e ordena cada grupo.
+  type Candidate = (typeof candidates)[number];
+  const byStage = new Map<string, Candidate[]>();
+  for (const c of candidates) {
+    const arr = byStage.get(c.stageId);
+    if (arr) arr.push(c);
+    else byStage.set(c.stageId, [c]);
+  }
+  const cmp = (a: Candidate, b: Candidate) => {
+    const aLast = a.contactId ? lastByContact.get(a.contactId) : undefined;
+    const bLast = b.contactId ? lastByContact.get(b.contactId) : undefined;
+    // Nulls last em AMBAS as direções: deals sem conversa nunca devem
+    // ficar no topo, independentemente de "mais recente" ou "mais antigo".
+    if (!aLast && !bLast) return a.position - b.position;
+    if (!aLast) return 1;
+    if (!bLast) return -1;
+    const diff = aLast.getTime() - bLast.getTime();
+    if (diff !== 0) return direction === "desc" ? -diff : diff;
+    return a.position - b.position;
+  };
+
+  const paginatedIdsByStage = new Map<string, string[]>();
+  for (const [stageId, items] of byStage) {
+    items.sort(cmp);
+    const extra = offsetByStage[stageId] ?? 0;
+    const limit = perStage + extra;
+    paginatedIdsByStage.set(stageId, items.slice(0, limit).map((d) => d.id));
+  }
+
+  const allPaginatedIds = Array.from(paginatedIdsByStage.values()).flat();
+  const dealsLoaded =
+    allPaginatedIds.length === 0
+      ? []
+      : await prisma.deal.findMany({
+          where: { id: { in: allPaginatedIds } },
+          include: BOARD_DEAL_INCLUDE,
+        });
+  const dealById = new Map(dealsLoaded.map((d) => [d.id, d]));
+
+  return stagesRaw.map((stage) => {
+    const ids = paginatedIdsByStage.get(stage.id) ?? [];
+    const deals = ids
+      .map((id) => dealById.get(id))
+      .filter((d): d is NonNullable<typeof d> => Boolean(d));
+    return { ...stage, deals };
+  });
+}
+
 export type BoardLimitOptions = {
   /** Quantos cards retornar por coluna. */
   perStage?: number;
   /** Offset por etapa: stageId -> quantos pular. Permite "Carregar mais". */
   offsetByStage?: Record<string, number>;
+  /** Campo de ordenação dentro de cada coluna. Default: `position`. */
+  sortField?: BoardSortField;
+  /** Direção da ordenação. Default: `asc`. */
+  sortDirection?: BoardSortDirection;
 };
 
 export async function getBoardData(
@@ -638,64 +929,60 @@ export async function getBoardData(
     Math.max(1, limitOptions?.perStage ?? DEFAULT_BOARD_COLUMN_LIMIT),
   );
   const offsetByStage = limitOptions?.offsetByStage ?? {};
+  const sortField = limitOptions?.sortField;
+  const sortDirection: BoardSortDirection =
+    limitOptions?.sortDirection === "desc" ? "desc" : "asc";
+  // Construído uma vez e reusado nas 2 queries de deals (stages.deals
+  // + branch de "Carregar mais"). Default cai em `position asc` =
+  // comportamento histórico.
+  const dealOrderBy = buildBoardDealOrderBy(sortField, sortDirection);
 
-  // 1) Etapas + cards. Para evitar problemas de UX em "Carregar mais",
-  //    quando uma etapa tem `extraLoaded > 0`, retornamos `perStage + extraLoaded`
-  //    (acumulado). O frontend continua vendo todos os cards já carregados.
-  const stages = await prisma.stage.findMany({
-    where: { pipelineId },
-    orderBy: { position: "asc" },
-    include: {
-      deals: {
-        where: dealWhere,
-        orderBy: { position: "asc" },
-        take: perStage,
-        include: {
-          contact: {
-            select: {
-              id: true,
-              name: true,
-              email: true,
-              phone: true,
-              avatarUrl: true,
-            },
-          },
-          owner: { select: { id: true, name: true, avatarUrl: true } },
-          tags: { select: { tag: { select: { id: true, name: true, color: true } } } },
-          activities: {
-            where: { completed: false },
-            select: { id: true, scheduledAt: true },
-            take: 5,
-          },
+  let stages: BoardStageWithDeals[];
+
+  if (sortField === "lastInteraction") {
+    // Caminho dedicado: ordena por `MAX(Conversation.updatedAt)` do
+    // contato. Já aplica `offsetByStage` internamente (não cai no
+    // branch de "Carregar mais" abaixo).
+    stages = await loadBoardStagesByLastInteraction(
+      pipelineId,
+      dealWhere,
+      perStage,
+      offsetByStage,
+      sortDirection,
+    );
+  } else {
+    // 1) Etapas + cards. Para evitar problemas de UX em "Carregar mais",
+    //    quando uma etapa tem `extraLoaded > 0`, retornamos `perStage + extraLoaded`
+    //    (acumulado). O frontend continua vendo todos os cards já carregados.
+    stages = await prisma.stage.findMany({
+      where: { pipelineId },
+      orderBy: { position: "asc" },
+      include: {
+        deals: {
+          where: dealWhere,
+          orderBy: dealOrderBy,
+          take: perStage,
+          include: BOARD_DEAL_INCLUDE,
         },
       },
-    },
-  });
+    });
 
-  // 2) Para etapas com extra carregado > 0, substitui pelo conjunto acumulado.
-  const stageIdsWithOffset = Object.keys(offsetByStage).filter((id) => (offsetByStage[id] ?? 0) > 0);
-  if (stageIdsWithOffset.length > 0) {
-    for (const stageId of stageIdsWithOffset) {
-      const extra = offsetByStage[stageId] ?? 0;
-      const expanded = await prisma.deal.findMany({
-        where: { ...dealWhere, stageId },
-        orderBy: { position: "asc" },
-        take: perStage + extra,
-        include: {
-          contact: {
-            select: { id: true, name: true, email: true, phone: true, avatarUrl: true },
-          },
-          owner: { select: { id: true, name: true, avatarUrl: true } },
-          tags: { select: { tag: { select: { id: true, name: true, color: true } } } },
-          activities: {
-            where: { completed: false },
-            select: { id: true, scheduledAt: true },
-            take: 5,
-          },
-        },
-      });
-      const idx = stages.findIndex((s) => s.id === stageId);
-      if (idx >= 0) stages[idx] = { ...stages[idx], deals: expanded };
+    // 2) Para etapas com extra carregado > 0, substitui pelo conjunto acumulado.
+    const stageIdsWithOffset = Object.keys(offsetByStage).filter(
+      (id) => (offsetByStage[id] ?? 0) > 0,
+    );
+    if (stageIdsWithOffset.length > 0) {
+      for (const stageId of stageIdsWithOffset) {
+        const extra = offsetByStage[stageId] ?? 0;
+        const expanded = await prisma.deal.findMany({
+          where: { ...dealWhere, stageId },
+          orderBy: dealOrderBy,
+          take: perStage + extra,
+          include: BOARD_DEAL_INCLUDE,
+        });
+        const idx = stages.findIndex((s) => s.id === stageId);
+        if (idx >= 0) stages[idx] = { ...stages[idx], deals: expanded };
+      }
     }
   }
 

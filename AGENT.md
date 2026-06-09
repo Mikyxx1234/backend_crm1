@@ -5,6 +5,107 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-09 — Ganho/Perdido viram ESTÁGIOS FIXOS do pipeline (modelo Kommo)
+
+**Decisão.** Todo pipeline passa a terminar em dois estágios fixos —
+"Ganho" (`Stage.isWon`) e "Perdido" (`Stage.isLost`) — e fechar um
+negócio É movê-lo para um deles. `Deal.status` (OPEN/WON/LOST) **não
+foi removido**: ele é sincronizado automaticamente com o estágio em
+TODOS os caminhos de movimentação (`moveDeal`, bulk `move_stage` sync e
+async via worker, step `move_stage` de automação). O inverso também
+vale: `markDealWon`/`markDealLost`/`reopenDeal` agora movem o card para
+o estágio correspondente (reabrir devolve pro último estágio
+operacional). O Kanban v2 perdeu as abas Abertos/Ganhos/Perdidos e
+busca o board com `status=ALL` — fechados vivem nas colunas terminais.
+
+**Contexto.** Antes, ganhar/perder só mudava `Deal.status` e o card
+ficava parado na coluna em que estava, com abas filtrando por status —
+o usuário pediu paridade com o Kommo (estágios terminais fixos).
+
+**Alternativas descartadas.**
+- *Remover `Deal.status` e derivar tudo do estágio:* quebraria dashboard,
+  analytics, distribuição, segmentos, automações (`deal_won`/`deal_lost`,
+  filtro `dealStatus`) — dezenas de pontos leem o enum. Mantê-lo
+  sincronizado preserva tudo sem reescrever relatórios.
+- *Detectar terminal pelo NOME do estágio* (como o kanban legado fazia):
+  frágil a rename/idioma. Flags booleanas no schema seguem o precedente
+  de `Stage.isIncoming`.
+
+**Impacto.**
+- Schema: `Stage.isWon`/`isLost` + migration
+  `20260609210000_add_terminal_stages` (idempotente: cria os 2 estágios
+  em pipelines existentes e MOVE deals já WON/LOST para eles,
+  garantindo `closedAt`).
+- `pipelines.ts`: `TERMINAL_STAGES` exportado (usado também por
+  `onboarding.ts::applyPipelineTemplate`); `createStage` clampa posição
+  pra antes dos terminais; `updateStage` rejeita reposicionar terminal
+  (`CANNOT_MOVE_TERMINAL_STAGE`); `deleteStage` rejeita
+  (`CANNOT_DELETE_TERMINAL_STAGE`); `reorderStages` NORMALIZA (terminais
+  sempre no fim, Ganho→Perdido) em vez de rejeitar — compat com clientes
+  que mandam a lista completa.
+- Side effects de fechar via movimentação (evento `STATUS_CHANGED` +
+  `fireTrigger deal_won/deal_lost`) replicados na rota de move, no bulk
+  e no worker — paridade com `PUT /deals/[id]/status`.
+- `markDealLost` aceita motivo vazio (obrigatoriedade é decidida na
+  rota pelo org setting `deals.loss_reason_required`; bulk já permitia).
+- Frontend: colunas terminais sempre visíveis no fim (verde/vermelho via
+  flags em `adapters.ts`), `/settings/pipeline` trava drag/rename/reorder
+  dos fixos (cadeado + badge "Fixo") e "Nova etapa" insere antes deles.
+
+---
+
+### 2026-06-09 — Sort do Kanban por "última interação" server-side + RBAC de navegação (`nav:*`) com permission > role legado
+
+**Decisão (3 partes, aprovadas em sequência pelo usuário).**
+
+1. **Sort "Última interação" no Kanban (substitui "Valor").** Novo
+   `BoardSortField = "lastInteraction"` em `services/deals.ts`. Como
+   `Deal` não denormaliza a data da última conversa, o sort usa
+   abordagem multi-query: ids leves por stage → `Conversation.groupBy`
+   por `MAX(updatedAt)` → sort em memória → `findMany` paginado dos ids.
+   Frontend troca as opções `value_*` por `interaction_*` e delega ao
+   backend (junto com `created_*`; só `name_*` continua client-side).
+   *Alternativa descartada:* denormalizar `lastInteractionAt` no Deal
+   (migration + manutenção em todo write de mensagem; fica para quando
+   o volume justificar).
+
+2. **Sidebar principal controlada por RBAC.** Novo resource `nav` no
+   catálogo (`nav:dashboard`, `nav:pipeline`, ... — 1 chave por ícone).
+   Presets MANAGER/MEMBER ganham as chaves nos presets TS + migration de
+   backfill (`20260609180000_add_nav_permissions`) para roles existentes.
+   Frontend: `SidebarCatalogItem.requiredPermission` +
+   `filterNavItemsByPermissions` em série com o filtro legado por role.
+   **Semântica importante: permissões efetivas = UNIÃO de todas as roles
+   do user.** Se o user tem "Operador" (preset MEMBER, com `nav:campaigns`)
+   E uma role custom restrita, ele vê a união — para restringir de fato,
+   remover a role preset do user (caso real do user `caio`).
+
+3. **Settings: `requiredPermission` MANDA sobre `allowedRoles`.** Em
+   `nav-visibility.ts::canSeeItem`, item com `requiredPermission` é
+   decidido só pela permission (com wildcard `resource:*`); `allowedRoles`
+   vira fallback apenas para itens sem permission declarada. *Motivo:*
+   no modelo antigo (AND), um user com enum legado MEMBER e role custom
+   que concede `settings:channels` nunca via o item — roles customizadas
+   não conseguiam liberar nada no settings. Chaves fracas trocadas:
+   Pipeline/Motivos de perda → `pipeline:manage_stages` (era
+   `pipeline:view`/`deal:edit`), Tags → `tag:edit` (era `tag:view`) —
+   senão todo MEMBER veria telas administrativas.
+
+**Bug corrigido junto:** `addRoleAssignment` não chamava
+`invalidateAuthzForOrg` (só o remove chamava) — mudança de role demorava
+até 60s (TTL do cache Redis `authz:user:*`) para refletir.
+
+**Arquivos.** Backend: `src/services/deals.ts`,
+`src/app/api/pipelines/[id]/board/route.ts`, `src/lib/authz/permissions.ts`,
+`src/lib/authz/presets.ts`, `src/services/roles.ts`,
+`prisma/migrations/20260609180000_add_nav_permissions/`. Frontend:
+`src/app/(app)/pipeline/_v2-client.tsx`, `src/features/pipeline-v2/api/board.ts`,
+`src/lib/sidebar-catalog.ts`, `src/components/crm/nav-rail-v2.tsx`,
+`src/lib/nav-visibility.ts`, `src/lib/settings-nav.ts`,
+`src/features/permissions/*` (editor inline de roles por usuário).
+
+---
+
 ### 2026-06-09 — Promoção dev→prod: aplicar as 9 migrations no `db_crm` manualmente, mantendo `SKIP_PRISMA_MIGRATE=1` [DECISÃO — agente OPUS]
 
 **Decisão.** Para subir a `DEV_BRANCH` para `main` (deploy EasyPanel da org

@@ -52,10 +52,13 @@ export async function POST(request: Request, context: RouteContext) {
       if (typeof b.position !== "number" || !Number.isInteger(b.position) || b.position < 0) {
         return NextResponse.json({ message: "position inválido." }, { status: 400 });
       }
+      // Motivo da perda — opcional, usado quando o destino é o estágio
+      // Perdido (a tabulação é coletada no frontend antes do move).
+      const lostReason = typeof b.lostReason === "string" ? b.lostReason.trim() : undefined;
 
       try {
         const fromStage = { id: existing.stage.id, name: existing.stage.name };
-        const deal = await moveDeal(dealId, b.stageId, b.position);
+        const deal = await moveDeal(dealId, b.stageId, b.position, { lostReason });
         if (!deal) {
           return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
         }
@@ -73,6 +76,32 @@ export async function POST(request: Request, context: RouteContext) {
             contactId: existing.contactId ?? undefined,
             data: { fromStageId: fromStage.id, toStageId: b.stageId },
           }).catch(() => {});
+
+          // Estágios terminais (Ganho/Perdido): o moveDeal sincroniza
+          // Deal.status — aqui replicamos os side effects do fluxo de
+          // status (evento + trigger) pra manter paridade com PUT /status.
+          const fromStatus = existing.status;
+          const newStatus = (deal as { status?: string }).status;
+          if (newStatus && newStatus !== fromStatus) {
+            createDealEvent(dealId, uid, "STATUS_CHANGED", {
+              from: fromStatus,
+              to: newStatus,
+              ...(newStatus === "LOST" && lostReason ? { lostReason } : {}),
+            }).catch(() => {});
+            if (newStatus === "WON") {
+              fireTrigger("deal_won", {
+                dealId,
+                contactId: existing.contactId ?? undefined,
+                data: { fromStatus },
+              }).catch(() => {});
+            } else if (newStatus === "LOST") {
+              fireTrigger("deal_lost", {
+                dealId,
+                contactId: existing.contactId ?? undefined,
+                data: { fromStatus, lostReason },
+              }).catch(() => {});
+            }
+          }
         }
 
         return NextResponse.json(deal);

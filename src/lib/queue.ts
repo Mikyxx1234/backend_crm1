@@ -114,6 +114,8 @@ export type BulkMoveStagePayload = LeadsBulkBasePayload & {
   dealIds: string[];
   /** Stage de destino (validada no handler como pertencente à org). */
   targetStageId: string;
+  /** Motivo da perda — usado quando o destino é o estágio Perdido. */
+  lostReason?: string | null;
 };
 
 export type LeadsBulkPayload = BulkUpdateFieldsPayload | BulkMoveStagePayload;

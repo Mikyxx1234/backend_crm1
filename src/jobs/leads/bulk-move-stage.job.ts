@@ -55,7 +55,7 @@ export async function processBulkMoveStage(
   payload: BulkMoveStagePayload,
   job: Job<BulkMoveStagePayload>,
 ): Promise<void> {
-  const { operationId, organizationId, dealIds, targetStageId, initiatedByUserId } = payload;
+  const { operationId, organizationId, dealIds, targetStageId, initiatedByUserId, lostReason } = payload;
   const ctx = log.child({
     operationId,
     organizationId,
@@ -77,7 +77,7 @@ export async function processBulkMoveStage(
   // Valida que a stage de destino existe na org.
   const targetStage = await prisma.stage.findUnique({
     where: { id: targetStageId },
-    select: { id: true, name: true },
+    select: { id: true, name: true, isWon: true, isLost: true },
   });
   if (!targetStage) {
     await markOperationFailed(
@@ -109,6 +109,7 @@ export async function processBulkMoveStage(
         select: {
           id: true,
           stageId: true,
+          status: true,
           stage: { select: { name: true } },
         },
       });
@@ -137,12 +138,29 @@ export async function processBulkMoveStage(
         // Postgres lida com lock de linha; concorrência com outras ops
         // (move 1:1, change_owner) é mediada pelo nível de isolamento
         // padrão (READ COMMITTED), suficiente aqui.
+        // Estágios terminais fixos (Ganho/Perdido) sincronizam
+        // Deal.status — mesma regra do moveDeal manual.
+        const syncedStatus = targetStage.isWon
+          ? ("WON" as const)
+          : targetStage.isLost
+            ? ("LOST" as const)
+            : ("OPEN" as const);
         await prisma.deal.updateMany({
           where: {
             id: { in: toMove.map((d) => d.id) },
             stageId: { not: targetStageId }, // defesa contra concorrência
           },
-          data: { stageId: targetStageId },
+          data:
+            syncedStatus === "OPEN"
+              ? { stageId: targetStageId, status: "OPEN", closedAt: null, lostReason: null }
+              : syncedStatus === "LOST"
+                ? {
+                    stageId: targetStageId,
+                    status: "LOST",
+                    closedAt: new Date(),
+                    lostReason: lostReason?.trim() || null,
+                  }
+                : { stageId: targetStageId, status: "WON", closedAt: new Date(), lostReason: null },
         });
         chunkSucceeded += toMove.length;
 
@@ -169,6 +187,18 @@ export async function processBulkMoveStage(
               "fireTrigger stage_changed falhou (fire-and-forget)",
             );
           });
+
+          if (deal.status !== syncedStatus) {
+            createDealEvent(deal.id, initiatedByUserId, "STATUS_CHANGED", {
+              from: deal.status,
+              to: syncedStatus,
+            }).catch(() => {});
+            if (syncedStatus === "WON") {
+              fireTrigger("deal_won", { dealId: deal.id, data: { fromStatus: deal.status } }).catch(() => {});
+            } else if (syncedStatus === "LOST") {
+              fireTrigger("deal_lost", { dealId: deal.id, data: { fromStatus: deal.status } }).catch(() => {});
+            }
+          }
         }
       }
 

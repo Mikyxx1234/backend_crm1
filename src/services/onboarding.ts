@@ -8,6 +8,7 @@ import {
 } from "@/lib/authz/sync-user-role";
 import { prismaBase } from "@/lib/prisma-base";
 import { logAudit } from "@/lib/audit/log";
+import { TERMINAL_STAGES } from "@/services/pipelines";
 import {
   PIPELINE_TEMPLATES,
   type PipelineTemplateId,
@@ -201,15 +202,23 @@ export async function applyPipelineTemplate(
         name: template.pipelineName,
         isDefault: true,
         stages: {
-          create: template.stages.map((s) => ({
-            organizationId,
-            name: s.name,
-            position: s.position,
-            color: s.color,
-            winProbability: s.winProbability,
-            rottingDays: s.rottingDays,
-            isIncoming: s.isIncoming ?? false,
-          })),
+          create: [
+            ...template.stages.map((s) => ({
+              organizationId,
+              name: s.name,
+              position: s.position,
+              color: s.color,
+              winProbability: s.winProbability,
+              rottingDays: s.rottingDays,
+              isIncoming: s.isIncoming ?? false,
+            })),
+            // Terminais fixos (estilo Kommo) fecham todo pipeline.
+            ...TERMINAL_STAGES.map((s, i) => ({
+              ...s,
+              organizationId,
+              position: template.stages.length + i,
+            })),
+          ],
         },
       },
       select: { id: true },
