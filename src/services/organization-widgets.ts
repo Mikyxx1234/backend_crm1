@@ -1,20 +1,29 @@
 /**
- * Service da Central de Widgets — estado de instalacao por organizacao.
+ * Service da Central de Widgets.
  *
- * A definicao dos widgets vem do catalogo estatico (`@/lib/widget-catalog`).
- * Aqui so lidamos com o ESTADO por org (ACTIVE/INACTIVE) na tabela
- * `OrganizationWidget`. O `organizationId` vem SEMPRE do contexto da request
- * (`getOrgIdOrThrow`) — nunca do body — e a Prisma Extension de
- * organization-scope reforca o isolamento.
+ * Modelo:
+ *   - `Widget` (global): catalogo de definicoes — internos (seed) + parceiros.
+ *     Lido via `prismaBase` (NAO tenant-scoped — todas as orgs veem o mesmo
+ *     catalogo de widgets `ONLINE`).
+ *   - `OrganizationWidget` (tenant-scoped): estado de instalacao por org.
+ *     Lido via `prisma` (org-scope injetado pela Prisma Extension).
+ *
+ * Regras:
+ *   - Apenas widgets `status=ONLINE` aparecem na listagem do CRM.
+ *   - Slug eh fonte de "join logico" entre Widget e OrganizationWidget
+ *     (sem FK Prisma — ver coment do schema). O service valida a existencia.
+ *   - Widgets internos sao identificados por `ownerType=INTERNAL`; no
+ *     frontend, abrem rotas proprias. Externos abrem iframe.
  */
 
 import { prisma } from "@/lib/prisma";
+import { prismaBase } from "@/lib/prisma-base";
 import { getOrgIdOrThrow } from "@/lib/request-context";
-import {
-  AVAILABLE_WIDGETS,
-  getWidgetBySlug,
-  isInstallableSlug,
-  type WidgetDefinition,
+import type {
+  WidgetAvailability,
+  WidgetDefinition,
+  WidgetOwnerType,
+  WidgetStatus,
 } from "@/lib/widget-catalog";
 
 /** Erro de slug invalido — o route handler mapeia para HTTP 400. */
@@ -34,39 +43,156 @@ export interface WidgetWithState extends WidgetDefinition {
   status: WidgetInstallStatus | null;
   /** ISO da ultima instalacao/reativacao, ou null. */
   installedAt: string | null;
+  /** Status do widget no marketplace — para o card mostrar selo "DRAFT"
+   *  caso a UI queira distinguir (no padrao listamos so ONLINE, mas o tipo
+   *  fica disponivel pra UIs futuras). */
+  marketplaceStatus: WidgetStatus;
+  /** Widget esta instalado mas indisponivel (OFFLINE no marketplace ou
+   *  parceiro SUSPENDED). UI usa pra mostrar badge "Indisponivel" e
+   *  liberar apenas o botao Desinstalar. */
+  disabled: boolean;
+  /** Motivo curto pra UI exibir junto do badge "Indisponivel". */
+  disabledReason: string | null;
 }
 
 /**
- * Lista o catalogo de widgets mesclado com o estado da organizacao atual.
- * Sempre retorna TODOS os widgets do catalogo (mesmo nao instalados).
+ * Le um Widget pelo slug (sem filtro de status). Usado para validacoes
+ * internas (instalar/desinstalar). Para listagem publica, use
+ * `listWidgetsWithState`.
+ */
+async function findWidgetBySlug(slug: string) {
+  return prismaBase.widget.findUnique({
+    where: { slug },
+    include: { partnerAccount: { select: { name: true, status: true } } },
+  });
+}
+
+/**
+ * Lista o catalogo de widgets ONLINE mesclado com o estado da organizacao
+ * atual. Inclui tambem widgets ja instalados que ficaram indisponiveis
+ * (OFFLINE no marketplace ou parceiro SUSPENDED) — marcados com
+ * `disabled: true` — pra org poder desinstalar pelo UI sem ficar com
+ * estado fantasma.
+ *
+ * Filtra parceiros com `status != ACTIVE` (SUSPENDED nao deve descobrir
+ * novos clientes), mas mantem orgs que ja instalaram esses widgets
+ * vendo-os (com `disabled: true`).
  */
 export async function listWidgetsWithState(): Promise<WidgetWithState[]> {
-  const rows = await prisma.organizationWidget.findMany({
-    select: { widgetSlug: true, status: true, installedAt: true },
-  });
-  const bySlug = new Map(rows.map((r) => [r.widgetSlug, r]));
+  const [marketplace, installations] = await Promise.all([
+    prismaBase.widget.findMany({
+      where: {
+        status: "ONLINE",
+        // Parceiros SUSPENDED somem do marketplace publico. Widgets
+        // INTERNAL (sem partnerAccount) sempre aparecem.
+        OR: [
+          { ownerType: "INTERNAL" },
+          { partnerAccount: { status: "ACTIVE" } },
+        ],
+      },
+      orderBy: [{ ownerType: "asc" }, { name: "asc" }],
+      include: { partnerAccount: { select: { name: true, status: true } } },
+    }),
+    prisma.organizationWidget.findMany({
+      select: { widgetSlug: true, status: true, installedAt: true },
+    }),
+  ]);
+  const bySlug = new Map(installations.map((r) => [r.widgetSlug, r]));
 
-  return AVAILABLE_WIDGETS.map((widget) => {
-    const row = bySlug.get(widget.slug);
-    const status = (row?.status as WidgetInstallStatus | undefined) ?? null;
+  // Marketplace primeiro. Construimos um Set de slugs marketplace pra
+  // descobrir installations "orfas" (widget ficou OFFLINE ou parceiro
+  // suspenso DEPOIS da instalacao).
+  const marketplaceSlugs = new Set(marketplace.map((w) => w.slug));
+
+  const fromMarketplace: WidgetWithState[] = marketplace.map((w) => {
+    const row = bySlug.get(w.slug);
+    const installStatus = (row?.status as WidgetInstallStatus | undefined) ?? null;
     return {
-      ...widget,
-      installed: status === "ACTIVE",
-      status,
+      slug: w.slug,
+      name: w.name,
+      description: w.description,
+      icon: w.icon,
+      category: w.category,
+      features: w.features,
+      availability: w.availability as WidgetAvailability,
+      ownerType: w.ownerType as WidgetOwnerType,
+      partnerAccountId: w.partnerAccountId,
+      iframeUrl: w.iframeUrl,
+      partnerName: w.partnerAccount?.name ?? null,
+      installed: installStatus === "ACTIVE",
+      status: installStatus,
       installedAt: row?.installedAt ? row.installedAt.toISOString() : null,
+      marketplaceStatus: w.status as WidgetStatus,
+      disabled: false,
+      disabledReason: null,
     };
   });
+
+  // Instalacoes ATIVAS de widgets que NAO estao mais no marketplace —
+  // precisamos buscar o registro do `Widget` mesmo OFFLINE pra ter
+  // metadata (nome/icone). Sem isso, a org perderia o botao "Desinstalar".
+  const orphanSlugs = installations
+    .filter((i) => i.status === "ACTIVE" && !marketplaceSlugs.has(i.widgetSlug))
+    .map((i) => i.widgetSlug);
+
+  let orphans: WidgetWithState[] = [];
+  if (orphanSlugs.length > 0) {
+    const orphanWidgets = await prismaBase.widget.findMany({
+      where: { slug: { in: orphanSlugs } },
+      include: { partnerAccount: { select: { name: true, status: true } } },
+    });
+    orphans = orphanWidgets.map((w) => {
+      const row = bySlug.get(w.slug)!;
+      const reason =
+        w.status === "OFFLINE"
+          ? "Widget tirado do ar pelo parceiro."
+          : w.partnerAccount?.status && w.partnerAccount.status !== "ACTIVE"
+            ? "Parceiro indisponível."
+            : w.status === "DRAFT"
+              ? "Widget despublicado."
+              : "Widget indisponível.";
+      return {
+        slug: w.slug,
+        name: w.name,
+        description: w.description,
+        icon: w.icon,
+        category: w.category,
+        features: w.features,
+        availability: w.availability as WidgetAvailability,
+        ownerType: w.ownerType as WidgetOwnerType,
+        partnerAccountId: w.partnerAccountId,
+        iframeUrl: w.iframeUrl,
+        partnerName: w.partnerAccount?.name ?? null,
+        installed: true,
+        status: "ACTIVE" as WidgetInstallStatus,
+        installedAt: row.installedAt.toISOString(),
+        marketplaceStatus: w.status as WidgetStatus,
+        disabled: true,
+        disabledReason: reason,
+      };
+    });
+  }
+
+  return [...fromMarketplace, ...orphans];
 }
 
 /**
  * Instala (ou reativa) um widget para a organizacao atual.
- * - Valida o slug contra o catalogo (apenas widgets "available").
- * - Se ja estiver ACTIVE, e idempotente (nao mexe em installedAt).
- * - Se existir INACTIVE, reativa atualizando installedAt/installedById.
- * - Caso contrario, cria o registro ACTIVE.
+ * - Valida que o slug existe E esta `ONLINE` (catalogo publico).
+ * - Idempotente quando ja ACTIVE.
+ * - Reativa registros INACTIVE atualizando installedAt/installedById.
  */
 export async function installWidget(slug: string, userId: string): Promise<void> {
-  if (!isInstallableSlug(slug)) throw new InvalidWidgetSlugError(slug);
+  const widget = await findWidgetBySlug(slug);
+  if (!widget || widget.status !== "ONLINE" || widget.availability !== "available") {
+    throw new InvalidWidgetSlugError(slug);
+  }
+  // Parceiro suspenso nao deve ganhar novos clientes — orgs que ja
+  // tinham instalado continuam vendo o widget como "disabled" (vide
+  // listWidgetsWithState) mas novas instalacoes sao bloqueadas.
+  if (widget.ownerType === "PARTNER" && widget.partnerAccount?.status !== "ACTIVE") {
+    throw new InvalidWidgetSlugError(slug);
+  }
   const organizationId = getOrgIdOrThrow();
 
   const existing = await prisma.organizationWidget.findUnique({
@@ -74,7 +200,6 @@ export async function installWidget(slug: string, userId: string): Promise<void>
     select: { status: true },
   });
 
-  // Ja ativo: idempotente, evita efeitos colaterais desnecessarios.
   if (existing?.status === "ACTIVE") return;
 
   await prisma.organizationWidget.upsert({
@@ -92,9 +217,12 @@ export async function installWidget(slug: string, userId: string): Promise<void>
 /**
  * Desativa um widget para a organizacao atual (status INACTIVE).
  * Nunca deleta fisicamente. Idempotente: se nao existir registro, no-op.
+ * Valida que o slug existe no catalogo (em qualquer status — pra
+ * permitir desinstalar widgets ja OFFLINE).
  */
 export async function uninstallWidget(slug: string): Promise<void> {
-  if (!getWidgetBySlug(slug)) throw new InvalidWidgetSlugError(slug);
+  const widget = await findWidgetBySlug(slug);
+  if (!widget) throw new InvalidWidgetSlugError(slug);
   const organizationId = getOrgIdOrThrow();
 
   await prisma.organizationWidget.updateMany({
@@ -106,6 +234,11 @@ export async function uninstallWidget(slug: string): Promise<void> {
 /**
  * Helper para gating futuro de features: true se a org atual tem o widget
  * ativo. O `organizationId` vem do contexto (org-scope), entao basta o slug.
+ *
+ * NAO valida `Widget.status` — um widget que ficou OFFLINE depois de
+ * instalado continua "habilitado" para a org (ate ela desinstalar
+ * explicitamente). Isso evita que o parceiro derrube o servico de orgs
+ * em producao mudando o toggle.
  */
 export async function hasOrganizationWidget(slug: string): Promise<boolean> {
   const row = await prisma.organizationWidget.findFirst({
@@ -118,7 +251,6 @@ export async function hasOrganizationWidget(slug: string): Promise<boolean> {
 /**
  * Conjunto de slugs de widgets ATIVOS na org atual. Use para gatear varios
  * itens de uma vez (ex.: `computeAvailableKeys` da sidebar) com UMA query.
- * `organizationId` vem do contexto (org-scope).
  */
 export async function getActiveWidgetSlugs(): Promise<Set<string>> {
   const rows = await prisma.organizationWidget.findMany({

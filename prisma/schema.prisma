@@ -144,19 +144,21 @@ model OrganizationFeatureFlag {
   @@map("organization_feature_flags")
 }
 
-/// Estado de instalacao dos widgets (extensoes internas) por organizacao.
+/// Estado de instalacao dos widgets (extensoes) por organizacao.
 ///
-/// A DEFINICAO de cada widget (nome, descricao, features, icone) NAO vive
-/// aqui — fica no catalogo estatico em `src/lib/widget-catalog.ts`. Esta
-/// tabela guarda apenas o estado por org: instalado/inativo, quem instalou
-/// e config futura opcional. Tenant-scoped (ver `SCOPED_MODELS` em
-/// `src/lib/prisma.ts`).
+/// A DEFINICAO de cada widget (nome, descricao, icone, iframeUrl) vive
+/// na tabela `Widget` — populada por widgets internos (seed) ou pelo
+/// portal de parceiros. Esta tabela guarda apenas o estado por org:
+/// instalado/inativo, quem instalou e config futura opcional.
+/// Tenant-scoped (ver `SCOPED_MODELS` em `src/lib/prisma.ts`).
 model OrganizationWidget {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  /// Slug do widget. Convencao snake_case. Lista canonica (whitelist) em
-  /// `src/lib/widget-catalog.ts` — o backend valida contra ela.
+  /// Slug do widget — referencia logica para `Widget.slug`. Nao usamos
+  /// FK Prisma aqui pra manter a tabela tenant-scoped sem joins
+  /// cross-org indesejados (Widget e global, OrganizationWidget e
+  /// tenant). Backend valida que o slug existe + esta `ONLINE`.
   widgetSlug     String
   /// "ACTIVE" (instalado) | "INACTIVE" (desativado, sem delete fisico).
   status         String       @default("ACTIVE")
@@ -172,6 +174,104 @@ model OrganizationWidget {
   @@index([organizationId])
   @@index([widgetSlug])
   @@map("organization_widgets")
+}
+
+/// Conta de parceiro que publica widgets no marketplace.
+///
+/// Modelo INDEPENDENTE de `User` — parceiros nao sao membros de nenhuma
+/// org do CRM. Auth gerenciada pelo `partner_portal_crm1` (Next.js
+/// separado, mesmo Postgres). NAO tenant-scoped (sem `organizationId`).
+model PartnerAccount {
+  id           String         @id @default(cuid())
+  email        String         @unique
+  name         String
+  /// Hash bcrypt da senha (gerado no portal). Nunca exposto ao CRM.
+  passwordHash String
+  /// "ACTIVE" (login liberado) | "SUSPENDED" (bloqueado pelo super-admin).
+  status       String         @default("ACTIVE")
+  widgets      Widget[]
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@map("partner_accounts")
+}
+
+/// Definicao canonica de um widget (interno ou de parceiro).
+///
+/// Substitui o catalogo estatico que vivia em `src/lib/widget-catalog.ts`.
+/// Widgets internos (`smart_distribution`, `ai_agents`) viraram seed:
+/// `ownerType=INTERNAL`, `status=ONLINE`, sem `partnerAccountId` e sem
+/// `iframeUrl` (renderizados via rota propria no CRM).
+///
+/// Widgets de parceiros (`ownerType=PARTNER`) sao criados pelo portal,
+/// tem `iframeUrl` obrigatoria e aparecem no `/widgets` do CRM apenas
+/// quando `status=ONLINE`. O parceiro controla o toggle ONLINE/OFFLINE.
+///
+/// NAO tenant-scoped — o catalogo eh GLOBAL (todas as orgs veem os
+/// mesmos widgets ONLINE; o que varia eh o estado de instalacao em
+/// `OrganizationWidget`).
+model Widget {
+  id            String          @id @default(cuid())
+  /// snake_case unico. Para internos, e estavel (gravado historicamente
+  /// em `OrganizationWidget.widgetSlug`). Para parceiros, o portal
+  /// bloqueia prefixos reservados `core_` e `crm_`.
+  slug          String          @unique
+  name          String
+  description   String
+  /// Para INTERNAL: chave de icone resolvida no frontend (ex.: "route").
+  /// Para PARTNER: URL absoluta do icone (idealmente PNG/SVG, <100KB).
+  icon          String
+  category      String
+  /// Lista curta de bullet points exibidos no card. Opcional para
+  /// parceiros — se vazio, o card renderiza so descricao.
+  features      String[]        @default([])
+  /// Origem do widget.
+  ownerType     WidgetOwnerType
+  /// FK pra `PartnerAccount` — NULL quando `ownerType=INTERNAL`.
+  partnerAccountId String?
+  partnerAccount   PartnerAccount? @relation(fields: [partnerAccountId], references: [id], onDelete: Cascade)
+  /// URL do app do parceiro (iframe). NULL para INTERNAL (renderizado
+  /// pela rota propria no CRM).
+  iframeUrl     String?
+  /// Disponibilidade visual no card ("available" | "coming_soon").
+  /// Independente de `status` — um widget pode estar ONLINE mas
+  /// "coming_soon" (visivel no card, sem botao instalar).
+  availability  String          @default("available")
+  /// "DRAFT" (so o dono ve) | "ONLINE" (no marketplace) | "OFFLINE"
+  /// (escondido temporariamente, sem deletar). Parceiro controla
+  /// pelo portal; internos ficam sempre ONLINE.
+  status        WidgetStatus    @default(DRAFT)
+  /// Resultado do ultimo healthcheck rodado pelo portal (HEAD/GET na
+  /// `iframeUrl` + check de X-Frame-Options/CSP). Usado pra bloquear
+  /// publish ONLINE quando a URL nao carrega ou recusa embed.
+  healthcheckOk      Boolean?
+  healthcheckAt      DateTime?
+  /// Mensagem curta de diagnostico do ultimo healthcheck (ex.:
+  /// "HTTP 500", "X-Frame-Options: DENY", "Connection timeout").
+  healthcheckMessage String?
+  createdAt     DateTime        @default(now())
+  updatedAt     DateTime        @updatedAt
+
+  @@index([status])
+  @@index([partnerAccountId])
+  @@map("widgets")
+}
+
+enum WidgetOwnerType {
+  /// Widget interno do CRM (renderizado por rota propria).
+  INTERNAL
+  /// Widget de parceiro (iframe externo).
+  PARTNER
+}
+
+enum WidgetStatus {
+  /// Rascunho — so o parceiro dono ve no portal. NAO aparece no /widgets.
+  DRAFT
+  /// Publicado no marketplace — aparece em todas as orgs.
+  ONLINE
+  /// Despublicado temporariamente — escondido do /widgets sem deletar.
+  /// Orgs que ja instalaram mantem o registro mas o card some.
+  OFFLINE
 }
 
 enum OrgStatus {

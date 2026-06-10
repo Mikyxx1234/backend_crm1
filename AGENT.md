@@ -5,6 +5,154 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-10 (PR 2) — Hardening do marketplace de widgets (robustez do iframe + rate limits + healthcheck bloqueante)
+
+**Decisão.** Camada de proteção sobre o marketplace MVP do mesmo dia,
+endereçando os riscos críticos identificados em análise (iframe sem
+detecção de falha, sem rate limit no SSO, instalações órfãs, sem
+healthcheck no publish). Quatro frentes:
+
+1. **Runner do iframe à prova de falha** (`SafePartnerIframe`): overlay
+   de loading até `onload` ou timeout de 20s; estado de erro acionável
+   com "Tentar novamente" + "Abrir em nova aba" (sem token na URL);
+   refresh real do iframe quando o token SSO renova (via `key`);
+   `referrerPolicy="no-referrer"` no iframe e no ícone.
+2. **Healthcheck bloqueante no portal** (`partner_portal_crm1/src/services/widget-healthcheck.ts`):
+   HEAD com fallback GET (timeout 8s) que verifica reachability (2xx/3xx),
+   anti-embed (`X-Frame-Options: DENY/SAMEORIGIN`, CSP `frame-ancestors`)
+   e HTTPS em prod. Resultado salvo em `widgets.healthcheckOk/At/Message`
+   (migration `20260610170000_add_widget_healthcheck`). `setAppStatus(ONLINE)`
+   **bloqueia** se healthcheck não passou; editar `iframeUrl` invalida
+   healthcheck e força reteste antes de re-publicar.
+3. **Rate limits no backend** (usando `withRateLimit` que já existe):
+   `auth.public` (10/min/IP) em `POST /api/public/widgets/sso/verify`
+   (HMAC custa CPU; alvo natural pra brute-force); `api.default` em
+   `GET /api/widgets/:slug/sso-token` (user), `POST install`/`uninstall`
+   (org).
+4. **Instalações órfãs e parceiro suspenso**: `listWidgetsWithState()`
+   filtra parceiros `status != ACTIVE` do marketplace, MAS ainda devolve
+   widgets que a org já instalou (mesmo OFFLINE/parceiro suspenso) com
+   `disabled: true` + `disabledReason` — sem isso, a org perderia o
+   botão Desinstalar e ficaria com estado fantasma. `installWidget`
+   bloqueia nova instalação se parceiro SUSPENDED.
+
+**Contexto.** O usuário pediu que o marketplace fosse "funcional, sem
+crashar ou dar erro" mesmo com parceiros cadastrando apps reais.
+Análise dos 3 repos identificou 5 riscos críticos (iframe sem
+fallback, sem rate limit no verify, instalações órfãs, sem
+healthcheck, JWT na query string). PR endereça os 4 primeiros; o 5º
+(JWT em postMessage em vez de query) ficou pra fase futura porque
+muda o contrato com parceiros.
+
+**Alternativas descartadas.**
+- *Não fazer healthcheck (só rodar quando o usuário abre)*: descobrir
+  app morto quando o cliente CRM tenta usar é UX inaceitável. O custo
+  de uma chamada HEAD por publish/teste manual é trivial.
+- *Bloquear instalação quando widget vai OFFLINE depois*: quebraria
+  orgs em produção quando o parceiro mexe no toggle. Manter "disabled
+  mas removível" preserva a autonomia da org.
+- *Rate limit no verify por slug*: parceiro malicioso pode usar 1 slug
+  e ainda burlar. Por IP é mais robusto (e o JWT carrega autorização).
+- *Tentar detectar X-Frame-Options dentro do browser do CRM*:
+  impossível cross-origin (security boundary). Só `onload` timeout
+  funciona — é o que `SafePartnerIframe` faz.
+
+**Impacto.**
+- Schema: `Widget` ganha `healthcheckOk`, `healthcheckAt`,
+  `healthcheckMessage` (nullable; sem backfill — widgets internos não
+  precisam). Replicado em `partner_portal_crm1/prisma/schema.prisma`.
+- Backend: 4 endpoints com rate limit; `listWidgetsWithState` retorna
+  `disabled`/`disabledReason`; `installWidget` rejeita parceiro suspenso.
+- Frontend: `WidgetDto` ganha `disabled?`/`disabledReason?`; card mostra
+  badge "Indisponível" e esconde botão Abrir; runner `/widgets/[slug]`
+  envolve iframe em `SafePartnerIframe` com timeout 20s + UX de erro;
+  ícone com `onError` → fallback `IconPuzzle`.
+- Portal: `MAX_APPS_PER_PARTNER = 20`; `runHealthcheck` em
+  `services/widget-healthcheck.ts`; UI de edit mostra resultado do
+  healthcheck + botão "Rodar teste de conexão"; "Publicar ONLINE"
+  desabilitado até passar.
+- Telemetria: `getLogger("widgets.sso")` em emissão (info: ok / error:
+  fail) e em verify (debug: ok / info: failed por `reason`); frontend
+  `console.info/warn/error` com tag `widget.iframe` (load_ok/timeout/error)
+  e duração — pronto pra plugar em analytics no futuro.
+
+---
+
+### 2026-06-10 — Marketplace de widgets com SSO via JWT + portal de parceiros (repo separado)
+
+**Decisão.** A Central de Widgets (antes catálogo estático em
+`src/lib/widget-catalog.ts`) virou marketplace: definição passou pra
+tabela `Widget` (Postgres global, não tenant-scoped) com `ownerType`
+(`INTERNAL` | `PARTNER`) + `status` (`DRAFT` | `ONLINE` | `OFFLINE`).
+Widgets internos viraram seed (`smart_distribution`, `ai_agents`,
+`status=ONLINE`); widgets de parceiros são cadastrados pelo novo repo
+`partner_portal_crm1` e renderizados como **iframe** no CRM em
+`/widgets/[slug]`, com um JWT SSO curto (5 min) carregando contexto
+(`orgId`, `userId`, `userEmail`, `orgName`, `widgetSlug`) que o backend
+do parceiro valida via `POST /api/public/widgets/sso/verify`.
+
+**Contexto.** O usuário pediu uma forma de parceiros publicarem apps que
+apareçam na seção de widgets. A escolha foi modelo Zendesk/Pipedrive
+(iframe + SSO), porque:
+- Parceiros podem usar qualquer stack (Easypanel já é o hosting deles).
+- Nada roda no servidor do CRM além da emissão do JWT — superfície de
+  ataque mínima, sem upload de código de terceiros.
+- Toggle ONLINE/OFFLINE pelo próprio parceiro evita gargalo de revisão
+  manual no MVP (sempre dá pra adicionar moderação depois).
+
+**Alternativas descartadas.**
+- *Apps "nativos"* (parceiro sobe bundle JS que o CRM carrega): exige
+  sandbox forte (Web Workers/iframes próprios), versionamento, segurança
+  de dependências — escopo enorme pro MVP.
+- *Webhooks puros* (parceiro só recebe eventos, sem UI no CRM): não
+  resolve "aparecer no marketplace e ter tela própria dentro do CRM".
+- *Monorepo (pnpm workspaces) já no MVP*: aceleraria a duplicação do
+  schema entre `backend_crm1` e `partner_portal_crm1`, mas exige
+  reorganizar deploy/Easypanel de 3 apps. Adiado — copia manual do
+  schema com aviso nos READMEs basta enquanto só dois modelos são
+  compartilhados.
+
+**Impacto.**
+- Schema: `Widget`, `PartnerAccount`, enums `WidgetOwnerType` /
+  `WidgetStatus`, migrations `20260610130000_add_widget_marketplace` +
+  `20260610140000_add_widget_features`. `OrganizationWidget` permanece
+  intacto (estado de instalação por org, tenant-scoped) e continua
+  ligando ao catálogo por `widgetSlug` — referência LÓGICA, sem FK
+  Prisma, pra manter tenant-scope limpo (Widget é global).
+- `src/services/organization-widgets.ts`: passa a ler de `Widget` via
+  `prismaBase` (global) + `OrganizationWidget` via `prisma` (org-scoped).
+  Só widgets `status=ONLINE` aparecem. `installWidget` valida que o
+  slug existe e está ONLINE; `hasOrganizationWidget` NÃO valida status
+  do widget — uma org que já instalou continua "habilitada" mesmo se o
+  parceiro tirar OFFLINE (evita parceiro derrubar serviço em produção
+  trocando o toggle).
+- `src/services/widget-sso.ts` + `WIDGET_SSO_SECRET`: emissão e verificação
+  do JWT HS256 com `iss=crm-widgets-sso` e `aud=widget:<slug>`. Segredo
+  separado do `AUTH_SECRET` (escopo isolado — comprometer um não expõe
+  o outro). Em dev cai num fallback derivado do `AUTH_SECRET` pra não
+  quebrar setups locais.
+- `GET /api/widgets/:slug/sso-token` (auth requerida, org precisa ter
+  o widget instalado e ativo) + `POST /api/public/widgets/sso/verify`
+  (público, CORS `*`, sem cookie — confiança vem só da assinatura HMAC).
+- Frontend: tipo `WidgetDto` ganha `ownerType`/`iframeUrl`/`partnerName`/
+  `marketplaceStatus`; card mostra badge "Parceiro: X" quando PARTNER e
+  botão **Abrir**; nova rota `/widgets/[slug]` redireciona widgets
+  INTERNAL com rota própria (ex.: `smart_distribution`) e renderiza
+  iframe sandbox (`allow-scripts allow-forms allow-same-origin
+  allow-popups-to-escape-sandbox`) pros PARTNER, com refresh automático
+  do token a cada 4 min.
+- Novo repo `partner_portal_crm1` (irmão de `backend_crm1`/`frontend_crm1`):
+  Next.js 15 + NextAuth Credentials + Prisma apontando pro mesmo
+  Postgres (apenas `Widget` e `PartnerAccount` no schema duplicado).
+  CRUD de apps, toggle ONLINE/OFFLINE/DRAFT, contagem de installs via
+  `$queryRaw` em `organization_widgets` (evita duplicar o modelo no
+  portal).
+- Sincronia de schema entre repos: copia manual com aviso explícito nos
+  READMEs dos dois lados ("alterou aqui? sincroniza lá"). Não é o ideal,
+  mas é o trade-off consciente do MVP.
+
+---
+
 ### 2026-06-09 — Ganho/Perdido viram ESTÁGIOS FIXOS do pipeline (modelo Kommo)
 
 **Decisão.** Todo pipeline passa a terminar em dois estágios fixos —

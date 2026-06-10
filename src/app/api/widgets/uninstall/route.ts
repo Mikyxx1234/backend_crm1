@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { isAdmin, withOrgContext } from "@/lib/auth-helpers";
-import { WIDGET_SLUGS } from "@/lib/widget-catalog";
+import { withRateLimit } from "@/lib/rate-limit";
+import { isValidWidgetSlug } from "@/lib/widget-catalog";
 import {
   InvalidWidgetSlugError,
   uninstallWidget,
@@ -11,6 +12,7 @@ import {
  * POST /api/widgets/uninstall
  * Body: { slug: string }
  * Desativa um widget para a organizacao (status INACTIVE, sem delete). Apenas ADMIN.
+ * A validacao de existencia ocorre no service.
  * TODO(authz): migrar para permission key "settings:widgets" quando existir.
  */
 export async function POST(request: Request) {
@@ -22,11 +24,19 @@ export async function POST(request: Request) {
       );
     }
 
+    const rl = await withRateLimit({
+      route: "POST /api/widgets/uninstall",
+      profile: "api.default",
+      scope: "org",
+      id: session.user.organizationId,
+    });
+    if (!rl.ok) return rl.response as unknown as NextResponse;
+
     const body = (await request.json().catch(() => null)) as {
       slug?: unknown;
     } | null;
     const slug = typeof body?.slug === "string" ? body.slug.trim() : "";
-    if (!slug || !WIDGET_SLUGS.has(slug)) {
+    if (!slug || !isValidWidgetSlug(slug)) {
       return NextResponse.json(
         { message: "Widget inválido." },
         { status: 400 },

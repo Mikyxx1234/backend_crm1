@@ -161,6 +161,9 @@ export async function middleware(req: NextRequest) {
       pathname.startsWith("/api/webhooks") ||
       pathname.startsWith("/api/health") ||
       pathname.startsWith("/api/cron") ||
+      // Endpoints publicos do marketplace de widgets — parceiros chamam
+      // do backend deles sem cookie (a confianca esta no JWT assinado).
+      pathname.startsWith("/api/public/") ||
       pathname.startsWith("/_next") ||
       pathname.startsWith("/favicon.ico")
     ) {
