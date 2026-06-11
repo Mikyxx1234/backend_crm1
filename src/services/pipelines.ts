@@ -64,10 +64,18 @@ export async function ensureDefaultPipeline() {
   });
 }
 
-export async function getPipelines() {
+export async function getPipelines(options?: { allowedPipelineIds?: string[] | null }) {
   await ensureDefaultPipeline();
 
+  // `allowedPipelineIds === null/undefined` → sem restrição (todos). Array
+  // (mesmo vazio) → restringe ao escopo do usuário.
+  const allowed = options?.allowedPipelineIds;
+  const where: Prisma.PipelineWhereInput | undefined = allowed
+    ? { id: { in: allowed } }
+    : undefined;
+
   const pipelines = await prisma.pipeline.findMany({
+    where,
     orderBy: { createdAt: "asc" },
     include: {
       stages: {

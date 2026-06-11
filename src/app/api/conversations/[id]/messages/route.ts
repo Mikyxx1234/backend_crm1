@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { userOrgFilter } from "@/lib/auth-helpers";
 import type { AppUserRole } from "@/lib/auth-types";
+import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
@@ -260,6 +261,14 @@ export async function POST(request: Request, context: RouteContext) {
         ? b.messageType
         : "outgoing";
     const isPrivateNote = b.private === true || messageType === "note";
+
+    // Escopo de canal: enviar mensagem exige permissão de "send" no canal
+    // da conversa. Notas privadas são internas e não passam pelo canal.
+    if (!isPrivateNote) {
+      const sendDenied = await requireChannelScope(authResult.user, "send", conv.channelId);
+      if (sendDenied) return sendDenied;
+    }
+
     const senderName = authResult.user.name ?? authResult.user.email ?? "Agente";
     const replyRef = typeof b.replyToId === "string" ? b.replyToId.trim() : "";
 

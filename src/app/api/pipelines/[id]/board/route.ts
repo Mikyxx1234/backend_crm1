@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePipelineScope } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import {
   getBoardData,
@@ -47,6 +48,9 @@ export async function GET(request: Request, context: RouteContext) {
       if (!meta) {
         return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
       }
+
+      const scopeDenied = await requirePipelineScope(session.user, "view", pipelineId);
+      if (scopeDenied) return scopeDenied;
 
       const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
       const visibility = await getVisibilityFilter(user);
@@ -101,6 +105,9 @@ export async function POST(request: Request, context: RouteContext) {
       if (!meta) {
         return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
       }
+
+      const scopeDenied = await requirePipelineScope(session.user, "view", pipelineId);
+      if (scopeDenied) return scopeDenied;
 
       const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
       const visibility = await getVisibilityFilter(user);

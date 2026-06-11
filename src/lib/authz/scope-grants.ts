@@ -7,10 +7,15 @@ export type {
   ScopeGrants,
   CrmActionKey,
   CrmActionGrants,
+  UserScopeGrants,
 } from "@/lib/authz/scope-grants-shared";
 export {
   canAccessField,
   canAccessScopedResource,
+  canAccessPipelineForUser,
+  canAccessChannelForUser,
+  listAllowedPipelineIdsForUser,
+  listAllowedChannelIdsForUser,
   canSeeInboxTab,
   canSeeSettingsItem,
   canSeeSidebarRoute,

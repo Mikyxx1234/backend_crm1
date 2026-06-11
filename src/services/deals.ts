@@ -98,6 +98,11 @@ export type GetDealsParams = {
   page?: number;
   perPage?: number;
   visibilityWhere?: Prisma.DealWhereInput;
+  /**
+   * Escopo de funis por usuário. `null/undefined` → sem restrição; array
+   * (mesmo vazio) → restringe deals aos estágios desses funis.
+   */
+  allowedPipelineIds?: string[] | null;
 };
 
 const listInclude = {
@@ -127,6 +132,9 @@ export async function getDeals(params: GetDealsParams = {}) {
 
   if (params.pipelineId) {
     conditions.push({ stage: { pipelineId: params.pipelineId } });
+  }
+  if (params.allowedPipelineIds) {
+    conditions.push({ stage: { pipelineId: { in: params.allowedPipelineIds } } });
   }
   if (params.stageId) {
     conditions.push({ stageId: params.stageId });

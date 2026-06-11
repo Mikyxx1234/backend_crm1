@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
-import { requirePermissionForUser, requirePipelineScope, requireStageScope } from "@/lib/authz/resource-policy";
+import { listAllowedPipelineIds, requirePermissionForUser, requireStageScope } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, getDeals, isValidDealStatus } from "@/services/deals";
@@ -40,6 +40,10 @@ export async function GET(request: Request) {
     const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
     const visibility = await getVisibilityFilter(user);
 
+    // Escopo de funis por usuário aplicado no WHERE (eficiente e correto
+    // com paginação). Escopo de etapa segue como pós-filtro por item.
+    const allowedPipelineIds = await listAllowedPipelineIds(authResult.user);
+
     const result = await getDeals({
       pipelineId,
       stageId,
@@ -52,14 +56,13 @@ export async function GET(request: Request) {
       page,
       perPage,
       visibilityWhere: visibility.dealWhere,
+      allowedPipelineIds,
     });
 
     const items = await Promise.all(
       result.items.map(async (deal) => {
         const stageDenied = await requireStageScope(authResult.user, "view", deal.stageId);
         if (stageDenied) return null;
-        const pipelineDenied = await requirePipelineScope(authResult.user, "view", deal.stage.pipelineId);
-        if (pipelineDenied) return null;
         return deal;
       }),
     );

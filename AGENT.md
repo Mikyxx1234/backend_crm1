@@ -5,6 +5,58 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-09 — Escopo por usuário de funis e canais (ScopeGrants estendido)
+
+**Decisão.** Permitir que um usuário individual tenha acesso só a funis
+específicos e só veja/envie mensagens em canais específicos, estendendo o
+sistema `ScopeGrants` existente (`permissions.scope.grants.v1`) em vez de
+criar tabela nova. Tudo atrás da flag `rbac_granular_scope_v1`.
+
+**Por quê estender ScopeGrants e não tabela nova.** Já existe storage
+(`OrganizationSetting`), flag, normalização (`parseScopeGrants`) e enforcement
+plumbing (`resource-policy.ts`). O override por usuário espelha o precedente
+`crm.users[userId]`. Menos superfície, zero migration.
+
+**Shape adicionado** (`scope-grants-shared.ts`, back + cópia front):
+- `pipeline.users[userId] = string[]` — IDs de funis visíveis (`["*"]` = todos,
+  `[]` = nenhum, chave ausente = cai na regra por papel / liberado).
+- `channel.view.users[userId]` e `channel.send.users[userId]` — IDs de canais
+  (`Channel.id`). Canais não tinham regra legada por papel, só override por
+  usuário. `send` exige também `view`.
+
+**Helpers puros novos:** `canAccessPipelineForUser`,
+`listAllowedPipelineIdsForUser`, `canAccessChannelForUser`,
+`listAllowedChannelIdsForUser`. Em `resource-policy.ts`:
+`listAllowedPipelineIds`, `requireChannelScope`, `listAllowedChannelIds`;
+`requirePipelineScope("view")` passou a considerar o override por usuário.
+
+**Enforcement aplicado:**
+- Funis: `getPipelines({allowedPipelineIds})`, `getDeals({allowedPipelineIds})`
+  (filtro no WHERE — corrige paginação) e o board do kanban
+  (`pipelines/[id]/board` GET+POST, que antes **não** checava scope — gap
+  fechado).
+- Canais: `getConversations`/`getTabCounts` (filtro `channelId in [...]`),
+  `userHasConversationAccess` (acesso individual) e todas as rotas de envio
+  (`messages`, `attachments`, `template`, `create`). Notas privadas não passam
+  pelo gate de `send` (são internas).
+
+**API de escrita:** endpoint dedicado `GET/PUT /api/users/[id]/scope-grants`
+que faz **read-merge-write** — nunca apaga regras de outros usuários/papéis
+(diferente de `PUT /api/settings/permissions`, cujo `setScopeGrants` substitui
+o objeto inteiro). `null` = sem restrição (remove a chave do user); array =
+restringe.
+
+**Não mexido de propósito:** `effective-permissions` continua devolvendo
+`channelGrants: []` — no front esse campo significa *tipos* de canal
+(whatsapp/instagram), não IDs; preencher com IDs quebraria o filtro da inbox.
+O backend é a fonte de verdade do enforcement.
+
+**UI.** Editor por usuário em `UserPermissionsView` (sheet "Gerenciar"):
+multiselect de funis + canais (ver/enviar), com toggle "Todos". Só tem efeito
+real com a flag ligada.
+
+---
+
 ### 2026-06-10 (PR 2) — Hardening do marketplace de widgets (robustez do iframe + rate limits + healthcheck bloqueante)
 
 **Decisão.** Camada de proteção sobre o marketplace MVP do mesmo dia,
