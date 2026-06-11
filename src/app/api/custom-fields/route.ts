@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
@@ -31,23 +32,36 @@ async function buildUniqueFieldName(base: string, entity: string): Promise<strin
   return `${root}_${i}`;
 }
 
+// Migrado de `withOrgContext` (somente cookie NextAuth) para o par
+// `authenticateApiRequest` + `runWithApiUserContext` — mesmo padrão já
+// aplicado nas rotas por entidade (`/api/contacts/:id/custom-fields`,
+// `/api/deals/:id/custom-fields`). Permite que integrações Bearer (n8n)
+// montem dropdowns com a lista de campos personalizados.
+//
+// Autorização: a listagem retorna apenas DEFINIÇÕES de campos
+// (id/nome/label/tipo/opções), dado não-sensível e já exposto via as
+// rotas por entidade acima. Para `entity=deal` mantemos o gate de
+// visualização (`deal:view`); contato segue o padrão de `/api/contacts`
+// (apenas autenticação). POST permanece restrito (sessão + settings).
 export async function GET(request: Request) {
-  return withOrgContext(async (session) => {
-    try {
-      const denied = await requirePermissionForUser(
-        session.user as { id: string; organizationId: string | null; role?: string | null; isSuperAdmin?: boolean },
-        "settings:custom_fields",
-      );
-      if (denied) return denied;
+  try {
+    const authResult = await authenticateApiRequest(request);
+    if (!authResult.ok) return authResult.response;
+
+    return await runWithApiUserContext(authResult.user, async () => {
       const url = new URL(request.url);
       const entity = url.searchParams.get("entity") || undefined;
+      if ((entity ?? "contact") === "deal") {
+        const denied = await requirePermissionForUser(authResult.user, "deal:view");
+        if (denied) return denied;
+      }
       const fields = await getCustomFields(entity);
       return NextResponse.json(fields);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Erro ao listar campos.";
-      return NextResponse.json({ message: msg }, { status: 500 });
-    }
-  });
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Erro ao listar campos.";
+    return NextResponse.json({ message: msg }, { status: 500 });
+  }
 }
 
 export async function POST(request: Request) {
