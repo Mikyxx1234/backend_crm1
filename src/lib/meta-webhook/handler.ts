@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
+import { nextContactNumber } from "@/services/contacts";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -518,6 +519,7 @@ async function resolveWebhookContact(
 
   const created = await prisma.contact.create({
     data: withOrgFromCtx({
+      number: await nextContactNumber(),
       name,
       ...(phone ? { phone } : {}),
       ...(bsuid ? { whatsappBsuid: bsuid } : {}),

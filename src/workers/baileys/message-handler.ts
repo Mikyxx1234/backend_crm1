@@ -8,6 +8,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { fireTrigger } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
+import { nextContactNumber } from "@/services/contacts";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -96,6 +97,7 @@ async function resolveContact(
   const name = pushName || `Lead ${phone}`;
   const created = await prisma.contact.create({
     data: withOrgFromCtx({
+      number: await nextContactNumber(),
       name,
       phone,
       lifecycleStage: "LEAD" as const,

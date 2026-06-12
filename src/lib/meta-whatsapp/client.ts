@@ -5,6 +5,20 @@ import { metaErrorReason } from "@/lib/meta-whatsapp/error-catalog";
 const GRAPH_VERSION = "v21.0";
 
 /**
+ * Timeout das chamadas à Graph/Cloud API da Meta.
+ *
+ * Por que existe: sem timeout, um envio (ex.: POST de template) podia ficar
+ * pendurado esperando a Meta e estourar o tempo limite do proxy reverso
+ * (EasyPanel/Traefik) — que então devolve um 502 com HTML, sem JSON tratável.
+ * Falhando aqui antes (com Error claro), o handler responde JSON 502/500 e o
+ * erro é persistido em `Message.sendError` de forma legível.
+ *
+ * 20s fica bem abaixo do timeout típico de gateway (30–60s) e folgado para a
+ * latência normal da Meta (< 2s na maioria dos envios).
+ */
+const GRAPH_TIMEOUT_MS = 20_000;
+
+/**
  * Estrutura oficial de erro do Graph/Cloud API (v16+), documentada em
  * https://developers.facebook.com/docs/graph-api/guides/error-handling/
  * e https://developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes
@@ -229,7 +243,27 @@ export class MetaWhatsAppClient {
       headers.set("Content-Type", "application/json");
     }
 
-    const res = await fetch(url, { ...init, headers, cache: "no-store" });
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        ...init,
+        headers,
+        cache: "no-store",
+        signal: init.signal ?? AbortSignal.timeout(GRAPH_TIMEOUT_MS),
+      });
+    } catch (err) {
+      // AbortSignal.timeout dispara TimeoutError; AbortController, AbortError.
+      if (
+        err instanceof Error &&
+        (err.name === "TimeoutError" || err.name === "AbortError")
+      ) {
+        console.error(`[MetaWA] timeout ${GRAPH_TIMEOUT_MS}ms em ${path}`);
+        throw new Error(
+          `Tempo limite ao comunicar com a Meta (${GRAPH_TIMEOUT_MS}ms) em ${path}. Tente novamente.`,
+        );
+      }
+      throw err;
+    }
     const text = await res.text();
     let data: unknown;
     try { data = JSON.parse(text); } catch { data = text; }

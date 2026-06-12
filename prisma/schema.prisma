@@ -880,6 +880,10 @@ model OrganizationSetting {
 
 model Contact {
   id                     String         @id @default(cuid())
+  /// Número sequencial por organização (1, 2, 3...).
+  /// Gerenciado no app layer via nextContactNumber() — ver services/contacts.ts.
+  /// Sem default no banco; a camada de serviço atribui max+1 com retry em P2002.
+  number                 Int
   /// ID no sistema de origem (ex.: Kommo) — reimportação atualiza o mesmo registro.
   /// Unicidade é por organização (cada empresa pode importar Kommos diferentes).
   externalId             String?        @map("external_id")
@@ -943,9 +947,11 @@ model Contact {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([organizationId, number])
   @@unique([organizationId, externalId])
   @@unique([organizationId, whatsappBsuid])
   @@index([organizationId])
+  @@index([organizationId, number])
   @@index([organizationId, email])
   @@index([organizationId, phone])
   @@index([organizationId, whatsappJid])

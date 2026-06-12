@@ -380,7 +380,7 @@ export async function linkContactToConversation(conversationId: string, contactI
   return prisma.conversation.update({
     where: { id: conversationId },
     data: { contactId },
-    include: { contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } } },
+    include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 }
 
@@ -388,7 +388,7 @@ export async function getConversationById(id: string) {
   const conv = await prisma.conversation.findUnique({
     where: { id },
     include: {
-      contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } },
+      contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
       assignedTo: { select: { id: true, name: true, email: true } },
     },
   });
@@ -466,7 +466,7 @@ export async function assignConversationAssignedTo(
         ...(shouldResetGreeted ? { aiGreetedAt: null } : {}),
       },
       include: {
-        contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } },
+        contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
         assignedTo: { select: { id: true, name: true, email: true } },
       },
     });
@@ -501,6 +501,6 @@ export async function updateConversationStatusInDb(id: string, status: Conversat
   return prisma.conversation.update({
     where: { id },
     data: { status },
-    include: { contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } } },
+    include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 }

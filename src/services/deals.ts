@@ -204,7 +204,7 @@ export async function getDeals(params: GetDealsParams = {}) {
 const detailInclude = {
   contact: {
     select: {
-      id: true, name: true, email: true, phone: true, avatarUrl: true,
+      id: true, number: true, name: true, email: true, phone: true, avatarUrl: true,
       conversations: {
         orderBy: { updatedAt: "desc" as const },
         select: {
