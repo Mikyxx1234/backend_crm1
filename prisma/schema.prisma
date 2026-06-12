@@ -1193,6 +1193,8 @@ model Pipeline {
   isDefault         Boolean            @default(false)
   stages            Stage[]
   distributionRules DistributionRule[]
+  /// Canais cujo inbound roteia para este funil (Channel.defaultPipelineId).
+  channels          Channel[]
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
 
@@ -2185,6 +2187,11 @@ model Channel {
   lastConnectedAt DateTime?
   qrCode          String?         @db.Text
   sessionData     Json?
+  /// Funil de destino do inbound deste canal. Null = usa o funil padrão da
+  /// org (comportamento legado). SetNull ao apagar o funil — o canal volta
+  /// ao roteamento padrão em vez de quebrar.
+  defaultPipelineId String?
+  defaultPipeline   Pipeline?     @relation(fields: [defaultPipelineId], references: [id], onDelete: SetNull)
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt
 
@@ -2197,6 +2204,7 @@ model Channel {
   @@index([organizationId, status])
   @@index([organizationId, type, status])
   @@index([organizationId, provider, status])
+  @@index([defaultPipelineId])
   /// Lookup pelo webhook Meta: `phone_number_id` chega na URL do webhook
   /// antes de haver sessão; usamos este índice pra achar o Channel
   /// (e daí resolver organizationId) em tempo de requisição.

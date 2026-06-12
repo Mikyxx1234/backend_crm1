@@ -33,6 +33,13 @@ type EnsureOpenDealOptions = {
   source?: EnsureOpenDealSource;
   /** Prefixo usado em logs para identificar a origem do chamador. */
   logTag?: string;
+  /**
+   * Canal de origem do inbound. Quando informado e o canal tiver um
+   * `defaultPipelineId` válido, o deal é criado NAQUELE funil — é assim que
+   * cada canal (WhatsApp, e-mail, etc.) roteia para o funil configurado.
+   * Ausente ou sem funil configurado → fallback para o funil padrão da org.
+   */
+  channelId?: string | null;
 };
 
 type EnsureOpenDealResult =
@@ -52,7 +59,7 @@ type EnsureOpenDealResult =
 export async function ensureOpenDealForContact(
   options: EnsureOpenDealOptions,
 ): Promise<EnsureOpenDealResult> {
-  const { contactId, contactName, source = "auto_whatsapp", logTag = "auto-deals" } = options;
+  const { contactId, contactName, source = "auto_whatsapp", logTag = "auto-deals", channelId } = options;
 
   // Fast path: contato já tem deal aberto → nada a fazer.
   const existing = await prisma.deal.findFirst({
@@ -64,14 +71,33 @@ export async function ensureOpenDealForContact(
     return { status: "existing", dealId: existing.id };
   }
 
-  // 27/mai/26 — Prioriza pipeline marcado como `isDefault` (configurado
-  // via UI de pipelines). Cai pro mais antigo só como fallback quando
-  // nenhum default existe. Antes pegava sempre o mais antigo, o que
-  // confundia operadores com mais de um pipeline (lead aparecia no
-  // pipeline errado).
-  const pipeline = await prisma.pipeline.findFirst({
-    orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
-  });
+  // Roteamento por canal: se o inbound veio de um canal com `defaultPipelineId`
+  // configurado, o lead vai pra ESSE funil. Permite que cada WhatsApp/e-mail
+  // rode no seu próprio funil em vez de tudo cair no padrão da org.
+  let pipeline: { id: string } | null = null;
+  if (channelId) {
+    const channel = await prisma.channel.findUnique({
+      where: { id: channelId },
+      select: { defaultPipelineId: true },
+    });
+    if (channel?.defaultPipelineId) {
+      pipeline = await prisma.pipeline.findUnique({
+        where: { id: channel.defaultPipelineId },
+        select: { id: true },
+      });
+    }
+  }
+
+  // 27/mai/26 — Fallback: prioriza pipeline marcado como `isDefault`
+  // (configurado via UI de pipelines). Cai pro mais antigo só como fallback
+  // quando nenhum default existe. Antes pegava sempre o mais antigo, o que
+  // confundia operadores com mais de um pipeline (lead aparecia no errado).
+  if (!pipeline) {
+    pipeline = await prisma.pipeline.findFirst({
+      orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
+      select: { id: true },
+    });
+  }
   if (!pipeline) {
     console.warn(`[${logTag}] nenhum pipeline encontrado — deal não criado para ${contactName}`);
     return { status: "skipped", reason: "no_pipeline" };

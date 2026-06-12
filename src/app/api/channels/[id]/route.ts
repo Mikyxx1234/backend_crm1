@@ -101,6 +101,21 @@ export async function PUT(request: Request, context: RouteContext) {
           ? b.phoneNumber.trim()
           : null;
     }
+    if (b.defaultPipelineId !== undefined) {
+      if (
+        b.defaultPipelineId !== null &&
+        typeof b.defaultPipelineId !== "string"
+      ) {
+        return NextResponse.json(
+          { message: "defaultPipelineId deve ser string ou null." },
+          { status: 400 },
+        );
+      }
+      patch.defaultPipelineId =
+        typeof b.defaultPipelineId === "string" && b.defaultPipelineId.trim() !== ""
+          ? b.defaultPipelineId.trim()
+          : null;
+    }
 
     if (Object.keys(patch).length === 0) {
       return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });

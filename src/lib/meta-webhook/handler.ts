@@ -482,11 +482,15 @@ async function resolveWebhookContact(
     // Garante deal aberto para contato pré-existente (idempotente). Sem
     // isso, contatos antigos sem deal ficavam "órfãos" no Painel CRM do
     // Inbox ("Nenhum negócio aberto") mesmo conversando ativamente.
+    // `channelId` roteia o lead para o funil configurado no canal de origem.
+    const existingRoutingChannelId =
+      (await findChannelByPhoneNumberId(phoneNumberId))?.id ?? null;
     ensureOpenDealForContact({
       contactId: contactRow.id,
       contactName: contactRow.name,
       source: "auto_whatsapp",
       logTag: "meta-webhook",
+      channelId: existingRoutingChannelId,
     }).catch((err) =>
       log.warn("Falha ao garantir deal aberto:", err),
     );
@@ -539,6 +543,7 @@ async function resolveWebhookContact(
     contactName: name,
     source: "auto_whatsapp",
     logTag: "meta-webhook",
+    channelId: (await findChannelByPhoneNumberId(phoneNumberId))?.id ?? null,
   }).catch((err) =>
     log.warn("Falha ao garantir deal aberto:", err),
   );

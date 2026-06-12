@@ -44,6 +44,12 @@ export type UpdateChannelData = {
   qrCode?: string | null;
   sessionData?: Prisma.InputJsonValue | null;
   lastConnectedAt?: Date | null;
+  /**
+   * Funil de destino do inbound deste canal. `string` = roteia novos leads
+   * para esse funil; `null` = volta ao funil padrão da org. Validado contra
+   * a org corrente em `updateChannel`.
+   */
+  defaultPipelineId?: string | null;
 };
 
 export type UpdateChannelStatusExtra = {
@@ -111,7 +117,10 @@ export async function createChannel(data: CreateChannelData): Promise<Channel> {
 }
 
 export async function updateChannel(id: string, data: UpdateChannelData): Promise<Channel> {
-  const patch: Prisma.ChannelUpdateInput = {};
+  // Unchecked input: combina com a extensao `organization-scope` que injeta
+  // `organizationId` escalar no data. Misturar com `relation: { connect }`
+  // (checked input) faz o Prisma falhar com "Did you mean 'organization'?".
+  const patch: Prisma.ChannelUncheckedUpdateInput = {};
   if (data.name !== undefined) patch.name = data.name.trim();
   if (data.type !== undefined) patch.type = data.type;
   if (data.provider !== undefined) patch.provider = data.provider;
@@ -139,6 +148,21 @@ export async function updateChannel(id: string, data: UpdateChannelData): Promis
     }
   }
   if (data.phoneNumber !== undefined) patch.phoneNumber = data.phoneNumber?.trim() || null;
+  if (data.defaultPipelineId !== undefined) {
+    if (data.defaultPipelineId) {
+      // Valida que o funil pertence à org corrente (prisma é org-scoped):
+      // evita vincular o canal a um pipeline de outra organização. A
+      // extension scope-by-org já injeta organizationId no where do find.
+      const pipeline = await prisma.pipeline.findFirst({
+        where: { id: data.defaultPipelineId },
+        select: { id: true },
+      });
+      if (!pipeline) throw new Error("Funil de destino inválido.");
+    }
+    // Escalar (unchecked) ao inves de `defaultPipeline: { connect/disconnect }`
+    // pra manter coerencia com a extension de org-scope (ver coment. acima).
+    patch.defaultPipelineId = data.defaultPipelineId ?? null;
+  }
   if (data.status !== undefined) patch.status = data.status;
   if (data.qrCode !== undefined) patch.qrCode = data.qrCode;
   if (data.sessionData !== undefined) {
