@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withApiAuthContext } from "@/lib/api-auth";
+import { loadAuthzContext } from "@/lib/authz";
 import { canSeeInboxTab, getScopeGrants } from "@/lib/authz/scope-grants";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
@@ -44,13 +45,25 @@ export async function GET(request: Request) {
       const grants = await getScopeGrants();
       const allowedChannelIds = await listAllowedChannelIds(apiUser);
 
+      // Permissões efetivas (Authz v2) — conectam as roles custom ao gating de
+      // abas do inbox. Admin/super-admin recebem `*` (todas as abas). Sem isso,
+      // um MEMBER com role custom concedendo `conversation:view` continuaria
+      // preso ao default legado (só "esperando"/"respondidas").
+      const authz = await loadAuthzContext({
+        userId: apiUser.id,
+        organizationId: apiUser.organizationId,
+        isSuperAdmin: apiUser.isSuperAdmin,
+      });
+      const inboxPerms: ReadonlySet<string> =
+        authz.isSuperAdmin || authz.isAdmin ? new Set(["*"]) : authz.permissions;
+
       if (searchParams.get("counts") === "1") {
         const visibility = await getVisibilityFilter(user);
         const memberCategoryTabs: InboxCategoryTab[] | null =
           user.role === "MEMBER"
             ? (() => {
                 const tabs = INBOX_CATEGORY_TABS.filter((t) =>
-                  canSeeInboxTab({ grants, role: user.role, tab: t }),
+                  canSeeInboxTab({ grants, role: user.role, tab: t, permissions: inboxPerms }),
                 );
                 return tabs.length > 0 ? [...tabs] : (["esperando", "respondidas"] as InboxCategoryTab[]);
               })()
@@ -63,7 +76,7 @@ export async function GET(request: Request) {
         if (user.role === "MEMBER") {
           const masked = { ...counts };
           for (const key of INBOX_TAB_LIST) {
-            if (!canSeeInboxTab({ grants, role: user.role, tab: key })) {
+            if (!canSeeInboxTab({ grants, role: user.role, tab: key, permissions: inboxPerms })) {
               masked[key] = 0;
             }
           }
@@ -76,7 +89,7 @@ export async function GET(request: Request) {
       const tabRaw = searchParams.get("tab") ?? undefined;
       const tab = tabRaw && validTabs.has(tabRaw as InboxTab) ? (tabRaw as InboxTab) : undefined;
 
-      if (tab && !canSeeInboxTab({ grants, role: user.role, tab })) {
+      if (tab && !canSeeInboxTab({ grants, role: user.role, tab, permissions: inboxPerms })) {
         return NextResponse.json({ message: "Sem permissão para esta aba." }, { status: 403 });
       }
       const statusRaw = searchParams.get("status") ?? undefined;
@@ -107,7 +120,7 @@ export async function GET(request: Request) {
         tab === "todos" && user.role === "MEMBER"
           ? (() => {
               const tabs = INBOX_CATEGORY_TABS.filter((t) =>
-                canSeeInboxTab({ grants, role: user.role, tab: t }),
+                canSeeInboxTab({ grants, role: user.role, tab: t, permissions: inboxPerms }),
               );
               return tabs.length > 0 ? [...tabs] : (["esperando", "respondidas"] as InboxCategoryTab[]);
             })()
