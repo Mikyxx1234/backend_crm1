@@ -429,21 +429,25 @@ export async function POST(request: Request, context: RouteContext) {
     }).catch((err) => console.warn("[automation trigger] message_sent:", err));
 
     // Log unificado de atividade (Activity Log) — fire-and-forget.
-    void logEvent({
-      type: "MESSAGE_SENT",
-      entityType: "MESSAGE",
-      entityId: saved.id,
-      entityLabel: senderName ?? "Mensagem enviada",
-      conversationId: conv.id,
-      contactId: conv.contactId,
-      meta: {
-        preview: content.slice(0, 200),
-        channel: "WhatsApp",
-        via: useBaileys ? "baileys" : localOnly ? "local" : "meta",
-        failed: sendFailed,
-        externalId,
-      },
-    });
+    // Falhas de envio sao registradas como MESSAGE_FAILED dentro de
+    // sendWhatsAppText (markFailed) — aqui so logamos o sucesso para
+    // nao duplicar o evento nem poluir as estatisticas.
+    if (!sendFailed) {
+      void logEvent({
+        type: "MESSAGE_SENT",
+        entityType: "MESSAGE",
+        entityId: saved.id,
+        entityLabel: senderName ?? "Mensagem enviada",
+        conversationId: conv.id,
+        contactId: conv.contactId,
+        meta: {
+          preview: content.slice(0, 200),
+          channel: "WhatsApp",
+          via: useBaileys ? "baileys" : localOnly ? "local" : "meta",
+          externalId,
+        },
+      });
+    }
 
     // Notifica abas/inboxes em tempo real: a conversa acabou de mudar de
     // 'esperando' para 'respondidas' (ou similar). Sem isso, a UI so

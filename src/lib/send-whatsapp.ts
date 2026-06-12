@@ -6,6 +6,7 @@ import {
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { enqueueBaileysOutbound } from "@/lib/queue";
 import { prisma } from "@/lib/prisma";
+import { logMessageFailed } from "@/services/activity-log";
 
 type ChannelInfo = {
   id: string;
@@ -27,6 +28,44 @@ type SendTextResult = {
   failed: boolean;
   error: string | null;
 };
+
+/**
+ * Marca a mensagem como falha (sendStatus/sendError) e registra o evento
+ * `MESSAGE_FAILED` no Activity Log (feed `/logs` + estatisticas). Ponto
+ * unico para todas as falhas imediatas de envio de texto (Meta e Baileys).
+ * O log busca o nome do contato (Origem) de forma fire-and-forget.
+ */
+async function markFailed(
+  opts: SendTextOpts,
+  error: string,
+  source: "api" | "baileys",
+): Promise<SendTextResult> {
+  await prisma.message
+    .update({
+      where: { id: opts.messageId },
+      data: { sendStatus: "failed", sendError: error },
+    })
+    .catch(() => {});
+  void (async () => {
+    const contact = await prisma.contact
+      .findUnique({
+        where: { id: opts.contactId },
+        select: { name: true, phone: true },
+      })
+      .catch(() => null);
+    await logMessageFailed({
+      messageId: opts.messageId,
+      conversationId: opts.conversationId,
+      contactId: opts.contactId,
+      contactLabel: contact?.name ?? null,
+      contactSublabel: contact?.phone ?? null,
+      error,
+      source,
+      channel: "WhatsApp",
+    });
+  })();
+  return { externalId: null, failed: true, error };
+}
 
 /**
  * Sends a WhatsApp text message via the appropriate provider
@@ -59,12 +98,12 @@ async function sendViaMeta(opts: SendTextOpts): Promise<SendTextResult> {
   const client = await getMetaClient(opts.channelRef);
 
   if (!client.configured) {
-    return { externalId: null, failed: true, error: "Meta WhatsApp API não configurada." };
+    return markFailed(opts, "Meta WhatsApp API não configurada.", "api");
   }
 
   const waTarget = await getContactWhatsAppTargets(opts.contactId);
   if (!waTarget) {
-    return { externalId: null, failed: true, error: "Contato sem telefone nem BSUID WhatsApp." };
+    return markFailed(opts, "Contato sem telefone nem BSUID WhatsApp.", "api");
   }
 
   try {
@@ -84,11 +123,7 @@ async function sendViaMeta(opts: SendTextOpts): Promise<SendTextResult> {
     return { externalId, failed: false, error: null };
   } catch (err) {
     const error = formatMetaSendError(err);
-    await prisma.message.update({
-      where: { id: opts.messageId },
-      data: { sendStatus: "failed", sendError: error },
-    }).catch(() => {});
-    return { externalId: null, failed: true, error };
+    return markFailed(opts, error, "api");
   }
 }
 
@@ -102,12 +137,7 @@ async function sendViaBaileys(opts: SendTextOpts): Promise<SendTextResult> {
     });
 
     if (!contact?.phone) {
-      const error = "Contato sem telefone para envio via Baileys.";
-      await prisma.message.update({
-        where: { id: opts.messageId },
-        data: { sendStatus: "failed", sendError: error },
-      }).catch(() => {});
-      return { externalId: null, failed: true, error };
+      return markFailed(opts, "Contato sem telefone para envio via Baileys.", "baileys");
     }
     targetJid = contact.phone;
   }
@@ -125,11 +155,7 @@ async function sendViaBaileys(opts: SendTextOpts): Promise<SendTextResult> {
     return { externalId: null, failed: false, error: null };
   } catch (err) {
     const error = formatMetaSendError(err);
-    await prisma.message.update({
-      where: { id: opts.messageId },
-      data: { sendStatus: "failed", sendError: error },
-    }).catch(() => {});
-    return { externalId: null, failed: true, error };
+    return markFailed(opts, error, "baileys");
   }
 }
 

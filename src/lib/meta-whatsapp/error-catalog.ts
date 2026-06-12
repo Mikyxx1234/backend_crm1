@@ -19,6 +19,16 @@ export type MetaErrorInfo = {
 };
 
 const CATALOG: Record<number, MetaErrorInfo> = {
+  // ── Genéricos / infra ───────────────────────────────────────
+  1: {
+    reason: "Erro desconhecido ao enviar pela Meta.",
+    action:
+      "Tente reenviar. Se persistir, verifique a saúde da conta WhatsApp e o status da Cloud API.",
+  },
+  2: {
+    reason: "Serviço da Meta temporariamente indisponível.",
+    action: "Tente novamente em alguns minutos.",
+  },
   // ── Autenticação / autorização ──────────────────────────────
   0: {
     reason: "Falha de autenticação com a Meta.",

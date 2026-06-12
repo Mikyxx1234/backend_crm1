@@ -2216,6 +2216,62 @@ async function executeStep(
       return {};
     }
 
+    case "inventory.adjust":
+    case "inventory_adjust": {
+      // Ajuste de alocação via ledger novo (InventoryPool). Reusa o service
+      // `inventory.ts` (transacional/auditado). NÃO toca o estoque legado
+      // (`consume_stock`). Operações: consume | restock | reserve | release.
+      // Resolve o pool por `poolId` explícito ou por `productId` (pool global).
+      // `consume`/`reserve` lançam InsufficientInventoryError sem saldo —
+      // o erro propaga e marca o passo como falho (bloqueante).
+      const operation = (readString(cfg, "operation") ?? "consume").toLowerCase();
+      const qty = Math.max(
+        1,
+        Math.floor(readNumber(cfg, "qty") ?? readNumber(cfg, "quantity") ?? 1),
+      );
+
+      let poolId = readString(cfg, "poolId");
+      if (!poolId) {
+        const productId = readString(cfg, "productId");
+        if (!productId) {
+          throw new Error("inventory.adjust: informe poolId ou productId");
+        }
+        const globalPool = await prisma.inventoryPool.findFirst({
+          where: { productId, orgUnitId: null },
+          select: { id: true },
+        });
+        const anyPool =
+          globalPool ??
+          (await prisma.inventoryPool.findFirst({
+            where: { productId },
+            select: { id: true },
+          }));
+        if (!anyPool) {
+          throw new Error("inventory.adjust: nenhum pool encontrado para o produto");
+        }
+        poolId = anyPool.id;
+      }
+
+      const dealId = rt.dealId ?? readString(cfg, "dealId") ?? null;
+      const inv = await import("@/services/inventory");
+      if (operation === "restock") {
+        await inv.restock({ poolId, qty, dealId, note: "Automação: reposição" });
+      } else if (operation === "release") {
+        await inv.release({ poolId, qty, dealId });
+      } else if (operation === "reserve") {
+        await inv.reserve({ poolId, qty, dealId });
+      } else {
+        await inv.consume({
+          poolId,
+          qty,
+          reason: "SALE",
+          dealId,
+          note: "Automação: consumo",
+        });
+      }
+      return {};
+    }
+
     default:
       throw new Error(`Tipo de passo desconhecido: ${stepType}`);
   }

@@ -154,6 +154,55 @@ export async function logEvent(input: LogEventInput): Promise<void> {
   }
 }
 
+/**
+ * Atalho para registrar uma falha de envio de mensagem no Activity Log.
+ *
+ * Centraliza o `type: "MESSAGE_FAILED"` para que todas as origens (webhook
+ * de status da Meta, envio imediato via API e Baileys) gerem o mesmo evento
+ * — assim aparece no feed `/logs` e nas estatisticas. Fire-and-forget.
+ *
+ * O texto do erro vai em `newValue` (renderizado no feed) e em `meta.error`
+ * (consumido por tooltips/detalhes). `source` distingue a origem da falha.
+ */
+export async function logMessageFailed(input: {
+  messageId: string;
+  conversationId?: string | null;
+  contactId?: string | null;
+  dealId?: string | null;
+  /// Nome do contato/destinatario — usado como label da Origem no feed.
+  contactLabel?: string | null;
+  contactSublabel?: string | null;
+  error?: string | null;
+  /// Origem da falha: "meta" (webhook), "api" (envio imediato) ou "baileys".
+  source?: "meta" | "api" | "baileys" | string;
+  errorCode?: string | number | null;
+  channel?: string | null;
+}): Promise<void> {
+  const errorText = input.error?.trim() || "Falha no envio";
+  // Sem override de ator: deixamos `logEvent` derivar do contexto —
+  // agente (HUMAN) no envio imediato via API, SYSTEM no webhook/worker.
+  // O contato (destinatario) vai por `contactId`/`entityLabel` e é
+  // resolvido como "Origem" (Cliente) no feed.
+  await logEvent({
+    type: "MESSAGE_FAILED",
+    entityType: "MESSAGE",
+    entityId: input.messageId,
+    entityLabel: input.contactLabel ?? "Falha no envio",
+    conversationId: input.conversationId ?? null,
+    contactId: input.contactId ?? null,
+    dealId: input.dealId ?? null,
+    newValue: errorText,
+    meta: {
+      error: errorText,
+      source: input.source ?? null,
+      errorCode: input.errorCode ?? null,
+      channel: input.channel ?? "WhatsApp",
+      contactName: input.contactLabel ?? null,
+      contactPhone: input.contactSublabel ?? null,
+    },
+  });
+}
+
 /// Atalho usado pelo backfill / wrapper de `createDealEvent`. Recebe
 /// o objeto serializado direto e nao deriva ator do contexto.
 export async function logEventRaw(

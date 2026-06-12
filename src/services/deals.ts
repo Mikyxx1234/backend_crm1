@@ -544,7 +544,9 @@ export async function moveDeal(
     throw new Error("INVALID_POSITION");
   }
 
-  return prisma.$transaction(async (tx) => {
+  let becameWon = false;
+  let becameLost = false;
+  const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id: dealId } });
     if (!deal) throw new Error("NOT_FOUND");
 
@@ -559,6 +561,8 @@ export async function moveDeal(
     const oldStageId = deal.stageId;
     const oldPos = deal.position;
     const statusPatch = buildStatusSyncPatch(deal.status, targetStage, options?.lostReason);
+    becameWon = deal.status !== "WON" && targetStage.isWon;
+    becameLost = deal.status !== "LOST" && targetStage.isLost;
 
     if (oldStageId === targetStageId) {
       const deals = await tx.deal.findMany({
@@ -602,6 +606,26 @@ export async function moveDeal(
       include: listInclude,
     });
   });
+
+  // Pós-commit (fire-and-forget; import dinâmico evita ciclo de módulos):
+  if (becameWon) {
+    void import("@/services/product-fulfillment").then((m) => m.onDealWon(dealId));
+  } else if (becameLost) {
+    void import("@/services/product-fulfillment").then((m) =>
+      m.onDealReverted(dealId),
+    );
+  }
+  // Funil B2C de candidatos: reserva/contratação ao entrar nos estágios da vaga.
+  void import("@/services/product-fulfillment").then((m) =>
+    m.onCandidateStageMove(dealId, targetStageId).catch((err) => {
+      console.warn("[deals.moveDeal] onCandidateStageMove falhou:", {
+        dealId,
+        targetStageId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }),
+  );
+  return result;
 }
 
 /**
@@ -636,7 +660,7 @@ async function buildTerminalStageMovePatch(
 }
 
 export async function markDealWon(id: string) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
     if (!deal) throw new Error("NOT_FOUND");
     const movePatch = await buildTerminalStageMovePatch(tx, deal, "won");
@@ -651,6 +675,9 @@ export async function markDealWon(id: string) {
       include: listInclude,
     });
   });
+  // Pós-commit (fire-and-forget; import dinâmico evita ciclo deals<->fulfillment).
+  void import("@/services/product-fulfillment").then((m) => m.onDealWon(id));
+  return result;
 }
 
 export async function markDealLost(id: string, lostReason?: string | null) {
@@ -658,7 +685,7 @@ export async function markDealLost(id: string, lostReason?: string | null) {
   // `deals.loss_reason_required`); aqui aceitamos vazio → null.
   const reason = lostReason?.trim() || null;
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
     if (!deal) throw new Error("NOT_FOUND");
     const movePatch = await buildTerminalStageMovePatch(tx, deal, "lost");
@@ -673,10 +700,13 @@ export async function markDealLost(id: string, lostReason?: string | null) {
       include: listInclude,
     });
   });
+  // Perda: estorna alocações (no-op se não houver; cobre "desistência" no funil B2C).
+  void import("@/services/product-fulfillment").then((m) => m.onDealReverted(id));
+  return result;
 }
 
 export async function reopenDeal(id: string) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
     if (!deal) throw new Error("NOT_FOUND");
 
@@ -713,6 +743,9 @@ export async function reopenDeal(id: string) {
       include: listInclude,
     });
   });
+  // Reabertura: estorna alocações consumidas no ganho (lança inversos).
+  void import("@/services/product-fulfillment").then((m) => m.onDealReverted(id));
+  return result;
 }
 
 /** Limite default de cards exibidos por coluna no board. */

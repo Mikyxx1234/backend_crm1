@@ -9,6 +9,8 @@ import {
   type BaileysOutboundPayload,
 } from "@/lib/queue";
 import { parseStoragePath, readStoredFile } from "@/lib/storage/local";
+import { logMessageFailed } from "@/services/activity-log";
+import { runWithContext } from "@/lib/request-context";
 import type { BaileysManager } from "./baileys-manager";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
 
@@ -141,4 +143,40 @@ async function markFailed(messageId: string, error: string) {
     where: { id: messageId },
     data: { sendStatus: "failed", sendError: error },
   }).catch(() => {});
+
+  // Activity Log (feed /logs + estatisticas). O worker roda fora de um
+  // request, entao montamos um contexto minimo com a org da mensagem
+  // para que `logEvent`/`withOrgFromCtx` consigam escrever o evento.
+  void (async () => {
+    const msg = await prisma.message
+      .findUnique({
+        where: { id: messageId },
+        select: {
+          organizationId: true,
+          conversationId: true,
+          conversation: {
+            select: {
+              contactId: true,
+              contact: { select: { name: true, phone: true } },
+            },
+          },
+        },
+      })
+      .catch(() => null);
+    if (!msg?.organizationId) return;
+    await runWithContext(
+      { organizationId: msg.organizationId, userId: "system", isSuperAdmin: false },
+      () =>
+        logMessageFailed({
+          messageId,
+          conversationId: msg.conversationId,
+          contactId: msg.conversation?.contactId ?? null,
+          contactLabel: msg.conversation?.contact?.name ?? null,
+          contactSublabel: msg.conversation?.contact?.phone ?? null,
+          error,
+          source: "baileys",
+          channel: "WhatsApp",
+        }),
+    );
+  })();
 }
