@@ -124,6 +124,33 @@ real com a flag ligada.
 
 ---
 
+### 2026-06-11 — GET /api/custom-fields aceita Bearer (dropdown de custom fields no node n8n)
+
+**Decisão.** `GET /api/custom-fields` foi migrado de `withOrgContext`
+(somente cookie NextAuth) para `authenticateApiRequest` + `runWithApiUserContext`,
+passando a aceitar Bearer token. Motivo: o pacote `n8n-nodes-eduit-crm`
+precisa listar as definições de campos personalizados para montar dropdowns
+amigáveis em Create/Update de contato e negócio.
+
+**Contexto.** As rotas por entidade (`/api/contacts/:id/custom-fields`,
+`/api/deals/:id/custom-fields`) já haviam sido migradas para Bearer (bug
+27/mai/26). A listagem global era a única que ainda barrava integrações.
+
+**Autorização.** A resposta contém apenas DEFINIÇÕES (id/nome/label/tipo/opções),
+dado não-sensível já exposto pelas rotas por entidade. Para `entity=deal`
+mantém-se o gate `deal:view`; para contato segue o padrão de `/api/contacts`
+(apenas autenticação). `POST` permanece restrito (sessão + `settings:custom_fields`).
+
+**Alternativas descartadas.** (a) Manter `settings:custom_fields` no GET —
+exigiria que o usuário do token tivesse permissão de configurações, quebrando
+o dropdown para integrações comuns. (b) Resolver nomes de campo no node sem
+listar (free-text) — funciona, mas perde a UX de dropdown pedida.
+
+**Impacto.** Aditivo; sessão (UI) continua funcionando. Sem mudança de schema.
+Requer deploy do backend para o dropdown aparecer no n8n.
+
+---
+
 ### 2026-06-10 (PR 2) — Hardening do marketplace de widgets (robustez do iframe + rate limits + healthcheck bloqueante)
 
 **Decisão.** Camada de proteção sobre o marketplace MVP do mesmo dia,
