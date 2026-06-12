@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
@@ -119,6 +120,9 @@ export async function POST(request: Request) {
       if (!channel) {
         return NextResponse.json({ message: "Canal não encontrado." }, { status: 404 });
       }
+
+      const sendDenied = await requireChannelScope(session.user, "send", channel.id);
+      if (sendDenied) return sendDenied;
 
       if (channel.status !== "CONNECTED") {
         return NextResponse.json(

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withApiAuthContext } from "@/lib/api-auth";
 import { canSeeInboxTab, getScopeGrants } from "@/lib/authz/scope-grants";
+import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import {
   getConversations,
@@ -41,6 +42,7 @@ export async function GET(request: Request) {
       const { searchParams } = new URL(request.url);
       const user = { id: apiUser.id, role: apiUser.role as "ADMIN" | "MANAGER" | "MEMBER" };
       const grants = await getScopeGrants();
+      const allowedChannelIds = await listAllowedChannelIds(apiUser);
 
       if (searchParams.get("counts") === "1") {
         const visibility = await getVisibilityFilter(user);
@@ -53,7 +55,11 @@ export async function GET(request: Request) {
                 return tabs.length > 0 ? [...tabs] : (["esperando", "respondidas"] as InboxCategoryTab[]);
               })()
             : null;
-        const counts = await getTabCounts(visibility.conversationWhere, memberCategoryTabs);
+        const counts = await getTabCounts(
+          visibility.conversationWhere,
+          memberCategoryTabs,
+          allowedChannelIds,
+        );
         if (user.role === "MEMBER") {
           const masked = { ...counts };
           for (const key of INBOX_TAB_LIST) {
@@ -122,6 +128,7 @@ export async function GET(request: Request) {
         tagIds,
         sortBy,
         sortOrder,
+        allowedChannelIds,
       });
 
       return NextResponse.json(result);

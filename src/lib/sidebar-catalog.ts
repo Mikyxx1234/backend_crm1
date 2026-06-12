@@ -55,6 +55,13 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
   },
   { key: "logs", title: "Logs", href: "/logs", locked: false },
   { key: "widgets", title: "Widgets", href: "/widgets", locked: false },
+  {
+    key: "job-openings",
+    title: "Vagas",
+    href: "/job-openings",
+    locked: false,
+    requiredPermission: "job_opening:view",
+  },
 ] as const;
 
 export const SIDEBAR_KEYS: ReadonlySet<string> = new Set(

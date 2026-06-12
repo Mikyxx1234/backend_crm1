@@ -4,6 +4,10 @@ import { loadAuthzContext, can, type PermissionKey } from "@/lib/authz";
 import {
   canAccessField,
   canAccessScopedResource,
+  canAccessPipelineForUser,
+  canAccessChannelForUser,
+  listAllowedPipelineIdsForUser,
+  listAllowedChannelIdsForUser,
   getScopeGrants,
   readCrmActionGrant,
   type CrmActionKey,
@@ -89,15 +93,88 @@ export async function requirePipelineScope(
 ): Promise<NextResponse | null> {
   const policy = await loadScopedPolicy(user);
   if (!policy.enabled) return null;
-  const allowed = canAccessScopedResource({
-    grants: policy.grants,
-    role: user.role,
-    resource: "pipeline",
-    action,
-    targetId: pipelineId,
-  });
+  // "view" considera o override por usuário (lista de funis); "edit"
+  // continua governado pela regra por papel.
+  const allowed =
+    action === "view"
+      ? canAccessPipelineForUser({
+          grants: policy.grants,
+          role: user.role,
+          userId: user.id,
+          pipelineId,
+        })
+      : canAccessScopedResource({
+          grants: policy.grants,
+          role: user.role,
+          resource: "pipeline",
+          action,
+          targetId: pipelineId,
+        });
   if (allowed) return null;
   return NextResponse.json({ message: "Acesso negado ao funil." }, { status: 403 });
+}
+
+/**
+ * IDs de funis que o usuário pode ver, para filtrar listagens/queries.
+ * Retorna `null` quando não há restrição (flag off ou acesso a todos).
+ */
+export async function listAllowedPipelineIds(
+  user: UserLike,
+): Promise<string[] | null> {
+  const policy = await loadScopedPolicy(user);
+  if (!policy.enabled) return null;
+  return listAllowedPipelineIdsForUser({
+    grants: policy.grants,
+    role: user.role,
+    userId: user.id,
+  });
+}
+
+/**
+ * Escopo de canal por usuário. `action: "send"` exige também permissão de
+ * "view". `channelId` ausente (conversa legada sem canal) → não escopa.
+ */
+export async function requireChannelScope(
+  user: UserLike,
+  action: "view" | "send",
+  channelId: string | null | undefined,
+): Promise<NextResponse | null> {
+  if (!channelId) return null;
+  const policy = await loadScopedPolicy(user);
+  if (!policy.enabled) return null;
+  const allowed = canAccessChannelForUser({
+    grants: policy.grants,
+    role: user.role,
+    userId: user.id,
+    action,
+    channelId,
+  });
+  if (allowed) return null;
+  return NextResponse.json(
+    {
+      message:
+        action === "send"
+          ? "Sem permissão para enviar neste canal."
+          : "Sem acesso a este canal.",
+    },
+    { status: 403 },
+  );
+}
+
+/**
+ * IDs de canais que o usuário pode ver, para filtrar conversas.
+ * Retorna `null` quando não há restrição (flag off ou acesso a todos).
+ */
+export async function listAllowedChannelIds(
+  user: UserLike,
+): Promise<string[] | null> {
+  const policy = await loadScopedPolicy(user);
+  if (!policy.enabled) return null;
+  return listAllowedChannelIdsForUser({
+    grants: policy.grants,
+    role: user.role,
+    userId: user.id,
+  });
 }
 
 export async function requireStageScope(

@@ -148,7 +148,33 @@ export async function GET(req: Request) {
     const nextCursor =
       hasMore && last ? `${last.occurredAt.getTime()}_${last.id}` : null;
 
-    return NextResponse.json({ items, nextCursor });
+    // Enriquecimento aditivo: anexa o nome do contato em eventos que
+    // possuam contactId. Útil em MESSAGE_SENT/RECEIVED para exibir
+    // "Cliente: <nome>" no feed, já que o entityLabel nesses casos
+    // representa apenas um dos lados da conversa.
+    const contactIds = Array.from(
+      new Set(
+        items
+          .map((r) => r.contactId)
+          .filter((v): v is string => typeof v === "string" && v.length > 0),
+      ),
+    );
+
+    const contactMap = new Map<string, string | null>();
+    if (contactIds.length > 0) {
+      const contacts = await prisma.contact.findMany({
+        where: { id: { in: contactIds } },
+        select: { id: true, name: true },
+      });
+      for (const c of contacts) contactMap.set(c.id, c.name ?? null);
+    }
+
+    const enriched = items.map((row) => ({
+      ...row,
+      contactName: row.contactId ? contactMap.get(row.contactId) ?? null : null,
+    }));
+
+    return NextResponse.json({ items: enriched, nextCursor });
   } catch (e) {
     return NextResponse.json(
       { message: e instanceof Error ? e.message : "Erro." },

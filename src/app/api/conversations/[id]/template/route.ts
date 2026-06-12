@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
@@ -99,6 +100,9 @@ export async function POST(request: Request, context: RouteContext) {
     if (!conv) {
       return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
     }
+
+    const sendDenied = await requireChannelScope(session.user, "send", conv.channelId);
+    if (sendDenied) return sendDenied;
 
     if (conv.channelRef?.provider === "BAILEYS_MD") {
       return NextResponse.json(

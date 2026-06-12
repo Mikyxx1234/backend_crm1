@@ -54,6 +54,23 @@ export type CrmActionGrants = Partial<
   Record<CrmActionKey, { users?: CrmActionUserGrants }>
 >;
 
+/**
+ * Override por usuário individual (não por papel) para escopo de recursos
+ * com instâncias dinâmicas — funis e canais.
+ *
+ * Schema: `users[userId] = string[]`
+ *   - `["*"]`           → acesso a todos (equivale a "sem restrição")
+ *   - `["id1","id2"]`   → restrito a esses IDs
+ *   - `[]`              → nenhum acesso (restrição total)
+ *   - chave ausente     → cai na regra por papel (`pipeline.view[role]`) ou,
+ *                          quando não houver, libera (default permissivo)
+ *
+ * 09/jun/26 — adicionado para suportar escopo por usuário de funis
+ * (`pipeline.users`) e canais (`channel.view/send.users`), configurável na
+ * tela de cada usuário em /settings/permissions.
+ */
+export type UserScopeGrants = Partial<Record<string, string[]>>;
+
 export type ScopeGrants = {
   /** Abas da Inbox por papel (`MEMBER`). Valores: chaves de aba ou `"*"`. */
   inbox?: {
@@ -62,6 +79,17 @@ export type ScopeGrants = {
   pipeline?: {
     view?: RoleScope;
     edit?: RoleScope;
+    /** Override por usuário: lista de IDs de funis visíveis (ou `["*"]`). */
+    users?: UserScopeGrants;
+  };
+  /**
+   * Escopo de canais (instâncias dinâmicas de `Channel`). Diferente de
+   * pipeline/stage, não existe regra legada por papel — só override por
+   * usuário, separando "ver" e "enviar".
+   */
+  channel?: {
+    view?: { users?: UserScopeGrants };
+    send?: { users?: UserScopeGrants };
   };
   stage?: {
     view?: RoleScope;
@@ -120,6 +148,17 @@ function normalizeRoleScope(input: unknown): RoleScope {
   };
 }
 
+function normalizeUserScope(input: unknown): UserScopeGrants {
+  if (!input || typeof input !== "object") return {};
+  const src = input as Record<string, unknown>;
+  const out: UserScopeGrants = {};
+  for (const [userId, raw] of Object.entries(src)) {
+    if (typeof userId !== "string" || !userId) continue;
+    out[userId] = normalizeIds(raw);
+  }
+  return out;
+}
+
 function normalizeCrmUserGrants(input: unknown): CrmActionUserGrants {
   if (!input || typeof input !== "object") return {};
   const src = input as Record<string, unknown>;
@@ -151,6 +190,9 @@ export function parseScopeGrants(input: unknown): ScopeGrants {
   const field = src.field && typeof src.field === "object" ? (src.field as Record<string, unknown>) : {};
   const sidebar = src.sidebar && typeof src.sidebar === "object" ? (src.sidebar as Record<string, unknown>) : {};
   const inbox = src.inbox && typeof src.inbox === "object" ? (src.inbox as Record<string, unknown>) : {};
+  const channel = src.channel && typeof src.channel === "object" ? (src.channel as Record<string, unknown>) : {};
+  const channelView = channel.view && typeof channel.view === "object" ? (channel.view as Record<string, unknown>) : {};
+  const channelSend = channel.send && typeof channel.send === "object" ? (channel.send as Record<string, unknown>) : {};
   const dealField = field.deal && typeof field.deal === "object" ? (field.deal as Record<string, unknown>) : {};
   const contactField = field.contact && typeof field.contact === "object" ? (field.contact as Record<string, unknown>) : {};
   const productField = field.product && typeof field.product === "object" ? (field.product as Record<string, unknown>) : {};
@@ -161,6 +203,11 @@ export function parseScopeGrants(input: unknown): ScopeGrants {
     pipeline: {
       view: normalizeRoleScope(pipeline.view),
       edit: normalizeRoleScope(pipeline.edit),
+      users: normalizeUserScope(pipeline.users),
+    },
+    channel: {
+      view: { users: normalizeUserScope(channelView.users) },
+      send: { users: normalizeUserScope(channelSend.users) },
     },
     stage: {
       view: normalizeRoleScope(stage.view),
@@ -241,6 +288,105 @@ export function canAccessScopedResource(args: {
           : args.grants.stage?.move;
   if (!hasRoleRule(scope, role)) return true;
   return roleRuleAllows(scope, role, args.targetId);
+}
+
+/**
+ * Avalia uma lista de IDs de override por usuário.
+ * `["*"]` → libera tudo; lista vazia → nega; senão precisa conter o alvo.
+ */
+function userScopeAllows(ids: string[], value: string): boolean {
+  if (ids.includes("*")) return true;
+  return ids.includes(value);
+}
+
+/**
+ * Acesso (view) a um funil considerando override por usuário e fallback
+ * para a regra por papel. ADMIN sempre libera.
+ */
+export function canAccessPipelineForUser(args: {
+  grants: ScopeGrants;
+  role: string | null | undefined;
+  userId: string;
+  pipelineId: string;
+}): boolean {
+  if (asRoleKey(args.role) === "ADMIN") return true;
+  const userRule = args.grants.pipeline?.users?.[args.userId];
+  if (Array.isArray(userRule)) return userScopeAllows(userRule, args.pipelineId);
+  return canAccessScopedResource({
+    grants: args.grants,
+    role: args.role,
+    resource: "pipeline",
+    action: "view",
+    targetId: args.pipelineId,
+  });
+}
+
+/**
+ * Lista de IDs de funis permitidos a um usuário, para filtrar queries.
+ * Retorna `null` quando não há restrição (acesso a todos); array (possivelmente
+ * vazio) quando restrito.
+ */
+export function listAllowedPipelineIdsForUser(args: {
+  grants: ScopeGrants;
+  role: string | null | undefined;
+  userId: string;
+}): string[] | null {
+  const role = asRoleKey(args.role);
+  if (role === "ADMIN") return null;
+  const userRule = args.grants.pipeline?.users?.[args.userId];
+  if (Array.isArray(userRule)) {
+    if (userRule.includes("*")) return null;
+    return userRule;
+  }
+  if (!role) return null;
+  const roleScope = args.grants.pipeline?.view?.[role];
+  if (!Array.isArray(roleScope) || roleScope.length === 0 || roleScope.includes("*")) {
+    return null;
+  }
+  return roleScope;
+}
+
+/**
+ * Acesso a um canal (ver ou enviar) por usuário. "enviar" exige também
+ * permissão de "ver". ADMIN sempre libera. Sem regra → liberado (canais não
+ * tinham escopo antes desta feature).
+ */
+export function canAccessChannelForUser(args: {
+  grants: ScopeGrants;
+  role: string | null | undefined;
+  userId: string;
+  action: "view" | "send";
+  channelId: string;
+}): boolean {
+  if (asRoleKey(args.role) === "ADMIN") return true;
+  const viewRule = args.grants.channel?.view?.users?.[args.userId];
+  if (Array.isArray(viewRule) && !userScopeAllows(viewRule, args.channelId)) {
+    return false;
+  }
+  if (args.action === "send") {
+    const sendRule = args.grants.channel?.send?.users?.[args.userId];
+    if (Array.isArray(sendRule) && !userScopeAllows(sendRule, args.channelId)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Lista de IDs de canais que o usuário pode ver, para filtrar conversas.
+ * Retorna `null` quando não há restrição; array (possivelmente vazio) quando
+ * restrito.
+ */
+export function listAllowedChannelIdsForUser(args: {
+  grants: ScopeGrants;
+  role: string | null | undefined;
+  userId: string;
+}): string[] | null {
+  if (asRoleKey(args.role) === "ADMIN") return null;
+  const rule = args.grants.channel?.view?.users?.[args.userId];
+  if (!Array.isArray(rule)) return null;
+  if (rule.includes("*")) return null;
+  return rule;
 }
 
 export function canAccessField(args: {

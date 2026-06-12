@@ -70,6 +70,7 @@ export const ACTION_STEP_TYPES = [
   "ask_ai_agent",
   "transfer_to_ai_agent",
   "execute_distribution",
+  "inventory.adjust",
 ] as const;
 
 export type ActionStepType = (typeof ACTION_STEP_TYPES)[number];
@@ -123,6 +124,7 @@ export function stepTypeLabel(t: string): string {
     ask_ai_agent: "Perguntar ao agente IA",
     transfer_to_ai_agent: "Transferir para agente IA",
     execute_distribution: "Executar distribuição",
+    "inventory.adjust": "Ajustar alocação (estoque/vagas)",
   };
   return map[t] ?? t;
 }
@@ -401,6 +403,8 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       return { targetStepId: "" };
     case "transfer_automation":
       return { targetAutomationId: "", targetAutomationName: "" };
+    case "inventory.adjust":
+      return { operation: "consume", productId: "", poolId: "", qty: 1 };
     case "stop_automation":
       return {};
     case "create_deal":

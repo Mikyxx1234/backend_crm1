@@ -192,6 +192,35 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "create", label: "Criar produto" },
       { action: "edit", label: "Editar produto" },
       { action: "delete", label: "Excluir produto", destructive: true },
+      { action: "manage_offers", label: "Gerenciar ofertas por unidade" },
+      { action: "manage_stakeholders", label: "Gerenciar stakeholders do produto" },
+    ],
+  },
+  {
+    resource: "inventory",
+    label: "Inventário / Alocação",
+    description: "Saldo e movimentos do ledger (estoque, vagas, assentos).",
+    actions: [
+      { action: "view", label: "Visualizar saldo e extrato" },
+      { action: "adjust", label: "Ajustar alocação (movimento manual)", destructive: true },
+    ],
+  },
+  {
+    resource: "job_opening",
+    label: "Vagas (recrutamento)",
+    actions: [
+      { action: "view", label: "Visualizar vagas" },
+      { action: "manage", label: "Criar/editar vagas e funis" },
+      { action: "close", label: "Fechar vaga", destructive: true },
+    ],
+  },
+  {
+    resource: "org_unit",
+    label: "Unidades (filiais)",
+    description: "Filiais/CNPJs do tenant para ofertas e pools por unidade.",
+    actions: [
+      { action: "view", label: "Visualizar unidades" },
+      { action: "manage", label: "Criar/editar unidades" },
     ],
   },
   {
