@@ -1,4 +1,4 @@
-import { Prisma, type DealStatus } from "@prisma/client";
+import { Prisma, type DealRole, type DealStatus } from "@prisma/client";
 
 import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -288,6 +288,8 @@ export type CreateDealInput = {
   contactId?: string | null;
   stageId: string;
   ownerId?: string | null;
+  /** Papel do deal (PRD catálogo): default COMMERCIAL no schema. */
+  dealRole?: DealRole;
 };
 
 /**
@@ -347,6 +349,7 @@ export async function createDeal(data: CreateDealInput) {
           contactId: data.contactId === undefined ? undefined : data.contactId,
           stageId: data.stageId,
           ownerId: data.ownerId === undefined ? undefined : data.ownerId,
+          dealRole: data.dealRole === undefined ? undefined : data.dealRole,
         }),
         include: listInclude,
       });
@@ -610,6 +613,8 @@ export async function moveDeal(
   // Pós-commit (fire-and-forget; import dinâmico evita ciclo de módulos):
   if (becameWon) {
     void import("@/services/product-fulfillment").then((m) => m.onDealWon(dealId));
+    // Catálogo por capacidades (PRD): operação pós-venda agnóstica.
+    void import("@/services/fulfillment").then((m) => m.onCommercialDealWon(dealId));
   } else if (becameLost) {
     void import("@/services/product-fulfillment").then((m) =>
       m.onDealReverted(dealId),
@@ -677,6 +682,8 @@ export async function markDealWon(id: string) {
   });
   // Pós-commit (fire-and-forget; import dinâmico evita ciclo deals<->fulfillment).
   void import("@/services/product-fulfillment").then((m) => m.onDealWon(id));
+  // Catálogo por capacidades (PRD): operação pós-venda agnóstica.
+  void import("@/services/fulfillment").then((m) => m.onCommercialDealWon(id));
   return result;
 }
 

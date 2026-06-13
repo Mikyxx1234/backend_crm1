@@ -2052,6 +2052,8 @@ enum EventEntityType {
   PIPELINE
   STAGE
   AUTOMATION
+  /// Catálogo por capacidades: alertas/eventos de produto/pool sem deal.
+  PRODUCT
 }
 
 // ──────────────────────────────────────────────

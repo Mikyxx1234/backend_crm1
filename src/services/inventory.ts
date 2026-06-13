@@ -345,3 +345,45 @@ export async function reverse(
   }
   return result;
 }
+
+export type AdjustInput = {
+  poolId: string;
+  /** Delta assinado: positivo soma, negativo subtrai. */
+  delta: number;
+  dealId?: string | null;
+  actorId?: string | null;
+  actorType?: string | null;
+  note?: string | null;
+};
+
+/**
+ * Ajuste manual do saldo (reason ADJUSTMENT). `delta` assinado. Subtrações
+ * respeitam `allowNegative` (erro tipado se estouraria). Usado pelo painel de
+ * alocação (sob `allocation:adjust`) e pelo step de automação.
+ */
+export async function adjust(
+  input: AdjustInput,
+): Promise<{ movementId: string; balance: number }> {
+  if (input.delta === 0) throw new Error("inventory.adjust: delta não pode ser 0.");
+  const orgId = getOrgIdOrThrow();
+
+  const result = await prisma.$transaction(async (tx) => {
+    const pool = await lockPool(tx, input.poolId, orgId);
+    const balance = await getBalance(input.poolId, tx);
+    if (!pool.allowNegative && input.delta < 0 && balance + input.delta < 0) {
+      throw new InsufficientInventoryError(input.poolId, balance, -input.delta);
+    }
+    const mv = await recordMovement(
+      tx,
+      { ...input, reason: "ADJUSTMENT" },
+      orgId,
+    );
+    return { movementId: mv.id, balance: balance + input.delta };
+  });
+
+  auditOnDeal(input.dealId, "INVENTORY_ADJUSTED", {
+    poolId: input.poolId,
+    delta: input.delta,
+  });
+  return result;
+}

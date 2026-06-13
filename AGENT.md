@@ -5,6 +5,43 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-13 — Catálogo por Capacidades, Fase 2: services agnósticos sobre os primitivos existentes [DECISÃO — agente OPUS]
+
+**Decisão.** Os três services do PRD (Fase 2) nascem como **camadas agnósticas
+sobre o que já existe**, sem reescrever o legado:
+
+- **`allocation.ts`** — fachada (vocabulário AllocationPool/Movement) sobre
+  `inventory.ts`, que já é a porta única transacional/auditada. Reexporta
+  `getBalance/consume/reserve/release/restock/reverse`; adicionei `adjust`
+  (delta assinado, reason ADJUSTMENT, respeita `allowNegative`) **em
+  `inventory.ts`** (onde vive o `lockPool`); e o **alerta de saldo baixo**:
+  `consume`/`reserve` da fachada resolvem o `lowThreshold` da config da
+  capability `allocation` (ProductCapability → fallback CatalogCapability) e
+  emitem `ALLOCATION_LOW` ao cruzar o limite.
+- **`fulfillment.ts`** — `onCommercialDealWon(dealId)` 100% agnóstico: para cada
+  produto com capability `fulfillment`, lê `config.creationTrigger`
+  (MANUAL→tarefa "configurar operação" via `FULFILLMENT_SETUP_REQUIRED`;
+  BY_AUTOMATION→no-op; ON_WON→cria deal `dealRole=OPERATIONAL` no pipeline da
+  config + `DealLink(ORIGINATED)`). **Zero `if (kind)`** — convive com o legado
+  `product-fulfillment.ts` (que continua por kind). Ligado pós-commit ao lado do
+  gancho legado em `deals.ts` (moveDeal e markDealWon).
+- **`stakeholder-notify.ts`** — nova `evaluateStakeholderRules({productId,
+  event, ...})`: carrega `StakeholderRule` (event×role×templateRef), casa papéis
+  com `ProductStakeholder` e entrega pelo mecanismo LGPD-mínimo já existente.
+
+**Steps de automação genéricos** (em `automation-executor.ts`): `allocation.adjust`
+(operation adjust|consume|restock|reserve|release, roteado pela fachada p/ disparar
+o alerta) e `stakeholder.notify`. Sem lógica por vertical.
+
+**`createDeal` ganhou `dealRole?`** (opcional; default COMMERCIAL no schema) para
+o fulfillment criar deals operacionais.
+
+**Schema:** `EventEntityType` ganhou `PRODUCT` (migration aditiva
+`20260613140000_event_entity_product`) para o `ALLOCATION_LOW` sem deal.
+Verificação: lint limpo, `tsc` mantém 21 erros pré-existentes (0 novos), build verde.
+
+---
+
 ### 2026-06-13 — Catálogo Universal por Capacidades: coexistência aditiva com o domínio multi-tipo (Fases 0–1) [DECISÃO — agente OPUS]
 
 **Decisão.** Implementar o catálogo agnóstico por capacidades do PRD

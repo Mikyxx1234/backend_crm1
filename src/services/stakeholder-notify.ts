@@ -189,6 +189,70 @@ export async function notifyStakeholdersOnSend(
   return { notified };
 }
 
+/**
+ * Avalia as `StakeholderRule` de um produto para um evento de domínio
+ * (STAGE_ENTERED, DEAL_WON, DEAL_LOST, ALLOCATION_CONSUMED) e notifica os
+ * stakeholders cujo papel casa com a regra (PRD: capability `stakeholders`).
+ *
+ * Agnóstico: a regra (event × role × templateRef) vem de dados, não de código.
+ * O `templateRef` é repassado no ActivityEvent; o envio proativo de template/
+ * Flow estruturado fica como TODO (hoje entrega convite em texto mínimo, LGPD).
+ */
+export async function evaluateStakeholderRules(params: {
+  productId: string;
+  event: string;
+  subjectName: string;
+  processLabel: string;
+  dealId?: string | null;
+}): Promise<{ notified: number }> {
+  const rules = await prisma.stakeholderRule.findMany({
+    where: { productId: params.productId, event: params.event, enabled: true },
+    select: { id: true, role: true, templateRef: true },
+  });
+  if (rules.length === 0) return { notified: 0 };
+
+  const roles = [...new Set(rules.map((r) => r.role))];
+  const stakeholders = await prisma.productStakeholder.findMany({
+    where: { productId: params.productId, role: { in: roles } },
+    select: {
+      id: true,
+      contactId: true,
+      role: true,
+      channelPreference: true,
+      contact: { select: { id: true, name: true } },
+    },
+  });
+
+  let notified = 0;
+  for (const st of stakeholders) {
+    const text =
+      `Olá, ${st.contact.name}. Atualização do processo "${params.processLabel}": ` +
+      `${params.subjectName}.`;
+    try {
+      await deliver(st, text, params.dealId);
+      notified++;
+    } catch (err) {
+      log.warn("evaluateStakeholderRules falhou:", err);
+    }
+  }
+
+  if (params.dealId) {
+    void logEvent({
+      type: "STAKEHOLDER_RULES_EVALUATED",
+      entityType: "DEAL",
+      entityId: params.dealId,
+      dealId: params.dealId,
+      meta: {
+        event: params.event,
+        rules: rules.length,
+        notified,
+        templateRefs: rules.map((r) => r.templateRef).filter(Boolean),
+      },
+    });
+  }
+  return { notified };
+}
+
 /** Solicita feedback aos stakeholders `notifyForFeedback`. */
 export async function requestStakeholderFeedback(
   params: NotifyParams,

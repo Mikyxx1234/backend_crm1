@@ -2272,6 +2272,89 @@ async function executeStep(
       return {};
     }
 
+    case "allocation.adjust":
+    case "allocation_adjust": {
+      // Passo agnóstico do catálogo por capacidades (PRD). Roteia pelo service
+      // `allocation.ts` (fachada de inventory.ts) para que o alerta de saldo
+      // baixo dispare. Operações: adjust (delta assinado) | consume | restock |
+      // reserve | release. Resolve o pool por poolId ou productId (pool global).
+      const operation = (readString(cfg, "operation") ?? "adjust").toLowerCase();
+
+      let poolId = readString(cfg, "poolId");
+      if (!poolId) {
+        const productId = readString(cfg, "productId");
+        if (!productId) {
+          throw new Error("allocation.adjust: informe poolId ou productId");
+        }
+        const globalPool = await prisma.inventoryPool.findFirst({
+          where: { productId, orgUnitId: null },
+          select: { id: true },
+        });
+        const anyPool =
+          globalPool ??
+          (await prisma.inventoryPool.findFirst({
+            where: { productId },
+            select: { id: true },
+          }));
+        if (!anyPool) {
+          throw new Error("allocation.adjust: nenhum pool encontrado para o produto");
+        }
+        poolId = anyPool.id;
+      }
+
+      const dealId = rt.dealId ?? readString(cfg, "dealId") ?? null;
+      const alloc = await import("@/services/allocation");
+
+      if (operation === "adjust") {
+        const delta = Math.floor(readNumber(cfg, "delta") ?? 0);
+        if (delta === 0) throw new Error("allocation.adjust: delta não pode ser 0");
+        await alloc.adjust({ poolId, delta, dealId, note: "Automação: ajuste" });
+        return {};
+      }
+
+      const qty = Math.max(
+        1,
+        Math.floor(readNumber(cfg, "qty") ?? readNumber(cfg, "quantity") ?? 1),
+      );
+      if (operation === "restock") {
+        await alloc.restock({ poolId, qty, dealId, note: "Automação: reposição" });
+      } else if (operation === "release") {
+        await alloc.release({ poolId, qty, dealId });
+      } else if (operation === "reserve") {
+        await alloc.reserve({ poolId, qty, dealId });
+      } else {
+        await alloc.consume({
+          poolId,
+          qty,
+          reason: "SALE",
+          dealId,
+          note: "Automação: consumo",
+        });
+      }
+      return {};
+    }
+
+    case "stakeholder.notify":
+    case "stakeholder_notify": {
+      // Passo agnóstico: avalia StakeholderRule do produto para um evento e
+      // notifica os papéis casados (PRD: capability stakeholders).
+      const productId = readString(cfg, "productId");
+      if (!productId) throw new Error("stakeholder.notify: informe productId");
+      const event = readString(cfg, "event") ?? "STAGE_ENTERED";
+      const subjectName = readString(cfg, "subjectName") ?? "Atualização";
+      const processLabel = readString(cfg, "processLabel") ?? "Processo";
+      const dealId = rt.dealId ?? readString(cfg, "dealId") ?? null;
+      const svc = await import("@/services/stakeholder-notify");
+      await svc.evaluateStakeholderRules({
+        productId,
+        event,
+        subjectName,
+        processLabel,
+        dealId,
+      });
+      return {};
+    }
+
     default:
       throw new Error(`Tipo de passo desconhecido: ${stepType}`);
   }
