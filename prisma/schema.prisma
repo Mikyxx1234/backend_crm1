@@ -119,6 +119,14 @@ model Organization {
   courseClasses            CourseClass[]
   jobOpenings              JobOpening[]
   productStakeholders      ProductStakeholder[]
+  // Catálogo por capacidades (aditivo).
+  catalogs                 Catalog[]
+  catalogCapabilities      CatalogCapability[]
+  productCapabilities      ProductCapability[]
+  capacitySlots            CapacitySlot[]
+  shippingRanges           ShippingRange[]
+  stakeholderRules         StakeholderRule[]
+  dealLinks                DealLink[]
 
   @@index([status])
   @@map("organizations")
@@ -1249,6 +1257,10 @@ model Deal {
   title          String
   value          Decimal      @default(0) @db.Decimal(12, 2)
   status         DealStatus   @default(OPEN)
+  /// Papel no fluxo comercial → operacional (PRD §5). Default COMMERCIAL:
+  /// deals existentes são comerciais (zero regressão). Indexado e usado em
+  /// filtros/relatórios.
+  dealRole       DealRole     @default(COMMERCIAL)
   expectedClose  DateTime?
   lostReason     String?
   position       Int          @default(0)
@@ -1267,6 +1279,9 @@ model Deal {
   tags           TagOnDeal[]
   events         DealEvent[]
   activityEvents ActivityEvent[]
+  // Vínculos tipados entre deals (PRD: fulfillment).
+  linksFrom      DealLink[]   @relation("DealLinkFrom")
+  linksTo        DealLink[]   @relation("DealLinkTo")
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1283,6 +1298,7 @@ model Deal {
   @@index([organizationId, stageId, status])
   @@index([organizationId, stageId, position])
   @@index([organizationId, contactId, status])
+  @@index([organizationId, dealRole])
   @@map("deals")
 }
 
@@ -1320,15 +1336,25 @@ model Product {
   /// Quantidade disponível em estoque (relevante só com trackStock=true).
   stock          Decimal      @default(0) @db.Decimal(12, 2)
 
-  dealProducts   DealProduct[]
-  customValues   ProductCustomFieldValue[]
-  offers         ProductOffer[]
-  inventoryPools InventoryPool[]
-  shipping       ProductShipping?
-  plans          ProductPlan[]
-  courseConfig   CourseConfig?
-  jobOpenings    JobOpening[]
-  stakeholders   ProductStakeholder[]
+  /// Catálogo ao qual o produto pertence (PRD: herança catálogo → produto).
+  /// Nullable para zero regressão; backfill move produtos legados ao catálogo
+  /// default da org.
+  catalogId      String?
+  catalog        Catalog?     @relation(fields: [catalogId], references: [id])
+
+  dealProducts     DealProduct[]
+  customValues     ProductCustomFieldValue[]
+  offers           ProductOffer[]
+  inventoryPools   InventoryPool[]
+  shipping         ProductShipping?
+  plans            ProductPlan[]
+  courseConfig     CourseConfig?
+  jobOpenings      JobOpening[]
+  stakeholders     ProductStakeholder[]
+  // Catálogo por capacidades (aditivo).
+  capabilities     ProductCapability[]
+  capacitySlots    CapacitySlot[]
+  stakeholderRules StakeholderRule[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1339,6 +1365,7 @@ model Product {
   @@index([organizationId, name])
   @@index([organizationId, type])
   @@index([organizationId, kind])
+  @@index([organizationId, catalogId])
   @@map("products")
 }
 
@@ -1403,6 +1430,9 @@ enum InventoryReason {
   REVERSAL
   RESERVATION
   RESERVATION_RELEASE
+  /// Alias agnóstico do PRD para liberação de reserva (= RESERVATION_RELEASE).
+  /// Ambos coexistem; o service de alocação novo emite RELEASE.
+  RELEASE
   HIRE
   WITHDRAWAL
   ADJUSTMENT
@@ -1504,6 +1534,8 @@ model InventoryPool {
   movements     InventoryMovement[]
   courseClasses CourseClass[]
   jobOpenings   JobOpening[]
+  /// Slot de capacidade que usa este pool como lugares (capability scheduling).
+  capacitySlot  CapacitySlot?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1549,6 +1581,8 @@ model ProductShipping {
   weightGrams    Int?
   dimensions     Json?
   shippingPolicy Json?
+  /// Faixas de CEP × valor × prazo (capability shipping).
+  ranges         ShippingRange[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1680,6 +1714,222 @@ model ProductStakeholder {
   @@index([jobOpeningId])
   @@index([contactId])
   @@map("product_stakeholders")
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Catálogo Universal por Capacidades (PRD catalogo-capacidades)
+//
+// Núcleo agnóstico: Product / Catalog / Capability. Verticais são apenas
+// TEMPLATES de dados que LIGAM capacidades — NUNCA enums de tipo.
+//
+// Coexistência aditiva (decisão 2026-06-13): os models legados de produto
+// multi-tipo (ProductKind, CourseConfig, JobOpening, InventoryPool/Movement,
+// ProductOffer/Plan/Shipping, ProductStakeholder) continuam intactos. As
+// capacidades reusam esses primitivos onde possível:
+//   - allocation  -> InventoryPool / InventoryMovement
+//   - pricing     -> ProductOffer
+//   - recurrence  -> ProductPlan
+//   - shipping    -> ProductShipping + ShippingRange (novo, faixas de CEP)
+//   - stakeholders-> ProductStakeholder + StakeholderRule (novo)
+//   - scheduling  -> CapacitySlot (novo)
+//   - fulfillment -> DealLink (novo) + Deal.dealRole
+//
+// O registro de capacidades (conjunto fechado de 8) vive em CÓDIGO
+// (src/lib/capabilities) — não há tabela Capability para evitar fonte dupla
+// de verdade. As junctions guardam `capabilityKey` validada pelo registry.
+// ──────────────────────────────────────────────────────────────────
+
+/// Papel do deal no fluxo comercial → operacional. Indexado e usado em
+/// TODOS os filtros/relatórios desde o início (PRD §9, mitigação de
+/// "deal sobrecarregado"). Default COMMERCIAL (zero regressão: deals
+/// existentes são comerciais).
+enum DealRole {
+  COMMERCIAL
+  OPERATIONAL
+}
+
+/// Tipo de vínculo entre deals (PRD §3 — DealLink tipado, não parentDealId).
+/// ORIGINATED: deal operacional originado de um deal comercial ganho.
+enum DealLinkType {
+  ORIGINATED
+  RELATED
+}
+
+/// Catálogo de produtos por organização. Agrupa produtos e capacidades
+/// padrão (herança catálogo → produto com override pontual, PRD §2.5).
+/// `isTemplate` marca catálogos salvos como modelo reutilizável da org.
+model Catalog {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  /// Catálogo default da org (recebe os produtos legados no backfill).
+  isDefault      Boolean      @default(false)
+  /// Catálogo salvo como template reutilizável (wizard "salvar como template").
+  isTemplate     Boolean      @default(false)
+  /// Chave do template de origem (ex.: "store", "saas", "education") quando
+  /// criado a partir de um seed. String livre — não cria acoplamento vertical.
+  templateKey    String?
+
+  products     Product[]
+  capabilities CatalogCapability[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([organizationId, isDefault])
+  @@index([organizationId, isTemplate])
+  @@map("catalogs")
+}
+
+/// Junction catálogo × capacidade. `capabilityKey` é validada pelo registry
+/// de código (src/lib/capabilities); `config` é Json validado pelo Zod da
+/// capacidade antes de persistir. Capacidades do catálogo são herdadas
+/// pelos produtos, com override em ProductCapability.
+model CatalogCapability {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  catalogId      String
+  catalog        Catalog      @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  /// Chave da capacidade (conjunto fechado, ver CAPABILITY_KEYS). Sem FK —
+  /// o registry de código é a fonte da verdade.
+  capabilityKey  String
+  /// Config da capacidade, validado pelo Zod correspondente.
+  config         Json         @default("{}")
+  enabled        Boolean      @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([catalogId, capabilityKey])
+  @@index([organizationId])
+  @@index([catalogId])
+  @@map("catalog_capabilities")
+}
+
+/// Junction produto × capacidade. Override pontual sobre a capacidade do
+/// catálogo (ou ativação extra só no produto). Mesmas regras de validação.
+model ProductCapability {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  capabilityKey  String
+  config         Json         @default("{}")
+  enabled        Boolean      @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([productId, capabilityKey])
+  @@index([organizationId])
+  @@index([productId])
+  @@map("product_capabilities")
+}
+
+/// Slot de capacidade (capability `scheduling`): janela reservável com
+/// recurso opcional e pool de lugares 1-1 (PRD §4). Substitui CourseClass
+/// como caminho agnóstico dali pra frente — sem semântica vertical.
+model CapacitySlot {
+  id             String         @id @default(cuid())
+  organizationId String
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Produto que oferece o slot (opcional: slot pode ser avulso).
+  productId      String?
+  product        Product?       @relation(fields: [productId], references: [id], onDelete: Cascade)
+  startsAt       DateTime?
+  endsAt         DateTime?
+  /// Referência livre ao recurso (sala, instrutor, equipamento). Scalar —
+  /// sem acoplar a um model de recurso (fora do escopo v1).
+  resourceRef    String?
+  /// Pool de lugares 1-1 (reusa InventoryPool como AllocationPool). Opcional.
+  poolId         String?        @unique
+  pool           InventoryPool? @relation(fields: [poolId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([productId])
+  @@index([organizationId, startsAt])
+  @@map("capacity_slots")
+}
+
+/// Faixa de frete (capability `shipping`): faixa de CEP × valor × prazo.
+/// Pendura no ProductShipping legado (tabela própria de frete do produto).
+model ShippingRange {
+  id                String          @id @default(cuid())
+  organizationId    String
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  productShippingId String
+  productShipping   ProductShipping @relation(fields: [productShippingId], references: [id], onDelete: Cascade)
+  /// Faixa de CEP (texto livre — formatos variam por país; PRD é global).
+  zipFrom           String
+  zipTo             String
+  price             Decimal         @default(0) @db.Decimal(12, 2)
+  /// Prazo de entrega em dias para esta faixa.
+  leadDays          Int             @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([productShippingId])
+  @@map("shipping_ranges")
+}
+
+/// Regra de notificação de stakeholder (capability `stakeholders`):
+/// event × role × templateRef. Avaliada por stakeholder-notify em eventos
+/// de domínio. Reusa ProductStakeholder como "quem" (Contact × papel).
+model StakeholderRule {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Produto ao qual a regra se aplica (opcional: regra pode ser do catálogo).
+  productId      String?
+  product        Product?     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  /// Evento de domínio que dispara (STAGE_ENTERED, DEAL_WON, DEAL_LOST,
+  /// ALLOCATION_CONSUMED). String livre alinhada ao enum do registry.
+  event          String
+  /// Papel do stakeholder alvo (casa com ProductStakeholder.role).
+  role           String
+  /// Referência ao template/Flow de mensagem (scalar — resolvido em runtime).
+  templateRef    String?
+  channel        StakeholderChannel @default(WHATSAPP)
+  enabled        Boolean      @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([productId])
+  @@index([organizationId, event])
+  @@map("stakeholder_rules")
+}
+
+/// Vínculo tipado entre deals (PRD §3). N:N — um deal comercial pode
+/// originar vários operacionais; rastreabilidade "entregue X de N".
+model DealLink {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  fromDealId     String
+  fromDeal       Deal         @relation("DealLinkFrom", fields: [fromDealId], references: [id], onDelete: Cascade)
+  toDealId       String
+  toDeal         Deal         @relation("DealLinkTo", fields: [toDealId], references: [id], onDelete: Cascade)
+  linkType       DealLinkType @default(ORIGINATED)
+
+  createdAt DateTime @default(now())
+
+  @@unique([fromDealId, toDealId, linkType])
+  @@index([organizationId])
+  @@index([fromDealId])
+  @@index([toDealId])
+  @@map("deal_links")
 }
 
 // ──────────────────────────────────────────────

@@ -5,6 +5,61 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-13 — Catálogo Universal por Capacidades: coexistência aditiva com o domínio multi-tipo (Fases 0–1) [DECISÃO — agente OPUS]
+
+**Decisão.** Implementar o catálogo agnóstico por capacidades do PRD
+(`decision-log/PRD-catalogo-capacidades.md`) **sobre** o domínio de produtos
+multi-tipo de 2026-06-11, sem reescrever nada. O núcleo passa a conhecer
+`Product`/`Catalog`/capacidades; os verticais (curso, vaga, SaaS…) só existem
+como TEMPLATES de dados que ligam capacidades — **nenhum `if (kind === ...)`
+novo**.
+
+**Por que coexistência (e não substituição).** O schema já tinha, há 2 dias,
+`ProductKind`, `InventoryPool/Movement`, `ProductOffer/Plan/Shipping`,
+`CourseConfig`, `JobOpening`, `ProductStakeholder` — com código vivo. O PRD §5
+diz "não existem `CourseConfig`/`JobOpening`", mas removê-los seria regressão
+destrutiva. Optou-se por **congelar o legado** e mapear cada capacidade aos
+primitivos existentes:
+
+| Capacidade | Implementação (reuso) |
+|---|---|
+| `allocation` | `InventoryPool` / `InventoryMovement` (= AllocationPool/Movement) |
+| `pricing` | `ProductOffer` |
+| `recurrence` | `ProductPlan` |
+| `shipping` | `ProductShipping` + **`ShippingRange`** (novo: faixas de CEP) |
+| `stakeholders` | `ProductStakeholder` + **`StakeholderRule`** (novo: event×role×template) |
+| `scheduling` | **`CapacitySlot`** (novo: caminho agnóstico que sucede `CourseClass`) |
+| `fulfillment` | **`DealLink`** (novo) + **`Deal.dealRole`** |
+
+**Registro de capacidades = só código.** O conjunto fechado de 8 capacidades
+vive em `src/lib/capabilities/` (Fase 0): cada uma exporta `key`/`label`/
+`description` + schema Zod do `config`. Não há tabela `Capability` (evita fonte
+dupla de verdade); as junctions `CatalogCapability`/`ProductCapability` guardam
+`capabilityKey` como string validada pelo registry, e `config Json` validado
+pelo Zod antes de persistir. Adicionar capacidade = PR (código+schema+validação),
+nunca ação de usuário. Exposto ao frontend por `GET /api/capabilities`
+(JSON Schema serializado para o wizard montar sub-perguntas).
+
+**Migration (`20260613130000_catalog_capabilities`).** 100% aditiva e
+idempotente (`IF NOT EXISTS` / `DO $$ ... EXCEPTION WHEN duplicate_object $$`),
+aplicada no dev via `prisma db execute` (mantém `SKIP_PRISMA_MIGRATE=1`; nunca
+`migrate deploy` em prod). Novos models: `Catalog`, `CatalogCapability`,
+`ProductCapability`, `CapacitySlot`, `ShippingRange`, `StakeholderRule`,
+`DealLink`. Extensões: `Product.catalogId`, `Deal.dealRole` (default
+`COMMERCIAL`, indexado — PRD §9). Enum `InventoryReason` ganhou alias `RELEASE`
+(coexiste com `RESERVATION_RELEASE`). **Backfill:** um `Catalog` default por org
++ capability `pricing` ligada + produtos sem catálogo movidos pro default.
+Atenção: o `migrate diff` capturou drift pré-existente do banco de dev
+(`channels.defaultPipelineId`, `contacts.number NOT NULL`) que foi **removido à
+mão** da migration por não pertencer a esta feature (e `contacts.number NOT NULL`
+sem default quebraria tabela populada).
+
+Todos os 7 models novos entraram em `SCOPED_MODELS` (multi-tenant). Verificação:
+schema válido, `prisma generate` ok, `tsc --noEmit` mantém os 21 erros
+pré-existentes (0 novos), lint limpo.
+
+---
+
 ### 2026-06-12 — Atribuição Canal → Funil (planejado, aguardando backend) [DECISÃO — agente OPUS]
 
 **Decisão.** Documentado o plano para roteamento de origem (canal A → funil X,
