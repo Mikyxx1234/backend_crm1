@@ -36,6 +36,8 @@ export type GroupWriteInput = {
   permissions?: ScopedPermissionInput[];
   stageGrants?: StageGrantInput[];
   fieldGrants?: FieldGrantInput[];
+  /** IDs de usuários a já vincular como membros na CRIAÇÃO do grupo. */
+  memberIds?: string[];
 };
 
 // ─── Selects + mapeadores ────────────────────────────────────────────────────
@@ -219,6 +221,26 @@ export async function createGroup(input: GroupWriteInput) {
   const stageGrants = sanitizeStageGrants(input.stageGrants);
   const fieldGrants = sanitizeFieldGrants(input.fieldGrants);
 
+  // Membros opcionais na criação. Validamos contra usuários HUMANOS ativos
+  // da própria org (defesa em profundidade) antes de vincular, evitando
+  // anexar IDs inválidos/cross-org que quebrariam a FK.
+  const requestedMemberIds = Array.from(
+    new Set((input.memberIds ?? []).filter((id) => typeof id === "string" && id)),
+  );
+  const validMemberIds = requestedMemberIds.length
+    ? (
+        await prisma.user.findMany({
+          where: {
+            id: { in: requestedMemberIds },
+            organizationId: orgId,
+            type: "HUMAN",
+            isErased: false,
+          },
+          select: { id: true },
+        })
+      ).map((u) => u.id)
+    : [];
+
   const group = await prisma.group.create({
     data: {
       organizationId: orgId,
@@ -235,6 +257,9 @@ export async function createGroup(input: GroupWriteInput) {
       },
       fieldGrants: {
         create: fieldGrants.map((f) => ({ ...f, organizationId: orgId })),
+      },
+      members: {
+        create: validMemberIds.map((userId) => ({ userId, organizationId: orgId })),
       },
     },
     select: groupDetailSelect,

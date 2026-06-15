@@ -35,6 +35,7 @@ const createSchema = z.object({
   permissions: z.array(scopedPermissionSchema).optional(),
   stageGrants: z.array(stageGrantSchema).optional(),
   fieldGrants: z.array(fieldGrantSchema).optional(),
+  memberIds: z.array(z.string().min(1)).optional(),
 });
 
 async function gate(session: {
