@@ -5,6 +5,93 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-13 — Permissões por GRUPO com escopo (modelo Kommo) em `/settings/permissions` — entidade `Group` nova, ADITIVA ao RBAC de papéis [DECISÃO — agente OPUS]
+
+**Decisão (escolhida pelo usuário: "modelo completo" + nível "Equipe" adiado).**
+Novo domínio `Group` (Prisma) com membros e permissões **com escopo por ação**
+(`PermissionLevel`: `NONE | SELF | TEAM | ALL`), espelhando o mockup estilo
+Kommo. Modelos: `Group`, `GroupMember`, `GroupPermission`, `GroupStageGrant`,
+`GroupFieldGrant` + extras no grupo (`sharedInbox`, `mediaAccess`,
+`sidebarRoutes`). Migrado via `prisma db push` (crm_dev sem migrations).
+
+**Por quê ADITIVO (não substitui papéis).** O RBAC de papéis (`Role.permissions
+string[]` + `UserRoleAssignment`) continua intacto. Permissões efetivas de um
+user = **união** papéis ∪ grupos. No resolver (`lib/authz/index.ts`,
+`loadFromDb`): toda `GroupPermission` com nível ≥ `SELF` injeta a key booleana
+`resource:action` no `can()`; o nível fica num mapa `scopes` (resource → action
+→ nível) no `AuthzContext` para dirigir a visibilidade own/all. Usuários sem
+grupos mantêm exatamente o comportamento atual (fail-safe — evita repetir o
+incidente de "sumiço de dados").
+
+**Nível "Equipe" (TEAM) adiado.** Sem estrutura de times no sistema, o enum
+inclui `TEAM` (forward-compat) mas a UI mostra apenas `NONE/SELF/ALL` ativos
+(`Equipe` aparece desabilitado como "em breve"). No resolver, `TEAM` é tratado
+como `ALL` defensivamente, mas nunca é gravado pela UI.
+
+**Enforcement (escopo desta entrega).**
+- **Gating de ação** (create/view/edit/delete/export) via `can()`: vale para
+  **todas** as entidades, pois grupos alimentam `can()`.
+- **Visibilidade de linha own/all**: ligada em **deals** e **conversas** via
+  `getVisibilityFilter` (grupos só EXPANDEM: nível `ALL` no `view` promove o
+  usuário "own"→"all"; nunca restringem ali).
+- **Etapas (`GroupStageGrant`) e campos (`GroupFieldGrant`)**: têm UI +
+  persistência completas, mas o enforcement por etapa/campo fica **staged**
+  (reaproveitará o caminho de `ScopeGrants` / flag `rbac_granular_scope_v1`)
+  para não esconder dados por engano nesta fase.
+
+**Rotas.** `GET/POST /api/groups`, `GET/PUT/DELETE /api/groups/[id]`,
+`POST /api/groups/[id]/members`, `DELETE /api/groups/[id]/members/[userId]`
+(substituem o stub 501). Gate: `settings:permissions`. Membros reaproveitam o
+mesmo padrão de `UserRoleAssignment`. UI: hub em `/settings/permissions` +
+editor full-width em `/settings/permissions/groups/[groupId]`.
+
+---
+
+### 2026-06-13 — Grupos de acesso de mensageria (`/settings/conversations`): herança PRAGMÁTICA + assinatura ainda global [DECISÃO — agente OPUS]
+
+**Contexto.** Reconstrução de `/settings/conversations` para um modelo de 3 telas
+(lista de grupos → editor de preset → editor custom com herança). O brief assume
+herança+override e assinatura por-grupo, mas o backend tem `Role.permissions`
+**plano** (lista de chaves efetivas), sem herança nem override, e assinatura
+**global** por organização (`OrganizationSetting` lido pelo composer).
+
+**Decisão (escolhida pelo usuário entre 3 opções).**
+
+1. **Herança pragmática, não em runtime.** Adicionada **uma coluna aditiva**
+   `Role.inheritsFrom String?` (+ índice) via migration idempotente
+   (`ADD COLUMN IF NOT EXISTS`). Grupos personalizados continuam guardando as
+   permissões **efetivas** em `permissions`; a UI calcula "herdado vs
+   personalizado" por **diff** contra o efetivo do base (`inheritsFrom`).
+   Helpers puros e testados em `frontend/src/features/messaging-roles/inheritance.ts`.
+   - `can()` **não** muda — não há resolução de herança no servidor.
+   - **Cascata não é automática.** Editar um preset não propaga sozinho. A
+     propagação é uma **ação explícita** ("Reaplicar aos dependentes ao salvar"),
+     que preserva o que cada dependente personalizou medindo override contra o
+     base **anterior** ao save.
+
+2. **Serviço de roles (`services/roles.ts`):** `createRole`/`updateRole` aceitam
+   `inheritsFrom` (validado: precisa ser role da MESMA org; não pode herdar de si
+   mesmo). `deleteRole` passa a **recusar exclusão com membros** (`assignments>0`)
+   — a UI antecipa a regra, mas o servidor é a fonte da verdade. Zod das rotas
+   `POST/PUT /api/roles` estendido com `inheritsFrom`.
+
+3. **Assinatura permanece GLOBAL no v1 (pendência registrada).** O brief pede
+   assinatura por-grupo substituindo o toggle global. Mantivemos o toggle global
+   (`agentSignatureEnabled/Editable`) **sem reinterpretar** silenciosamente como
+   per-role. Tornar por-grupo exige adicionar a permission `signature:edit` ao
+   catálogo + religar o composer para ler a permission da role em vez do
+   `OrganizationSetting` — **trabalho de backend a fazer numa próxima fase.**
+
+**Por quê.** Entregar o UX das 3 telas (comparar grupos, criar por área, herdado×
+personalizado com `↺ herdar`) com **mudança mínima e aditiva** no backend,
+evitando reescrever o núcleo de autorização. O trade-off aceito é cascata manual
+em vez de herança viva.
+
+**Não-objetivo / dívida.** Herança real em runtime e assinatura por-grupo ficam
+para uma fase futura (exigiriam storage de override + mudança no `can()`/composer).
+
+---
+
 ### 2026-06-13 — Catálogo por Capacidades, Fase 2: services agnósticos sobre os primitivos existentes [DECISÃO — agente OPUS]
 
 **Decisão.** Os três services do PRD (Fase 2) nascem como **camadas agnósticas

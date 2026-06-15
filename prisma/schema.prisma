@@ -106,6 +106,8 @@ model Organization {
   aiAgentMessages          AIAgentMessage[]
   roles                    Role[]
   roleAssignments          UserRoleAssignment[]
+  groups                   Group[]
+  groupMembers             GroupMember[]
   organizationSettings     OrganizationSetting[]
   savedFilters             SavedFilter[]
   organizationWidgets      OrganizationWidget[]
@@ -501,6 +503,7 @@ model User {
   loginAttempts                  LoginAttempt[]
   dataRequests                   DataRequest[]
   roleAssignments                UserRoleAssignment[]
+  groupMemberships               GroupMember[]
   savedFilters                   SavedFilter[]             @relation("UserSavedFilters")
   erasedAt                       DateTime?
   /// Marca usuario anonimizado pela rotina LGPD (PR 4.3). O registro
@@ -821,6 +824,12 @@ model Role {
   /// Catalogo canonico em src/lib/authz/permissions.ts. Validacao da
   /// integridade dos itens fica no service layer.
   permissions    String[]
+  /// Ponteiro de origem para grupos personalizados (modelo de heranca
+  /// pragmatico): id do Role base do qual este grupo "herda". As permissoes
+  /// efetivas continuam em `permissions` (copia); a UI calcula herdado vs
+  /// personalizado por diff contra o base. Null = sem origem (presets ou
+  /// grupos legados). Integridade validada no service layer (mesma org).
+  inheritsFrom   String?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
@@ -829,6 +838,7 @@ model Role {
   @@unique([organizationId, name])
   @@unique([organizationId, systemPreset])
   @@index([organizationId])
+  @@index([inheritsFrom])
   @@map("roles")
 }
 
@@ -853,6 +863,118 @@ model UserRoleAssignment {
   @@index([userId])
   @@index([roleId])
   @@map("user_role_assignments")
+}
+
+/// Nivel de escopo de uma acao concedida a um grupo (modelo estilo Kommo).
+///   NONE = negado
+///   SELF = apenas registros do proprio usuario (responsavel)
+///   TEAM = registros da equipe (RESERVADO — sem estrutura de times ainda;
+///          nao selecionavel na UI, enforcement futuro)
+///   ALL  = todos os registros da organizacao
+enum PermissionLevel {
+  NONE
+  SELF
+  TEAM
+  ALL
+}
+
+/// Grupo de acesso (RBAC por grupo — modelo Kommo). As permissoes vivem no
+/// GRUPO; usuarios entram via GroupMember e herdam as regras. ADITIVO ao
+/// RBAC de papeis (Role): permissoes efetivas de um user = uniao das
+/// permissions dos papeis (booleanas) ∪ permissions dos grupos (scoped).
+/// A visibilidade por recurso (own/all) deriva do maior nivel concedido.
+model Group {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  /// Acessos extras (toggles do editor de grupo).
+  sharedInbox    Boolean      @default(true)
+  mediaAccess    Boolean      @default(true)
+  /// Rotas de nav visiveis para o grupo (vazio = todas). Menu lateral.
+  sidebarRoutes  String[]
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  members     GroupMember[]
+  permissions GroupPermission[]
+  stageGrants GroupStageGrant[]
+  fieldGrants GroupFieldGrant[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("groups")
+}
+
+/// Vinculo N:N entre User e Group. Um user pode estar em varios grupos;
+/// permissoes efetivas = uniao (maior nivel vence por resource:action).
+model GroupMember {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  groupId        String
+  group          Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+
+  @@unique([groupId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@index([groupId])
+  @@map("group_members")
+}
+
+/// Permissao com escopo por acao de um grupo. `resource`/`action` referem o
+/// PERMISSION_CATALOG (src/lib/authz/permissions.ts). Ausencia de linha = NONE.
+model GroupPermission {
+  id             String          @id @default(cuid())
+  organizationId String
+  groupId        String
+  group          Group           @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  resource       String
+  action         String
+  level          PermissionLevel @default(NONE)
+
+  @@unique([groupId, resource, action])
+  @@index([organizationId])
+  @@index([groupId])
+  @@map("group_permissions")
+}
+
+/// Visibilidade por etapa do funil para um grupo (ver/editar deals do stage).
+model GroupStageGrant {
+  id             String  @id @default(cuid())
+  organizationId String
+  groupId        String
+  group          Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  stageId        String
+  canView        Boolean @default(true)
+  canEdit        Boolean @default(false)
+
+  @@unique([groupId, stageId])
+  @@index([organizationId])
+  @@index([groupId])
+  @@map("group_stage_grants")
+}
+
+/// Permissao por campo (Pro) de um grupo. `entity` = "deal"|"contact"|
+/// "company"|"product"; `fieldKey` = chave do campo (ex.: "deal.value").
+model GroupFieldGrant {
+  id             String  @id @default(cuid())
+  organizationId String
+  groupId        String
+  group          Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  entity         String
+  fieldKey       String
+  canView        Boolean @default(true)
+  canEdit        Boolean @default(true)
+
+  @@unique([groupId, entity, fieldKey])
+  @@index([organizationId])
+  @@index([groupId])
+  @@map("group_field_grants")
 }
 
 /// Configs por organizacao (substitui SystemSetting global pra dados
@@ -1327,13 +1449,14 @@ model Product {
   /// Tipo de domínio multi-tipo (Físico, Serviço, Curso, Vaga). Default PHYSICAL.
   kind           ProductKind  @default(PHYSICAL)
   isActive       Boolean      @default(true)
-  /// Quando true, o produto controla estoque/limite. Só então `stock` é
-  /// relevante e a baixa (step `consume_stock`) age sobre ele.
-  /// LEGADO (modo paralelo): o ledger novo (InventoryPool/InventoryMovement)
-  /// é a fonte de verdade para pools novos; trackStock/stock continuam para
-  /// compatibilidade com o step `consume_stock`.
+  /// @deprecated (Catálogo Genérico por Capacidades — Fase 1). Não ler em código novo.
+  /// A fonte da verdade de estoque/limite é a capacidade `allocation`
+  /// (InventoryPool + InventoryMovement). Este campo permanece apenas para o step
+  /// legado `consume_stock`, que será substituído pela Fase 5/6. Não dropar antes
+  /// de pós-Fase 7.
   trackStock     Boolean      @default(false) @map("track_stock")
-  /// Quantidade disponível em estoque (relevante só com trackStock=true).
+  /// @deprecated — ver `trackStock`. Quantidade só lida pelo step `consume_stock`
+  /// legado. Pools novos não usam este campo.
   stock          Decimal      @default(0) @db.Decimal(12, 2)
 
   /// Catálogo ao qual o produto pertence (PRD: herança catálogo → produto).
@@ -1784,10 +1907,21 @@ model Catalog {
   @@map("catalogs")
 }
 
+/// Política de override catálogo → produto (Fase 1 do Catálogo Genérico por
+/// Capacidades). Aplicada no backend (não decorativa):
+///   LOCKED  — produto herda e não pode alterar. PUT rejeita config divergente.
+///   DEFAULT — catálogo sugere; produto pode sobrescrever quando presente.
+///   OPEN    — catálogo não impõe; produto configura do zero.
+enum OverridePolicy {
+  LOCKED
+  DEFAULT
+  OPEN
+}
+
 /// Junction catálogo × capacidade. `capabilityKey` é validada pelo registry
 /// de código (src/lib/capabilities); `config` é Json validado pelo Zod da
 /// capacidade antes de persistir. Capacidades do catálogo são herdadas
-/// pelos produtos, com override em ProductCapability.
+/// pelos produtos, com override em ProductCapability — sujeito a `overridePolicy`.
 model CatalogCapability {
   id             String       @id @default(cuid())
   organizationId String
@@ -1797,8 +1931,14 @@ model CatalogCapability {
   /// Chave da capacidade (conjunto fechado, ver CAPABILITY_KEYS). Sem FK —
   /// o registry de código é a fonte da verdade.
   capabilityKey  String
-  /// Config da capacidade, validado pelo Zod correspondente.
+  /// Modo da capacidade dentro do registry (ex.: pricing.one_time | recurring | ...).
+  /// Fase 2 valida via discriminated union Zod por modo. Backfill: `default`
+  /// substituído pela rotina da migration por modo equivalente ao estado atual.
+  mode           String       @default("default")
+  /// Config da capacidade, validado pelo Zod do modo correspondente.
   config         Json         @default("{}")
+  /// Política aplicada no backend: LOCKED rejeita ProductCapability divergente.
+  overridePolicy OverridePolicy @default(DEFAULT)
   enabled        Boolean      @default(true)
 
   createdAt DateTime @default(now())
@@ -1812,6 +1952,7 @@ model CatalogCapability {
 
 /// Junction produto × capacidade. Override pontual sobre a capacidade do
 /// catálogo (ou ativação extra só no produto). Mesmas regras de validação.
+/// Override é rejeitado pelo backend quando `CatalogCapability.overridePolicy = LOCKED`.
 model ProductCapability {
   id             String       @id @default(cuid())
   organizationId String
@@ -1819,7 +1960,15 @@ model ProductCapability {
   productId      String
   product        Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
   capabilityKey  String
+  /// Modo da capacidade no produto. Pode diferir do catálogo se a policy
+  /// permitir (DEFAULT/OPEN). Validado por discriminated union Zod (Fase 2).
+  mode           String       @default("default")
+  /// Override do config no nível do produto. Aplicado em cascata após
+  /// CatalogCapability.config — ver helper `resolveCapabilityConfig` (Fase 2).
   config         Json         @default("{}")
+  /// Overrides escopados por OrgUnit. Mapa { [orgUnitId]: Partial<Config> }
+  /// aplicado por último na cascata: catálogo → produto → unidade.
+  unitOverrides  Json?
   enabled        Boolean      @default(true)
 
   createdAt DateTime @default(now())
@@ -2591,6 +2740,8 @@ model WhatsAppTemplateConfig {
 /// Fluxo WhatsApp (Flow JSON) desenhado no CRM e publicado na WABA.
 model WhatsappFlowDefinition {
   id               String               @id @default(cuid())
+  /// ID curto para URL (8 chars base64url). Gerado na criação; nulo em registros legados.
+  shortId          String?              @unique @map("short_id")
   organizationId   String
   organization     Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name             String

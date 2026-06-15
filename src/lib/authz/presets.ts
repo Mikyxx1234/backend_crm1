@@ -57,6 +57,9 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   "inventory:view", "inventory:adjust",
   "job_opening:view", "job_opening:manage", "job_opening:close",
   "org_unit:view", "org_unit:manage",
+  // Catálogo por capacidades — Gestor tem tudo
+  "catalog:view", "catalog:create", "catalog:edit_capabilities",
+  "catalog:delete", "catalog:save_as_template",
   // Channel / Template
   "channel:view", "channel:edit",
   "template:view", "template:create", "template:edit",
@@ -83,6 +86,7 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   "inventory:view",
   "job_opening:view",
   "org_unit:view",
+  "catalog:view",
   // Distribution: operador só visualiza (e altera o próprio online/offline,
   // controlado fora do RBAC via ownership na rota de status do agente).
   "distribution:view",

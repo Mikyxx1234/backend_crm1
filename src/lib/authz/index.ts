@@ -59,12 +59,30 @@ const CACHE_TTL_SEC = 60;
  * `isAdmin` aqui e o kill switch — true sempre que o user tem algum
  * role `systemPreset="ADMIN"` (independente das permissions do preset).
  */
+export type ScopeLevel = "NONE" | "SELF" | "TEAM" | "ALL";
+
+/**
+ * Mapa de escopos vindos de GRUPOS: resource -> action -> maior nivel
+ * concedido entre os grupos do user. Dirige a visibilidade (own/all) no
+ * enforcement das rotas de dados. Aditivo ao RBAC de papeis.
+ */
+export type GroupScopeMap = Record<string, Record<string, ScopeLevel>>;
+
+const LEVEL_RANK: Record<ScopeLevel, number> = {
+  NONE: 0,
+  SELF: 1,
+  TEAM: 2,
+  ALL: 3,
+};
+
 export interface AuthzContext {
   userId: string;
   organizationId: string | null;
   isSuperAdmin: boolean;
   isAdmin: boolean;
   permissions: ReadonlySet<string>;
+  /** Escopos vindos de grupos (resource -> action -> nivel). */
+  scopes: GroupScopeMap;
 }
 
 /**
@@ -74,6 +92,7 @@ interface CachedAuthzPayload {
   organizationId: string | null;
   isAdmin: boolean;
   permissions: string[];
+  scopes: GroupScopeMap;
 }
 
 // ──────────────────────────────────────────────
@@ -164,6 +183,36 @@ async function loadFromDb(
     }
   }
 
+  // Grupos (modelo Kommo) — aditivo aos papeis. Uma permissao com nivel
+  // >= SELF concede a key booleana (faz `can()` passar); o nivel fica no
+  // mapa `scopes` pra dirigir own/all no enforcement de visibilidade.
+  const groupMemberships = await prismaBase.groupMember.findMany({
+    where: { userId, organizationId },
+    select: {
+      group: {
+        select: {
+          permissions: { select: { resource: true, action: true, level: true } },
+        },
+      },
+    },
+  });
+
+  const scopes: GroupScopeMap = {};
+  for (const gm of groupMemberships) {
+    for (const p of gm.group.permissions) {
+      const level = p.level as ScopeLevel;
+      if (level === "NONE") continue;
+      const key = `${p.resource}:${p.action}`;
+      if (!isValidPermissionKey(key)) continue;
+      merged.add(key);
+      const byAction = (scopes[p.resource] ??= {});
+      const current = byAction[p.action];
+      if (!current || LEVEL_RANK[level] > LEVEL_RANK[current]) {
+        byAction[p.action] = level;
+      }
+    }
+  }
+
   const fallback = await applyLegacyRoleFallback(
     userId,
     organizationId,
@@ -175,6 +224,7 @@ async function loadFromDb(
     organizationId,
     isAdmin: fallback.isAdmin,
     permissions: Array.from(fallback.permissions),
+    scopes,
   };
 }
 
@@ -201,6 +251,7 @@ export async function loadAuthzContext(input: {
       isSuperAdmin: true,
       isAdmin: true,
       permissions: new Set(),
+      scopes: {},
     };
   }
 
@@ -214,6 +265,7 @@ export async function loadAuthzContext(input: {
       isSuperAdmin: false,
       isAdmin: false,
       permissions: new Set(),
+      scopes: {},
     };
   }
 
@@ -230,7 +282,40 @@ export async function loadAuthzContext(input: {
     isSuperAdmin: false,
     isAdmin: payload.isAdmin,
     permissions: new Set(payload.permissions),
+    scopes: payload.scopes ?? {},
   };
+}
+
+// ──────────────────────────────────────────────
+// Escopos de grupo (own/all) — usado no enforcement de visibilidade
+// ──────────────────────────────────────────────
+
+/** Nivel de escopo concedido por grupos para `resource:action` (default NONE). */
+export function groupScopeOf(
+  ctx: AuthzContext,
+  resource: string,
+  action: string,
+): ScopeLevel {
+  return ctx.scopes?.[resource]?.[action] ?? "NONE";
+}
+
+/**
+ * Visibilidade que os GRUPOS concedem para um recurso (dirigida pela action
+ * "view"). Aditivo: retorna "all" se algum grupo dá ALL/TEAM no view, "own"
+ * se o maior nivel de view é SELF, ou null se nenhum grupo opina (deixa o
+ * RBAC de papel/legacy decidir). TEAM é tratado como "all" por ora (sem
+ * estrutura de times — nivel reservado, não selecionável na UI).
+ */
+export function groupResourceVisibility(
+  ctx: AuthzContext,
+  resource: string,
+): "all" | "own" | null {
+  const byAction = ctx.scopes?.[resource];
+  if (!byAction) return null;
+  const viewLevel = byAction["view"];
+  if (!viewLevel || viewLevel === "NONE") return null;
+  if (viewLevel === "SELF") return "own";
+  return "all";
 }
 
 // ──────────────────────────────────────────────

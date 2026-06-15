@@ -22,3 +22,15 @@ export {
   UnknownCapabilityError,
   CapabilityConfigError,
 } from "./registry";
+
+export {
+  resolveCapabilityConfig,
+  type CatalogCapabilityRow,
+  type ProductCapabilityRow,
+  type ResolvedCapability,
+} from "./resolve";
+
+export {
+  assertOverrideAllowed,
+  OverrideNotAllowedError,
+} from "./override";

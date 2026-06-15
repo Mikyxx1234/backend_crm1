@@ -655,13 +655,17 @@ const DEALS: SeedDeal[] = [
 async function main() {
   console.log("▶ Iniciando seed do Sales Hub…");
 
-  // Admin: precisa existir pra assinar as notas internas.
-  const admin = await prisma.user.findFirst({
-    where: { email: "admin@eduit.com" },
-  });
+  // Admin: precisa existir pra assinar as notas internas. Mesmo email do
+  // seed base (`seed.ts`): SEED_ADMIN_EMAIL ou o default `adm@eduit.com.br`.
+  // Fallback final: qualquer super-admin da org (cobre bases antigas).
+  const adminEmail =
+    process.env.SEED_ADMIN_EMAIL?.trim().toLowerCase() || "adm@eduit.com.br";
+  const admin =
+    (await prisma.user.findFirst({ where: { email: adminEmail } })) ??
+    (await prisma.user.findFirst({ where: { isSuperAdmin: true } }));
   if (!admin) {
     throw new Error(
-      "Usuário admin@eduit.com não encontrado. Rode `npx tsx prisma/seed.ts` antes.",
+      `Usuário admin (${adminEmail}) não encontrado. Rode \`npm run db:seed\` antes.`,
     );
   }
   if (!admin.organizationId) {

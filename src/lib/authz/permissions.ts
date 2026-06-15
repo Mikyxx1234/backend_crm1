@@ -206,6 +206,19 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
     ],
   },
   {
+    resource: "catalog",
+    label: "Catálogos (por capacidades)",
+    description:
+      "Catálogo Universal por Capacidades (PRD): agrupa produtos e capacidades.",
+    actions: [
+      { action: "view", label: "Visualizar catálogos" },
+      { action: "create", label: "Criar catálogo" },
+      { action: "edit_capabilities", label: "Ligar/desligar capacidades e editar config" },
+      { action: "delete", label: "Excluir catálogo", destructive: true },
+      { action: "save_as_template", label: "Salvar catálogo como template da org" },
+    ],
+  },
+  {
     resource: "job_opening",
     label: "Vagas (recrutamento)",
     actions: [

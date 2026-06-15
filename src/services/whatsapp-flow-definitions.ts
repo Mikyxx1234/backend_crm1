@@ -1,3 +1,5 @@
+import { randomBytes } from "crypto";
+
 import { prisma } from "@/lib/prisma";
 import { buildWaFlowJsonString, type CrmFlowScreenInput } from "@/lib/meta-whatsapp/build-static-wa-flow-json";
 import type { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
@@ -6,6 +8,11 @@ import {
   normalizeFlowMatchKey,
 } from "@/lib/meta-whatsapp/parse-flow-response";
 import { parseWaFlowJsonToCrmScreens } from "@/lib/meta-whatsapp/parse-wa-flow-json";
+
+/** Gera 8 chars base64url (6 bytes de entropia = 48 bits). */
+function generateShortId(): string {
+  return randomBytes(6).toString("base64url");
+}
 
 export type FlowDefinitionInputScreen = {
   title: string;
@@ -69,6 +76,7 @@ export async function listFlowDefinitions() {
     orderBy: { updatedAt: "desc" },
     select: {
       id: true,
+      shortId: true,
       name: true,
       status: true,
       metaFlowId: true,
@@ -79,9 +87,13 @@ export async function listFlowDefinitions() {
   });
 }
 
-export async function getFlowDefinitionById(id: string) {
+/**
+ * Resolve um flow pelo CUID (`id`) ou pelo `shortId` de 8 chars.
+ * Aceita ambos para compatibilidade com registros legados sem shortId.
+ */
+export async function getFlowDefinitionById(idOrShortId: string) {
   return prisma.whatsappFlowDefinition.findFirst({
-    where: { id },
+    where: { OR: [{ id: idOrShortId }, { shortId: idOrShortId }] },
     include: {
       screens: {
         orderBy: { sortOrder: "asc" },
@@ -111,6 +123,7 @@ export async function createFlowDefinitionDraft(
       data: {
         organizationId: orgId,
         name,
+        shortId: generateShortId(),
         status: "DRAFT",
         flowCategory: (input.flowCategory ?? "LEAD_GENERATION").trim() || "LEAD_GENERATION",
       },
@@ -157,7 +170,7 @@ export async function createFlowDefinitionDraft(
     return flow;
   });
 
-  return { id: created.id };
+  return { id: created.shortId ?? created.id };
 }
 
 /**
@@ -593,10 +606,10 @@ export async function importFlowFromMeta(
 
   const existing = await prisma.whatsappFlowDefinition.findFirst({
     where: { organizationId, metaFlowId: flowId },
-    select: { id: true },
+    select: { id: true, shortId: true },
   });
   if (existing) {
-    return { id: existing.id, created: false };
+    return { id: existing.shortId ?? existing.id, created: false };
   }
 
   const detail = (await metaClient.getFlowById(flowId)) as Record<string, unknown>;
@@ -619,6 +632,7 @@ export async function importFlowFromMeta(
       data: {
         organizationId,
         name: flowName.slice(0, 512),
+        shortId: generateShortId(),
         status: metaStatus === "DRAFT" ? "DRAFT" : "PUBLISHED",
         flowCategory,
         metaFlowId: flowId,
@@ -657,7 +671,7 @@ export async function importFlowFromMeta(
     return flow;
   });
 
-  return { id: created.id, created: true };
+  return { id: created.shortId ?? created.id, created: true };
 }
 
 /**

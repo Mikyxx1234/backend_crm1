@@ -18,7 +18,10 @@
 
 import type { z } from "zod";
 
-/** Conjunto fechado de chaves de capacidade. Adicionar aqui = adicionar capacidade. */
+/** Conjunto fechado de chaves de capacidade. Adicionar aqui = adicionar capacidade.
+ *  9 chaves após a Fase 1 do Catálogo Genérico por Capacidades:
+ *  `messaging` foi adicionada para regras evento→template→destinatário,
+ *  com persistência via StakeholderRule (vista — MAPEAMENTO.md §7). */
 export const CAPABILITY_KEYS = [
   "allocation",
   "scheduling",
@@ -27,6 +30,7 @@ export const CAPABILITY_KEYS = [
   "fulfillment",
   "pricing",
   "stakeholders",
+  "messaging",
   "custom_data",
 ] as const;
 

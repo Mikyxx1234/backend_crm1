@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
@@ -10,8 +11,11 @@ type Ctx = { params: Promise<{ id: string }> };
 // (direto ou via service), avaliado ANTES da Prisma extension popular
 // o ctx. Migrado para withOrgContext.
 export async function GET(_req: Request, ctx: Ctx) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
     try {
+      const denied = await requirePermissionForUser(session.user, "product:view");
+      if (denied) return denied;
+
       const { id } = await ctx.params;
 
       const product = await prisma.product.findUnique({ where: { id }, select: { id: true } });
@@ -39,8 +43,11 @@ export async function GET(_req: Request, ctx: Ctx) {
 }
 
 export async function PUT(request: Request, ctx: Ctx) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
     try {
+      const denied = await requirePermissionForUser(session.user, "product:edit");
+      if (denied) return denied;
+
       const { id } = await ctx.params;
 
       const product = await prisma.product.findUnique({ where: { id }, select: { id: true } });

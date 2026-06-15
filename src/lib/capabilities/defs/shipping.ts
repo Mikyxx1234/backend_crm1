@@ -1,15 +1,20 @@
 /**
- * Capacidade: shipping (frete por faixa de CEP).
+ * Capacidade: shipping — entrega física.
  *
- * Habilita `ShippingTable` + `ShippingRange` (faixa de CEP × valor × prazo).
- * Sem lógica vertical — qualquer produto físico pode ligar.
+ * Discriminated union por `mode` (mantida mesmo com um modo só para
+ * consistência com as demais capacidades e para extensão futura, ex.: digital).
+ *
+ *   - physical : tabela de frete por faixa de CEP (valor × prazo).
+ *
+ * Materializa em `ProductShipping` + `ShippingRange`.
  */
 
 import { z } from "zod";
 
 import { defineCapability } from "../types";
 
-export const shippingConfigSchema = z.object({
+export const shippingPhysicalSchema = z.object({
+  mode: z.literal("physical"),
   freeAbove: z.number().min(0).nullable().default(null).meta({
     title: "Frete grátis acima de",
     description: "Valor de pedido a partir do qual o frete é gratuito. Opcional.",
@@ -24,9 +29,19 @@ export const shippingConfigSchema = z.object({
   }),
 });
 
+// Futuro: shippingDigitalSchema (download, e-mail), shippingPickupSchema, etc.
+
+export const shippingConfigSchema = z.discriminatedUnion("mode", [
+  shippingPhysicalSchema,
+]);
+
+export const SHIPPING_MODES = ["physical"] as const;
+export type ShippingMode = (typeof SHIPPING_MODES)[number];
+
 export const shippingCapability = defineCapability({
   key: "shipping",
   label: "Frete",
-  description: "Tabela de frete por faixa de CEP (valor × prazo).",
+  description:
+    "Tabela de frete por faixa de CEP. Materializa em ProductShipping + ShippingRange.",
   configSchema: shippingConfigSchema,
 });

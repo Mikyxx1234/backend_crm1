@@ -15,7 +15,7 @@ import { logEvent } from "@/services/activity-log";
 async function logDealEventsForConversationContact(
   conversationId: string,
   userId: string,
-  type: "CONVERSATION_STATUS_CHANGED" | "ASSIGNEE_CHANGED",
+  type: "CONVERSATION_STATUS_CHANGED" | "CONVERSATION_CLOSED" | "CONVERSATION_REOPENED" | "ASSIGNEE_CHANGED",
   meta: Record<string, unknown>,
 ) {
   try {
@@ -170,20 +170,27 @@ export async function POST(request: Request, context: RouteContext) {
 
       if (conv.status !== updated.status) {
         const uid = (session.user as { id: string }).id;
-        await logDealEventsForConversationContact(id, uid, "CONVERSATION_STATUS_CHANGED", {
-          from: conv.status,
-          to: updated.status,
-          action,
-        });
-        // Evento da própria conversa — registra fechamento/reabertura no
-        // feed independentemente de haver deal. Tipo específico facilita
-        // o filtro e o EVENT_CONFIG no feed UI.
+
+        // Tipo específico: CONVERSATION_CLOSED / CONVERSATION_REOPENED /
+        // CONVERSATION_STATUS_CHANGED — usado em ambos os logs (deal + conversa)
+        // para facilitar filtros e exibição no feed/timeline.
         const convEventType =
           updated.status === "RESOLVED"
             ? "CONVERSATION_CLOSED"
             : conv.status === "RESOLVED" && updated.status === "OPEN"
               ? "CONVERSATION_REOPENED"
               : "CONVERSATION_STATUS_CHANGED";
+
+        const statusMeta = {
+          from: conv.status,
+          to: updated.status,
+          action,
+        };
+
+        // Grava no log de cada deal aberto do contato com o tipo correto.
+        await logDealEventsForConversationContact(id, uid, convEventType, statusMeta);
+
+        // Evento da própria conversa (sem dealId) — registra no feed global.
         void logEvent({
           type: convEventType,
           entityType: "CONVERSATION",

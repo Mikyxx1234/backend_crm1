@@ -2,6 +2,14 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import {
+  CapabilityConfigError,
+  UnknownCapabilityError,
+  assertOverrideAllowed,
+  OverrideNotAllowedError,
+  validateCapabilityConfig,
+  type CatalogCapabilityRow,
+} from "@/lib/capabilities";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
@@ -15,6 +23,89 @@ function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v)
     ? (v as Record<string, unknown>)
     : null;
+}
+
+type CapabilityDraft = {
+  capabilityKey: string;
+  mode: string;
+  config: Record<string, unknown>;
+  unitOverrides: Record<string, Record<string, unknown>> | null;
+  enabled: boolean;
+};
+
+/**
+ * Lê e valida o array `capabilities` do body do PUT de produto.
+ * Cada item é validado pelo Zod do `mode` e checado contra a política de
+ * override do catálogo (`assertOverrideAllowed`). Lança `NextResponse` em erro.
+ */
+function parseProductCapabilities(
+  raw: unknown,
+  catalogCapsByKey: Map<string, CatalogCapabilityRow>,
+): CapabilityDraft[] {
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) {
+    throw NextResponse.json(
+      { message: "`capabilities` deve ser uma lista." },
+      { status: 400 },
+    );
+  }
+
+  const drafts: CapabilityDraft[] = [];
+  for (const item of raw) {
+    const r = asRecord(item) ?? {};
+    const key = typeof r.capabilityKey === "string" ? r.capabilityKey : "";
+    const mode = typeof r.mode === "string" ? r.mode : "";
+    const rawConfig = asRecord(r.config) ?? {};
+    const unitOverrides =
+      asRecord(r.unitOverrides) as Record<string, Record<string, unknown>> | null;
+    const enabled = r.enabled !== false;
+
+    // Política de override (LOCKED rejeita divergência) ANTES de validar.
+    const catalogCap = catalogCapsByKey.get(key) ?? null;
+    try {
+      assertOverrideAllowed(catalogCap, {
+        capabilityKey: key,
+        mode,
+        config: rawConfig,
+        unitOverrides,
+      });
+    } catch (err) {
+      if (err instanceof OverrideNotAllowedError) {
+        throw NextResponse.json(
+          { message: err.message, capabilityKey: err.capabilityKey, policy: err.policy },
+          { status: 422 },
+        );
+      }
+      throw err;
+    }
+
+    // Valida config pelo Zod do modo (config precisa carregar `mode`).
+    try {
+      const parsed = validateCapabilityConfig(key, { ...rawConfig, mode });
+      drafts.push({
+        capabilityKey: key,
+        mode,
+        config: parsed,
+        unitOverrides,
+        enabled,
+      });
+    } catch (err) {
+      if (err instanceof UnknownCapabilityError) {
+        throw NextResponse.json(
+          { message: `Capacidade desconhecida: ${key}` },
+          { status: 400 },
+        );
+      }
+      if (err instanceof CapabilityConfigError) {
+        throw NextResponse.json(
+          { message: `Config inválida para "${key}".`, errors: err.flatten() },
+          { status: 400 },
+        );
+      }
+      throw err;
+    }
+  }
+  return drafts;
 }
 
 export async function GET(request: Request, context: RouteContext) {
@@ -91,10 +182,98 @@ export async function PUT(request: Request, context: RouteContext) {
       if (PRODUCT_KINDS.has(k)) data.kind = k;
     }
 
+    // catalogId: aceita string (vincula), null (desvincula). Valida pertença.
+    if (body.catalogId !== undefined) {
+      if (body.catalogId === null || body.catalogId === "") {
+        data.catalogId = null;
+      } else if (typeof body.catalogId === "string") {
+        const catalog = await prisma.catalog.findUnique({
+          where: { id: body.catalogId.trim() },
+          select: { id: true },
+        });
+        if (!catalog) {
+          return NextResponse.json({ message: "Catálogo não encontrado." }, { status: 400 });
+        }
+        data.catalogId = catalog.id;
+      }
+    }
+
+    // Resolve o catálogo efetivo (novo do body ou o atual do produto) para
+    // aplicar a política de override nas capabilities enviadas.
+    const current = await prisma.product.findUnique({
+      where: { id },
+      select: { id: true, catalogId: true },
+    });
+    if (!current) {
+      return NextResponse.json({ message: "Produto não encontrado." }, { status: 404 });
+    }
+    const effectiveCatalogId =
+      (data.catalogId as string | null | undefined) !== undefined
+        ? (data.catalogId as string | null)
+        : current.catalogId;
+
+    // Valida capabilities (se enviadas) ANTES de qualquer escrita.
+    let capabilityDrafts: CapabilityDraft[] | null = null;
+    if (body.capabilities !== undefined) {
+      const catalogCaps = effectiveCatalogId
+        ? await prisma.catalogCapability.findMany({
+            where: { catalogId: effectiveCatalogId },
+          })
+        : [];
+      const byKey = new Map<string, CatalogCapabilityRow>(
+        catalogCaps.map((c) => [
+          c.capabilityKey,
+          {
+            capabilityKey: c.capabilityKey,
+            mode: c.mode,
+            config: c.config as Record<string, unknown>,
+            overridePolicy: c.overridePolicy,
+            enabled: c.enabled,
+          },
+        ]),
+      );
+      try {
+        capabilityDrafts = parseProductCapabilities(body.capabilities, byKey);
+      } catch (err) {
+        if (err instanceof NextResponse) return err;
+        throw err;
+      }
+    }
+
     try {
       await prisma.product.update({ where: { id }, data });
     } catch {
       return NextResponse.json({ message: "Produto não encontrado." }, { status: 404 });
+    }
+
+    // Persiste capabilities do produto (reconcilia: upsert presentes,
+    // remove ausentes). Já validadas + checadas contra a policy acima.
+    if (capabilityDrafts) {
+      const desiredKeys = new Set(capabilityDrafts.map((c) => c.capabilityKey));
+      await prisma.productCapability.deleteMany({
+        where: { productId: id, capabilityKey: { notIn: [...desiredKeys] } },
+      });
+      for (const c of capabilityDrafts) {
+        await prisma.productCapability.upsert({
+          where: {
+            productId_capabilityKey: { productId: id, capabilityKey: c.capabilityKey },
+          },
+          update: {
+            mode: c.mode,
+            config: c.config as never,
+            unitOverrides: (c.unitOverrides ?? undefined) as never,
+            enabled: c.enabled,
+          },
+          create: withOrgFromCtx({
+            productId: id,
+            capabilityKey: c.capabilityKey,
+            mode: c.mode,
+            config: c.config as never,
+            unitOverrides: (c.unitOverrides ?? undefined) as never,
+            enabled: c.enabled,
+          }),
+        });
+      }
     }
 
     // ── Blocos por kind (só quando enviados) ────────────────────────────
@@ -184,6 +363,16 @@ export async function PUT(request: Request, context: RouteContext) {
         shipping: true,
         plans: true,
         courseConfig: { include: { classes: true } },
+        capabilities: {
+          select: {
+            id: true,
+            capabilityKey: true,
+            mode: true,
+            config: true,
+            unitOverrides: true,
+            enabled: true,
+          },
+        },
       },
     });
     return NextResponse.json({ product });

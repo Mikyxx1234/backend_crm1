@@ -9,6 +9,7 @@ const createSchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(500).nullable().optional(),
   permissions: z.array(z.string()).default([]),
+  inheritsFrom: z.string().min(1).nullable().optional(),
 });
 
 export async function GET() {

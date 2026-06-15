@@ -14,6 +14,7 @@ import { z } from "zod";
 import { allocationCapability } from "./defs/allocation";
 import { customDataCapability } from "./defs/custom_data";
 import { fulfillmentCapability } from "./defs/fulfillment";
+import { messagingCapability } from "./defs/messaging";
 import { pricingCapability } from "./defs/pricing";
 import { recurrenceCapability } from "./defs/recurrence";
 import { schedulingCapability } from "./defs/scheduling";
@@ -34,6 +35,7 @@ export const CAPABILITY_REGISTRY: Record<CapabilityKey, CapabilityDefinition> = 
   fulfillment: fulfillmentCapability,
   pricing: pricingCapability,
   stakeholders: stakeholdersCapability,
+  messaging: messagingCapability,
   custom_data: customDataCapability,
 };
 
