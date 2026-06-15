@@ -65,6 +65,10 @@ next-env.d.ts
 *.db
 *.db-journal
 
+# backups defensivos gerados por scripts/dev/backup-prod-data.mjs.
+# CONTEM DADOS DE PRODUCAO — NUNCA versionar.
+/backups/
+
 # IDE
 .vscode/
 .idea/

@@ -5,6 +5,60 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-15 — Migração DEV_BRANCH → prod (DNA): nova migration `backfill_catalog_permissions` e protocolo manual de aplicação [DECISÃO — agente Opus]
+
+**Decisão.** Antes do merge `DEV_BRANCH → main`, aplicar manualmente em prod
+as 11 migrations idempotentes da DEV_BRANCH **+ uma 12ª nova**
+(`20260615120200_backfill_catalog_permissions/migration.sql`) que faltou na
+DEV_BRANCH para atualizar `roles.permissions` dos presets MANAGER e MEMBER de
+orgs já existentes (DNA, EduIT, teste). Aplicação via
+`scripts/dev/apply-dev-branch-migrations.mjs` — script idempotente que faz
+BEGIN/COMMIT por arquivo, com checagem de `_prisma_migrations` antes/depois.
+
+**Contexto.** A DEV_BRANCH adicionou novos resources ao `PERMISSION_CATALOG`
+(catalog/inventory/job_opening/org_unit + product:manage_*) e atualizou
+`src/lib/authz/presets.ts` com 14 keys novas no MANAGER e 5 no MEMBER. Pelo
+comentário do próprio `presets.ts`, mudanças de preset **exigem migration de
+update para refletir em orgs existentes** — a DEV_BRANCH esqueceu essa
+migration, então roles snapshotados (DNA) ficariam fail-closed nas features
+novas pós-merge. A migration nova segue exatamente o pattern idempotente
+(`UNNEST + DISTINCT`) já estabelecido em
+`20260609180000_add_nav_permissions/migration.sql` — preserva customizações
+manuais e nunca duplica entradas.
+
+**Alternativas descartadas.**
+- *"Reset to preset" via UI da DNA pós-merge*: exigiria intervenção humana
+  na DNA e perderia qualquer customização que o admin tivesse adicionado às
+  permissions. Reprovado.
+- *Não fazer nada e esperar usuário descobrir*: causaria fail-closed
+  silencioso (gestores sem acesso a Catálogo/Inventário/Vagas), suporte
+  reativo. Reprovado.
+- *`prisma migrate deploy` em prod*: prod usa `SKIP_PRISMA_MIGRATE=1` por
+  política — aplicação manual via `db execute --file` ou equivalente é o
+  pattern do projeto. As migrations já são escritas idempotentes
+  (`IF NOT EXISTS`, `DO $$ EXCEPTION`) justamente para isso. Mantido.
+
+**Impacto.**
+- 12 migrations registradas em `_prisma_migrations` do prod.
+- DNA: MANAGER 88→102 perms, MEMBER 31→36 perms (gap de catálogo
+  preenchido). 1866 contatos numerados (`Contact.number` 1..1866). 1 produto
+  ligado ao "Catálogo padrão" criado automaticamente. Tabelas Group vazias
+  (criadas zeradas — sem efeito até o admin configurar).
+- EduIT: idem (183 contatos numerados, 2 produtos no novo catálogo default).
+- Backup defensivo de 82MB (`backups/prod-2026-06-15-175443/data.sql`,
+  formato `pg_dump --data-only`) — restaurável via `psql -f data.sql` num
+  schema com as migrations aplicadas. Não versionado (`.gitignore`).
+- Scripts adicionados (commitáveis):
+  `scripts/dev/inspect-prod-readonly.mjs`,
+  `scripts/dev/apply-dev-branch-migrations.mjs`,
+  `scripts/dev/backup-prod-data.mjs`,
+  `scripts/dev/verify-prod-postmigration.mjs`.
+- Risco residual: zero quebra na main rodando (todas mudanças aditivas — o
+  Prisma client da main não enxerga colunas/tabelas novas, então não as
+  consulta).
+
+---
+
 ### 2026-06-13 — Permissões por GRUPO com escopo (modelo Kommo) em `/settings/permissions` — entidade `Group` nova, ADITIVA ao RBAC de papéis [DECISÃO — agente OPUS]
 
 **Decisão (escolhida pelo usuário: "modelo completo" + nível "Equipe" adiado).**
