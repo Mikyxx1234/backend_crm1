@@ -27,6 +27,14 @@ export async function GET() {
         email: true,
         role: true,
         avatarUrl: true,
+        // Roles RBAC atribuídas (modelo novo). Usado pela tela de Equipe
+        // para exibir a "função" como role customizada (mantendo só ADMIN
+        // como preset). NÃO substitui `role` legado — coexistem.
+        roleAssignments: {
+          select: {
+            role: { select: { id: true, name: true, systemPreset: true } },
+          },
+        },
         agentStatus: {
           select: {
             status: true,
@@ -37,7 +45,16 @@ export async function GET() {
       },
     });
 
-    return NextResponse.json(users);
+    // Achata `roleAssignments` em `assignedRoles` (lista limpa pra UI).
+    const shaped = users.map((u) => {
+      const { roleAssignments, ...rest } = u;
+      return {
+        ...rest,
+        assignedRoles: roleAssignments.map((a) => a.role),
+      };
+    });
+
+    return NextResponse.json(shaped);
   } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao listar usuários." }, { status: 500 });

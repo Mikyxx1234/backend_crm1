@@ -16,6 +16,7 @@ const roleListSelect = {
   systemPreset: true,
   isSystem: true,
   permissions: true,
+  inheritsFrom: true,
   _count: { select: { assignments: true } },
 } satisfies Prisma.RoleSelect;
 
@@ -42,6 +43,7 @@ function mapRoleList(
     systemPreset: row.systemPreset,
     isSystem: row.isSystem,
     permissions: row.permissions,
+    inheritsFrom: row.inheritsFrom,
     _count: {
       assignments: row._count.assignments,
       groups: 0,
@@ -87,22 +89,50 @@ export async function getRoleById(id: string) {
   return row ? mapRoleDetail(row) : null;
 }
 
+/**
+ * Valida o ponteiro de heranca: precisa ser um Role existente na MESMA org
+ * (ou null). Evita apontar pra role de outro tenant ou pra id inexistente.
+ * `selfId` impede um grupo de herdar de si mesmo (no update).
+ */
+async function resolveInheritsFrom(
+  orgId: string,
+  value: string | null | undefined,
+  selfId?: string,
+): Promise<string | null | undefined> {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  const baseId = value.trim();
+  if (!baseId) return null;
+  if (selfId && baseId === selfId) {
+    throw new Error("Um grupo não pode herdar de si mesmo.");
+  }
+  const base = await prisma.role.findFirst({
+    where: { id: baseId, organizationId: orgId },
+    select: { id: true },
+  });
+  if (!base) throw new Error("Grupo de origem (herança) não encontrado.");
+  return base.id;
+}
+
 export async function createRole(input: {
   name: string;
   description?: string | null;
   permissions: string[];
+  inheritsFrom?: string | null;
 }) {
   const orgId = getOrgIdOrThrow();
   const name = input.name.trim();
   if (!name) throw new Error("Nome é obrigatório.");
 
   const permissions = sanitizePermissions(input.permissions);
+  const inheritsFrom = await resolveInheritsFrom(orgId, input.inheritsFrom);
   const role = await prisma.role.create({
     data: {
       organizationId: orgId,
       name,
       description: input.description?.trim() || null,
       permissions,
+      inheritsFrom: inheritsFrom ?? null,
       isSystem: false,
       systemPreset: null,
     },
@@ -117,6 +147,7 @@ export async function updateRole(
     name?: string;
     description?: string | null;
     permissions?: string[];
+    inheritsFrom?: string | null;
   },
 ) {
   const orgId = getOrgIdOrThrow();
@@ -136,6 +167,14 @@ export async function updateRole(
     }
     if (input.description !== undefined) {
       data.description = input.description?.trim() || null;
+    }
+    // Troca de origem de heranca so faz sentido em grupos custom.
+    if (input.inheritsFrom !== undefined) {
+      data.inheritsFrom = await resolveInheritsFrom(
+        orgId,
+        input.inheritsFrom,
+        id,
+      );
     }
   }
 
@@ -164,11 +203,18 @@ export async function deleteRole(id: string) {
   const orgId = getOrgIdOrThrow();
   const existing = await prisma.role.findFirst({
     where: { id, organizationId: orgId },
-    select: { id: true, isSystem: true },
+    select: { id: true, isSystem: true, _count: { select: { assignments: true } } },
   });
   if (!existing) return null;
   if (existing.isSystem) {
     throw new Error("Roles de sistema não podem ser excluídos.");
+  }
+  if (existing._count.assignments > 0) {
+    const n = existing._count.assignments;
+    throw new Error(
+      `Este grupo tem ${n} ${n === 1 ? "membro" : "membros"}. ` +
+        "Mova-os para outro grupo antes de excluir.",
+    );
   }
 
   await prisma.role.delete({ where: { id } });

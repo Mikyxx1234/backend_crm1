@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
-import { publishFlowDefinition } from "@/services/whatsapp-flow-definitions";
+import { getFlowDefinitionById, publishFlowDefinition } from "@/services/whatsapp-flow-definitions";
 
 function requireAdminOrManager(session: { user?: { role?: string } }): NextResponse | null {
   const r = session.user?.role;
@@ -28,7 +28,9 @@ export async function POST(_request: Request, context: RouteContext) {
     if (!resolved.ok) return resolved.response;
 
     try {
-      const out = await publishFlowDefinition(id, resolved.client);
+      const flow = await getFlowDefinitionById(id);
+      if (!flow) return NextResponse.json({ message: "Não encontrado." }, { status: 404 });
+      const out = await publishFlowDefinition(flow.id, resolved.client);
       return NextResponse.json(out, { status: 200 });
     } catch (e: unknown) {
       const extra = e as Error & { validationErrors?: unknown[] };

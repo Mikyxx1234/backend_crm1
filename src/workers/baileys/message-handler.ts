@@ -8,6 +8,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { fireTrigger } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
+import { nextContactNumber } from "@/services/contacts";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -59,7 +60,11 @@ type CrmContact = {
   /// rapida sem campo extra no schema.
 };
 
-async function resolveContact(jid: string, pushName: string | null | undefined): Promise<CrmContact> {
+async function resolveContact(
+  jid: string,
+  pushName: string | null | undefined,
+  channelId: string,
+): Promise<CrmContact> {
   const phone = jidToPhone(jid);
 
   const existing = await prisma.contact.findFirst({
@@ -81,6 +86,7 @@ async function resolveContact(jid: string, pushName: string | null | undefined):
       contactName: resolvedName,
       source: "auto_whatsapp_qr",
       logTag: "baileys-msg",
+      channelId,
     }).catch((err) =>
       log.warn("Falha ao garantir deal aberto:", err),
     );
@@ -91,6 +97,7 @@ async function resolveContact(jid: string, pushName: string | null | undefined):
   const name = pushName || `Lead ${phone}`;
   const created = await prisma.contact.create({
     data: withOrgFromCtx({
+      number: await nextContactNumber(),
       name,
       phone,
       lifecycleStage: "LEAD" as const,
@@ -112,6 +119,7 @@ async function resolveContact(jid: string, pushName: string | null | undefined):
     contactName: name,
     source: "auto_whatsapp_qr",
     logTag: "baileys-msg",
+    channelId,
   }).catch((err) => log.warn("Falha ao garantir deal aberto:", err));
 
   log.info(`Novo lead: ${name} (${phone})`);
@@ -496,7 +504,7 @@ export async function handleBaileysMessage(
     });
     if (existingMsg) return;
 
-    const contact = await resolveContact(jid, msg.pushName);
+    const contact = await resolveContact(jid, msg.pushName, channelId);
     const conversation = await findOrCreateConversation(contact.id, channelId, rawJid);
 
     // Sincronizar foto de perfil em background — nao bloqueia o

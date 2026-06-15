@@ -1,7 +1,10 @@
 import { NextResponse } from "next/server";
+import type { Prisma } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
+import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getVisibilityFilter } from "@/lib/visibility";
 
 type SessionUser = { id: string; role: AppUserRole };
@@ -12,11 +15,20 @@ export async function userHasConversationAccess(
   conversationId: string
 ): Promise<boolean> {
   const { conversationWhere } = await getVisibilityFilter(user);
-  const where =
-    conversationWhere && Object.keys(conversationWhere).length > 0
-      ? { AND: [{ id: conversationId }, conversationWhere] }
-      : { id: conversationId };
-  const n = await prisma.conversation.count({ where });
+  const conditions: Prisma.ConversationWhereInput[] = [{ id: conversationId }];
+  if (conversationWhere && Object.keys(conversationWhere).length > 0) {
+    conditions.push(conversationWhere);
+  }
+  // Escopo de canais por usuário (mesma regra do GET /conversations).
+  const allowedChannelIds = await listAllowedChannelIds({
+    id: user.id,
+    role: user.role,
+    organizationId: getOrgIdOrThrow(),
+  });
+  if (allowedChannelIds) {
+    conditions.push({ channelId: { in: allowedChannelIds } });
+  }
+  const n = await prisma.conversation.count({ where: { AND: conditions } });
   return n > 0;
 }
 

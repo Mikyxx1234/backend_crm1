@@ -5,6 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
+import { nextContactNumber } from "@/services/contacts";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -47,7 +48,8 @@ void META_WEBHOOK_BUILD_MARKER;
 const log = getLogger("meta-webhook");
 import { processMetaWhatsappCallsWebhook } from "@/services/meta-whatsapp-calls-webhook";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
-import { logEvent } from "@/services/activity-log";
+import { logEvent, logMessageFailed } from "@/services/activity-log";
+import { metaErrorReason } from "@/lib/meta-whatsapp/error-catalog";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { markCampaignReplyByContact } from "@/services/campaigns";
@@ -481,11 +483,15 @@ async function resolveWebhookContact(
     // Garante deal aberto para contato pré-existente (idempotente). Sem
     // isso, contatos antigos sem deal ficavam "órfãos" no Painel CRM do
     // Inbox ("Nenhum negócio aberto") mesmo conversando ativamente.
+    // `channelId` roteia o lead para o funil configurado no canal de origem.
+    const existingRoutingChannelId =
+      (await findChannelByPhoneNumberId(phoneNumberId))?.id ?? null;
     ensureOpenDealForContact({
       contactId: contactRow.id,
       contactName: contactRow.name,
       source: "auto_whatsapp",
       logTag: "meta-webhook",
+      channelId: existingRoutingChannelId,
     }).catch((err) =>
       log.warn("Falha ao garantir deal aberto:", err),
     );
@@ -513,6 +519,7 @@ async function resolveWebhookContact(
 
   const created = await prisma.contact.create({
     data: withOrgFromCtx({
+      number: await nextContactNumber(),
       name,
       ...(phone ? { phone } : {}),
       ...(bsuid ? { whatsappBsuid: bsuid } : {}),
@@ -538,6 +545,7 @@ async function resolveWebhookContact(
     contactName: name,
     source: "auto_whatsapp",
     logTag: "meta-webhook",
+    channelId: (await findChannelByPhoneNumberId(phoneNumberId))?.id ?? null,
   }).catch((err) =>
     log.warn("Falha ao garantir deal aberto:", err),
   );
@@ -1100,7 +1108,13 @@ async function processStatusUpdate(status: Record<string, unknown>) {
               const details = str(obj(e.error_data).details);
               const href = str(e.href);
               // Prioriza details (texto acionável) > message > title.
-              const human = details || message || title || "Falha no envio";
+              const rawHuman = details || message || title || "Falha no envio";
+              // Traduz para PT-BR pelo `code` catalogado (mesma convenção do
+              // envio imediato em MetaGraphError.toPersistedString): mostra o
+              // motivo em português e mantém o texto original da Meta entre
+              // parênteses para diagnóstico.
+              const ptReason = metaErrorReason(code);
+              const human = ptReason ? `${ptReason} (Meta: ${rawHuman})` : rawHuman;
               const metaParts: string[] = [];
               if (code != null) metaParts.push(`code ${code}`);
               return {
@@ -1147,6 +1161,41 @@ async function processStatusUpdate(status: Record<string, unknown>) {
           } catch {
             // best-effort
           }
+
+          // Activity Log: registra a falha no feed unificado (/logs) e nas
+          // estatisticas. Fire-and-forget — nao bloqueia o webhook.
+          void (async () => {
+            const conv = await prisma.conversation
+              .findUnique({
+                where: { id: msg.conversationId },
+                select: {
+                  contactId: true,
+                  contact: { select: { name: true, phone: true } },
+                },
+              })
+              .catch(() => null);
+            const openDeal = conv?.contactId
+              ? await prisma.deal
+                  .findFirst({
+                    where: { contactId: conv.contactId, status: "OPEN" },
+                    select: { id: true },
+                    orderBy: { updatedAt: "desc" },
+                  })
+                  .catch(() => null)
+              : null;
+            await logMessageFailed({
+              messageId: msg.id,
+              conversationId: msg.conversationId,
+              contactId: conv?.contactId ?? null,
+              dealId: openDeal?.id ?? null,
+              contactLabel: conv?.contact?.name ?? null,
+              contactSublabel: conv?.contact?.phone ?? null,
+              error: sendError,
+              source: "meta",
+              errorCode: errorInfo?.code ?? null,
+              channel: "WhatsApp",
+            });
+          })();
         }
 
         try {

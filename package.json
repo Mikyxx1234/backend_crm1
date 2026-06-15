@@ -23,6 +23,7 @@
     "db:migrate:deploy": "prisma migrate deploy",
     "db:seed": "prisma db seed",
     "db:seed:saleshub": "tsx prisma/seed-sales-hub.ts",
+    "db:seed:testusers": "tsx prisma/seed-test-users.ts",
     "db:ensure-conversations": "tsx prisma/ensure-deal-conversations.ts",
     "db:studio": "prisma studio",
     "check:migrations": "tsx scripts/check-migrations.ts",
@@ -103,6 +104,7 @@
     "esbuild": "^0.25.12",
     "eslint": "^9.39.4",
     "eslint-config-next": "^16.2.4",
+    "pg-copy-streams": "^7.0.0",
     "vitest": "^4.1.5"
   }
 }

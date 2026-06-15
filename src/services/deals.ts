@@ -1,4 +1,4 @@
-import { Prisma, type DealStatus } from "@prisma/client";
+import { Prisma, type DealRole, type DealStatus } from "@prisma/client";
 
 import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -98,6 +98,11 @@ export type GetDealsParams = {
   page?: number;
   perPage?: number;
   visibilityWhere?: Prisma.DealWhereInput;
+  /**
+   * Escopo de funis por usuário. `null/undefined` → sem restrição; array
+   * (mesmo vazio) → restringe deals aos estágios desses funis.
+   */
+  allowedPipelineIds?: string[] | null;
 };
 
 const listInclude = {
@@ -127,6 +132,9 @@ export async function getDeals(params: GetDealsParams = {}) {
 
   if (params.pipelineId) {
     conditions.push({ stage: { pipelineId: params.pipelineId } });
+  }
+  if (params.allowedPipelineIds) {
+    conditions.push({ stage: { pipelineId: { in: params.allowedPipelineIds } } });
   }
   if (params.stageId) {
     conditions.push({ stageId: params.stageId });
@@ -196,7 +204,7 @@ export async function getDeals(params: GetDealsParams = {}) {
 const detailInclude = {
   contact: {
     select: {
-      id: true, name: true, email: true, phone: true, avatarUrl: true,
+      id: true, number: true, name: true, email: true, phone: true, avatarUrl: true,
       conversations: {
         orderBy: { updatedAt: "desc" as const },
         select: {
@@ -280,6 +288,8 @@ export type CreateDealInput = {
   contactId?: string | null;
   stageId: string;
   ownerId?: string | null;
+  /** Papel do deal (PRD catálogo): default COMMERCIAL no schema. */
+  dealRole?: DealRole;
 };
 
 /**
@@ -339,6 +349,7 @@ export async function createDeal(data: CreateDealInput) {
           contactId: data.contactId === undefined ? undefined : data.contactId,
           stageId: data.stageId,
           ownerId: data.ownerId === undefined ? undefined : data.ownerId,
+          dealRole: data.dealRole === undefined ? undefined : data.dealRole,
         }),
         include: listInclude,
       });
@@ -536,7 +547,9 @@ export async function moveDeal(
     throw new Error("INVALID_POSITION");
   }
 
-  return prisma.$transaction(async (tx) => {
+  let becameWon = false;
+  let becameLost = false;
+  const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id: dealId } });
     if (!deal) throw new Error("NOT_FOUND");
 
@@ -551,6 +564,8 @@ export async function moveDeal(
     const oldStageId = deal.stageId;
     const oldPos = deal.position;
     const statusPatch = buildStatusSyncPatch(deal.status, targetStage, options?.lostReason);
+    becameWon = deal.status !== "WON" && targetStage.isWon;
+    becameLost = deal.status !== "LOST" && targetStage.isLost;
 
     if (oldStageId === targetStageId) {
       const deals = await tx.deal.findMany({
@@ -594,6 +609,28 @@ export async function moveDeal(
       include: listInclude,
     });
   });
+
+  // Pós-commit (fire-and-forget; import dinâmico evita ciclo de módulos):
+  if (becameWon) {
+    void import("@/services/product-fulfillment").then((m) => m.onDealWon(dealId));
+    // Catálogo por capacidades (PRD): operação pós-venda agnóstica.
+    void import("@/services/fulfillment").then((m) => m.onCommercialDealWon(dealId));
+  } else if (becameLost) {
+    void import("@/services/product-fulfillment").then((m) =>
+      m.onDealReverted(dealId),
+    );
+  }
+  // Funil B2C de candidatos: reserva/contratação ao entrar nos estágios da vaga.
+  void import("@/services/product-fulfillment").then((m) =>
+    m.onCandidateStageMove(dealId, targetStageId).catch((err) => {
+      console.warn("[deals.moveDeal] onCandidateStageMove falhou:", {
+        dealId,
+        targetStageId,
+        err: err instanceof Error ? err.message : String(err),
+      });
+    }),
+  );
+  return result;
 }
 
 /**
@@ -628,7 +665,7 @@ async function buildTerminalStageMovePatch(
 }
 
 export async function markDealWon(id: string) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
     if (!deal) throw new Error("NOT_FOUND");
     const movePatch = await buildTerminalStageMovePatch(tx, deal, "won");
@@ -643,6 +680,11 @@ export async function markDealWon(id: string) {
       include: listInclude,
     });
   });
+  // Pós-commit (fire-and-forget; import dinâmico evita ciclo deals<->fulfillment).
+  void import("@/services/product-fulfillment").then((m) => m.onDealWon(id));
+  // Catálogo por capacidades (PRD): operação pós-venda agnóstica.
+  void import("@/services/fulfillment").then((m) => m.onCommercialDealWon(id));
+  return result;
 }
 
 export async function markDealLost(id: string, lostReason?: string | null) {
@@ -650,7 +692,7 @@ export async function markDealLost(id: string, lostReason?: string | null) {
   // `deals.loss_reason_required`); aqui aceitamos vazio → null.
   const reason = lostReason?.trim() || null;
 
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
     if (!deal) throw new Error("NOT_FOUND");
     const movePatch = await buildTerminalStageMovePatch(tx, deal, "lost");
@@ -665,10 +707,13 @@ export async function markDealLost(id: string, lostReason?: string | null) {
       include: listInclude,
     });
   });
+  // Perda: estorna alocações (no-op se não houver; cobre "desistência" no funil B2C).
+  void import("@/services/product-fulfillment").then((m) => m.onDealReverted(id));
+  return result;
 }
 
 export async function reopenDeal(id: string) {
-  return prisma.$transaction(async (tx) => {
+  const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
     if (!deal) throw new Error("NOT_FOUND");
 
@@ -705,6 +750,9 @@ export async function reopenDeal(id: string) {
       include: listInclude,
     });
   });
+  // Reabertura: estorna alocações consumidas no ganho (lança inversos).
+  void import("@/services/product-fulfillment").then((m) => m.onDealReverted(id));
+  return result;
 }
 
 /** Limite default de cards exibidos por coluna no board. */

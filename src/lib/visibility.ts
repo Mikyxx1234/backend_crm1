@@ -1,7 +1,9 @@
 import { Prisma } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
+import { groupResourceVisibility, loadAuthzContext } from "@/lib/authz";
 import { getOrgSettingsByPrefix } from "@/lib/org-settings";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 
 export type VisibilityMode = "all" | "own";
 
@@ -61,27 +63,50 @@ export async function getVisibilityFilter(
     };
   }
 
+  /**
+   * Modo "own" do papel — GRUPOS de acesso podem EXPANDIR a visibilidade
+   * (modelo aditivo): se algum grupo do usuário concede nível "Todos" (ALL)
+   * no `view` de deal/conversation, ele passa a ver tudo daquele recurso.
+   * Grupos nunca restringem aqui (defesa contra esconder dados por engano).
+   */
+  let dealAll = false;
+  let convAll = false;
+  try {
+    const orgId = getOrgIdOrThrow();
+    const ctx = await loadAuthzContext({
+      userId: user.id,
+      organizationId: orgId,
+      isSuperAdmin: false,
+    });
+    dealAll = groupResourceVisibility(ctx, "deal") === "all";
+    convAll = groupResourceVisibility(ctx, "conversation") === "all";
+  } catch {
+    // Fora de RequestContext (ex.: jobs) — mantém o modo "own" do papel.
+  }
+
   return {
-    canSeeAll: false,
-    dealWhere: { ownerId: user.id },
+    canSeeAll: dealAll,
+    dealWhere: dealAll ? {} : { ownerId: user.id },
     /**
      * Inbox: conversa atribuída só ao agente indicado; sem atribuição segue a visibilidade por contato
      * (dono do negócio ou responsável pelo lead).
      */
-    conversationWhere: {
-      OR: [
-        { assignedToId: user.id },
-        {
-          assignedToId: null,
-          contact: {
-            OR: [
-              { deals: { some: { ownerId: user.id } } },
-              { assignedToId: user.id },
-            ],
-          },
+    conversationWhere: convAll
+      ? {}
+      : {
+          OR: [
+            { assignedToId: user.id },
+            {
+              assignedToId: null,
+              contact: {
+                OR: [
+                  { deals: { some: { ownerId: user.id } } },
+                  { assignedToId: user.id },
+                ],
+              },
+            },
+          ],
         },
-      ],
-    },
   };
 }
 

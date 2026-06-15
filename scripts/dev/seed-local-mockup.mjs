@@ -340,10 +340,18 @@ async function main() {
   console.log("\n  • Criando contatos…");
   const contactIdMap = new Map();
 
+  // Número sequencial por organização (sem default no banco — atribuído aqui).
+  const maxContactNumberRow = await prisma.contact.aggregate({
+    where: { organizationId: orgId },
+    _max: { number: true },
+  });
+  let nextContactNumber = (maxContactNumberRow._max.number ?? 0) + 1;
+
   for (const c of CONTACTS) {
     const contact = await prisma.contact.create({
       data: {
         organizationId: orgId,
+        number: nextContactNumber++,
         externalId: `${SEED_PREFIX}${c.key}`,
         name: c.name,
         email: c.email,

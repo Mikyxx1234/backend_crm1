@@ -2,7 +2,7 @@ import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
-import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import { listAllowedPipelineIds, requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { createPipeline, getPipelines } from "@/services/pipelines";
 
 /** Prisma nem sempre mantém `instanceof` após o bundle; usa também `code` e mensagem. */
@@ -48,7 +48,8 @@ export async function GET(request: Request) {
     return await runWithApiUserContext(authResult.user, async () => {
     const denied = await requirePermissionForUser(authResult.user, "pipeline:view");
     if (denied) return denied;
-    const pipelines = await getPipelines();
+    const allowedPipelineIds = await listAllowedPipelineIds(authResult.user);
+    const pipelines = await getPipelines({ allowedPipelineIds });
     return NextResponse.json(pipelines);
     });
   } catch (e) {

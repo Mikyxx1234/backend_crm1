@@ -42,17 +42,19 @@ export async function PUT(request: Request, context: RouteContext) {
       const body = (await request.json()) as FlowDefinitionUpsertInput;
       const existing = await getFlowDefinitionById(id);
       if (!existing) return NextResponse.json({ message: "Não encontrado." }, { status: 404 });
+      // Usa o CUID real para as funções internas (param pode ser shortId)
+      const cuid = existing.id;
       if (existing.status === "PUBLISHED" || existing.metaFlowId?.trim()) {
-        await updatePublishedFlowMappings(id, body);
+        await updatePublishedFlowMappings(cuid, body);
       } else if (existing.status === "DRAFT") {
-        await replaceFlowDefinitionDraft(id, body);
+        await replaceFlowDefinitionDraft(cuid, body);
       } else {
         return NextResponse.json(
           { message: "Flow arquivado não pode ser editado." },
           { status: 400 },
         );
       }
-      const row = await getFlowDefinitionById(id);
+      const row = await getFlowDefinitionById(cuid);
       return NextResponse.json(row);
     } catch (e) {
       return NextResponse.json(
@@ -75,7 +77,10 @@ export async function DELETE(_request: Request, context: RouteContext) {
     });
     if (!resolved.ok) return resolved.response;
     try {
-      await deleteFlowDefinitionDraft(id, resolved.client);
+      // Resolve shortId → CUID antes de deletar
+      const existing = await getFlowDefinitionById(id);
+      if (!existing) return NextResponse.json({ message: "Não encontrado." }, { status: 404 });
+      await deleteFlowDefinitionDraft(existing.id, resolved.client);
       return NextResponse.json({ ok: true });
     } catch (e) {
       return NextResponse.json(

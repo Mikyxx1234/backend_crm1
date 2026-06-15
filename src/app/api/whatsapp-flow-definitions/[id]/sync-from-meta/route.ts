@@ -32,8 +32,10 @@ export async function POST(_request: Request, context: RouteContext) {
     if (!resolved.ok) return resolved.response;
 
     try {
-      await syncFlowFieldsFromMeta(id, resolved.client);
-      const row = await getFlowDefinitionById(id);
+      const flow = await getFlowDefinitionById(id);
+      if (!flow) return NextResponse.json({ message: "Não encontrado." }, { status: 404 });
+      await syncFlowFieldsFromMeta(flow.id, resolved.client);
+      const row = await getFlowDefinitionById(flow.id);
       return NextResponse.json(row);
     } catch (e) {
       return NextResponse.json(

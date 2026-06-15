@@ -175,7 +175,10 @@ async function resolveOpenDealId(contactId: string): Promise<string | null> {
   return deal?.id ?? null;
 }
 
-async function ensureDealForContact(contactId: string): Promise<string | null> {
+async function ensureDealForContact(
+  contactId: string,
+  channelId?: string | null,
+): Promise<string | null> {
   const existing = await resolveOpenDealId(contactId);
   if (existing) return existing;
 
@@ -187,6 +190,7 @@ async function ensureDealForContact(contactId: string): Promise<string | null> {
     contactId,
     contactName: contact?.name?.trim() || "Lead",
     logTag: "whatsapp-flow",
+    channelId,
   });
   if (ensured.status === "skipped") return null;
   return ensured.dealId;
@@ -406,7 +410,7 @@ export async function applyWhatsappFlowResponseToContact(params: {
 
   let dealId: string | null = null;
   if (needsDeal) {
-    dealId = await ensureDealForContact(params.contactId);
+    dealId = await ensureDealForContact(params.contactId, params.channelRef?.id ?? null);
     if (!dealId) {
       result.alerts.push(
         "Nenhum negócio aberto para gravar os campos mapeados. Crie um negócio no pipeline ou verifique o pipeline padrão.",

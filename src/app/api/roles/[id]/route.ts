@@ -12,6 +12,7 @@ const updateSchema = z
     name: z.string().min(1).max(120).optional(),
     description: z.string().max(500).nullable().optional(),
     permissions: z.array(z.string()).optional(),
+    inheritsFrom: z.string().min(1).nullable().optional(),
   })
   .refine((obj) => Object.keys(obj).length > 0, {
     message: "Nenhum campo para atualizar.",

@@ -42,6 +42,11 @@ export type GetConversationsParams = {
   tagIds?: string[];
   sortBy?: "updatedAt" | "createdAt" | "unreadCount";
   sortOrder?: "asc" | "desc";
+  /**
+   * Escopo de canais por usuário (IDs de `Channel`). `null/undefined` → sem
+   * restrição; array (mesmo vazio) → restringe conversas a esses canais.
+   */
+  allowedChannelIds?: string[] | null;
 };
 
 const listSelect = {
@@ -233,6 +238,9 @@ export async function getConversations(
   if (params.contactId) conditions.push({ contactId: params.contactId });
   if (params.status && !params.tab) conditions.push({ status: params.status });
   if (params.channel) conditions.push({ channel: params.channel });
+  if (params.allowedChannelIds) {
+    conditions.push({ channelId: { in: params.allowedChannelIds } });
+  }
 
   if (params.ownerId) {
     conditions.push({
@@ -319,6 +327,7 @@ const TAB_LIST = INBOX_TAB_LIST;
 async function countTodosTab(
   visibilityWhere: Prisma.ConversationWhereInput | undefined,
   memberOrTabs: InboxCategoryTab[] | null,
+  allowedChannelIds?: string[] | null,
 ): Promise<number> {
   const conditions: Prisma.ConversationWhereInput[] = [];
   if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
@@ -326,6 +335,9 @@ async function countTodosTab(
   }
   if (memberOrTabs && memberOrTabs.length > 0) {
     conditions.push({ OR: memberOrTabs.map((t) => tabToWhere(t)) });
+  }
+  if (allowedChannelIds) {
+    conditions.push({ channelId: { in: allowedChannelIds } });
   }
   const where: Prisma.ConversationWhereInput =
     conditions.length > 0 ? { AND: conditions } : {};
@@ -336,6 +348,8 @@ export async function getTabCounts(
   visibilityWhere?: Prisma.ConversationWhereInput,
   /** `null` = ADMIN/MANAGER (todas as conversas visíveis). Array = MEMBER (OR das categorias). */
   todosMemberCategoryTabs?: InboxCategoryTab[] | null,
+  /** Escopo de canais por usuário (IDs de `Channel`). `null` = sem restrição. */
+  allowedChannelIds?: string[] | null,
 ): Promise<Record<InboxTab, number>> {
   const results = await Promise.all(
     TAB_LIST.map(async (tab) => {
@@ -344,6 +358,9 @@ export async function getTabCounts(
         conditions.push(visibilityWhere);
       }
       conditions.push(tabToWhere(tab));
+      if (allowedChannelIds) {
+        conditions.push({ channelId: { in: allowedChannelIds } });
+      }
       const where: Prisma.ConversationWhereInput =
         conditions.length > 0 ? { AND: conditions } : {};
       const count = await prisma.conversation.count({ where });
@@ -351,7 +368,11 @@ export async function getTabCounts(
     }),
   );
   const record = Object.fromEntries(results) as Record<InboxTab, number>;
-  record.todos = await countTodosTab(visibilityWhere, todosMemberCategoryTabs ?? null);
+  record.todos = await countTodosTab(
+    visibilityWhere,
+    todosMemberCategoryTabs ?? null,
+    allowedChannelIds,
+  );
   return record;
 }
 
@@ -359,7 +380,7 @@ export async function linkContactToConversation(conversationId: string, contactI
   return prisma.conversation.update({
     where: { id: conversationId },
     data: { contactId },
-    include: { contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } } },
+    include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 }
 
@@ -367,7 +388,7 @@ export async function getConversationById(id: string) {
   const conv = await prisma.conversation.findUnique({
     where: { id },
     include: {
-      contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } },
+      contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
       assignedTo: { select: { id: true, name: true, email: true } },
     },
   });
@@ -445,7 +466,7 @@ export async function assignConversationAssignedTo(
         ...(shouldResetGreeted ? { aiGreetedAt: null } : {}),
       },
       include: {
-        contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } },
+        contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
         assignedTo: { select: { id: true, name: true, email: true } },
       },
     });
@@ -480,6 +501,6 @@ export async function updateConversationStatusInDb(id: string, status: Conversat
   return prisma.conversation.update({
     where: { id },
     data: { status },
-    include: { contact: { select: { id: true, name: true, email: true, phone: true, avatarUrl: true } } },
+    include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 }

@@ -54,6 +54,23 @@ export type CrmActionGrants = Partial<
   Record<CrmActionKey, { users?: CrmActionUserGrants }>
 >;
 
+/**
+ * Override por usuário individual (não por papel) para escopo de recursos
+ * com instâncias dinâmicas — funis e canais.
+ *
+ * Schema: `users[userId] = string[]`
+ *   - `["*"]`           → acesso a todos (equivale a "sem restrição")
+ *   - `["id1","id2"]`   → restrito a esses IDs
+ *   - `[]`              → nenhum acesso (restrição total)
+ *   - chave ausente     → cai na regra por papel (`pipeline.view[role]`) ou,
+ *                          quando não houver, libera (default permissivo)
+ *
+ * 09/jun/26 — adicionado para suportar escopo por usuário de funis
+ * (`pipeline.users`) e canais (`channel.view/send.users`), configurável na
+ * tela de cada usuário em /settings/permissions.
+ */
+export type UserScopeGrants = Partial<Record<string, string[]>>;
+
 export type ScopeGrants = {
   /** Abas da Inbox por papel (`MEMBER`). Valores: chaves de aba ou `"*"`. */
   inbox?: {
@@ -62,6 +79,23 @@ export type ScopeGrants = {
   pipeline?: {
     view?: RoleScope;
     edit?: RoleScope;
+    /** Override por usuário: lista de IDs de funis visíveis (ou `["*"]`). */
+    users?: UserScopeGrants;
+  };
+  /**
+   * Escopo de canais (instâncias dinâmicas de `Channel`). Separa "ver" e
+   * "enviar". Dois eixos ADITIVOS:
+   *   - `users[userId]`   → override por usuário (configurável na ficha do user)
+   *   - `roles[roleId]`   → grant por Role CUSTOMIZADA (configurável no editor
+   *                          de papel). `roleId` é o id real da Role.
+   *
+   * Resolução (ver `canAccessChannelForUser`): as regras definidas (usuário +
+   * roles do usuário) são UNIDAS de forma permissiva. Sem nenhuma regra
+   * definida → sem restrição (comportamento anterior preservado).
+   */
+  channel?: {
+    view?: { users?: UserScopeGrants; roles?: UserScopeGrants };
+    send?: { users?: UserScopeGrants; roles?: UserScopeGrants };
   };
   stage?: {
     view?: RoleScope;
@@ -120,6 +154,17 @@ function normalizeRoleScope(input: unknown): RoleScope {
   };
 }
 
+function normalizeUserScope(input: unknown): UserScopeGrants {
+  if (!input || typeof input !== "object") return {};
+  const src = input as Record<string, unknown>;
+  const out: UserScopeGrants = {};
+  for (const [userId, raw] of Object.entries(src)) {
+    if (typeof userId !== "string" || !userId) continue;
+    out[userId] = normalizeIds(raw);
+  }
+  return out;
+}
+
 function normalizeCrmUserGrants(input: unknown): CrmActionUserGrants {
   if (!input || typeof input !== "object") return {};
   const src = input as Record<string, unknown>;
@@ -151,6 +196,9 @@ export function parseScopeGrants(input: unknown): ScopeGrants {
   const field = src.field && typeof src.field === "object" ? (src.field as Record<string, unknown>) : {};
   const sidebar = src.sidebar && typeof src.sidebar === "object" ? (src.sidebar as Record<string, unknown>) : {};
   const inbox = src.inbox && typeof src.inbox === "object" ? (src.inbox as Record<string, unknown>) : {};
+  const channel = src.channel && typeof src.channel === "object" ? (src.channel as Record<string, unknown>) : {};
+  const channelView = channel.view && typeof channel.view === "object" ? (channel.view as Record<string, unknown>) : {};
+  const channelSend = channel.send && typeof channel.send === "object" ? (channel.send as Record<string, unknown>) : {};
   const dealField = field.deal && typeof field.deal === "object" ? (field.deal as Record<string, unknown>) : {};
   const contactField = field.contact && typeof field.contact === "object" ? (field.contact as Record<string, unknown>) : {};
   const productField = field.product && typeof field.product === "object" ? (field.product as Record<string, unknown>) : {};
@@ -161,6 +209,17 @@ export function parseScopeGrants(input: unknown): ScopeGrants {
     pipeline: {
       view: normalizeRoleScope(pipeline.view),
       edit: normalizeRoleScope(pipeline.edit),
+      users: normalizeUserScope(pipeline.users),
+    },
+    channel: {
+      view: {
+        users: normalizeUserScope(channelView.users),
+        roles: normalizeUserScope(channelView.roles),
+      },
+      send: {
+        users: normalizeUserScope(channelSend.users),
+        roles: normalizeUserScope(channelSend.roles),
+      },
     },
     stage: {
       view: normalizeRoleScope(stage.view),
@@ -243,6 +302,139 @@ export function canAccessScopedResource(args: {
   return roleRuleAllows(scope, role, args.targetId);
 }
 
+/**
+ * Avalia uma lista de IDs de override por usuário.
+ * `["*"]` → libera tudo; lista vazia → nega; senão precisa conter o alvo.
+ */
+function userScopeAllows(ids: string[], value: string): boolean {
+  if (ids.includes("*")) return true;
+  return ids.includes(value);
+}
+
+/**
+ * Acesso (view) a um funil considerando override por usuário e fallback
+ * para a regra por papel. ADMIN sempre libera.
+ */
+export function canAccessPipelineForUser(args: {
+  grants: ScopeGrants;
+  role: string | null | undefined;
+  userId: string;
+  pipelineId: string;
+}): boolean {
+  if (asRoleKey(args.role) === "ADMIN") return true;
+  const userRule = args.grants.pipeline?.users?.[args.userId];
+  if (Array.isArray(userRule)) return userScopeAllows(userRule, args.pipelineId);
+  return canAccessScopedResource({
+    grants: args.grants,
+    role: args.role,
+    resource: "pipeline",
+    action: "view",
+    targetId: args.pipelineId,
+  });
+}
+
+/**
+ * Lista de IDs de funis permitidos a um usuário, para filtrar queries.
+ * Retorna `null` quando não há restrição (acesso a todos); array (possivelmente
+ * vazio) quando restrito.
+ */
+export function listAllowedPipelineIdsForUser(args: {
+  grants: ScopeGrants;
+  role: string | null | undefined;
+  userId: string;
+}): string[] | null {
+  const role = asRoleKey(args.role);
+  if (role === "ADMIN") return null;
+  const userRule = args.grants.pipeline?.users?.[args.userId];
+  if (Array.isArray(userRule)) {
+    if (userRule.includes("*")) return null;
+    return userRule;
+  }
+  if (!role) return null;
+  const roleScope = args.grants.pipeline?.view?.[role];
+  if (!Array.isArray(roleScope) || roleScope.length === 0 || roleScope.includes("*")) {
+    return null;
+  }
+  return roleScope;
+}
+
+/**
+ * Coleta as regras de canal aplicáveis a um usuário (override por usuário +
+ * grants das roles customizadas que ele possui). Cada entrada é uma lista de
+ * IDs; a resolução é ADITIVA (ver `canAccessChannelForUser`).
+ */
+function collectChannelRules(
+  node: { users?: UserScopeGrants; roles?: UserScopeGrants } | undefined,
+  userId: string,
+  roleIds: string[],
+): string[][] {
+  const rules: string[][] = [];
+  const userRule = node?.users?.[userId];
+  if (Array.isArray(userRule)) rules.push(userRule);
+  for (const roleId of roleIds) {
+    const roleRule = node?.roles?.[roleId];
+    if (Array.isArray(roleRule)) rules.push(roleRule);
+  }
+  return rules;
+}
+
+/**
+ * Acesso a um canal (ver ou enviar). "enviar" exige também "ver". ADMIN sempre
+ * libera. As regras (usuário + roles) são unidas de forma permissiva: havendo
+ * QUALQUER regra definida, o acesso só passa se ao menos uma a permitir; sem
+ * nenhuma regra → liberado (comportamento anterior à feature preservado).
+ */
+export function canAccessChannelForUser(args: {
+  grants: ScopeGrants;
+  role: string | null | undefined;
+  userId: string;
+  action: "view" | "send";
+  channelId: string;
+  roleIds?: string[];
+}): boolean {
+  if (asRoleKey(args.role) === "ADMIN") return true;
+  const roleIds = args.roleIds ?? [];
+
+  const viewRules = collectChannelRules(args.grants.channel?.view, args.userId, roleIds);
+  if (viewRules.length > 0 && !viewRules.some((r) => userScopeAllows(r, args.channelId))) {
+    return false;
+  }
+  if (args.action === "send") {
+    const sendRules = collectChannelRules(args.grants.channel?.send, args.userId, roleIds);
+    if (sendRules.length > 0 && !sendRules.some((r) => userScopeAllows(r, args.channelId))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Lista de IDs de canais que o usuário pode ver, para filtrar conversas.
+ * Une override por usuário + grants das roles. Retorna `null` quando não há
+ * restrição (nenhuma regra ou alguma regra com `*`); array (possivelmente
+ * vazio) quando restrito.
+ */
+export function listAllowedChannelIdsForUser(args: {
+  grants: ScopeGrants;
+  role: string | null | undefined;
+  userId: string;
+  roleIds?: string[];
+}): string[] | null {
+  if (asRoleKey(args.role) === "ADMIN") return null;
+  const rules = collectChannelRules(
+    args.grants.channel?.view,
+    args.userId,
+    args.roleIds ?? [],
+  );
+  if (rules.length === 0) return null;
+  if (rules.some((r) => r.includes("*"))) return null;
+  const set = new Set<string>();
+  for (const rule of rules) {
+    for (const id of rule) if (id !== "*") set.add(id);
+  }
+  return Array.from(set);
+}
+
 export function canAccessField(args: {
   grants: ScopeGrants;
   role: string | null | undefined;
@@ -284,31 +476,92 @@ export function canSeeSettingsItem(args: {
 
 const DEFAULT_MEMBER_INBOX_TABS = new Set<InboxTab>(["esperando", "respondidas"]);
 
+/**
+ * Permissão RBAC mínima por aba de categoria (Authz v2 ↔ inbox).
+ *
+ * Modelo: "entrada" é a fila LIVRE (conversas sem resposta do agente) — só
+ * faz sentido para quem pode ASSUMIR conversa da fila (`conversation:claim`).
+ * As demais abas refletem o trabalho do agente e exigem apenas
+ * `conversation:view`. Mantido alinhado ao catálogo em
+ * `src/lib/authz/permissions.ts` (resource `conversation`).
+ */
+const INBOX_TAB_REQUIRED_PERMISSION: Record<Exclude<InboxTab, "todos">, string> = {
+  entrada: "conversation:claim",
+  esperando: "conversation:view",
+  respondidas: "conversation:view",
+  automacao: "conversation:view",
+  finalizados: "conversation:view",
+  erro: "conversation:view",
+};
+
+function toPermissionSet(
+  permissions: ReadonlySet<string> | readonly string[] | null | undefined,
+): ReadonlySet<string> | null {
+  if (!permissions) return null;
+  return permissions instanceof Set ? permissions : new Set(permissions);
+}
+
+/** Checa uma permission key respeitando wildcards `*` e `<resource>:*`. */
+function permissionsAllow(perms: ReadonlySet<string>, key: string): boolean {
+  if (perms.has("*") || perms.has(key)) return true;
+  const colon = key.indexOf(":");
+  if (colon > 0 && perms.has(`${key.slice(0, colon)}:*`)) return true;
+  return false;
+}
+
+function memberTabAllowedByPermissions(
+  perms: ReadonlySet<string>,
+  tab: Exclude<InboxTab, "todos">,
+): boolean {
+  const required = INBOX_TAB_REQUIRED_PERMISSION[tab];
+  if (!required) return false;
+  return permissionsAllow(perms, required);
+}
+
+/**
+ * Decide se um papel pode ver uma aba da inbox.
+ *
+ * Ordem de precedência para MEMBER:
+ *   1. Regra explícita por papel configurada pela org (`inbox.tabs.MEMBER`,
+ *      via /settings/permissions) — sempre vence (admin restringiu de propósito).
+ *   2. Caso contrário, deriva do RBAC (`permissions`): o papel custom que
+ *      concede `conversation:view`/`conversation:claim` libera as abas
+ *      correspondentes. É a CONEXÃO entre o sistema de roles (Authz v2) e o
+ *      gating do inbox, que antes era hardcoded no enum legado `User.role`.
+ *   3. Sem info de permissões (callers legados/client) → default histórico
+ *      (`esperando`/`respondidas`), preservando o fail-safe anterior.
+ */
 export function canSeeInboxTab(args: {
   grants: ScopeGrants;
   role: string | null | undefined;
   tab: InboxTab;
+  permissions?: ReadonlySet<string> | readonly string[] | null;
 }): boolean {
   if (args.tab === "todos") return true;
   const role = asRoleKey(args.role);
   if (!role || role === "ADMIN" || role === "MANAGER") return true;
   const scope = args.grants.inbox?.tabs;
-  if (!hasRoleRule(scope, "MEMBER")) {
-    return DEFAULT_MEMBER_INBOX_TABS.has(args.tab);
+  if (hasRoleRule(scope, "MEMBER")) {
+    return roleRuleAllows(scope, "MEMBER", args.tab);
   }
-  return roleRuleAllows(scope, "MEMBER", args.tab);
+  const perms = toPermissionSet(args.permissions);
+  if (perms) {
+    return memberTabAllowedByPermissions(perms, args.tab);
+  }
+  return DEFAULT_MEMBER_INBOX_TABS.has(args.tab);
 }
 
 export function listAllowedInboxTabsForUser(args: {
   grants: ScopeGrants;
   role: string | null | undefined;
+  permissions?: ReadonlySet<string> | readonly string[] | null;
 }): InboxTab[] {
   const role = asRoleKey(args.role);
   if (!role || role === "ADMIN" || role === "MANAGER") {
     return ["todos", ...INBOX_CATEGORY_TAB_ORDER];
   }
   const allowed = INBOX_CATEGORY_TAB_ORDER.filter((t) =>
-    canSeeInboxTab({ grants: args.grants, role, tab: t }),
+    canSeeInboxTab({ grants: args.grants, role, tab: t, permissions: args.permissions }),
   );
   const base: Exclude<InboxTab, "todos">[] =
     allowed.length > 0 ? [...allowed] : ["esperando", "respondidas"];

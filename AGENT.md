@@ -5,6 +5,358 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-15 — Migração DEV_BRANCH → prod (DNA): nova migration `backfill_catalog_permissions` e protocolo manual de aplicação [DECISÃO — agente Opus]
+
+**Decisão.** Antes do merge `DEV_BRANCH → main`, aplicar manualmente em prod
+as 11 migrations idempotentes da DEV_BRANCH **+ uma 12ª nova**
+(`20260615120200_backfill_catalog_permissions/migration.sql`) que faltou na
+DEV_BRANCH para atualizar `roles.permissions` dos presets MANAGER e MEMBER de
+orgs já existentes (DNA, EduIT, teste). Aplicação via
+`scripts/dev/apply-dev-branch-migrations.mjs` — script idempotente que faz
+BEGIN/COMMIT por arquivo, com checagem de `_prisma_migrations` antes/depois.
+
+**Contexto.** A DEV_BRANCH adicionou novos resources ao `PERMISSION_CATALOG`
+(catalog/inventory/job_opening/org_unit + product:manage_*) e atualizou
+`src/lib/authz/presets.ts` com 14 keys novas no MANAGER e 5 no MEMBER. Pelo
+comentário do próprio `presets.ts`, mudanças de preset **exigem migration de
+update para refletir em orgs existentes** — a DEV_BRANCH esqueceu essa
+migration, então roles snapshotados (DNA) ficariam fail-closed nas features
+novas pós-merge. A migration nova segue exatamente o pattern idempotente
+(`UNNEST + DISTINCT`) já estabelecido em
+`20260609180000_add_nav_permissions/migration.sql` — preserva customizações
+manuais e nunca duplica entradas.
+
+**Alternativas descartadas.**
+- *"Reset to preset" via UI da DNA pós-merge*: exigiria intervenção humana
+  na DNA e perderia qualquer customização que o admin tivesse adicionado às
+  permissions. Reprovado.
+- *Não fazer nada e esperar usuário descobrir*: causaria fail-closed
+  silencioso (gestores sem acesso a Catálogo/Inventário/Vagas), suporte
+  reativo. Reprovado.
+- *`prisma migrate deploy` em prod*: prod usa `SKIP_PRISMA_MIGRATE=1` por
+  política — aplicação manual via `db execute --file` ou equivalente é o
+  pattern do projeto. As migrations já são escritas idempotentes
+  (`IF NOT EXISTS`, `DO $$ EXCEPTION`) justamente para isso. Mantido.
+
+**Impacto.**
+- 12 migrations registradas em `_prisma_migrations` do prod.
+- DNA: MANAGER 88→102 perms, MEMBER 31→36 perms (gap de catálogo
+  preenchido). 1866 contatos numerados (`Contact.number` 1..1866). 1 produto
+  ligado ao "Catálogo padrão" criado automaticamente. Tabelas Group vazias
+  (criadas zeradas — sem efeito até o admin configurar).
+- EduIT: idem (183 contatos numerados, 2 produtos no novo catálogo default).
+- Backup defensivo de 82MB (`backups/prod-2026-06-15-175443/data.sql`,
+  formato `pg_dump --data-only`) — restaurável via `psql -f data.sql` num
+  schema com as migrations aplicadas. Não versionado (`.gitignore`).
+- Scripts adicionados (commitáveis):
+  `scripts/dev/inspect-prod-readonly.mjs`,
+  `scripts/dev/apply-dev-branch-migrations.mjs`,
+  `scripts/dev/backup-prod-data.mjs`,
+  `scripts/dev/verify-prod-postmigration.mjs`.
+- Risco residual: zero quebra na main rodando (todas mudanças aditivas — o
+  Prisma client da main não enxerga colunas/tabelas novas, então não as
+  consulta).
+
+---
+
+### 2026-06-13 — Permissões por GRUPO com escopo (modelo Kommo) em `/settings/permissions` — entidade `Group` nova, ADITIVA ao RBAC de papéis [DECISÃO — agente OPUS]
+
+**Decisão (escolhida pelo usuário: "modelo completo" + nível "Equipe" adiado).**
+Novo domínio `Group` (Prisma) com membros e permissões **com escopo por ação**
+(`PermissionLevel`: `NONE | SELF | TEAM | ALL`), espelhando o mockup estilo
+Kommo. Modelos: `Group`, `GroupMember`, `GroupPermission`, `GroupStageGrant`,
+`GroupFieldGrant` + extras no grupo (`sharedInbox`, `mediaAccess`,
+`sidebarRoutes`). Migrado via `prisma db push` (crm_dev sem migrations).
+
+**Por quê ADITIVO (não substitui papéis).** O RBAC de papéis (`Role.permissions
+string[]` + `UserRoleAssignment`) continua intacto. Permissões efetivas de um
+user = **união** papéis ∪ grupos. No resolver (`lib/authz/index.ts`,
+`loadFromDb`): toda `GroupPermission` com nível ≥ `SELF` injeta a key booleana
+`resource:action` no `can()`; o nível fica num mapa `scopes` (resource → action
+→ nível) no `AuthzContext` para dirigir a visibilidade own/all. Usuários sem
+grupos mantêm exatamente o comportamento atual (fail-safe — evita repetir o
+incidente de "sumiço de dados").
+
+**Nível "Equipe" (TEAM) adiado.** Sem estrutura de times no sistema, o enum
+inclui `TEAM` (forward-compat) mas a UI mostra apenas `NONE/SELF/ALL` ativos
+(`Equipe` aparece desabilitado como "em breve"). No resolver, `TEAM` é tratado
+como `ALL` defensivamente, mas nunca é gravado pela UI.
+
+**Enforcement (escopo desta entrega).**
+- **Gating de ação** (create/view/edit/delete/export) via `can()`: vale para
+  **todas** as entidades, pois grupos alimentam `can()`.
+- **Visibilidade de linha own/all**: ligada em **deals** e **conversas** via
+  `getVisibilityFilter` (grupos só EXPANDEM: nível `ALL` no `view` promove o
+  usuário "own"→"all"; nunca restringem ali).
+- **Etapas (`GroupStageGrant`) e campos (`GroupFieldGrant`)**: têm UI +
+  persistência completas, mas o enforcement por etapa/campo fica **staged**
+  (reaproveitará o caminho de `ScopeGrants` / flag `rbac_granular_scope_v1`)
+  para não esconder dados por engano nesta fase.
+
+**Rotas.** `GET/POST /api/groups`, `GET/PUT/DELETE /api/groups/[id]`,
+`POST /api/groups/[id]/members`, `DELETE /api/groups/[id]/members/[userId]`
+(substituem o stub 501). Gate: `settings:permissions`. Membros reaproveitam o
+mesmo padrão de `UserRoleAssignment`. UI: hub em `/settings/permissions` +
+editor full-width em `/settings/permissions/groups/[groupId]`.
+
+---
+
+### 2026-06-13 — Grupos de acesso de mensageria (`/settings/conversations`): herança PRAGMÁTICA + assinatura ainda global [DECISÃO — agente OPUS]
+
+**Contexto.** Reconstrução de `/settings/conversations` para um modelo de 3 telas
+(lista de grupos → editor de preset → editor custom com herança). O brief assume
+herança+override e assinatura por-grupo, mas o backend tem `Role.permissions`
+**plano** (lista de chaves efetivas), sem herança nem override, e assinatura
+**global** por organização (`OrganizationSetting` lido pelo composer).
+
+**Decisão (escolhida pelo usuário entre 3 opções).**
+
+1. **Herança pragmática, não em runtime.** Adicionada **uma coluna aditiva**
+   `Role.inheritsFrom String?` (+ índice) via migration idempotente
+   (`ADD COLUMN IF NOT EXISTS`). Grupos personalizados continuam guardando as
+   permissões **efetivas** em `permissions`; a UI calcula "herdado vs
+   personalizado" por **diff** contra o efetivo do base (`inheritsFrom`).
+   Helpers puros e testados em `frontend/src/features/messaging-roles/inheritance.ts`.
+   - `can()` **não** muda — não há resolução de herança no servidor.
+   - **Cascata não é automática.** Editar um preset não propaga sozinho. A
+     propagação é uma **ação explícita** ("Reaplicar aos dependentes ao salvar"),
+     que preserva o que cada dependente personalizou medindo override contra o
+     base **anterior** ao save.
+
+2. **Serviço de roles (`services/roles.ts`):** `createRole`/`updateRole` aceitam
+   `inheritsFrom` (validado: precisa ser role da MESMA org; não pode herdar de si
+   mesmo). `deleteRole` passa a **recusar exclusão com membros** (`assignments>0`)
+   — a UI antecipa a regra, mas o servidor é a fonte da verdade. Zod das rotas
+   `POST/PUT /api/roles` estendido com `inheritsFrom`.
+
+3. **Assinatura permanece GLOBAL no v1 (pendência registrada).** O brief pede
+   assinatura por-grupo substituindo o toggle global. Mantivemos o toggle global
+   (`agentSignatureEnabled/Editable`) **sem reinterpretar** silenciosamente como
+   per-role. Tornar por-grupo exige adicionar a permission `signature:edit` ao
+   catálogo + religar o composer para ler a permission da role em vez do
+   `OrganizationSetting` — **trabalho de backend a fazer numa próxima fase.**
+
+**Por quê.** Entregar o UX das 3 telas (comparar grupos, criar por área, herdado×
+personalizado com `↺ herdar`) com **mudança mínima e aditiva** no backend,
+evitando reescrever o núcleo de autorização. O trade-off aceito é cascata manual
+em vez de herança viva.
+
+**Não-objetivo / dívida.** Herança real em runtime e assinatura por-grupo ficam
+para uma fase futura (exigiriam storage de override + mudança no `can()`/composer).
+
+---
+
+### 2026-06-13 — Catálogo por Capacidades, Fase 2: services agnósticos sobre os primitivos existentes [DECISÃO — agente OPUS]
+
+**Decisão.** Os três services do PRD (Fase 2) nascem como **camadas agnósticas
+sobre o que já existe**, sem reescrever o legado:
+
+- **`allocation.ts`** — fachada (vocabulário AllocationPool/Movement) sobre
+  `inventory.ts`, que já é a porta única transacional/auditada. Reexporta
+  `getBalance/consume/reserve/release/restock/reverse`; adicionei `adjust`
+  (delta assinado, reason ADJUSTMENT, respeita `allowNegative`) **em
+  `inventory.ts`** (onde vive o `lockPool`); e o **alerta de saldo baixo**:
+  `consume`/`reserve` da fachada resolvem o `lowThreshold` da config da
+  capability `allocation` (ProductCapability → fallback CatalogCapability) e
+  emitem `ALLOCATION_LOW` ao cruzar o limite.
+- **`fulfillment.ts`** — `onCommercialDealWon(dealId)` 100% agnóstico: para cada
+  produto com capability `fulfillment`, lê `config.creationTrigger`
+  (MANUAL→tarefa "configurar operação" via `FULFILLMENT_SETUP_REQUIRED`;
+  BY_AUTOMATION→no-op; ON_WON→cria deal `dealRole=OPERATIONAL` no pipeline da
+  config + `DealLink(ORIGINATED)`). **Zero `if (kind)`** — convive com o legado
+  `product-fulfillment.ts` (que continua por kind). Ligado pós-commit ao lado do
+  gancho legado em `deals.ts` (moveDeal e markDealWon).
+- **`stakeholder-notify.ts`** — nova `evaluateStakeholderRules({productId,
+  event, ...})`: carrega `StakeholderRule` (event×role×templateRef), casa papéis
+  com `ProductStakeholder` e entrega pelo mecanismo LGPD-mínimo já existente.
+
+**Steps de automação genéricos** (em `automation-executor.ts`): `allocation.adjust`
+(operation adjust|consume|restock|reserve|release, roteado pela fachada p/ disparar
+o alerta) e `stakeholder.notify`. Sem lógica por vertical.
+
+**`createDeal` ganhou `dealRole?`** (opcional; default COMMERCIAL no schema) para
+o fulfillment criar deals operacionais.
+
+**Schema:** `EventEntityType` ganhou `PRODUCT` (migration aditiva
+`20260613140000_event_entity_product`) para o `ALLOCATION_LOW` sem deal.
+Verificação: lint limpo, `tsc` mantém 21 erros pré-existentes (0 novos), build verde.
+
+---
+
+### 2026-06-13 — Catálogo Universal por Capacidades: coexistência aditiva com o domínio multi-tipo (Fases 0–1) [DECISÃO — agente OPUS]
+
+**Decisão.** Implementar o catálogo agnóstico por capacidades do PRD
+(`decision-log/PRD-catalogo-capacidades.md`) **sobre** o domínio de produtos
+multi-tipo de 2026-06-11, sem reescrever nada. O núcleo passa a conhecer
+`Product`/`Catalog`/capacidades; os verticais (curso, vaga, SaaS…) só existem
+como TEMPLATES de dados que ligam capacidades — **nenhum `if (kind === ...)`
+novo**.
+
+**Por que coexistência (e não substituição).** O schema já tinha, há 2 dias,
+`ProductKind`, `InventoryPool/Movement`, `ProductOffer/Plan/Shipping`,
+`CourseConfig`, `JobOpening`, `ProductStakeholder` — com código vivo. O PRD §5
+diz "não existem `CourseConfig`/`JobOpening`", mas removê-los seria regressão
+destrutiva. Optou-se por **congelar o legado** e mapear cada capacidade aos
+primitivos existentes:
+
+| Capacidade | Implementação (reuso) |
+|---|---|
+| `allocation` | `InventoryPool` / `InventoryMovement` (= AllocationPool/Movement) |
+| `pricing` | `ProductOffer` |
+| `recurrence` | `ProductPlan` |
+| `shipping` | `ProductShipping` + **`ShippingRange`** (novo: faixas de CEP) |
+| `stakeholders` | `ProductStakeholder` + **`StakeholderRule`** (novo: event×role×template) |
+| `scheduling` | **`CapacitySlot`** (novo: caminho agnóstico que sucede `CourseClass`) |
+| `fulfillment` | **`DealLink`** (novo) + **`Deal.dealRole`** |
+
+**Registro de capacidades = só código.** O conjunto fechado de 8 capacidades
+vive em `src/lib/capabilities/` (Fase 0): cada uma exporta `key`/`label`/
+`description` + schema Zod do `config`. Não há tabela `Capability` (evita fonte
+dupla de verdade); as junctions `CatalogCapability`/`ProductCapability` guardam
+`capabilityKey` como string validada pelo registry, e `config Json` validado
+pelo Zod antes de persistir. Adicionar capacidade = PR (código+schema+validação),
+nunca ação de usuário. Exposto ao frontend por `GET /api/capabilities`
+(JSON Schema serializado para o wizard montar sub-perguntas).
+
+**Migration (`20260613130000_catalog_capabilities`).** 100% aditiva e
+idempotente (`IF NOT EXISTS` / `DO $$ ... EXCEPTION WHEN duplicate_object $$`),
+aplicada no dev via `prisma db execute` (mantém `SKIP_PRISMA_MIGRATE=1`; nunca
+`migrate deploy` em prod). Novos models: `Catalog`, `CatalogCapability`,
+`ProductCapability`, `CapacitySlot`, `ShippingRange`, `StakeholderRule`,
+`DealLink`. Extensões: `Product.catalogId`, `Deal.dealRole` (default
+`COMMERCIAL`, indexado — PRD §9). Enum `InventoryReason` ganhou alias `RELEASE`
+(coexiste com `RESERVATION_RELEASE`). **Backfill:** um `Catalog` default por org
++ capability `pricing` ligada + produtos sem catálogo movidos pro default.
+Atenção: o `migrate diff` capturou drift pré-existente do banco de dev
+(`channels.defaultPipelineId`, `contacts.number NOT NULL`) que foi **removido à
+mão** da migration por não pertencer a esta feature (e `contacts.number NOT NULL`
+sem default quebraria tabela populada).
+
+Todos os 7 models novos entraram em `SCOPED_MODELS` (multi-tenant). Verificação:
+schema válido, `prisma generate` ok, `tsc --noEmit` mantém os 21 erros
+pré-existentes (0 novos), lint limpo.
+
+---
+
+### 2026-06-12 — Atribuição Canal → Funil (planejado, aguardando backend) [DECISÃO — agente OPUS]
+
+**Decisão.** Documentado o plano para roteamento de origem (canal A → funil X,
+canal B → funil Y) como mudança **aditiva**: `Channel.pipelineId String?` +
+uso em `ensureOpenDealForContact` (`src/services/auto-deals.ts`) com **fallback**
+para o pipeline `isDefault` atual (zero regressão para canais sem funil setado).
+
+**Contexto.** Diagnóstico a partir de dúvida do usuário comparando dois
+paradigmas: (1) **permissão por agente por canal** e (2) **canal → funil**.
+Conclusão da investigação: o paradigma (1) **já existe e é granular**
+(`ScopeGrants` — `channel.view/send.users[userId]`, UI em
+`features/permissions/user-permissions-view.tsx`, aplicado em
+`conversation-access.ts`); o paradigma (2) **não existe** — todo inbound cai no
+pipeline default, ignorando o canal.
+
+**Status.** Não implementado. Parte de schema exige migração de banco, hoje
+bloqueada por restrição operacional ("não subir commit do backend"). Plano,
+partes e alternativas em `docs/decisoes/canal-funil.md`.
+
+### 2026-06-11 — Produtos multi-tipo (Físico, Serviço, Curso, Vaga) com alocação consumível
+
+**Decisão.** Evoluir o domínio de Produtos para 4 tipos sobre **dois primitivos
+compartilhados** — alocação consumível via **ledger** (`InventoryPool` +
+`InventoryMovement`) e **oferta por unidade** (`ProductOffer`) — de forma 100%
+aditiva e multi-tenant. Nada de subsistema paralelo por tipo: cria-se o
+primitivo e dá-se semântica por `Product.kind`.
+
+**OrgUnit (não reusar Groups).** Criado model novo `OrgUnit` (filial/CNPJ,
+endereço, auto-relação `parentId`). Os "groups" do projeto são stub de RBAC/filas
+da Fase 3 (sem model Prisma, rota retorna `[]`/`501`) e semanticamente são
+equipe/fila de atendimento, não unidade jurídica. `Company` é conta cliente B2B.
+Tenant continua sendo `Organization`. Detalhes e alternativas em
+`docs/decisoes/org-unit.md`.
+
+**Estoque em modo PARALELO.** `Product.stock`/`trackStock` e o step de automação
+legado `consume_stock` (mutação direta da coluna) ficam **intactos** para
+compatibilidade. O ledger novo é a **fonte de verdade apenas dos pools novos**.
+Saldo do pool = `sum(InventoryMovement.delta)`; nunca uma coluna mutável. Toda
+baixa/reposição é um movimento dentro de `prisma.$transaction` (atômico, sem
+corrida na última unidade), com ator e motivo.
+
+**`Product.kind` vs `Product.type`.** Mantido o campo legado `type` (String
+"PRODUCT"/"SERVICE", usado por rotas/import existentes) e adicionado `kind`
+(enum `ProductKind`, default `PHYSICAL`). Backfill na migration:
+`UPDATE products SET kind='SERVICE' WHERE type='SERVICE'`.
+
+**Migration aplicada via `db execute` (não `migrate dev`).** O banco de dev local
+(`crm_dev`) é gerenciado em estilo `db push` — `prisma migrate status` mostra as
+84 migrations como "não aplicadas". Rodar `migrate dev` tentaria reaplicar tudo
+do zero e quebraria. Então: o arquivo de migration
+`prisma/migrations/20260611200000_products_multitype/migration.sql` foi gerado
+(via `migrate diff` contra o banco real — delta 100% aditivo) e aplicado com
+`prisma db execute`, seguido de `prisma generate`. O arquivo fica versionado para
+prod/teammates (`migrate deploy`).
+
+**FKs scalar (sem relation) de propósito.** `InventoryMovement.dealId`,
+`JobOpening.b2bDealId`/`candidatePipelineId`/`consumeStageId`/`reserveStageId` e
+`CourseConfig.postSalePipelineId` são `String?` sem `@relation` — são apenas IDs
+referenciados por lógica de app (dropdowns), evitando acoplar `Deal`/`Pipeline`/
+`Stage` a back-relations e mantendo o diff de schema enxuto. Queries por esses
+campos usam o scalar diretamente (`where: { dealId }`).
+
+**Multi-tenant.** Todos os models novos entraram em `SCOPED_MODELS`
+(`src/lib/prisma.ts`) para auto-injeção de `organizationId`.
+
+---
+
+### 2026-06-09 — Escopo por usuário de funis e canais (ScopeGrants estendido)
+
+**Decisão.** Permitir que um usuário individual tenha acesso só a funis
+específicos e só veja/envie mensagens em canais específicos, estendendo o
+sistema `ScopeGrants` existente (`permissions.scope.grants.v1`) em vez de
+criar tabela nova. Tudo atrás da flag `rbac_granular_scope_v1`.
+
+**Por quê estender ScopeGrants e não tabela nova.** Já existe storage
+(`OrganizationSetting`), flag, normalização (`parseScopeGrants`) e enforcement
+plumbing (`resource-policy.ts`). O override por usuário espelha o precedente
+`crm.users[userId]`. Menos superfície, zero migration.
+
+**Shape adicionado** (`scope-grants-shared.ts`, back + cópia front):
+- `pipeline.users[userId] = string[]` — IDs de funis visíveis (`["*"]` = todos,
+  `[]` = nenhum, chave ausente = cai na regra por papel / liberado).
+- `channel.view.users[userId]` e `channel.send.users[userId]` — IDs de canais
+  (`Channel.id`). Canais não tinham regra legada por papel, só override por
+  usuário. `send` exige também `view`.
+
+**Helpers puros novos:** `canAccessPipelineForUser`,
+`listAllowedPipelineIdsForUser`, `canAccessChannelForUser`,
+`listAllowedChannelIdsForUser`. Em `resource-policy.ts`:
+`listAllowedPipelineIds`, `requireChannelScope`, `listAllowedChannelIds`;
+`requirePipelineScope("view")` passou a considerar o override por usuário.
+
+**Enforcement aplicado:**
+- Funis: `getPipelines({allowedPipelineIds})`, `getDeals({allowedPipelineIds})`
+  (filtro no WHERE — corrige paginação) e o board do kanban
+  (`pipelines/[id]/board` GET+POST, que antes **não** checava scope — gap
+  fechado).
+- Canais: `getConversations`/`getTabCounts` (filtro `channelId in [...]`),
+  `userHasConversationAccess` (acesso individual) e todas as rotas de envio
+  (`messages`, `attachments`, `template`, `create`). Notas privadas não passam
+  pelo gate de `send` (são internas).
+
+**API de escrita:** endpoint dedicado `GET/PUT /api/users/[id]/scope-grants`
+que faz **read-merge-write** — nunca apaga regras de outros usuários/papéis
+(diferente de `PUT /api/settings/permissions`, cujo `setScopeGrants` substitui
+o objeto inteiro). `null` = sem restrição (remove a chave do user); array =
+restringe.
+
+**Não mexido de propósito:** `effective-permissions` continua devolvendo
+`channelGrants: []` — no front esse campo significa *tipos* de canal
+(whatsapp/instagram), não IDs; preencher com IDs quebraria o filtro da inbox.
+O backend é a fonte de verdade do enforcement.
+
+**UI.** Editor por usuário em `UserPermissionsView` (sheet "Gerenciar"):
+multiselect de funis + canais (ver/enviar), com toggle "Todos". Só tem efeito
+real com a flag ligada.
+
+---
+
 ### 2026-06-11 — GET /api/custom-fields aceita Bearer (dropdown de custom fields no node n8n)
 
 **Decisão.** `GET /api/custom-fields` foi migrado de `withOrgContext`

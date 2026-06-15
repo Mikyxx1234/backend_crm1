@@ -105,12 +105,20 @@ async function seed() {
   console.log(`[seed] Usando admin=${adminId} como responsável/agente.`);
 
   // --- garantir contatos ---
-  for (const c of CONTACTS) {
+  for (let ci = 0; ci < CONTACTS.length; ci++) {
+    const c = CONTACTS[ci];
+    // Calcula max+1 para atribuir número sequencial no upsert (create)
+    const maxNum = await prisma.contact.aggregate({
+      where: { organizationId },
+      _max: { number: true },
+    });
+    const nextNum = (maxNum._max.number ?? 0) + 1;
     await prisma.contact.upsert({
       where: { id: c.id },
       create: {
         id: c.id,
         organizationId,
+        number: nextNum,
         name: c.name,
         phone: c.phone,
         lifecycleStage: "LEAD",

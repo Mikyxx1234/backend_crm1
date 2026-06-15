@@ -335,6 +335,7 @@ export type InboxLeadPanelFieldRow = {
   type: string;
   options: string[];
   value: string | null;
+  highlightRules: unknown[];
   highlight: ResolvedHighlight | null;
 };
 
@@ -369,6 +370,7 @@ export async function getInboxLeadPanelFieldsForContact(
       type: f.type,
       options: f.options,
       value,
+      highlightRules: Array.isArray(f.highlightRules) ? f.highlightRules : [],
       highlight: resolveHighlight(value, f.highlightRules),
     };
   });
@@ -405,6 +407,7 @@ export async function getInboxLeadPanelFieldsForDeal(
       type: f.type,
       options: f.options,
       value,
+      highlightRules: Array.isArray(f.highlightRules) ? f.highlightRules : [],
       highlight: resolveHighlight(value, f.highlightRules),
     };
   });
@@ -649,42 +652,76 @@ export async function getContactById(id: string) {
   };
 }
 
+/**
+ * Retorna o próximo número sequencial de contato para a organização corrente.
+ * Usado em conjunto com retry em P2002 para lidar com corridas concorrentes.
+ */
+export async function nextContactNumber(): Promise<number> {
+  const r = await prisma.contact.aggregate({ _max: { number: true } });
+  return (r._max.number ?? 0) + 1;
+}
+
+const CONTACT_NUMBER_MAX_RETRIES = 5;
+
+function isPrismaUniqueViolation(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "code" in err &&
+    (err as { code: string }).code === "P2002"
+  );
+}
+
 export async function createContact(data: CreateContactInput) {
-  const created = await prisma.contact.create({
-    data: withOrgFromCtx({
-      ...(data.id ? { id: data.id } : {}),
-      name: data.name,
-      externalId: data.externalId === undefined ? undefined : data.externalId,
-      email: data.email ?? undefined,
-      phone: data.phone ?? undefined,
-      avatarUrl: data.avatarUrl ?? undefined,
-      leadScore: data.leadScore ?? undefined,
-      lifecycleStage: data.lifecycleStage ?? undefined,
-      source: data.source ?? undefined,
-      companyId: data.companyId ?? undefined,
-      assignedToId: data.assignedToId ?? undefined,
-    }),
-    include: {
-      company: { select: { id: true, name: true, domain: true } },
-      tags: { include: { tag: { select: { id: true, name: true, color: true } } } },
-      assignedTo: { select: assignedToSelect },
-    },
-  });
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < CONTACT_NUMBER_MAX_RETRIES; attempt++) {
+    const number = await nextContactNumber();
+    try {
+      const created = await prisma.contact.create({
+        data: withOrgFromCtx({
+          ...(data.id ? { id: data.id } : {}),
+          number,
+          name: data.name,
+          externalId: data.externalId === undefined ? undefined : data.externalId,
+          email: data.email ?? undefined,
+          phone: data.phone ?? undefined,
+          avatarUrl: data.avatarUrl ?? undefined,
+          leadScore: data.leadScore ?? undefined,
+          lifecycleStage: data.lifecycleStage ?? undefined,
+          source: data.source ?? undefined,
+          companyId: data.companyId ?? undefined,
+          assignedToId: data.assignedToId ?? undefined,
+        }),
+        include: {
+          company: { select: { id: true, name: true, domain: true } },
+          tags: { include: { tag: { select: { id: true, name: true, color: true } } } },
+          assignedTo: { select: assignedToSelect },
+        },
+      });
 
-  void logEvent({
-    type: "CONTACT_CREATED",
-    entityType: "CONTACT",
-    entityId: created.id,
-    entityLabel: created.name ?? created.phone ?? created.email ?? null,
-    contactId: created.id,
-    meta: {
-      email: created.email,
-      phone: created.phone,
-      source: data.source ?? null,
-    },
-  });
+      void logEvent({
+        type: "CONTACT_CREATED",
+        entityType: "CONTACT",
+        entityId: created.id,
+        entityLabel: created.name ?? created.phone ?? created.email ?? null,
+        contactId: created.id,
+        meta: {
+          email: created.email,
+          phone: created.phone,
+          source: data.source ?? null,
+        },
+      });
 
-  return created;
+      return created;
+    } catch (err) {
+      if (isPrismaUniqueViolation(err) && attempt < CONTACT_NUMBER_MAX_RETRIES - 1) {
+        lastErr = err;
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 export async function updateContact(id: string, data: UpdateContactInput) {

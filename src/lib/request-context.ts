@@ -65,7 +65,32 @@ export type RequestContext = {
   actor?: ContextActor;
 };
 
-const storage = new AsyncLocalStorage<RequestContext>();
+/**
+ * A instancia do AsyncLocalStorage e cacheada em globalThis — MESMO motivo
+ * e padrao do `prisma` (lib/prisma.ts cacheia em globalThis.prismaScoped).
+ *
+ * Por que isso e obrigatorio (bug de producao-dev caçado em 13/jun/26):
+ *   - O `prisma` estendido sobrevive ao HMR (cacheado em globalThis). A
+ *     closure da extension capturou `getRequestContext`, que le o `storage`
+ *     deste modulo.
+ *   - Quando o Turbopack/HMR recompila e recarrega `request-context.ts`,
+ *     um `new AsyncLocalStorage()` criaria uma instancia NOVA. O
+ *     `withOrgContext` passaria a gravar o contexto na instancia nova,
+ *     enquanto a extension (cacheada) continuaria lendo a ANTIGA →
+ *     `getRequestContext()` retorna undefined → throw "fora de
+ *     RequestContext" em praticamente todos os endpoints.
+ *   - Ancorar a ALS em globalThis garante que todo reload reaproveite a
+ *     MESMA instancia que a closure cacheada do prisma capturou.
+ */
+const globalForCtx = globalThis as unknown as {
+  __crmRequestContextStorage?: AsyncLocalStorage<RequestContext>;
+};
+
+const storage =
+  globalForCtx.__crmRequestContextStorage ??
+  new AsyncLocalStorage<RequestContext>();
+
+globalForCtx.__crmRequestContextStorage = storage;
 
 export const requestContext = storage;
 
