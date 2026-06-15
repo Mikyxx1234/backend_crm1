@@ -14,6 +14,20 @@ import {
   type ScopeGrants,
 } from "@/lib/authz/scope-grants";
 import { isFeatureEnabled } from "@/lib/feature-flags";
+import { prismaBase } from "@/lib/prisma-base";
+
+/**
+ * IDs das roles (RBAC) atribuídas ao usuário. Usado para resolver grants de
+ * canal por papel (eixo aditivo de `channel.*.roles`). Só é chamado quando a
+ * flag de escopo granular está ligada.
+ */
+async function getUserAssignedRoleIds(userId: string): Promise<string[]> {
+  const rows = await prismaBase.userRoleAssignment.findMany({
+    where: { userId },
+    select: { roleId: true },
+  });
+  return rows.map((r) => r.roleId);
+}
 
 type UserLike = {
   id: string;
@@ -142,12 +156,14 @@ export async function requireChannelScope(
   if (!channelId) return null;
   const policy = await loadScopedPolicy(user);
   if (!policy.enabled) return null;
+  const roleIds = await getUserAssignedRoleIds(user.id);
   const allowed = canAccessChannelForUser({
     grants: policy.grants,
     role: user.role,
     userId: user.id,
     action,
     channelId,
+    roleIds,
   });
   if (allowed) return null;
   return NextResponse.json(
@@ -170,10 +186,12 @@ export async function listAllowedChannelIds(
 ): Promise<string[] | null> {
   const policy = await loadScopedPolicy(user);
   if (!policy.enabled) return null;
+  const roleIds = await getUserAssignedRoleIds(user.id);
   return listAllowedChannelIdsForUser({
     grants: policy.grants,
     role: user.role,
     userId: user.id,
+    roleIds,
   });
 }
 

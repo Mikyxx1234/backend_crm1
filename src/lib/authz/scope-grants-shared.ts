@@ -83,13 +83,19 @@ export type ScopeGrants = {
     users?: UserScopeGrants;
   };
   /**
-   * Escopo de canais (instâncias dinâmicas de `Channel`). Diferente de
-   * pipeline/stage, não existe regra legada por papel — só override por
-   * usuário, separando "ver" e "enviar".
+   * Escopo de canais (instâncias dinâmicas de `Channel`). Separa "ver" e
+   * "enviar". Dois eixos ADITIVOS:
+   *   - `users[userId]`   → override por usuário (configurável na ficha do user)
+   *   - `roles[roleId]`   → grant por Role CUSTOMIZADA (configurável no editor
+   *                          de papel). `roleId` é o id real da Role.
+   *
+   * Resolução (ver `canAccessChannelForUser`): as regras definidas (usuário +
+   * roles do usuário) são UNIDAS de forma permissiva. Sem nenhuma regra
+   * definida → sem restrição (comportamento anterior preservado).
    */
   channel?: {
-    view?: { users?: UserScopeGrants };
-    send?: { users?: UserScopeGrants };
+    view?: { users?: UserScopeGrants; roles?: UserScopeGrants };
+    send?: { users?: UserScopeGrants; roles?: UserScopeGrants };
   };
   stage?: {
     view?: RoleScope;
@@ -206,8 +212,14 @@ export function parseScopeGrants(input: unknown): ScopeGrants {
       users: normalizeUserScope(pipeline.users),
     },
     channel: {
-      view: { users: normalizeUserScope(channelView.users) },
-      send: { users: normalizeUserScope(channelSend.users) },
+      view: {
+        users: normalizeUserScope(channelView.users),
+        roles: normalizeUserScope(channelView.roles),
+      },
+      send: {
+        users: normalizeUserScope(channelSend.users),
+        roles: normalizeUserScope(channelSend.roles),
+      },
     },
     stage: {
       view: normalizeRoleScope(stage.view),
@@ -347,9 +359,30 @@ export function listAllowedPipelineIdsForUser(args: {
 }
 
 /**
- * Acesso a um canal (ver ou enviar) por usuário. "enviar" exige também
- * permissão de "ver". ADMIN sempre libera. Sem regra → liberado (canais não
- * tinham escopo antes desta feature).
+ * Coleta as regras de canal aplicáveis a um usuário (override por usuário +
+ * grants das roles customizadas que ele possui). Cada entrada é uma lista de
+ * IDs; a resolução é ADITIVA (ver `canAccessChannelForUser`).
+ */
+function collectChannelRules(
+  node: { users?: UserScopeGrants; roles?: UserScopeGrants } | undefined,
+  userId: string,
+  roleIds: string[],
+): string[][] {
+  const rules: string[][] = [];
+  const userRule = node?.users?.[userId];
+  if (Array.isArray(userRule)) rules.push(userRule);
+  for (const roleId of roleIds) {
+    const roleRule = node?.roles?.[roleId];
+    if (Array.isArray(roleRule)) rules.push(roleRule);
+  }
+  return rules;
+}
+
+/**
+ * Acesso a um canal (ver ou enviar). "enviar" exige também "ver". ADMIN sempre
+ * libera. As regras (usuário + roles) são unidas de forma permissiva: havendo
+ * QUALQUER regra definida, o acesso só passa se ao menos uma a permitir; sem
+ * nenhuma regra → liberado (comportamento anterior à feature preservado).
  */
 export function canAccessChannelForUser(args: {
   grants: ScopeGrants;
@@ -357,15 +390,18 @@ export function canAccessChannelForUser(args: {
   userId: string;
   action: "view" | "send";
   channelId: string;
+  roleIds?: string[];
 }): boolean {
   if (asRoleKey(args.role) === "ADMIN") return true;
-  const viewRule = args.grants.channel?.view?.users?.[args.userId];
-  if (Array.isArray(viewRule) && !userScopeAllows(viewRule, args.channelId)) {
+  const roleIds = args.roleIds ?? [];
+
+  const viewRules = collectChannelRules(args.grants.channel?.view, args.userId, roleIds);
+  if (viewRules.length > 0 && !viewRules.some((r) => userScopeAllows(r, args.channelId))) {
     return false;
   }
   if (args.action === "send") {
-    const sendRule = args.grants.channel?.send?.users?.[args.userId];
-    if (Array.isArray(sendRule) && !userScopeAllows(sendRule, args.channelId)) {
+    const sendRules = collectChannelRules(args.grants.channel?.send, args.userId, roleIds);
+    if (sendRules.length > 0 && !sendRules.some((r) => userScopeAllows(r, args.channelId))) {
       return false;
     }
   }
@@ -374,19 +410,29 @@ export function canAccessChannelForUser(args: {
 
 /**
  * Lista de IDs de canais que o usuário pode ver, para filtrar conversas.
- * Retorna `null` quando não há restrição; array (possivelmente vazio) quando
- * restrito.
+ * Une override por usuário + grants das roles. Retorna `null` quando não há
+ * restrição (nenhuma regra ou alguma regra com `*`); array (possivelmente
+ * vazio) quando restrito.
  */
 export function listAllowedChannelIdsForUser(args: {
   grants: ScopeGrants;
   role: string | null | undefined;
   userId: string;
+  roleIds?: string[];
 }): string[] | null {
   if (asRoleKey(args.role) === "ADMIN") return null;
-  const rule = args.grants.channel?.view?.users?.[args.userId];
-  if (!Array.isArray(rule)) return null;
-  if (rule.includes("*")) return null;
-  return rule;
+  const rules = collectChannelRules(
+    args.grants.channel?.view,
+    args.userId,
+    args.roleIds ?? [],
+  );
+  if (rules.length === 0) return null;
+  if (rules.some((r) => r.includes("*"))) return null;
+  const set = new Set<string>();
+  for (const rule of rules) {
+    for (const id of rule) if (id !== "*") set.add(id);
+  }
+  return Array.from(set);
 }
 
 export function canAccessField(args: {

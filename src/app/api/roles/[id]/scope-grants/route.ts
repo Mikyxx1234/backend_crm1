@@ -1,14 +1,18 @@
 /**
- * GET/PUT /api/users/[id]/scope-grants
+ * GET/PUT /api/roles/[id]/scope-grants
  *
- * Escopo por usuário (funis e canais) sobre o `ScopeGrants` da org
- * (`permissions.scope.grants.v1`). Faz read-merge-write server-side para
- * NUNCA apagar regras de outros usuários/papéis ao salvar.
+ * Escopo de CANAL por Role (RBAC) sobre o `ScopeGrants` da org
+ * (`permissions.scope.grants.v1`, chave `channel.{view,send}.roles[roleId]`).
+ * Faz read-merge-write server-side para NUNCA apagar regras de outros papéis,
+ * usuários ou eixos ao salvar.
  *
- * Semântica dos campos:
- *   - `null`           → sem restrição (acesso a todos); remove a chave do user
- *   - `string[]`       → restringe aos IDs (vazio = nenhum; `["*"]` = todos)
- *   - omitido (PUT)    → não altera aquele campo
+ * Eixo ADITIVO: o usuário vê/usa um canal se QUALQUER regra (override pessoal
+ * OU uma de suas roles) permitir. Ver `canAccessChannelForUser`.
+ *
+ * Semântica dos campos (igual ao escopo por usuário):
+ *   - `null`        → sem restrição por esta role (remove a chave da role)
+ *   - `string[]`    → restringe/concede aos IDs (vazio = nenhum; `["*"]` = todos)
+ *   - omitido (PUT) → não altera aquele campo
  */
 
 import { NextResponse } from "next/server";
@@ -48,14 +52,13 @@ export async function GET(_req: Request, ctx: Ctx) {
       return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
 
-    const { id: userId } = await ctx.params;
+    const { id: roleId } = await ctx.params;
     const grants = await getScopeGrants();
 
-    const pipelineIds = grants.pipeline?.users?.[userId] ?? null;
-    const channelViewIds = grants.channel?.view?.users?.[userId] ?? null;
-    const channelSendIds = grants.channel?.send?.users?.[userId] ?? null;
+    const channelViewIds = grants.channel?.view?.roles?.[roleId] ?? null;
+    const channelSendIds = grants.channel?.send?.roles?.[roleId] ?? null;
 
-    return NextResponse.json({ pipelineIds, channelViewIds, channelSendIds });
+    return NextResponse.json({ channelViewIds, channelSendIds });
   });
 }
 
@@ -67,24 +70,20 @@ export async function PUT(request: Request, ctx: Ctx) {
       return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
 
-    const { id: userId } = await ctx.params;
+    const { id: roleId } = await ctx.params;
     const body = (await request.json().catch(() => null)) as Record<string, unknown> | null;
     if (!body || typeof body !== "object") {
       return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
     }
 
-    const pipelineIds = parseField(body, "pipelineIds");
     const channelViewIds = parseField(body, "channelViewIds");
     const channelSendIds = parseField(body, "channelSendIds");
 
-    // Read-merge-write: preserva todas as outras chaves dos grants.
+    // Read-merge-write: preserva TODAS as outras chaves dos grants (outros
+    // papéis, overrides por usuário e demais eixos).
     const grants = await getScopeGrants();
     const next: ScopeGrants = {
       ...grants,
-      pipeline: {
-        ...grants.pipeline,
-        users: { ...(grants.pipeline?.users ?? {}) },
-      },
       channel: {
         view: {
           users: { ...(grants.channel?.view?.users ?? {}) },
@@ -103,24 +102,22 @@ export async function PUT(request: Request, ctx: Ctx) {
     ) => {
       if (value === undefined) return;
       if (value === null) {
-        delete target[userId];
+        delete target[roleId];
       } else {
-        target[userId] = value;
+        target[roleId] = value;
       }
     };
 
-    applyField(next.pipeline!.users!, pipelineIds);
-    applyField(next.channel!.view!.users!, channelViewIds);
-    applyField(next.channel!.send!.users!, channelSendIds);
+    applyField(next.channel!.view!.roles!, channelViewIds);
+    applyField(next.channel!.send!.roles!, channelSendIds);
 
     await setScopeGrants(next);
 
     const saved = await getScopeGrants();
     return NextResponse.json({
       ok: true,
-      pipelineIds: saved.pipeline?.users?.[userId] ?? null,
-      channelViewIds: saved.channel?.view?.users?.[userId] ?? null,
-      channelSendIds: saved.channel?.send?.users?.[userId] ?? null,
+      channelViewIds: saved.channel?.view?.roles?.[roleId] ?? null,
+      channelSendIds: saved.channel?.send?.roles?.[roleId] ?? null,
     });
   });
 }
