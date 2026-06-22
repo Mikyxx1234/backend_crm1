@@ -5,6 +5,143 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-22 — Api4com: Provisionamento + Singleton JsSIP + Revisão [DECISÃO — agente OPUS]
+
+**Contexto.** Fases 2, 5 e 6 do plano de integração Api4com (`docs/PLAN-api4com.md`),
+executadas em Opus conforme governança de modelos.
+
+**Decisão 1 — Prisma migration `20260622120000_api4com_provisioning`.** Adicionados:
+- Enum `TelephonyProvisioningStep` (8 estados da máquina de provisionamento).
+- Campos em `SipExtension`: `telephonyEnabled`, `api4comUserId`, `api4comGateway`,
+  `provisioningStep`, `provisioningError`, `provisionedAt`.
+- Campos em `Call`: `dealId` (FK → `Deal`, onDelete SetNull), `metadata` (JSONB).
+- Índice `(organizationId, dealId)` em `calls`.
+
+**Decisão 2 — ProvisioningService máquina de estados.** Serviço stateless em
+`services/api4com/provisioning.ts`. Cada passo persiste `provisioningStep` ANTES de
+avançar (retomada segura após crash). 409 em POST /users = skip para CREATE_EXTENSION.
+Toggle OFF: marca DISABLED + INACTIVE sem apagar ramal remoto.
+
+**Decisão 3 — Singleton JsSIP em escopo de módulo.** Variáveis `moduleUA`,
+`moduleSession`, etc. vivem no escopo do módulo (`use-softphone.ts`), NÃO em
+`useRef` de componente. Motivo: remount não perde registro SIP. `beforeunload`
+garante cleanup ao fechar aba. `disconnect()` explícito destrói o UA.
+
+**Decisão 4 — Auto-answer por header SIP.** Além do `pendingDial` (heurística 1),
+inspeciona `X-Api4comintegratedcall: true` na INVITE inbound (heurística 2). Permite
+auto-answer mesmo em cenários de retry pelo PBX onde o dial REST não precede
+diretamente a INVITE.
+
+**Decisão 5 — Verificação cross-org na rota PATCH /users/:id/telephony.** Admin de
+org A não pode provisionar user de org B. Verificação explícita com
+`prisma.user.findFirst({ id, organizationId })` antes de chamar `enableTelephony`.
+
+---
+
+### 2026-06-16 — Módulo de Softphone (SIP/WebRTC) [DECISÃO — agente OPUS]
+
+**Contexto.** Briefing pede softphone que registra ramal SIP e faz/recebe chamada
+WebRTC **no navegador**, com histórico alimentado por webhook do provedor, gravações
+disponíveis e UI no DS v2. Provedor é genérico (qualquer ramal SIP padrão). Spec
+completo em `docs/superpowers/specs/2026-06-16-softphone-sip-webrtc-design.md`.
+
+**Decisão 1 — Mídia/registro no client, backend só persiste.** O registro SIP e o
+áudio rodam no navegador via **JsSIP** (escolhido sobre SIP.js por foco em
+registrar ramal + chamada contra PBX). Backend NUNCA registra ramal nem processa
+mídia: só guarda credenciais cifradas, entrega ao próprio dono e processa o webhook.
+
+**Decisão 2 — Domínio próprio multi-tenant.** Models novos `sip_extensions`,
+`calls`, `call_events`, `call_provider_configs` (cuid, camelCase + `@map`,
+`organizationId` direto, em `RLS_PROTECTED_TABLES` e `SCOPED_MODELS`). Migration
+idempotente. Reuso de `lib/crypto/secrets.ts` (`KEYRING_SECRET`) para
+`authPasswordEncrypted` e `webhookSecretEncrypted` — sem cripto nova.
+
+**Decisão 3 — `CallProviderConfig` (entidade não prevista no briefing).** Criada por
+dois motivos: (a) resolver o tenant num webhook **público** via `webhookToken` único
+(consulta sistêmica com `prismaBase`, depois `withResolvedContext({ organizationId })`
+para o restante do fluxo); (b) tornar o adapter genérico **configurável** sem deploy
+(`fieldMappings` + mapa de status). Auth do webhook suporta **HMAC e/ou token**.
+
+**Decisão 4 — Idempotência por `(organizationId, provider, providerCallId)`.** O
+histórico é alimentado pelo webhook (fonte da verdade), não pelo JsSIP — chamada de
+ramal físico/perdida também entra. Reenvio do mesmo evento só atualiza
+status/timestamps/duração, nunca duplica.
+
+**Decisão 5 — Gravações no storage local existente.** Re-hospedadas via
+`saveFile` no bucket `recordings` (já na whitelist), URL própria `/api/storage/...`
+— não depende de link que expira no provedor. Sem S3.
+
+**Decisão 6 — Adapter plugável.** `services/call-adapters/` com interface
+`normalizeCallEvent` + registry; `generic-sip` dirigido por config. Ponto claro para
+plugar `asterisk` etc. no futuro, sem assumir payload fixo.
+
+**Decisão 7 — Widget global persistente.** Montado em `(app)/layout.tsx` (irmão de
+`{children}`, `z-[55]`), estado em Zustand (`softphone-store`), lógica SIP isolada em
+`useSoftphone`. Não atrelado a rota — chamada não cai ao navegar.
+
+---
+
+### 2026-06-16 — Módulo de E-mail (IMAP/SMTP multi-conta) como DOMÍNIO NOVO, sem "tipo de canal" especial [DECISÃO — agente OPUS]
+
+**Contexto.** Briefing pede caixa de entrada de e-mail multi-conta (IMAP/SMTP),
+envio, e vínculo automático com contatos/leads, com UI 100% no Design System v2.
+Já existe `ChannelType.EMAIL` no enum de canais, mas aquele domínio é orientado a
+mensageria WhatsApp/Meta (Baileys, templates, webhooks) e **não** modela
+caixa-postal IMAP/SMTP. Reaproveitá-lo acoplaria conceitos distintos.
+
+**Decisão 1 — Domínio próprio, não estende `Channel`.** Duas tabelas novas,
+`email_accounts` e `emails`, com `organizationId` direto (multi-tenant) entrando
+em `RLS_PROTECTED_TABLES` (`lib/rls.ts`). Enforcement primário continua sendo a
+Prisma Extension app-layer (`withOrgFromCtx`/`withOrgContext`), igual ao resto do
+CRM — RLS é a 2ª camada (ainda não ENABLE em prod). Migration idempotente
+(`IF NOT EXISTS` + `DO $$`), no padrão das demais.
+
+**Decisão 2 — Reuso de criptografia existente.** A senha IMAP/SMTP usa
+`encryptSecret`/`decryptSecret` (`lib/crypto/secrets.ts`, AES-256-GCM, env
+`KEYRING_SECRET`). Coluna `passwordEncrypted` (`@map("password_encrypted")`).
+Senha **nunca** retorna em nenhuma resposta de API nem é logada; descriptografa
+só no momento de abrir a conexão. NÃO criar serviço de cripto novo.
+
+**Decisão 3 — Dependências.** `imapflow` (IMAP, TS-first, promises) + `nodemailer`
+(SMTP de facto + `verify()` para teste de conexão). Não havia lib IMAP/SMTP no
+backend; estas são as escolhas mantidas/ativas em 2026.
+
+**Decisão 4 — Contrato de erro por campo.** Endpoints de conta retornam
+`{ ok:false, field, message }` no 1º erro. Ordem de teste obrigatória: IMAP
+**depois** SMTP, parando no 1º erro — é o que define qual campo destacar. Camada
+`email-imap.ts`/`email-smtp.ts` traduz exceções do provedor para `{ field, message }`.
+
+**Decisão 5 — Vínculo de contato via use-case existente.** A resolução de
+`contactId` na sincronização usa `getContacts({ emailExact })` para match e
+`createContact(...)` (services/contacts.ts) para criação — que já dispara
+`logEvent`/efeitos colaterais. PROIBIDO inserir em `contacts` direto. Criação só
+quando `createContactsForReplies = true`.
+
+**Decisão 6 — Visibilidade no BACKEND.** `shared` = visível a quem tem
+`email_account:view`; `personal` = só `ownerUserId` (gate `email_account:view_own`).
+Caixa combinada (`GET /emails` sem accountId) = união das contas acessíveis ao
+usuário, resolvida no serviço, não na UI. Novo resource `email_account` no
+catálogo de permissões + item `email` na sidebar (backend + catálogo FE espelhado).
+
+**Decisão 7 — Estrutura de arquivos (segue convenção do repo).**
+- Backend services: `email-accounts.ts` (CRUD + orquestra teste), `email-imap.ts`,
+  `email-smtp.ts`, `email-sync.ts` (IMAP→DB→resolução de contato).
+- Rotas: `app/api/email-accounts/**` e `app/api/emails/**` (padrão `withOrgContext`).
+- Frontend: feature `src/features/email-v2/` (types/api/hooks/components) + page
+  fina `src/app/(app)/email/page.tsx`. UI só com componentes/tokens do DS v2.
+- `checkbox` e `segmented-control` não existem em `components/ui` — criar seguindo
+  tokens do DS v2 (não componentes soltos fora do DS).
+
+**Decisão 8 — Threading e dedup.** `threadId` = assunto normalizado (sem
+`Re:`/`Fwd:`) quando `groupInThreads`, senão `messageId`. Unicidade
+`(accountId, messageId)` evita reinserção em re-sync.
+
+**Aberto (defaults assumidos, ajustáveis):** leitura da mensagem via `Sheet`
+(drawer) do DS v2; RLS das tabelas novas fica "policy-ready" mas não ENABLE
+(mesmo estado do resto do schema).
+
+---
+
 ### 2026-06-15 — Migração DEV_BRANCH → prod (DNA): nova migration `backfill_catalog_permissions` e protocolo manual de aplicação [DECISÃO — agente Opus]
 
 **Decisão.** Antes do merge `DEV_BRANCH → main`, aplicar manualmente em prod

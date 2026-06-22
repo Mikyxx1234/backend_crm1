@@ -129,6 +129,14 @@ model Organization {
   shippingRanges           ShippingRange[]
   stakeholderRules         StakeholderRule[]
   dealLinks                DealLink[]
+  emailAccounts            EmailAccount[]
+  emails                   Email[]
+  emailCustomFolders       EmailCustomFolder[]
+  emailRules               EmailRule[]
+  sipExtensions            SipExtension[]
+  calls                    Call[]
+  callEvents               CallEvent[]
+  callProviderConfigs      CallProviderConfig[]
 
   @@index([status])
   @@map("organizations")
@@ -505,6 +513,8 @@ model User {
   roleAssignments                UserRoleAssignment[]
   groupMemberships               GroupMember[]
   savedFilters                   SavedFilter[]             @relation("UserSavedFilters")
+  emailAccounts                  EmailAccount[]
+  sipExtensions                  SipExtension[]
   erasedAt                       DateTime?
   /// Marca usuario anonimizado pela rotina LGPD (PR 4.3). O registro
   /// nao e deletado pra preservar FKs (AuditLog, mensagens). Apos
@@ -1073,6 +1083,8 @@ model Contact {
   phoneChanges           ContactPhoneChange[]
   activityEvents         ActivityEvent[]
   productStakeholders    ProductStakeholder[]
+  emails                 Email[]
+  calls                  Call[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1402,8 +1414,9 @@ model Deal {
   events         DealEvent[]
   activityEvents ActivityEvent[]
   // Vínculos tipados entre deals (PRD: fulfillment).
-  linksFrom      DealLink[]   @relation("DealLinkFrom")
-  linksTo        DealLink[]   @relation("DealLinkTo")
+  linksFrom      DealLink[]             @relation("DealLinkFrom")
+  linksTo        DealLink[]             @relation("DealLinkTo")
+  calls          Call[]
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1462,8 +1475,8 @@ model Product {
   /// Catálogo ao qual o produto pertence (PRD: herança catálogo → produto).
   /// Nullable para zero regressão; backfill move produtos legados ao catálogo
   /// default da org.
-  catalogId      String?
-  catalog        Catalog?     @relation(fields: [catalogId], references: [id])
+  catalogId String?
+  catalog   Catalog? @relation(fields: [catalogId], references: [id])
 
   dealProducts     DealProduct[]
   customValues     ProductCustomFieldValue[]
@@ -1696,11 +1709,11 @@ model InventoryMovement {
 
 /// Dados de envio (kind PHYSICAL). v1: registro, sem cálculo de frete.
 model ProductShipping {
-  id             String       @id @default(cuid())
+  id             String          @id @default(cuid())
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  productId      String       @unique
-  product        Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  productId      String          @unique
+  product        Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
   weightGrams    Int?
   dimensions     Json?
   shippingPolicy Json?
@@ -1923,23 +1936,23 @@ enum OverridePolicy {
 /// capacidade antes de persistir. Capacidades do catálogo são herdadas
 /// pelos produtos, com override em ProductCapability — sujeito a `overridePolicy`.
 model CatalogCapability {
-  id             String       @id @default(cuid())
+  id             String         @id @default(cuid())
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   catalogId      String
-  catalog        Catalog      @relation(fields: [catalogId], references: [id], onDelete: Cascade)
+  catalog        Catalog        @relation(fields: [catalogId], references: [id], onDelete: Cascade)
   /// Chave da capacidade (conjunto fechado, ver CAPABILITY_KEYS). Sem FK —
   /// o registry de código é a fonte da verdade.
   capabilityKey  String
   /// Modo da capacidade dentro do registry (ex.: pricing.one_time | recurring | ...).
   /// Fase 2 valida via discriminated union Zod por modo. Backfill: `default`
   /// substituído pela rotina da migration por modo equivalente ao estado atual.
-  mode           String       @default("default")
+  mode           String         @default("default")
   /// Config da capacidade, validado pelo Zod do modo correspondente.
-  config         Json         @default("{}")
+  config         Json           @default("{}")
   /// Política aplicada no backend: LOCKED rejeita ProductCapability divergente.
   overridePolicy OverridePolicy @default(DEFAULT)
-  enabled        Boolean      @default(true)
+  enabled        Boolean        @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2035,12 +2048,12 @@ model ShippingRange {
 /// event × role × templateRef. Avaliada por stakeholder-notify em eventos
 /// de domínio. Reusa ProductStakeholder como "quem" (Contact × papel).
 model StakeholderRule {
-  id             String       @id @default(cuid())
+  id             String             @id @default(cuid())
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization   Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// Produto ao qual a regra se aplica (opcional: regra pode ser do catálogo).
   productId      String?
-  product        Product?     @relation(fields: [productId], references: [id], onDelete: Cascade)
+  product        Product?           @relation(fields: [productId], references: [id], onDelete: Cascade)
   /// Evento de domínio que dispara (STAGE_ENTERED, DEAL_WON, DEAL_LOST,
   /// ALLOCATION_CONSUMED). String livre alinhada ao enum do registry.
   event          String
@@ -2049,7 +2062,7 @@ model StakeholderRule {
   /// Referência ao template/Flow de mensagem (scalar — resolvido em runtime).
   templateRef    String?
   channel        StakeholderChannel @default(WHATSAPP)
-  enabled        Boolean      @default(true)
+  enabled        Boolean            @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2582,25 +2595,25 @@ model MetaWebhookEvent {
 // ──────────────────────────────────────────────
 
 model Channel {
-  id              String          @id @default(cuid())
-  organizationId  String
-  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  name            String
-  type            ChannelType
-  provider        ChannelProvider
-  status          ChannelStatus   @default(DISCONNECTED)
-  config          Json            @default("{}")
-  phoneNumber     String?
-  lastConnectedAt DateTime?
-  qrCode          String?         @db.Text
-  sessionData     Json?
+  id                String          @id @default(cuid())
+  organizationId    String
+  organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name              String
+  type              ChannelType
+  provider          ChannelProvider
+  status            ChannelStatus   @default(DISCONNECTED)
+  config            Json            @default("{}")
+  phoneNumber       String?
+  lastConnectedAt   DateTime?
+  qrCode            String?         @db.Text
+  sessionData       Json?
   /// Funil de destino do inbound deste canal. Null = usa o funil padrão da
   /// org (comportamento legado). SetNull ao apagar o funil — o canal volta
   /// ao roteamento padrão em vez de quebrar.
   defaultPipelineId String?
-  defaultPipeline   Pipeline?     @relation(fields: [defaultPipelineId], references: [id], onDelete: SetNull)
-  createdAt       DateTime        @default(now())
-  updatedAt       DateTime        @updatedAt
+  defaultPipeline   Pipeline?       @relation(fields: [defaultPipelineId], references: [id], onDelete: SetNull)
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
 
   conversations     Conversation[]
   baileysAuthKeys   BaileysAuthKey[]
@@ -3818,4 +3831,386 @@ enum BulkOperationStatus {
   FAILED
   /// Cancelado manualmente (reservado para iteração futura).
   CANCELLED
+}
+
+// ──────────────────────────────────────────────
+// Módulo de E-mail (IMAP/SMTP multi-conta)
+// ──────────────────────────────────────────────
+
+enum EmailEncryption {
+  NONE
+  SSL_TLS
+  STARTTLS
+}
+
+enum EmailVisibility {
+  SHARED
+  PERSONAL
+}
+
+enum EmailFolder {
+  INBOX
+  SENT
+  TRASH
+}
+
+/// Conta de e-mail conectada (IMAP + SMTP). A senha é armazenada
+/// criptografada via AES-256-GCM (`lib/crypto/secrets.ts`). Nunca
+/// retorna `passwordEncrypted` em nenhuma resposta de API.
+model EmailAccount {
+  id             String @id @default(cuid())
+  organizationId String
+
+  email             String
+  /// Senha criptografada com encryptSecret() (KEYRING_SECRET). Nunca
+  /// exposta em respostas de API nem em logs.
+  passwordEncrypted String @map("password_encrypted")
+
+  imapHost       String          @map("imap_host")
+  imapPort       Int             @map("imap_port")
+  imapEncryption EmailEncryption @default(SSL_TLS) @map("imap_encryption")
+
+  smtpHost       String          @map("smtp_host")
+  smtpPort       Int             @map("smtp_port")
+  smtpEncryption EmailEncryption @default(SSL_TLS) @map("smtp_encryption")
+
+  visibility               EmailVisibility @default(SHARED)
+  /// Agrupa mensagens pelo assunto normalizado (sem Re:/Fwd:).
+  groupInThreads           Boolean         @default(true) @map("group_in_threads")
+  /// Cria contato/lead para remetentes desconhecidos ao responder.
+  createContactsForReplies Boolean         @default(false) @map("create_contacts_for_replies")
+
+  /// Proprietário da caixa (relevante quando visibility=PERSONAL).
+  ownerUserId String? @map("owner_user_id")
+  owner       User?   @relation(fields: [ownerUserId], references: [id], onDelete: SetNull)
+
+  organization  Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  emails        Email[]
+  customFolders EmailCustomFolder[]
+  rules         EmailRule[]
+
+  createdAt    DateTime  @default(now()) @map("created_at")
+  lastSyncedAt DateTime? @map("last_synced_at")
+
+  @@index([organizationId])
+  @@index([organizationId, ownerUserId])
+  @@map("email_accounts")
+}
+
+/// Mensagem de e-mail sincronizada via IMAP ou enviada via SMTP.
+/// `(accountId, messageId)` único impede duplicação em re-sync.
+model Email {
+  id             String @id @default(cuid())
+  organizationId String
+
+  accountId String       @map("account_id")
+  account   EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  folder    EmailFolder @default(INBOX)
+  /// Agrupa mensagens da mesma conversa. Quando groupInThreads=true,
+  /// é o assunto normalizado; caso contrário é o próprio messageId.
+  threadId  String      @map("thread_id")
+  /// ID único da mensagem no provedor (Message-ID header).
+  messageId String      @map("message_id")
+  /// UID IMAP da mensagem na pasta (para operações de sync incremental).
+  uid       String?
+
+  fromAddress String  @map("from_address")
+  fromName    String? @map("from_name")
+  toAddress   String  @map("to_address")
+
+  subject  String?
+  bodyText String? @map("body_text") @db.Text
+  bodyHtml String? @map("body_html") @db.Text
+
+  /// Contato vinculado automaticamente pelo e-mail do remetente.
+  contactId String?  @map("contact_id")
+  contact   Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  /// Pasta customizada criada pelo usuário (opcional).
+  /// Quando definida, a mensagem aparece na pasta custom em vez da pasta de
+  /// sistema (`folder` continua refletindo INBOX/SENT/TRASH).
+  customFolderId String?            @map("custom_folder_id")
+  customFolder   EmailCustomFolder? @relation(fields: [customFolderId], references: [id], onDelete: SetNull)
+
+  isRead Boolean @default(false) @map("is_read")
+
+  receivedAt DateTime? @map("received_at")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, messageId])
+  @@index([organizationId])
+  @@index([accountId, folder])
+  @@index([organizationId, threadId])
+  @@index([accountId, isRead])
+  @@index([customFolderId])
+  @@map("emails")
+}
+
+/// Pasta customizada criada pelo usuário em uma conta específica.
+/// Mensagens podem ser movidas (manualmente ou por regras) para uma pasta
+/// custom. A pasta vive *além* do enum `EmailFolder` — uma mensagem em
+/// pasta custom continua tendo `folder` (INBOX/SENT/TRASH) refletindo o
+/// estado IMAP.
+model EmailCustomFolder {
+  id             String       @id @default(cuid())
+  organizationId String
+  accountId      String       @map("account_id")
+  account        EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  name  String
+  color String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  emails Email[]
+  rules  EmailRule[]
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([accountId, name])
+  @@index([organizationId])
+  @@index([accountId])
+  @@map("email_custom_folders")
+}
+
+/// Regra simples de filtro: condição (campo + contém) + ação (mover ou
+/// excluir). Aplicada após persistir cada mensagem nova durante o sync
+/// (`email-sync.ts`). Primeira regra que bate vence (ordem por priority).
+model EmailRule {
+  id             String       @id @default(cuid())
+  organizationId String
+  accountId      String       @map("account_id")
+  account        EmailAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+
+  name     String
+  isActive Boolean @default(true) @map("is_active")
+
+  /// "FROM" | "TO" | "SUBJECT"
+  conditionField String @map("condition_field")
+  /// Substring buscada (case-insensitive) no campo escolhido.
+  conditionValue String @map("condition_value")
+
+  /// "MOVE" | "TRASH"
+  action         String             @map("action")
+  targetFolderId String?            @map("target_folder_id")
+  targetFolder   EmailCustomFolder? @relation(fields: [targetFolderId], references: [id], onDelete: SetNull)
+
+  priority  Int      @default(0)
+  createdAt DateTime @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([accountId, isActive, priority])
+  @@map("email_rules")
+}
+
+// ===========================================================================
+// Módulo Softphone (SIP/WebRTC) — Fase 1
+// ===========================================================================
+
+enum SipExtensionStatus {
+  ACTIVE
+  INACTIVE
+}
+
+/// Estado da máquina de provisionamento automático Api4com.
+/// Cada passo concluído persiste o step antes de avançar (retomada segura).
+enum TelephonyProvisioningStep {
+  IDLE
+  CHECK_REMOTE
+  CREATE_USER
+  CREATE_EXTENSION
+  CONFIG_WEBHOOK
+  ACTIVE
+  FAILED
+  DISABLED
+}
+
+enum CallDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum CallStatus {
+  RINGING
+  ANSWERED
+  COMPLETED
+  MISSED
+  BUSY
+  FAILED
+}
+
+enum WebhookAuthMode {
+  HMAC
+  TOKEN
+}
+
+enum RecordingDelivery {
+  URL
+  INLINE
+  FETCH_LATER
+}
+
+/// Ramal SIP de um usuário. Armazena credenciais cifradas para registro
+/// via JsSIP no navegador. O backend nunca registra ramal nem processa
+/// mídia — só guarda e entrega ao próprio dono autenticado.
+model SipExtension {
+  id             String @id @default(cuid())
+  organizationId String
+
+  userId String @map("user_id")
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  label                 String
+  /// Endereço SIP completo — ex.: `ramal@dominio.pbx`.
+  sipUri                String @map("sip_uri")
+  authUser              String @map("auth_user")
+  /// Senha cifrada via encryptSecret() (KEYRING_SECRET). Nunca exposta
+  /// fora de /api/sip-extensions/me/credentials (dono autenticado).
+  authPasswordEncrypted String @map("auth_password_encrypted")
+  /// URL WebSocket do proxy SIP — ex.: `wss://pbx.example.com:8089/ws`.
+  wsServer              String @map("ws_server")
+  /// Array de URLs STUN — ex.: ["stun:stun.l.google.com:19302"].
+  stunServers           Json   @map("stun_servers")
+  /// Config TURN opcional — { urls, username, credential }.
+  turnServer            Json?  @map("turn_server")
+  /// Metadados do provedor (ex.: token Api4Com cifrado). Nunca exposto na API pública.
+  providerMeta          Json?  @map("provider_meta")
+
+  status SipExtensionStatus @default(ACTIVE)
+
+  /// ── Provisionamento automático Api4com ─────────────────────────
+  /// Toggle principal: indica se o usuário tem telefonia habilitada.
+  telephonyEnabled    Boolean                    @default(false) @map("telephony_enabled")
+  /// UUID do usuário criado na Api4com via POST /users.
+  api4comUserId       String?                    @map("api4com_user_id")
+  /// Gateway lógico usado em metadata.gateway (webhookConstraint + /dialer).
+  api4comGateway      String?                    @map("api4com_gateway")
+  /// Estado da máquina de provisionamento (retomada a partir do último step).
+  provisioningStep    TelephonyProvisioningStep  @default(IDLE) @map("provisioning_step")
+  /// Último erro para exibição na UI e retomada manual.
+  provisioningError   String?                    @map("provisioning_error")
+  /// Timestamp de conclusão bem-sucedida do provisionamento.
+  provisionedAt       DateTime?                  @map("provisioned_at")
+
+  calls Call[]
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@map("sip_extensions")
+}
+
+/// Registro de chamada telefônica. Fonte da verdade = webhook do provedor.
+/// Idempotente por (organizationId, provider, providerCallId).
+model Call {
+  id             String @id @default(cuid())
+  organizationId String
+
+  direction CallDirection
+  status    CallStatus
+
+  extensionId String?       @map("extension_id")
+  extension   SipExtension? @relation(fields: [extensionId], references: [id], onDelete: SetNull)
+
+  provider       String
+  providerCallId String @map("provider_call_id")
+
+  fromNumber String @map("from_number")
+  toNumber   String @map("to_number")
+
+  contactId String?  @map("contact_id")
+  contact   Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+
+  /// Deal vinculado — preenchido a partir da metadata enviada no /dialer.
+  dealId String? @map("deal_id")
+  deal   Deal?   @relation(fields: [dealId], references: [id], onDelete: SetNull)
+
+  /// Snapshot da metadata Api4com (gateway, crm_user_id, deal_id, contact_id).
+  metadata Json?
+
+  startedAt       DateTime? @map("started_at")
+  answeredAt      DateTime? @map("answered_at")
+  endedAt         DateTime? @map("ended_at")
+  durationSeconds Int?      @map("duration_seconds")
+
+  /// URL da gravação re-hospedada no storage local do CRM (bucket "recordings").
+  recordingUrl String? @map("recording_url")
+
+  events CallEvent[]
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@unique([organizationId, provider, providerCallId])
+  @@index([organizationId, contactId])
+  @@index([organizationId, dealId])
+  @@index([organizationId, direction, status])
+  @@index([organizationId, extensionId])
+  @@map("calls")
+}
+
+/// Evento bruto do webhook, persistido antes de qualquer normalização.
+/// Permite reprocessamento e auditoria independente do status de correlação.
+model CallEvent {
+  id             String @id @default(cuid())
+  organizationId String
+
+  callId String? @map("call_id")
+  call   Call?   @relation(fields: [callId], references: [id], onDelete: SetNull)
+
+  provider   String
+  /// Payload exatamente como chegou no webhook — sem transformação.
+  rawPayload Json   @map("raw_payload")
+
+  receivedAt DateTime @default(now()) @map("received_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([organizationId, callId])
+  @@map("call_events")
+}
+
+/// Configuração de provedor de telefonia por organização.
+/// O `webhookToken` identifica a org no endpoint público de webhook.
+model CallProviderConfig {
+  id             String @id @default(cuid())
+  organizationId String
+
+  /// Identificador do adapter — ex.: "generic-sip", "asterisk".
+  providerKey   String @map("provider_key")
+  /// Mapeamento de caminhos no payload → campos normalizados.
+  fieldMappings Json   @map("field_mappings")
+
+  authMode               WebhookAuthMode
+  /// HMAC secret ou token de autenticação — cifrado via encryptSecret().
+  webhookSecretEncrypted String          @map("webhook_secret_encrypted")
+  /// Header onde a assinatura HMAC é enviada — ex.: "X-Signature-256".
+  signatureHeader        String?         @map("signature_header")
+  /// Token único na URL pública `/webhooks/calls/:provider?token=<webhookToken>`.
+  webhookToken           String          @unique @map("webhook_token")
+
+  recordingDelivery      RecordingDelivery @map("recording_delivery")
+  /// Cria contato/lead automaticamente para números desconhecidos.
+  createContactsForCalls Boolean           @default(false) @map("create_contacts_for_calls")
+  isActive               Boolean           @default(true) @map("is_active")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([organizationId])
+  @@map("call_provider_configs")
 }
