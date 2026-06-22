@@ -186,11 +186,18 @@ async function ensureDealForContact(
     where: { id: contactId },
     select: { name: true },
   });
+  // WhatsApp Flow Response é uma submissão EXPLÍCITA de formulário — os
+  // campos preenchidos precisam de um deal de destino, mesmo se o contato
+  // tiver apenas deals fechados (LOST/WON). Usa o modo legado pra evitar
+  // dados órfãos. Pra desligar reativação automática nesse fluxo, criar
+  // automação `message_received` filtrada por `dealStatus` em vez de
+  // depender do auto-create.
   const ensured = await ensureOpenDealForContact({
     contactId,
     contactName: contact?.name?.trim() || "Lead",
     logTag: "whatsapp-flow",
     channelId,
+    reopenLostContacts: true,
   });
   if (ensured.status === "skipped") return null;
   return ensured.dealId;

@@ -480,10 +480,13 @@ async function resolveWebhookContact(
       contactRow = { ...contactRow, ...updates };
     }
 
-    // Garante deal aberto para contato pré-existente (idempotente). Sem
-    // isso, contatos antigos sem deal ficavam "órfãos" no Painel CRM do
-    // Inbox ("Nenhum negócio aberto") mesmo conversando ativamente.
-    // `channelId` roteia o lead para o funil configurado no canal de origem.
+    // Contato JÁ EXISTE: a função só auto-cria deal se ele nunca tiver
+    // tido um (raro — ex.: contato importado sem deal). Se já houve
+    // OPEN/WON/LOST, NÃO recria — o controle passa pras automações
+    // configuradas pelo operador (trigger `message_received` com
+    // filtro `dealStatus`). Isso evita re-disparar `deal_created` em
+    // leads descartados ou clientes que já compraram. Ver `auto-deals.ts`
+    // (changelog v3 — jun/2026).
     const existingRoutingChannelId =
       (await findChannelByPhoneNumberId(phoneNumberId))?.id ?? null;
     ensureOpenDealForContact({

@@ -5,6 +5,55 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-22 — auto-deals v3: respeitar histórico do contato em inbounds passivos
+
+**Contexto.** Operador reportou que automação com trigger `deal_created`
+re-disparava cada vez que cliente com deal LOST voltava a mandar mensagem.
+Causa raiz: `ensureOpenDealForContact` em `src/services/auto-deals.ts`
+checava apenas `status = OPEN`; se contato tinha só LOST/WON, criava deal
+novo e disparava `fireTrigger("deal_created")` — comportamento intencional
+da v2 pra resolver "contatos órfãos" no Painel CRM do Inbox, mas
+incompatível com o modelo declarativo de automações ("o controle deve
+ser pelos gatilhos que eu configurei, não pelo backend").
+
+**Decisão.** Novo default: `ensureOpenDealForContact` só auto-cria deal
+quando o contato NUNCA teve deal algum. Se tem histórico (OPEN/WON/LOST),
+delega a decisão pras automações configuradas pelo operador (trigger
+`message_received` + filtro `dealStatus` + step `create_deal`). Opt-in
+explícito via `reopenLostContacts: true` mantém comportamento v2 para
+chamadores que precisam garantir destino pros dados (WhatsApp Flow
+Response — formulário preenchido precisa de deal pra anexar campos; e
+scripts de backfill manuais).
+
+**Alternativas descartadas.**
+- *Filtro `dealStatus` em `deal_created`*: paliativo — backend continuaria
+  criando deal desnecessariamente, só não dispararia. Custo computacional
+  e poluição da base de deals iguais ao bug original.
+- *Setting por organização*: complexidade desproporcional pra uma regra
+  que é claramente certa por default. Quem quiser reativação automática
+  configura via automação (caminho declarativo) ou usa o opt-in nos
+  callers específicos.
+- *Reabrir deal LOST em vez de criar novo*: alteraria semântica histórica
+  (deal LOST representa decisão deliberada do operador) e dispararia outro
+  problema (qual evento emitir — `deal_reopened` não existe ainda).
+
+**Impacto.**
+- Callers de inbound passivo (`workers/baileys/message-handler.ts`,
+  `lib/meta-webhook/handler.ts`) automaticamente herdam o novo default
+  — nenhuma mudança no caller foi necessária além de atualizar comentários.
+- Callers que precisam preservar o comportamento legado (`services/whatsapp-flow-response.ts`,
+  scripts `backfill-deals-for-contacts.ts` e `backfill-inbox-deals.ts`)
+  recebem `reopenLostContacts: true` com justificativa inline.
+- Novo `EnsureOpenDealResult.reason: "contact_has_closed_deal"` — callers
+  que tratavam `skipped` como genérico continuam funcionando (any-reason
+  pattern); quem quiser logar por motivo específico pode discriminar.
+- Operadores que dependiam de reativação automática precisam criar uma
+  automação `message_received` (filtro `dealStatus=LOST` + step `create_deal`).
+  Esse fluxo já é suportado pela infra existente — não exige mudança no
+  worker de automações.
+
+---
+
 ### 2026-06-22 — Api4com: Provisionamento + Singleton JsSIP + Revisão [DECISÃO — agente OPUS]
 
 **Contexto.** Fases 2, 5 e 6 do plano de integração Api4com (`docs/PLAN-api4com.md`),
