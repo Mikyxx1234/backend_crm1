@@ -12,10 +12,19 @@
  * deixam o workspace sem dados laterais.
  *
  * Agora o fluxo é idempotente: chamamos `ensureOpenDealForContact` em
- * TODO inbound — ele só cria deal se o contato não tiver nenhum deal
- * com `status = OPEN`. Deals fechados (WON/LOST) não bloqueiam a
- * criação: a regra é "manter pelo menos um deal OPEN pra contatos
- * ativamente conversando".
+ * TODO inbound.
+ *
+ * 22/jun/26 — Regra de criação ajustada para não duplicar negócios em
+ * reengajamento:
+ *   • Contato com deal OPEN  → reusa o existente (no-op).
+ *   • Contato SEM deal OPEN mas com deal fechado (WON/LOST) → NÃO cria.
+ *     O reengajamento de negócio fechado é decisão de NEGÓCIO e deve ser
+ *     tratado por uma automação `message_received` (filtrada por
+ *     `dealStatus` WON/LOST) que decide criar novo deal ou reabrir/mover.
+ *     Se o auto-deal criasse aqui, geraria card duplicado E o gatilho
+ *     `message_received` veria `dealStatus = OPEN`, impedindo a automação.
+ *   • Contato SEM nenhum deal (primeiro contato) → cria e dispara
+ *     `deal_created` (regra de recepção preservada para leads novos).
  */
 
 import { prisma } from "@/lib/prisma";
@@ -45,7 +54,7 @@ type EnsureOpenDealOptions = {
 type EnsureOpenDealResult =
   | { status: "existing"; dealId: string }
   | { status: "created"; dealId: string }
-  | { status: "skipped"; reason: "no_pipeline" };
+  | { status: "skipped"; reason: "no_pipeline" | "has_closed_deal" };
 
 /**
  * Garante que o contato tenha um deal OPEN. Se já existe, retorna o
@@ -69,6 +78,25 @@ export async function ensureOpenDealForContact(
   });
   if (existing) {
     return { status: "existing", dealId: existing.id };
+  }
+
+  // 22/jun/26 — Reengajamento de negócio fechado NÃO cria deal novo aqui.
+  // Se o contato já teve negócio (WON/LOST) e não tem nenhum OPEN, deixamos
+  // o negócio fechado intacto para que uma automação `message_received`
+  // (filtrada por dealStatus WON/LOST) decida no builder: criar novo deal
+  // (step create_deal) ou reabrir/mover (step move_stage). Criar aqui
+  // duplicaria o card e faria o gatilho `message_received` ver dealStatus
+  // OPEN, neutralizando a automação de reengajamento.
+  const closedDeal = await prisma.deal.findFirst({
+    where: { contactId, status: { in: ["WON", "LOST"] } },
+    select: { id: true },
+    orderBy: { closedAt: "desc" },
+  });
+  if (closedDeal) {
+    console.log(
+      `[${logTag}] Contato ${contactName} tem negócio fechado e nenhum OPEN — não criando (reengajamento fica a cargo da automação message_received).`,
+    );
+    return { status: "skipped", reason: "has_closed_deal" };
   }
 
   // Roteamento por canal: se o inbound veio de um canal com `defaultPipelineId`
