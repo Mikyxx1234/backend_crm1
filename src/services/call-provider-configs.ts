@@ -250,3 +250,46 @@ export async function findConfigByWebhookToken(webhookToken: string): Promise<{
 export function decryptWebhookSecret(config: { webhookSecretEncrypted: string }): string {
   return decryptSecret(config.webhookSecretEncrypted);
 }
+
+/**
+ * Busca ou cria a CallProviderConfig do tipo "api4com" para a org corrente.
+ * Idempotente — pode ser chamado múltiplas vezes (cada operador que conecta
+ * Api4com via UI cai aqui; só o primeiro cria, os demais reaproveitam).
+ *
+ * Modo TOKEN (Api4com não usa HMAC nos webhooks — autentica via token único
+ * na URL `?token=<webhookToken>`). O webhookSecret aqui é o próprio token —
+ * armazenamos cifrado por convenção do schema, mas a validação real no
+ * `processWebhookEvent` é feita por `findConfigByWebhookToken`.
+ */
+export async function getOrCreateApi4ComProviderConfig(): Promise<ProviderConfigPublic> {
+  const organizationId = getOrgIdOrThrow();
+
+  const existing = await prisma.callProviderConfig.findFirst({
+    where: { providerKey: "api4com" },
+    select: SELECT_DB,
+  });
+  if (existing) return toPublic(existing);
+
+  const webhookToken = generateWebhookToken();
+  const webhookSecretEncrypted = encryptSecret(webhookToken);
+
+  const row = await prisma.callProviderConfig.create({
+    data: withOrg(
+      {
+        providerKey: "api4com",
+        fieldMappings: {},
+        authMode: "TOKEN" as WebhookAuthMode,
+        webhookSecretEncrypted,
+        signatureHeader: null,
+        webhookToken,
+        recordingDelivery: "URL" as RecordingDelivery,
+        createContactsForCalls: false,
+        isActive: true,
+      },
+      organizationId,
+    ),
+    select: SELECT_DB,
+  });
+
+  return toPublic(row);
+}

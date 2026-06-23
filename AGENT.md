@@ -5,6 +5,84 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-23 — Api4com: setup de webhook no `connect-api4com` (user token + fallback manual)
+
+**Contexto.** O fluxo manual `POST /api/sip-extensions/connect-api4com`
+(usado pela UI "Conectar Api4Com" em Configurações → Softphone) só
+salvava o ramal SIP no banco. Faltava (a) criar o `CallProviderConfig`
+com `webhookToken` único pra org e (b) chamar `PATCH /integrations` na
+Api4com pra configurar o `webhookUrl`. Sem isso, a Api4com nunca dispara
+`channel-hangup` pro nosso `/api/webhooks/calls/api4com?token=...` →
+`processWebhookEvent` nunca roda → `Call` nunca é criado → a tela
+`/calls` fica vazia, mesmo a chamada tendo acontecido. Sintoma reportado:
+"fiz a ligação, mas o histórico está em branco".
+
+**Decisão.** Estender o próprio `connect-api4com` pra completar o setup
+de webhook usando o user token (o mesmo token de login email/senha que
+sai do `loginApi4Com`). Caminho de melhor UX possível dentro do fluxo
+que o operador já está fazendo — sem env adicional, sem endpoint novo,
+sem segunda tela. A função `upsertApi4ComWebhookWithUserToken` em
+`services/telephony-providers/api4com.ts` faz o `PATCH /integrations`
+direto na Api4com com o token do operador (em vez do
+`API4COM_SERVICE_TOKEN` admin que o `Api4ComClient` usa).
+
+Idempotência: `getOrCreateApi4ComProviderConfig` no
+`call-provider-configs.ts` reutiliza o `CallProviderConfig` existente
+da org (`findFirst({ providerKey: "api4com" })` org-scoped) — só o
+primeiro operador que conecta cria, os demais herdam o mesmo
+`webhookToken`.
+
+Fallback explícito: se o `PATCH /integrations` falhar (403/permissão,
+plano sem feature, etc.), o response inclui
+`{ webhook: { configured: false, webhookUrl, reason } }` em vez de
+mascarar como sucesso. A UI mostra a URL pronta pra colar no portal
+Api4com → Integrações → Webhook. Operador resolve em 30s sem precisar
+admin nem env nova. Pra ambientes sem `APP_URL`/`NEXT_PUBLIC_APP_URL`
+setada, o fallback é forçado (sem domínio, a Api4com não tem pra onde
+mandar).
+
+**Alternativas descartadas.**
+- *Forçar `API4COM_SERVICE_TOKEN` no env e usar o `Api4ComClient` admin*:
+  duplica o fluxo de `enableTelephony` do `provisioning.ts`, que já é
+  o "caminho automático completo" (provisiona user + ramal +
+  integração) e é incompatível com quem já tem conta Api4com prévia
+  (não quer re-provisionar). Além disso, exige token admin no `.env` —
+  fricção operacional desnecessária.
+- *Endpoint dedicado `POST /api/sip-extensions/setup-webhook`*: pra
+  cobrir o caso de operadores que já estão conectados mas sem webhook,
+  parece útil. Mas adiciona superfície de API e é trivialmente
+  substituível por "desconectar e reconectar" via UI atual. Adicionar
+  só se vier demanda real.
+- *Configurar webhook em `getMyCredentials`*: side-effect num GET é
+  anti-pattern. E o GET roda toda vez que a sessão recarrega — overhead
+  desnecessário e race condition se vários operadores logarem ao mesmo
+  tempo na mesma org.
+- *Persistir `webhookConfigured: true` em `SipExtension.providerMeta`*:
+  útil pra evitar refazer o `PATCH /integrations` toda reconexão, mas
+  prematuro — `PATCH /integrations` é idempotente na Api4com (segunda
+  chamada com mesmo `gateway` retorna 200 sem efeito colateral). Pode
+  ser adicionado depois se o tempo da chamada começar a importar.
+
+**Impacto.**
+- Operadores existentes que já fizeram `connect-api4com` antes desta
+  mudança continuam sem webhook configurado. Pra ativar histórico
+  pra eles: re-conectar via UI. UI agora mostra explicitamente se
+  o webhook está configurado ou se requer setup manual.
+- Multi-tenant seguro: `getOrCreateApi4ComProviderConfig` usa
+  `getOrgIdOrThrow()` via Prisma extension, garantindo que o
+  `webhookToken` é único por org. Webhook de uma org NUNCA processa
+  evento de outra (o `findConfigByWebhookToken` resolve org direto
+  pelo token).
+- Compatível com o fluxo `enableTelephony` (provisioning admin via
+  `API4COM_SERVICE_TOKEN`): ambos chamam o mesmo `PATCH /integrations`
+  com o mesmo formato. Se o admin já tinha rodado provisioning antes,
+  o `getOrCreateApi4ComProviderConfig` reaproveita o config existente.
+- Frontend `Api4ComConnectForm` ganhou bloco condicional de UI:
+  verde "webhook configurado" ou caixa amarela com URL + botão copiar
+  quando manual. Sem ambiguidade pra o operador.
+
+---
+
 ### 2026-06-23 — Hotfix: migration `20260616110000_add_softphone_module` faltante
 
 **Contexto.** Deploy do DEV_BRANCH quebrou a UI de Softphone com erro

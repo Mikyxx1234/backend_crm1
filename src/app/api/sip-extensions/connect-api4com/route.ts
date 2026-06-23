@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
+import { getOrCreateApi4ComProviderConfig } from "@/services/call-provider-configs";
 import { createOrUpdateExtension } from "@/services/sip-extensions";
 import { buildApi4ComProviderMeta } from "@/services/sip-extension-provider-meta";
 import {
@@ -9,6 +10,7 @@ import {
   listApi4ComExtensions,
   loginApi4Com,
   pickExtensionForEmail,
+  upsertApi4ComWebhookWithUserToken,
 } from "@/services/telephony-providers/api4com";
 
 /**
@@ -89,6 +91,52 @@ export async function POST(request: Request) {
         providerMeta: buildApi4ComProviderMeta(login.token, email, password),
       });
 
+      // ── Setup do webhook de chamadas (histórico em /calls) ─────────────
+      // Sem isso, o backend nunca recebe `channel-hangup` da Api4com e
+      // nenhum Call é registrado. Tenta automático com o user token; se
+      // a Api4com rejeitar (403 — depende do perfil/plano), devolve a
+      // URL pra o operador colar manual no portal.
+      const providerConfig = await getOrCreateApi4ComProviderConfig();
+      const baseUrl = (process.env.NEXT_PUBLIC_APP_URL ?? process.env.APP_URL ?? "")
+        .trim()
+        .replace(/\/$/, "");
+      const webhookUrl = baseUrl
+        ? `${baseUrl}/api/webhooks/calls/api4com?token=${providerConfig.webhookToken}`
+        : `/api/webhooks/calls/api4com?token=${providerConfig.webhookToken}`;
+      const gateway =
+        (process.env.API4COM_GATEWAY?.trim() || `crm-${extension.organizationId.slice(0, 8)}`);
+
+      let webhook:
+        | { configured: true }
+        | { configured: false; webhookUrl: string; manualSetupRequired: true; reason: string };
+
+      if (!baseUrl) {
+        // Sem APP_URL setada, a Api4com não tem pra onde mandar.
+        // Mostra URL relativa só pra log; admin tem que setar APP_URL.
+        webhook = {
+          configured: false,
+          webhookUrl,
+          manualSetupRequired: true,
+          reason:
+            "APP_URL (env do backend) não está definida. Configure-a e refaça a conexão.",
+        };
+      } else {
+        const setupResult = await upsertApi4ComWebhookWithUserToken(login.token, {
+          gateway,
+          webhookUrl,
+        });
+        if (setupResult.ok) {
+          webhook = { configured: true };
+        } else {
+          webhook = {
+            configured: false,
+            webhookUrl,
+            manualSetupRequired: true,
+            reason: setupResult.message,
+          };
+        }
+      }
+
       return NextResponse.json(
         {
           extension,
@@ -97,6 +145,7 @@ export async function POST(request: Request) {
             ramal: String(apiExt.ramal ?? sip.authUser),
             wsServer: sip.wsServer,
           },
+          webhook,
         },
         { status: 200 },
       );

@@ -304,3 +304,51 @@ export async function dialApi4ComCall(
     return { ok: true };
   }
 }
+
+/**
+ * PATCH /integrations — configura o webhook que a Api4com vai disparar
+ * a cada `channel-answer` / `channel-hangup`. Usa o TOKEN DO USUÁRIO
+ * (login email/senha) em vez do `API4COM_SERVICE_TOKEN` admin —
+ * complementa o fluxo manual `connect-api4com`, sem exigir token de
+ * serviço configurado.
+ *
+ * A Api4com aceita esse PATCH com user token na maioria dos planos,
+ * mas pode rejeitar com 403 dependendo do perfil. Em caso de erro,
+ * o caller deve mostrar a URL pra o operador colar manualmente no
+ * portal da Api4com (caminho de fallback).
+ *
+ * `webhookConstraint.metadata.gateway` filtra os eventos que a
+ * Api4com envia — só dispara webhook quando o `metadata.gateway`
+ * da chamada (definido em `dialApi4ComCall`) bate com esse valor.
+ * Sem isso, a integração receberia webhooks de TODA chamada da org
+ * na Api4com, incluindo originadas fora do CRM.
+ */
+export async function upsertApi4ComWebhookWithUserToken(
+  token: string,
+  payload: {
+    gateway: string;
+    webhookUrl: string;
+    webhookVersion?: string;
+    webhookTypes?: string[];
+  },
+): Promise<{ ok: true } | Api4ComFieldError> {
+  const body = {
+    gateway: payload.gateway,
+    webhook: true,
+    webhookConstraint: { metadata: { gateway: payload.gateway } },
+    metadata: {
+      webhookUrl: payload.webhookUrl,
+      webhookVersion: payload.webhookVersion ?? "v1.4",
+      webhookTypes: payload.webhookTypes ?? ["channel-answer", "channel-hangup"],
+    },
+  };
+
+  const result = await api4comFetch<unknown>("/integrations", {
+    method: "PATCH",
+    body: JSON.stringify(body),
+    token,
+  });
+
+  if (!result.ok) return result;
+  return { ok: true };
+}
