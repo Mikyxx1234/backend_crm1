@@ -5,6 +5,57 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-23 — Hotfix: migration `20260616110000_add_softphone_module` faltante
+
+**Contexto.** Deploy do DEV_BRANCH quebrou a UI de Softphone com erro
+`Tabela sip_extensions ausente. Aplique a migration
+20260616110000_add_softphone_module e reinicie o backend.` O código (commit
+572f06e — `feat(softphone)`) referencia essa migration na mensagem de erro
+e a migration seguinte (`20260622120000_api4com_provisioning`) faz
+`ALTER TABLE sip_extensions / calls` assumindo que ela existe, mas a
+migration **não foi commitada no repo** — o mfpi provavelmente sincronizou
+o schema local via `prisma db push` antes de gerar a migration de
+`api4com_provisioning`. Como o DB de DEV roda com `SKIP_PRISMA_MIGRATE=1`,
+nenhum deploy nunca aplicou esses CREATE TABLE.
+
+**Decisão.** Gerar a migration faltante a partir do schema (`prisma/schema.prisma`
+linhas 4015–4216), nomeada exatamente como o código de erro espera
+(`20260616110000_add_softphone_module`), criando as 4 tabelas
+(`sip_extensions`, `calls`, `call_events`, `call_provider_configs`) e os 5
+enums (`SipExtensionStatus`, `CallDirection`, `CallStatus`,
+`WebhookAuthMode`, `RecordingDelivery`). Não inclui as colunas/índices/FK
+adicionadas pela `20260622120000_api4com_provisioning` (`telephony_enabled`,
+`api4com_user_id`, `api4com_gateway`, `provisioning_step`,
+`provisioning_error`, `provisioned_at`, `calls.deal_id`, `calls.metadata`,
+FK `calls→deals`, índice `calls_organizationId_dealId_idx`, enum
+`TelephonyProvisioningStep`) — a `20260622120000` segue sendo a fonte da
+verdade pra esses ADDs. Toda a migration é idempotente (`IF NOT EXISTS` +
+`DO $$ ... EXCEPTION WHEN duplicate_object`) seguindo o padrão da
+`20260615120100_groups_kommo` (precedente do mesmo problema), pra rodar com
+segurança em DBs onde o mfpi aplicou parcialmente via `db push`.
+
+**Alternativas descartadas.**
+- *Esperar mfpi commitar a migration original*: bloqueia teste da telefonia
+  agora; conflito futuro com a versão dele é mais barato que ambiente
+  travado.
+- *`prisma db push` no banco de DEV*: corrige o sintoma mas não cria
+  histórico em `_prisma_migrations` — próximo `prisma migrate deploy`
+  ignoraria as tabelas existentes e quebraria de novo na próxima migration.
+- *Aplicar SQL direto sem criar migration*: idem acima + zero
+  rastreabilidade no repo.
+
+**Impacto.**
+- Próximo `prisma migrate deploy` aplica `20260616110000_add_softphone_module`
+  + `20260622120000_api4com_provisioning` na ordem correta sem erros.
+- DEV continua com `SKIP_PRISMA_MIGRATE=1` — operador roda
+  `npx prisma migrate deploy` manualmente no container quando há migration
+  nova (procedimento documentado em conversa de implementação).
+- Quando o mfpi commitar a versão dele da migration, gera conflito de
+  pasta com mesmo nome — resolver mantendo a versão que está no DB
+  (provavelmente a nossa, já aplicada).
+
+---
+
 ### 2026-06-22 — auto-deals v3: respeitar histórico do contato em inbounds passivos
 
 **Contexto.** Operador reportou que automação com trigger `deal_created`
