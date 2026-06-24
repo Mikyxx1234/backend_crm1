@@ -5,6 +5,70 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-24 — Motivos de perda: gate `allow_other` no service (defesa em profundidade)
+
+**Contexto.** Demanda do cliente: poluição da lista de `Deal.lostReason`
+em produção, vendedores usando o botão "Outro…" como saída livre. UI
+do CRM ganhou toggle "Permitir motivo personalizado" para o admin
+controlar (vide AGENT.md do frontend). Backend precisava complementar:
+sem gate no service, qualquer cliente HTTP autenticado (DevTools,
+integração externa, worker) poderia continuar mandando string livre.
+
+**Decisão.** Nova helper `assertLostReasonAllowed(reason)` em
+`services/deals.ts` lê `deals.loss_reason_allow_other` (default `true`)
+via `getOrgSettingBool`. Quando `false`, valida que `reason` bate
+EXATAMENTE com algum `LossReason.label` ativo da org corrente —
+`prisma.lossReason.findFirst({ where: { label, isActive: true }})`.
+Não casou → `throw new Error("INVALID_LOST_REASON")`, traduzido pra
+HTTP 400 nos routes.
+
+Chamadas inseridas em **3 pontos de entrada** que cobrem todos os caminhos
+de gravação real de `lostReason`:
+- `markDealLost(id, reason)` — usado por `PUT /api/deals/[id]/status`
+  e por `POST /api/deals/bulk` action `mark_lost`.
+- `moveDeal(dealId, stageId, position, { lostReason })` — usado por
+  `PATCH /api/deals/[id]/move` quando o destino é estágio terminal LOST.
+- Route `POST /api/deals/bulk` action `move_stage` — valida ANTES de
+  decidir entre path síncrono e enfileirar `BulkMoveStagePayload`. Isso
+  cobre o worker async `bulk-move-stage.job.ts` sem precisar duplicar
+  a leitura de org settings dentro do worker (que roda fora de
+  RequestContext).
+
+**Modo permissivo defensivo.** Se a leitura da setting falhar (ex.: chamada
+do service de cron job que não populou `RequestContext`), a helper loga
+e CAI PRO DEFAULT permissivo (`allow_other = true`) em vez de bloquear
+o update. O gate é uma melhoria de UX/qualidade de dados, não uma regra
+de segurança crítica — bloquear updates legítimos em situação degradada
+seria pior que aceitar um motivo livre.
+
+**Alternativas descartadas.**
+- *Validar dentro de `buildStatusSyncPatch`*: função é síncrona e parte
+  de várias transações. Tornar async cascateava em 6+ call sites e
+  exigia repassar `tx` por dentro da validação (não dá pra usar `prisma`
+  global em transação ativa por causa do isolamento). Validar no caller
+  ANTES de abrir a transação é mais barato e mais claro.
+- *Validar só no Zod do route*: cada route teria que carregar a lista
+  de motivos e replicar a regra. Centralizar no service garante que
+  `automation-executor` (que também marca deals como perdido via
+  automação) fica coberto sem mudança extra.
+- *Cache em memória da lista de `LossReason`*: hot path? hoje cada
+  marcação roda 1 SELECT por validação quando setting=false. Volume
+  esperado é baixíssimo (humano clicando no kanban) — premature
+  optimization. Se virar gargalo, adicionar `cache.wrap` na própria
+  helper depois.
+
+**Impacto.**
+- Adicionado: `assertLostReasonAllowed` em `services/deals.ts` (export).
+- Modificado: `markDealLost` (1 await no início), `moveDeal` (1 await
+  pré-transação), `POST /api/deals/bulk` (2 try/catch translation).
+- Comentário em `jobs/leads/bulk-move-stage.job.ts` documentando por que
+  o worker não revalida.
+- Mensagem de erro padrão: "Motivo da perda inválido. Selecione um dos
+  motivos cadastrados em Configurações → Motivos de perda." (orienta o
+  caminho de correção, evita ticket de suporte).
+
+---
+
 ### 2026-06-23 — Api4com: setup de webhook no `connect-api4com` (user token + fallback manual)
 
 **Contexto.** O fluxo manual `POST /api/sip-extensions/connect-api4com`

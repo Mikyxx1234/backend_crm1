@@ -6,7 +6,13 @@ import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
 import { fireTrigger } from "@/services/automation-triggers";
-import { assignDealOwner, createDealEvent, markDealLost, markDealWon } from "@/services/deals";
+import {
+  assertLostReasonAllowed,
+  assignDealOwner,
+  createDealEvent,
+  markDealLost,
+  markDealWon,
+} from "@/services/deals";
 
 const VALID_ACTIONS = ["move_stage", "change_owner", "mark_won", "mark_lost", "delete"] as const;
 type BulkAction = (typeof VALID_ACTIONS)[number];
@@ -66,6 +72,25 @@ export async function POST(request: Request) {
         // Motivo da perda — usado quando o destino é o estágio Perdido.
         const moveLostReason =
           typeof body.lostReason === "string" ? body.lostReason.trim() || null : null;
+
+        // Valida o motivo livre contra a setting "Permitir outro" — antes
+        // de criar BulkOperation ou de iniciar o for loop síncrono.
+        if (moveLostReason) {
+          try {
+            await assertLostReasonAllowed(moveLostReason);
+          } catch (err) {
+            if (err instanceof Error && err.message === "INVALID_LOST_REASON") {
+              return NextResponse.json(
+                {
+                  message:
+                    "Motivo da perda inválido. Selecione um dos motivos cadastrados em Configurações → Motivos de perda.",
+                },
+                { status: 400 },
+              );
+            }
+            throw err;
+          }
+        }
 
         const stage = await prisma.stage.findUnique({ where: { id: stageId }, select: { id: true, name: true } });
         if (!stage) return NextResponse.json({ message: "Etapa não encontrada." }, { status: 404 });
@@ -234,6 +259,25 @@ export async function POST(request: Request) {
         const required = await getOrgSettingBool("deals.loss_reason_required", false);
         if (required && !lostReason) {
           return NextResponse.json({ message: "Motivo da perda é obrigatório." }, { status: 400 });
+        }
+
+        // Gate "Permitir outro" — falha o bulk inteiro antes de iniciar o
+        // loop, evitando estado parcial (N deals marcados, restante rejeitado).
+        if (lostReason) {
+          try {
+            await assertLostReasonAllowed(lostReason);
+          } catch (err) {
+            if (err instanceof Error && err.message === "INVALID_LOST_REASON") {
+              return NextResponse.json(
+                {
+                  message:
+                    "Motivo da perda inválido. Selecione um dos motivos cadastrados em Configurações → Motivos de perda.",
+                },
+                { status: 400 },
+              );
+            }
+            throw err;
+          }
         }
 
         const deals = await prisma.deal.findMany({

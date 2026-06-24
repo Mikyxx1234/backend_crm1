@@ -3,6 +3,7 @@ import { Prisma, type DealRole, type DealStatus } from "@prisma/client";
 import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getOrgSettingBool } from "@/lib/org-settings";
 import { logEvent } from "@/services/activity-log";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
@@ -10,6 +11,49 @@ import {
   buildDealWhereFromFilters,
   type AdvancedDealFilters,
 } from "@/services/kanban-filters";
+
+/**
+ * Valida o motivo da perda contra a setting `deals.loss_reason_allow_other`.
+ *
+ * - Quando `allow_other === true` (default): aceita qualquer string (inclusive
+ *   um motivo livre digitado em "Outro…").
+ * - Quando `allow_other === false`: rejeita motivos que não bateram exatamente
+ *   com algum `LossReason.label` ativo cadastrado em
+ *   `/settings/loss-reasons` para a org corrente.
+ *
+ * Motivo vazio/null é cobertura de outra setting (`loss_reason_required`) e
+ * portanto aceita aqui (no-op). Throws `Error("INVALID_LOST_REASON")` quando
+ * inválido — handlers traduzem para HTTP 400.
+ *
+ * Defensivo: se falhar pra ler a setting (ex.: fora de RequestContext), cai
+ * pro default permissivo (allow_other = true) e loga, em vez de bloquear
+ * fluxos críticos.
+ */
+export async function assertLostReasonAllowed(
+  reason: string | null | undefined,
+): Promise<void> {
+  const trimmed = reason?.trim();
+  if (!trimmed) return;
+  let allowOther = true;
+  try {
+    allowOther = await getOrgSettingBool(
+      "deals.loss_reason_allow_other",
+      true,
+    );
+  } catch (e) {
+    console.warn(
+      "[deals/assertLostReasonAllowed] Falha lendo setting; permitindo:",
+      (e as Error)?.message ?? e,
+    );
+    return;
+  }
+  if (allowOther) return;
+  const match = await prisma.lossReason.findFirst({
+    where: { label: trimmed, isActive: true },
+    select: { id: true },
+  });
+  if (!match) throw new Error("INVALID_LOST_REASON");
+}
 
 export function isValidDealStatus(v: string): v is DealStatus {
   return v === "OPEN" || v === "WON" || v === "LOST";
@@ -547,6 +591,10 @@ export async function moveDeal(
     throw new Error("INVALID_POSITION");
   }
 
+  // Valida o motivo ANTES de abrir a transação (evita rollback se o destino
+  // for o estágio Perdido e o motivo livre tiver sido bloqueado pela setting).
+  if (options?.lostReason) await assertLostReasonAllowed(options.lostReason);
+
   let becameWon = false;
   let becameLost = false;
   const result = await prisma.$transaction(async (tx) => {
@@ -691,6 +739,9 @@ export async function markDealLost(id: string, lostReason?: string | null) {
   // Obrigatoriedade do motivo é decidida na rota (org setting
   // `deals.loss_reason_required`); aqui aceitamos vazio → null.
   const reason = lostReason?.trim() || null;
+
+  // Gate "Permitir outro motivo" — quando desligado, motivo livre é rejeitado.
+  await assertLostReasonAllowed(reason);
 
   const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
