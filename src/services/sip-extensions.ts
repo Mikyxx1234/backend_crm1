@@ -201,6 +201,56 @@ export async function getMyCredentials(userId: string): Promise<SipCredentials |
   };
 }
 
+export type Api4ComStatus = {
+  connected: boolean;
+  /** E-mail Api4com salvo (decifrado do providerMeta). NÃO inclui senha. */
+  email: string | null;
+  /** Ramal SIP (= authUser). */
+  ramal: string | null;
+  /** Domínio do PBX (parseado do wsServer). */
+  domain: string | null;
+};
+
+/**
+ * Status compacto da conexão Api4com do usuário corrente.
+ *
+ * Retorna o suficiente pra UI dizer "Conectado como X • Ramal Y" sem
+ * expor segredos. O e-mail vem decriptado pra reapresentar pro próprio
+ * dono — a UI pode pré-preencher num formulário de reconexão.
+ *
+ * SEGURANÇA: só pode ser chamado pelo dono autenticado (autorização
+ * no route handler). NUNCA retorna senha nem token de API.
+ */
+export async function getMyApi4ComStatus(userId: string): Promise<Api4ComStatus> {
+  const organizationId = getOrgIdOrThrow();
+
+  const ext = await prisma.sipExtension.findUnique({
+    where: { organizationId_userId: { organizationId, userId } },
+    select: {
+      authUser: true,
+      wsServer: true,
+      providerMeta: true,
+    },
+  });
+
+  if (!ext) {
+    return { connected: false, email: null, ramal: null, domain: null };
+  }
+
+  const account = getApi4ComAccountFromProviderMeta(ext.providerMeta);
+  const domain = ext.wsServer
+    .replace(/^wss?:\/\//, "")
+    .replace(/:.*$/, "")
+    .trim() || null;
+
+  return {
+    connected: Boolean(ext.authUser),
+    email: account?.email ?? null,
+    ramal: ext.authUser || null,
+    domain,
+  };
+}
+
 /** Token + ramal para discagem Api4Com REST (dono autenticado apenas). */
 export async function getMyApi4ComDialAuth(
   userId: string,
