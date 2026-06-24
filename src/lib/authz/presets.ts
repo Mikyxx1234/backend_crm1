@@ -69,7 +69,7 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   // (`allowedRoles` no catálogo do front já cobria automations/distribution/logs).
   "nav:dashboard", "nav:pipeline", "nav:contacts", "nav:companies",
   "nav:inbox", "nav:activities", "nav:automations", "nav:campaigns",
-  "nav:distribution", "nav:logs", "nav:widgets",
+  "nav:distribution", "nav:logs", "nav:widgets", "nav:calls",
 ];
 
 export const MEMBER_PERMISSIONS: readonly string[] = [
@@ -93,7 +93,7 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   // Navegação (sidebar principal) — MEMBER NÃO vê automations/distribution/logs
   // (restrição que antes ficava hardcoded em `allowedRoles` no catálogo do front).
   "nav:dashboard", "nav:pipeline", "nav:contacts", "nav:companies",
-  "nav:inbox", "nav:activities", "nav:campaigns", "nav:widgets",
+  "nav:inbox", "nav:activities", "nav:campaigns", "nav:widgets", "nav:calls",
 ];
 
 export const PRESET_PERMISSIONS: Record<UserRole, readonly string[]> = {

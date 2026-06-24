@@ -5,6 +5,64 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-24 — Telefonia como widget (`calls_history`) — seed + gate
+
+**Contexto.** A telefonia (rotas `/api/calls/*`, `/api/sip-extensions/*`,
+`/api/call-provider-configs/*`) era uma feature sempre ativa. Frontend
+decidiu convertê-la em widget plugável (mesmo padrão de
+`smart_distribution`) — o backend precisa acompanhar com seed do
+catálogo e instalação automática nas orgs existentes pra não quebrar
+quem já usa.
+
+**Decisão.** Migration `20260624140000_add_calls_history_widget` faz três
+coisas em uma transação:
+
+1. **Seed do widget no catálogo global** (`widgets`): slug
+   `calls_history`, INTERNAL, ONLINE, categoria "Comunicação", ícone
+   `phone`. `ON CONFLICT (slug) DO NOTHING` pra idempotência.
+2. **Permissão `nav:calls`** anexada aos presets MANAGER e MEMBER via
+   `UPDATE roles ... permissions || ARRAY['nav:calls']` (idempotente
+   via `NOT 'nav:calls' = ANY(permissions)`). Sincroniza o catálogo de
+   permissões em `lib/authz/permissions.ts` que ganhou
+   `{ action: "calls", label: "Chamadas (histórico)" }` no resource `nav`.
+3. **Backfill `organization_widgets`** — pra TODAS as orgs existentes
+   insere `(orgId, calls_history, ACTIVE)`. Sem esse passo, todas as
+   orgs em produção veriam a telefonia desaparecer no deploy (página,
+   softphone flutuante e botão de ligar somem).
+
+ID determinístico (`ow_<orgId>_calls_history`) garante que o backfill
+sobrevive a re-aplicação parcial via `ON CONFLICT (organizationId, widgetSlug)`.
+
+**Gate dedicado.** `assertCallsHistoryEnabled()` em
+`services/organization-widgets.ts` espelha o
+`assertSmartDistributionEnabled()` — disponível pra uso futuro nas rotas
+`/api/calls/*` como defesa em profundidade quando o frontend não puder
+mais ser confiado isoladamente. **NÃO foi aplicado ainda** nas rotas:
+o webhook do Api4Com (`POST /api/calls/webhook/api4com`) entra sem
+org-context da org do cliente (é assinado pelo provedor, não autenticado
+por sessão), então gateá-lo agora bloquearia o ingresso de calls. Aplicar
+seletivamente nas rotas autenticadas (`GET /api/calls`,
+`POST /api/sip-extensions/me/connect-api4com`) é o próximo passo se/quando
+o backend precisar reforçar o gate.
+
+**Alternativa descartada.** Default `installed=false` + migration que só
+ativa orgs com calls > 0 nos últimos 90 dias — mais "limpo" mas exigiria
+suporte manual pra orgs com uso esporádico que ficariam fora do recorte.
+`installed=true` por padrão + admin desinstala se quiser é mais
+previsível.
+
+**Impacto.**
+- `prisma/migrations/20260624140000_add_calls_history_widget/migration.sql`
+  (novo): seed catálogo + permissão + backfill installations.
+- `src/services/organization-widgets.ts`: novo helper
+  `assertCallsHistoryEnabled()`.
+- `src/lib/sidebar-catalog.ts`: novo entry `calls` com
+  `requiredWidgetSlug: "calls_history"` e `href: "/widgets/calls"`.
+- `src/lib/authz/permissions.ts`: `nav:calls` no catálogo.
+- `src/lib/authz/presets.ts`: MANAGER e MEMBER ganham `nav:calls`.
+
+---
+
 ### 2026-06-24 — Motivos de perda: gate `allow_other` no service (defesa em profundidade)
 
 **Contexto.** Demanda do cliente: poluição da lista de `Deal.lostReason`

@@ -284,3 +284,11 @@ export async function assertWidgetEnabled(slug: string): Promise<void> {
 export async function assertSmartDistributionEnabled(): Promise<void> {
   await assertWidgetEnabled("smart_distribution");
 }
+
+/** Gate dedicado da Telefonia (`calls_history`). Use em rotas /api/calls/*
+ *  e /api/sip-extensions/* pra reforçar o gate no backend (o frontend
+ *  já gateia via useCallsWidget, mas defesa em profundidade evita que
+ *  uma org desinstalada continue gerando registros de chamada). */
+export async function assertCallsHistoryEnabled(): Promise<void> {
+  await assertWidgetEnabled("calls_history");
+}

@@ -293,6 +293,7 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "distribution", label: "Distribuição de leads" },
       { action: "logs",         label: "Logs" },
       { action: "widgets",      label: "Widgets" },
+      { action: "calls",        label: "Chamadas (histórico)" },
     ],
   },
 ];

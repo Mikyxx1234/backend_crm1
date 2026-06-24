@@ -62,6 +62,14 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
     locked: false,
     requiredPermission: "job_opening:view",
   },
+  {
+    key: "calls",
+    title: "Chamadas",
+    href: "/widgets/calls",
+    locked: false,
+    requiredPermission: "nav:calls",
+    requiredWidgetSlug: "calls_history",
+  },
 ] as const;
 
 export const SIDEBAR_KEYS: ReadonlySet<string> = new Set(
