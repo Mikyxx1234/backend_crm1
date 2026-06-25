@@ -162,6 +162,36 @@ export async function listAllowedPipelineIds(
 }
 
 /**
+ * Versão boolean de `requireChannelScope` — pra payloads que precisam expor
+ * "pode/não pode" sem instanciar uma 403 NextResponse. Mesma precedência:
+ *   - flag off → permissivo (true)
+ *   - sem channelId → permissivo (true)
+ *   - delega pra canAccessChannelForUser (deny/manage/anti-lockout aplicados)
+ */
+export async function canDoChannelAction(
+  user: UserLike,
+  action: "view" | "send" | "initiate" | "manage",
+  channelId: string | null | undefined,
+): Promise<boolean> {
+  if (!channelId) return true;
+  const policy = await loadScopedPolicy(user);
+  if (!policy.enabled) return true;
+  const [roleIds, groupIds] = await Promise.all([
+    getUserAssignedRoleIds(user.id),
+    getUserGroupIds(user.id),
+  ]);
+  return canAccessChannelForUser({
+    grants: policy.grants,
+    role: user.role,
+    userId: user.id,
+    action,
+    channelId,
+    roleIds,
+    groupIds,
+  });
+}
+
+/**
  * Mensagem 403 por ação. Mantida fora da função pra facilitar i18n futura.
  */
 const CHANNEL_SCOPE_DENIED_MESSAGE: Record<

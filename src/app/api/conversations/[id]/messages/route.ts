@@ -3,7 +3,10 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { userOrgFilter } from "@/lib/auth-helpers";
 import type { AppUserRole } from "@/lib/auth-types";
-import { requireChannelScope } from "@/lib/authz/resource-policy";
+import {
+  canDoChannelAction,
+  requireChannelScope,
+} from "@/lib/authz/resource-policy";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
@@ -194,10 +197,17 @@ export async function GET(request: Request, context: RouteContext) {
       status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
     }));
 
+    // Bloco C (25/jun/26): expõe `canReply` no payload pra o composer
+    // entrar em modo leitura quando o usuário não tem `channel.send` no
+    // canal. Derivado do mesmo enforcement do POST messages — fonte de
+    // verdade é o backend; client usa só pra UX (desabilitar input + aviso).
+    const canReply = await canDoChannelAction(accessUser, "send", conv.channelId);
+
     return NextResponse.json({
       messages,
       pinnedNoteId,
       channelProvider: conv.channelRef?.provider ?? null,
+      canReply,
       session: {
         lastInboundAt: lastInboundAt?.toISOString() ?? null,
         active: sessionActive,
