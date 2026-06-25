@@ -2,6 +2,7 @@ import type { ChannelProvider, ChannelType } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { deleteChannel, getChannelById, updateChannel } from "@/services/channels";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -59,6 +60,10 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!existing) {
       return NextResponse.json({ message: "Canal não encontrado." }, { status: 404 });
     }
+
+    // Bloco B (25/jun/26): PUT exige `manage` do canal.
+    const manageDenied = await requireChannelScope(session.user, "manage", id);
+    if (manageDenied) return manageDenied;
 
     let body: unknown;
     try {
@@ -138,6 +143,12 @@ export async function DELETE(_request: Request, context: RouteContext) {
     }
 
     const { id } = await context.params;
+
+    // Bloco B (25/jun/26): DELETE exige `manage` do canal. Resolvido
+    // antes do try interno pra responder 403 antes de tentar deletar.
+    const manageDenied = await requireChannelScope(session.user, "manage", id);
+    if (manageDenied) return manageDenied;
+
     try {
       const channel = await deleteChannel(id);
       return NextResponse.json({ channel });

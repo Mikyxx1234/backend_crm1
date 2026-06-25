@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
+import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import { enqueueBaileysControl } from "@/lib/queue";
 import {
@@ -29,6 +30,10 @@ export async function POST(_request: Request, context: RouteContext) {
     if (!channel) {
       return NextResponse.json({ message: "Canal não encontrado." }, { status: 404 });
     }
+
+    // Bloco B (25/jun/26): POST connect exige `manage` do canal.
+    const manageDenied = await requireChannelScope(session.user, "manage", id);
+    if (manageDenied) return manageDenied;
 
     const cfg = parseChannelConfigDecrypted({
       provider: channel.provider,
