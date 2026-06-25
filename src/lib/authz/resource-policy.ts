@@ -29,6 +29,23 @@ async function getUserAssignedRoleIds(userId: string): Promise<string[]> {
   return rows.map((r) => r.roleId);
 }
 
+/**
+ * IDs dos grupos aos quais o usuário pertence. Usado pra resolver grants de
+ * canal por grupo (eixo aditivo de `channel.*.groups`, adicionado em
+ * 25/jun/26). Mesmo padrão de `getUserAssignedRoleIds` — só lê quando a
+ * flag de escopo granular está ligada.
+ *
+ * Filtra por `userId` apenas (cada user pertence a uma única org via
+ * `User.organizationId`; índice em `group_members(userId)` cobre).
+ */
+async function getUserGroupIds(userId: string): Promise<string[]> {
+  const rows = await prismaBase.groupMember.findMany({
+    where: { userId },
+    select: { groupId: true },
+  });
+  return rows.map((r) => r.groupId);
+}
+
 type UserLike = {
   id: string;
   role?: string | null;
@@ -145,18 +162,40 @@ export async function listAllowedPipelineIds(
 }
 
 /**
- * Escopo de canal por usuário. `action: "send"` exige também permissão de
- * "view". `channelId` ausente (conversa legada sem canal) → não escopa.
+ * Mensagem 403 por ação. Mantida fora da função pra facilitar i18n futura.
+ */
+const CHANNEL_SCOPE_DENIED_MESSAGE: Record<
+  "view" | "send" | "initiate" | "manage",
+  string
+> = {
+  view: "Sem acesso a este canal.",
+  send: "Sem permissão para enviar neste canal.",
+  initiate: "Sem permissão para iniciar conversa neste canal.",
+  manage: "Sem permissão para administrar este canal.",
+};
+
+/**
+ * Escopo de canal por usuário. Ações:
+ *   - `view`     — ler conversas/mensagens do canal
+ *   - `send`     — responder em conversa existente (exige view)
+ *   - `initiate` — iniciar conversa nova (exige view)
+ *   - `manage`   — administrar o canal (implica view+send+initiate)
+ *
+ * `channelId` ausente (conversa legada sem canal) → não escopa (mantém
+ * compat com conversas pré-feature).
  */
 export async function requireChannelScope(
   user: UserLike,
-  action: "view" | "send",
+  action: "view" | "send" | "initiate" | "manage",
   channelId: string | null | undefined,
 ): Promise<NextResponse | null> {
   if (!channelId) return null;
   const policy = await loadScopedPolicy(user);
   if (!policy.enabled) return null;
-  const roleIds = await getUserAssignedRoleIds(user.id);
+  const [roleIds, groupIds] = await Promise.all([
+    getUserAssignedRoleIds(user.id),
+    getUserGroupIds(user.id),
+  ]);
   const allowed = canAccessChannelForUser({
     grants: policy.grants,
     role: user.role,
@@ -164,15 +203,11 @@ export async function requireChannelScope(
     action,
     channelId,
     roleIds,
+    groupIds,
   });
   if (allowed) return null;
   return NextResponse.json(
-    {
-      message:
-        action === "send"
-          ? "Sem permissão para enviar neste canal."
-          : "Sem acesso a este canal.",
-    },
+    { message: CHANNEL_SCOPE_DENIED_MESSAGE[action] },
     { status: 403 },
   );
 }
@@ -186,12 +221,16 @@ export async function listAllowedChannelIds(
 ): Promise<string[] | null> {
   const policy = await loadScopedPolicy(user);
   if (!policy.enabled) return null;
-  const roleIds = await getUserAssignedRoleIds(user.id);
+  const [roleIds, groupIds] = await Promise.all([
+    getUserAssignedRoleIds(user.id),
+    getUserGroupIds(user.id),
+  ]);
   return listAllowedChannelIdsForUser({
     grants: policy.grants,
     role: user.role,
     userId: user.id,
     roleIds,
+    groupIds,
   });
 }
 

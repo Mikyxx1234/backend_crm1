@@ -5,6 +5,90 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-25 — Permissões por canal: eixos `initiate`/`manage` + `deny` + grupos
+
+**Contexto.** O scope-grants atual cobre só `channel.view` e `channel.send`
+(modelo aditivo permissivo), e grupos existem apenas pra RBAC booleano
+(`GroupPermission`) — não pra grants por instância de canal. As rotas
+`/api/channels/[id]/*` não validam permissão alguma além de `auth()`,
+qualquer usuário logado pode reconfigurar/desconectar canal. O plano de
+Gestão de Canais (Fase 1) exige granularidade maior: distinguir "ver",
+"responder em conversa existente", "iniciar nova conversa" e "administrar
+o canal", além de poder **negar** acesso a um canal específico pra um
+usuário mesmo que ele tenha grant via role.
+
+**Decisão.**
+
+1. **Estender `ScopeGrants.channel`** com 4 eixos + override `deny`:
+   - `view` (já existia), `send` (já existia), `initiate` (NOVO),
+     `manage` (NOVO), `deny` (NOVO).
+   - Cada eixo aceita `{ users?, roles?, groups? }` — grupos passam a ser
+     principal de 1ª classe no scope-grants (não só RBAC).
+   - **`deny` é GLOBAL ao canal** (não por eixo): listar `chId` em
+     `deny.users[uid]` nega `view`/`send`/`initiate`/`manage` daquele canal
+     para aquele usuário. Decisão consciente: simplicidade > granularidade.
+     Casos que exigem deny granular (raros) podem usar combinação de grants
+     positivos limitados.
+
+2. **Precedência (fixa no `canAccessChannelForUser`).**
+   - ADMIN (enum legado) → bypass total (ignora deny inclusive).
+   - `manage` global no canal (grant que cobre o canal sendo testado) →
+     ignora deny do mesmo canal. **Anti-lockout**: quem administra o canal
+     não pode ser bloqueado dele por accident.
+   - Senão: deny vence grant (user/role/group). Sem deny, modelo
+     permissivo aditivo OR entre users/roles/groups.
+
+3. **Dependências entre eixos:**
+   - `send` exige `view` (não dá pra enviar em canal que não vê).
+   - `initiate` exige `view` (mesma lógica).
+   - `manage` implica `view` + `send` + `initiate` (admin do canal pode tudo).
+
+4. **Enforcement de `initiate` e `manage`** (Bloco B, próximo PR):
+   - `initiate` em `POST /api/conversations/create` (qualquer caminho que
+     cria conversa nova — incluindo `skipSend: true` se já tem outro
+     critério). `send` continua exigido no caminho com mensagem inicial.
+   - `manage` em rotas **operacionais** `/api/channels/[id]/*`:
+     `PUT`, `DELETE`, `POST connect`, `POST disconnect`, `GET qr`.
+     `GET status` e `GET [id]` continuam sob `view` (monitoramento e
+     leitura de configuração não precisam de admin).
+   - `skipSend: true` em `conversations/create` exige **`view`** do canal
+     (não `initiate`). Decisão: abrir chat de visualização ≠ iniciar
+     conversa nova com cliente.
+
+**Alternativas descartadas.**
+
+- `deny` por eixo (`deny.view`, `deny.send`, ...): mais granular, mas a
+  UI fica com 8+ inputs por canal — confusão garantida. Casos reais
+  resolvem com grants positivos.
+- Tornar `manage` uma key RBAC (`channel:manage`) em vez de eixo
+  scope-grants: misturaria os dois sistemas. Scope-grants já cobre grants
+  por instância — `manage` segue o mesmo padrão pra consistência.
+- Eliminar `view` e usar só `manage` implícito: quebra retro-
+  compatibilidade brutal — todos os grants existentes seriam invalidados.
+
+**Impacto.**
+
+- **Backend:** `scope-grants-shared.ts` ganha 3 eixos e 1 override; novo
+  `getUserGroupIds(userId)`; `canAccessChannelForUser` e
+  `listAllowedChannelIdsForUser` ganham `action` estendida + `groupIds` +
+  precedência deny. `parseScopeGrants` normaliza novos campos. Nenhuma
+  migração SQL — JSON aditivo (campos novos são opcionais; orgs sem
+  upgrade ficam funcionalmente idênticas).
+- **Frontend:** cópia desincronizada de `scope-grants-shared.ts` precisa
+  ser atualizada agora (já estava sem `roles` em channel). UI editor
+  ganha controles pros 4 níveis + deny (Bloco D, PR separado).
+- **Compat:** grants existentes (`channel.view` e `channel.send`) seguem
+  funcionando idênticos. Quem não setar `initiate` / `manage` / `deny`
+  cai no comportamento atual permissivo (nada quebra).
+- **Auditoria:** entrega habilita Bloco E (logAudit em PUTs de grants
+  emitindo `permission.granted` / `permission.revoked` no `AuditLog`).
+- **Rollout:** 5 PRs sequenciais (A modelagem → B enforcement →
+  C composer canReply → D UI editor → E grupos+auditoria). PRs B+ são
+  estritamente aditivos em runtime — orgs continuam funcionando sem
+  novos grants graças à precedência permissiva pré-existente.
+
+---
+
 ### 2026-06-24 — Telefonia como widget (`calls_history`) — seed + gate
 
 **Contexto.** A telefonia (rotas `/api/calls/*`, `/api/sip-extensions/*`,
