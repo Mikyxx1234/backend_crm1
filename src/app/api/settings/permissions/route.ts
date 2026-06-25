@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { logAuditAsync } from "@/lib/audit/log";
 import { withOrgContext, requireAuthWithCtx } from "@/lib/auth-helpers";
 import { can } from "@/lib/authz";
 import { getScopeGrants, setScopeGrants, type ScopeGrants } from "@/lib/authz/scope-grants";
@@ -87,7 +88,20 @@ export async function PUT(request: Request) {
     }
 
     if (body.scopeGrants !== undefined) {
+      const beforeGrants = await getScopeGrants();
       await setScopeGrants((body.scopeGrants ?? {}) as ScopeGrants);
+      const afterGrants = await getScopeGrants();
+      // Bloco E (25/jun/26): auditoria do bulk update (PUT global da org).
+      // before/after são objetos grandes — redactValue do logAudit lida
+      // com chaves sensíveis; aqui o conteúdo é só IDs/listas, sem PII.
+      logAuditAsync({
+        entity: "settings",
+        action: "permission.scope.update",
+        entityId: null,
+        before: beforeGrants,
+        after: afterGrants,
+        metadata: { target: "org-bulk" },
+      });
     }
 
     return NextResponse.json({

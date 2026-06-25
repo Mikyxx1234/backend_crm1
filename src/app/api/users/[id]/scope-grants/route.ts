@@ -13,6 +13,7 @@
 
 import { NextResponse } from "next/server";
 
+import { logAuditAsync } from "@/lib/audit/log";
 import { withOrgContext, requireAuthWithCtx } from "@/lib/auth-helpers";
 import { can } from "@/lib/authz";
 import {
@@ -150,14 +151,33 @@ export async function PUT(request: Request, ctx: Ctx) {
     await setScopeGrants(next);
 
     const saved = await getScopeGrants();
-    return NextResponse.json({
-      ok: true,
+    const after = {
       pipelineIds: saved.pipeline?.users?.[userId] ?? null,
       channelViewIds: saved.channel?.view?.users?.[userId] ?? null,
       channelSendIds: saved.channel?.send?.users?.[userId] ?? null,
       channelInitiateIds: saved.channel?.initiate?.users?.[userId] ?? null,
       channelManageIds: saved.channel?.manage?.users?.[userId] ?? null,
       channelDenyIds: saved.channel?.deny?.users?.[userId] ?? null,
+    };
+
+    // Bloco E (25/jun/26): auditoria de mudanças de grants. Snapshot
+    // antes/depois pro reviewer entender exatamente o que mudou.
+    logAuditAsync({
+      entity: "settings",
+      action: "permission.scope.update",
+      entityId: userId,
+      before: {
+        pipelineIds: grants.pipeline?.users?.[userId] ?? null,
+        channelViewIds: grants.channel?.view?.users?.[userId] ?? null,
+        channelSendIds: grants.channel?.send?.users?.[userId] ?? null,
+        channelInitiateIds: grants.channel?.initiate?.users?.[userId] ?? null,
+        channelManageIds: grants.channel?.manage?.users?.[userId] ?? null,
+        channelDenyIds: grants.channel?.deny?.users?.[userId] ?? null,
+      },
+      after,
+      metadata: { target: "user", targetId: userId },
     });
+
+    return NextResponse.json({ ok: true, ...after });
   });
 }
