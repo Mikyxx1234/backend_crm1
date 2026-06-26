@@ -2435,12 +2435,20 @@ model Message {
   /// vínculo identificado mantêm NULL.
   templateConfigId String?                 @map("template_config_id")
   templateConfig   WhatsAppTemplateConfig? @relation(fields: [templateConfigId], references: [id], onDelete: SetNull)
+  /// Conexão (Channel) por onde ESTA mensagem trafegou. Permite distinguir,
+  /// dentro de uma mesma conversa, mensagens recebidas/enviadas por contas
+  /// distintas do mesmo tipo de canal (ex.: dois números de WhatsApp da org).
+  /// Snapshot no momento da criação. SetNull se o canal for excluído.
+  /// Nullable: mensagens históricas (anteriores à feature) ficam sem vínculo.
+  channelId        String?
+  channelRef       Channel?                @relation(fields: [channelId], references: [id], onDelete: SetNull)
   createdAt        DateTime                @default(now())
 
   @@index([organizationId])
   @@index([organizationId, createdAt])
   @@index([conversationId, createdAt])
   @@index([conversationId, authorType, createdAt])
+  @@index([channelId])
   @@index([externalId])
   @@index([aiAgentUserId, createdAt])
   // Index isolado em createdAt: o relatório /api/reports/messaging
@@ -2616,6 +2624,7 @@ model Channel {
   updatedAt         DateTime        @updatedAt
 
   conversations     Conversation[]
+  messages          Message[]
   baileysAuthKeys   BaileysAuthKey[]
   campaigns         Campaign[]
   metaWebhookEvents MetaWebhookEvent[]

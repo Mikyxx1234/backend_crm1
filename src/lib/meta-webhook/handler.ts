@@ -587,7 +587,9 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     if (Object.keys(updates).length > 0) {
       await prisma.conversation.update({ where: { id: existing.id }, data: updates });
     }
-    return existing;
+    // Retorna o channelId já reconciliado com o canal que recebeu (targetChannel),
+    // para o caller carimbar a mensagem inbound na conexão correta.
+    return { ...existing, channelId: targetChannel?.id ?? existing.channelId };
   }
 
   const contact = await prisma.contact.findUnique({
@@ -1797,6 +1799,7 @@ async function executePostBody(
             return tx.message.create({
               data: withOrgFromCtx({
                 conversationId: conversation.id,
+                channelId: conversation.channelId ?? undefined,
                 content: parsed.text,
                 direction: isSystemMessage ? "system" : "in",
                 messageType: inboundMsgType,

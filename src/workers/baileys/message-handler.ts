@@ -528,6 +528,7 @@ export async function handleBaileysMessage(
       await tx.message.create({
         data: withOrgFromCtx({
           conversationId: conversation.id,
+          channelId,
           content: parsed.text,
           direction: "in",
           messageType: parsed.messageType,

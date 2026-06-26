@@ -158,6 +158,7 @@ export async function sendAgentMessage(args: {
     const saved = await prisma.message.create({
       data: withOrgFromCtx({
         conversationId: args.conversationId,
+        channelId: conv?.channelRef?.id ?? undefined,
         content: text,
         direction: "out",
         messageType: "text",

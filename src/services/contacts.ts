@@ -592,6 +592,7 @@ export async function getContactById(id: string) {
             updatedAt: true,
             assignedToId: true,
             assignedTo: { select: { id: true, name: true, email: true } },
+            channelRef: { select: { id: true, name: true, type: true, phoneNumber: true } },
           },
         }),
       [] as Awaited<
@@ -607,6 +608,7 @@ export async function getContactById(id: string) {
               updatedAt: true;
               assignedToId: true;
               assignedTo: { select: { id: true; name: true; email: true } };
+              channelRef: { select: { id: true; name: true; type: true; phoneNumber: true } };
             };
           }>
         >

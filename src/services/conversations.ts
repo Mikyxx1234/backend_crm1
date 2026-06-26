@@ -492,7 +492,9 @@ export async function getConversationLite(id: string) {
     select: {
       id: true, externalId: true, contactId: true, status: true,
       channelId: true, waJid: true, organizationId: true,
-      channelRef: { select: { id: true, provider: true, config: true } },
+      channelRef: {
+        select: { id: true, provider: true, config: true, name: true, phoneNumber: true, type: true },
+      },
     },
   });
 }

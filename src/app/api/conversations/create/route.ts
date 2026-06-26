@@ -196,6 +196,7 @@ export async function POST(request: Request) {
         const msgRow = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: conversation.id,
+            channelId: channel.id,
             content: message,
             direction: "out",
             messageType: "text",
@@ -234,6 +235,7 @@ export async function POST(request: Request) {
         await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: conversation.id,
+            channelId: channel.id,
             content: message,
             direction: "out",
             messageType: "text",

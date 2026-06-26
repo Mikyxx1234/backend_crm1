@@ -158,6 +158,7 @@ export async function POST(request: Request, context: RouteContext) {
         const msgRow = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: conv.id,
+            channelId: conv.channelRef?.id ?? undefined,
             content: caption || `📎 ${fileName}`,
             direction: "out",
             messageType: mediaType,
@@ -314,6 +315,7 @@ export async function POST(request: Request, context: RouteContext) {
       await prisma.message.create({
         data: withOrgFromCtx({
           conversationId: conv.id,
+          channelId: conv.channelRef?.id ?? undefined,
           content: displayContent,
           direction: "out",
           messageType: mediaType,
