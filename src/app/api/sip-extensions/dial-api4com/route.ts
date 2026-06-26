@@ -86,11 +86,17 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = await dialApi4ComCall(dialAuth.apiToken, dialAuth.extension, phone, {
-      crm_user_id: authResult.user.id,
-      ...(dealId ? { deal_id: dealId } : {}),
-      ...(contactId ? { contact_id: contactId } : {}),
-    });
+    const result = await dialApi4ComCall(
+      dialAuth.apiToken,
+      dialAuth.extension,
+      phone,
+      {
+        crm_user_id: authResult.user.id,
+        ...(dealId ? { deal_id: dealId } : {}),
+        ...(contactId ? { contact_id: contactId } : {}),
+      },
+      dialAuth.organizationId,
+    );
     if (!result.ok) {
       return NextResponse.json(result, { status: 400 });
     }

@@ -16,6 +16,8 @@ import { encryptSecret } from "@/lib/crypto/secrets";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
 
+import { resolveApi4ComGateway } from "@/services/telephony-providers/api4com";
+
 import { Api4ComClient, getApi4ComClient } from "./client";
 import { Api4ComConflictError } from "./errors";
 import type { Api4ComExtensionResponse } from "./types";
@@ -52,8 +54,7 @@ export async function enableTelephony(
   organizationId: string,
 ): Promise<ProvisionResult> {
   const client = getApi4ComClient();
-  const gateway =
-    process.env.API4COM_GATEWAY ?? `crm-${organizationId.slice(0, 8)}`;
+  const gateway = resolveApi4ComGateway(organizationId);
   const webhookVersion = process.env.API4COM_WEBHOOK_VERSION ?? "v1.4";
 
   let ext = await findOrCreateExtensionRecord(userId, organizationId);

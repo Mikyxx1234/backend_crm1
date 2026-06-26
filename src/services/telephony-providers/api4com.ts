@@ -219,6 +219,30 @@ type DialerResponse = {
 const DIALER_ACK_MS = 5_000;
 
 /**
+ * Resolve o `gateway` enviado no `metadata.gateway` da chamada /dialer e
+ * cadastrado em `webhookConstraint.metadata.gateway` na integration.
+ *
+ * INVARIANTE CRÍTICA: o valor retornado aqui DEVE ser idêntico nos dois
+ * lados (cadastro do webhook + disparo da chamada). Se divergir, a Api4com
+ * cadastra o webhook mas NUNCA o dispara — chamadas viram fantasmas. Por
+ * isso a função aceita opcional `organizationId` mas garante um default
+ * único (não muda entre chamadas com a mesma config).
+ *
+ * Preferência (em ordem):
+ *   1. env `API4COM_GATEWAY` (override explícito)
+ *   2. `crm-<orgId.slice(0,8)>` quando orgId disponível (multi-tenant)
+ *   3. `crm-integrado` (fallback legacy; mantido pra compat com instalações
+ *      single-tenant antigas onde o webhook já está cadastrado nesse nome)
+ */
+export function resolveApi4ComGateway(organizationId?: string | null): string {
+  const envOverride = process.env.API4COM_GATEWAY?.trim();
+  if (envOverride) return envOverride;
+  const orgPrefix = organizationId?.trim().slice(0, 8);
+  if (orgPrefix) return `crm-${orgPrefix}`;
+  return "crm-integrado";
+}
+
+/**
  * Inicia chamada de saída via REST (webphone próprio Api4Com).
  * O PBX liga para o ramal do usuário; o JsSIP deve auto-atender a sessão SIP.
  *
@@ -227,12 +251,16 @@ const DIALER_ACK_MS = 5_000;
  * `extraMetadata` é mesclada à metadata enviada à Api4com — todos os campos
  * voltam no webhook (caminho de correlação CRM ↔ chamada). Convenção do PBX:
  * snake_case (`crm_user_id`, `deal_id`, `contact_id`).
+ *
+ * Passe `organizationId` quando souber (sempre que possível) — a resolução
+ * do gateway depende disso pra casar com o webhookConstraint cadastrado.
  */
 export async function dialApi4ComCall(
   token: string,
   extension: string,
   phoneRaw: string,
   extraMetadata: Record<string, string | number | boolean | null | undefined> = {},
+  organizationId?: string | null,
 ): Promise<{ ok: true; callId?: string } | Api4ComFieldError> {
   const phone = normalizePhone(phoneRaw);
   if (!phone) {
@@ -244,7 +272,7 @@ export async function dialApi4ComCall(
   }
 
   const baseMetadata: Record<string, string | number | boolean> = {
-    gateway: process.env.API4COM_GATEWAY?.trim() || "crm-integrado",
+    gateway: resolveApi4ComGateway(organizationId),
   };
   for (const [k, v] of Object.entries(extraMetadata)) {
     if (v === undefined || v === null) continue;
@@ -307,21 +335,32 @@ export async function dialApi4ComCall(
 
 /**
  * PATCH /integrations — configura o webhook que a Api4com vai disparar
- * a cada `channel-answer` / `channel-hangup`. Usa o TOKEN DO USUÁRIO
- * (login email/senha) em vez do `API4COM_SERVICE_TOKEN` admin —
- * complementa o fluxo manual `connect-api4com`, sem exigir token de
- * serviço configurado.
+ * a cada `channel-answer` / `channel-hangup`.
  *
- * A Api4com aceita esse PATCH com user token na maioria dos planos,
- * mas pode rejeitar com 403 dependendo do perfil. Em caso de erro,
- * o caller deve mostrar a URL pra o operador colar manualmente no
- * portal da Api4com (caminho de fallback).
+ * IMPORTANTE — qual token usar:
+ *   - Tokens DE USUÁRIO comum (login email/senha) NÃO têm permissão pra
+ *     cadastrar integration com `gateway` customizado. A Api4com aceita
+ *     o PATCH (200 OK) mas SILENCIOSAMENTE normaliza pra `gateway: "webhook"`
+ *     e descarta o `webhookConstraint` — resultando em integration inútil
+ *     (catch-all que não dispara em chamadas reais).
+ *   - Tokens ADMIN (criados via /users/accessTokens ttl:-1, lidos do env
+ *     `API4COM_SERVICE_TOKEN`) aceitam `gateway` customizado e gravam o
+ *     `webhookConstraint` corretamente — fazendo o webhook disparar nas
+ *     chamadas do CRM (que enviam `metadata.gateway = "crm-<orgId>"`).
  *
- * `webhookConstraint.metadata.gateway` filtra os eventos que a
- * Api4com envia — só dispara webhook quando o `metadata.gateway`
- * da chamada (definido em `dialApi4ComCall`) bate com esse valor.
- * Sem isso, a integração receberia webhooks de TODA chamada da org
- * na Api4com, incluindo originadas fora do CRM.
+ * Esta função:
+ *   1. Faz o PATCH com o token informado
+ *   2. VALIDA a response: se a Api4com NÃO persistiu `gateway` correto,
+ *      retorna erro pra o caller usar fallback (token admin ou manual)
+ *
+ * Esta função substitui silenciosa downgrade por erro explícito — preferimos
+ * falhar visivelmente a entregar integration quebrada. Caller deve tentar
+ * com `API4COM_SERVICE_TOKEN` antes do user token.
+ *
+ * `webhookConstraint.metadata.gateway` filtra os eventos que a Api4com
+ * envia — só dispara webhook quando o `metadata.gateway` da chamada
+ * (definido em `dialApi4ComCall`) bate com esse valor. Sem isso, a
+ * integração receberia webhooks de TODA chamada da org na Api4com.
  */
 export async function upsertApi4ComWebhookWithUserToken(
   token: string,
@@ -350,5 +389,24 @@ export async function upsertApi4ComWebhookWithUserToken(
   });
 
   if (!result.ok) return result;
+
+  // ── Validação: Api4com aceita PATCH com user token mas pode normalizar
+  // silenciosamente pra `gateway: "webhook"` (sem permissão pra gateway
+  // custom). Detectamos isso lendo a response e comparando com o esperado.
+  const persisted = result.data as
+    | { gateway?: string; webhookConstraint?: unknown }
+    | null
+    | undefined;
+  const persistedGateway = persisted?.gateway?.trim();
+  if (persistedGateway && persistedGateway !== payload.gateway) {
+    return {
+      ok: false,
+      field: "email",
+      message:
+        `Api4com aceitou o webhook mas gravou como "${persistedGateway}" em vez de "${payload.gateway}". ` +
+        "Provavelmente o token usado não tem permissão pra criar integration custom. " +
+        "Configure API4COM_SERVICE_TOKEN (token admin) no .env do backend.",
+    };
+  }
   return { ok: true };
 }

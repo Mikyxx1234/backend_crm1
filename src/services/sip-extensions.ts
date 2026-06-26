@@ -280,7 +280,7 @@ export async function getMyApi4ComDialAuth(
  */
 export async function resolveApi4ComDialToken(
   userId: string,
-): Promise<{ extension: string; apiToken: string } | null> {
+): Promise<{ extension: string; apiToken: string; organizationId: string } | null> {
   const organizationId = getOrgIdOrThrow();
 
   const ext = await prisma.sipExtension.findUnique({
@@ -312,12 +312,12 @@ export async function resolveApi4ComDialToken(
       },
     });
 
-    return { extension: ext.authUser, apiToken: login.token };
+    return { extension: ext.authUser, apiToken: login.token, organizationId };
   }
 
   const apiToken = getApi4ComTokenFromProviderMeta(ext.providerMeta);
   if (!apiToken) return null;
-  return { extension: ext.authUser, apiToken };
+  return { extension: ext.authUser, apiToken, organizationId };
 }
 
 /**

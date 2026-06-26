@@ -10,6 +10,7 @@ import {
   listApi4ComExtensions,
   loginApi4Com,
   pickExtensionForEmail,
+  resolveApi4ComGateway,
   upsertApi4ComWebhookWithUserToken,
 } from "@/services/telephony-providers/api4com";
 
@@ -103,16 +104,13 @@ export async function POST(request: Request) {
       const webhookUrl = baseUrl
         ? `${baseUrl}/api/webhooks/calls/api4com?token=${providerConfig.webhookToken}`
         : `/api/webhooks/calls/api4com?token=${providerConfig.webhookToken}`;
-      const gateway =
-        (process.env.API4COM_GATEWAY?.trim() || `crm-${extension.organizationId.slice(0, 8)}`);
+      const gateway = resolveApi4ComGateway(extension.organizationId);
 
       let webhook:
         | { configured: true }
         | { configured: false; webhookUrl: string; manualSetupRequired: true; reason: string };
 
       if (!baseUrl) {
-        // Sem APP_URL setada, a Api4com não tem pra onde mandar.
-        // Mostra URL relativa só pra log; admin tem que setar APP_URL.
         webhook = {
           configured: false,
           webhookUrl,
@@ -121,7 +119,16 @@ export async function POST(request: Request) {
             "APP_URL (env do backend) não está definida. Configure-a e refaça a conexão.",
         };
       } else {
-        const setupResult = await upsertApi4ComWebhookWithUserToken(login.token, {
+        // Tokens de USUÁRIO comum não conseguem cadastrar integration com
+        // gateway customizado (a Api4com normaliza silenciosamente pra
+        // "webhook" sem constraint, resultando em integration que NÃO
+        // dispara). Usamos o token ADMIN (env API4COM_SERVICE_TOKEN) sempre
+        // que disponível; fallback no user token só pra ambientes sem
+        // service token configurado (vai falhar visivelmente, sem ficar
+        // mudo como antes).
+        const adminToken = process.env.API4COM_SERVICE_TOKEN?.trim();
+        const webhookToken = adminToken || login.token;
+        const setupResult = await upsertApi4ComWebhookWithUserToken(webhookToken, {
           gateway,
           webhookUrl,
         });
@@ -132,7 +139,9 @@ export async function POST(request: Request) {
             configured: false,
             webhookUrl,
             manualSetupRequired: true,
-            reason: setupResult.message,
+            reason: adminToken
+              ? setupResult.message
+              : `${setupResult.message} (Dica: defina API4COM_SERVICE_TOKEN no .env do backend pra setup automático.)`,
           };
         }
       }
