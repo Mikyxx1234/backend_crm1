@@ -993,6 +993,64 @@ export type BoardLimitOptions = {
   sortDirection?: BoardSortDirection;
 };
 
+/**
+ * Resolve TODOS os IDs de deals que batem nos mesmos critérios do board
+ * (status + visibilidade + filtros avançados), opcionalmente escopados a uma
+ * única etapa. Usado pela edição em massa "selecionar todos" — diferente do
+ * `getBoardData`, não há limite por coluna; varre o pipeline inteiro até `cap`.
+ *
+ * Reaproveita exatamente `buildDealWhereFromFilters` (mesma engine do POST do
+ * board), garantindo que "todos os que batem no filtro" = o que o usuário vê.
+ *
+ * `cap` protege contra operações gigantes (default e teto = 5000, igual ao
+ * limite de `dealIds` aceito pela rota de bulk). `capped=true` sinaliza que
+ * havia mais que `cap` — o caller decide avisar o usuário.
+ */
+export async function resolveBoardDealIds(
+  pipelineId: string,
+  opts: {
+    visibilityOwnerId?: string | null;
+    statusFilter?: DealStatus | "ALL";
+    filters?: AdvancedDealFilters;
+    stageId?: string;
+    cap?: number;
+  } = {},
+): Promise<{ ids: string[]; capped: boolean }> {
+  const cap = Math.max(1, Math.min(opts.cap ?? 5000, 5000));
+  const conditions: Prisma.DealWhereInput[] = [];
+
+  if (opts.statusFilter && opts.statusFilter !== "ALL") {
+    conditions.push({ status: opts.statusFilter });
+  } else if (!opts.statusFilter) {
+    conditions.push({ status: "OPEN" });
+  }
+  if (opts.visibilityOwnerId) {
+    conditions.push({ ownerId: opts.visibilityOwnerId });
+  }
+  if (opts.filters && Object.keys(opts.filters).length > 0) {
+    const advConditions = await buildDealWhereFromFilters(opts.filters);
+    for (const c of advConditions) conditions.push(c);
+  }
+  // Escopo: etapa específica ou pipeline inteiro (via relação stage.pipelineId).
+  if (opts.stageId) {
+    conditions.push({ stageId: opts.stageId, stage: { is: { pipelineId } } });
+  } else {
+    conditions.push({ stage: { is: { pipelineId } } });
+  }
+
+  const where: Prisma.DealWhereInput =
+    conditions.length === 1 ? conditions[0] : { AND: conditions };
+
+  const rows = await prisma.deal.findMany({
+    where,
+    select: { id: true },
+    take: cap + 1,
+    orderBy: { position: "asc" },
+  });
+  const capped = rows.length > cap;
+  return { ids: rows.slice(0, cap).map((r) => r.id), capped };
+}
+
 export async function getBoardData(
   pipelineId: string,
   visibilityOwnerId?: string | null,
