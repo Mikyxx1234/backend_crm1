@@ -20,7 +20,7 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import type { CallDirection, CallStatus } from "@prisma/client";
+import type { CallDirection, CallStatus, Prisma } from "@prisma/client";
 
 import { withResolvedContext } from "@/lib/auth-helpers";
 import { getLogger } from "@/lib/logger";
@@ -29,6 +29,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { logEvent } from "@/services/activity-log";
+import { fireTrigger } from "@/services/automation-triggers";
 import { getContacts, createContact } from "@/services/contacts";
 import { getAdapter } from "./call-adapters";
 import { findConfigByWebhookToken, decryptWebhookSecret } from "./call-provider-configs";
@@ -280,6 +281,25 @@ export async function processWebhookEvent(
         // emitir ActivityEvent na timeline do deal.
         const crmMetadata = normalized.crmMetadata ?? {};
 
+        // Resolve dealId/extensionId da metadata (validando org) uma única
+        // vez — reusado no upsert do Call, no ActivityEvent e no gatilho.
+        let resolvedDealId: string | null = null;
+        if (crmMetadata.dealId) {
+          const d = await prisma.deal.findUnique({
+            where: { id: crmMetadata.dealId },
+            select: { id: true, organizationId: true },
+          });
+          if (d && d.organizationId === organizationId) resolvedDealId = d.id;
+        }
+        let resolvedExtensionId: string | null = null;
+        if (crmMetadata.crmUserId) {
+          const ext = await prisma.sipExtension.findFirst({
+            where: { userId: crmMetadata.crmUserId },
+            select: { id: true },
+          });
+          if (ext) resolvedExtensionId = ext.id;
+        }
+
         let call: { id: string; contactId: string | null; recordingUrl: string | null };
 
         if (existingCall) {
@@ -291,6 +311,8 @@ export async function processWebhookEvent(
               ...(answeredAt ? { answeredAt } : {}),
               ...(endedAt ? { endedAt } : {}),
               ...(durationSeconds !== undefined ? { durationSeconds } : {}),
+              ...(resolvedDealId ? { dealId: resolvedDealId } : {}),
+              ...(resolvedExtensionId ? { extensionId: resolvedExtensionId } : {}),
             },
             select: { id: true, contactId: true, recordingUrl: true },
           });
@@ -308,6 +330,9 @@ export async function processWebhookEvent(
                 answeredAt,
                 endedAt,
                 durationSeconds,
+                ...(resolvedDealId ? { dealId: resolvedDealId } : {}),
+                ...(resolvedExtensionId ? { extensionId: resolvedExtensionId } : {}),
+                metadata: crmMetadata as unknown as Prisma.InputJsonValue,
               },
               organizationId,
             ),
@@ -390,12 +415,12 @@ export async function processWebhookEvent(
           normalized.status === "BUSY" ||
           normalized.status === "FAILED";
 
-        if (isTerminal && crmMetadata.dealId) {
+        if (isTerminal && resolvedDealId) {
           const deal = await prisma.deal.findUnique({
-            where: { id: crmMetadata.dealId },
-            select: { id: true, title: true, organizationId: true },
+            where: { id: resolvedDealId },
+            select: { id: true, title: true },
           });
-          if (deal && deal.organizationId === organizationId) {
+          if (deal) {
             const eventType =
               normalized.status === "COMPLETED" ? "CALL_COMPLETED" : "CALL_MISSED";
             await logEvent({
@@ -415,12 +440,35 @@ export async function processWebhookEvent(
                 to: toNormalized,
               },
             });
-          } else {
-            log.warn(
-              { dealId: crmMetadata.dealId, organizationId },
-              "[calls] dealId da metadata não encontrado ou de outra org — ignorando",
-            );
           }
+        }
+
+        // ── 11. Disparar automações de ligação (call_received/call_made) ──
+        // Só no evento terminal (hangup) pra não disparar a cada
+        // channel-answer/ringing. Vale mesmo sem deal — uma automação de
+        // "ligação recebida" pode rodar só com o contato.
+        if (isTerminal) {
+          const answered =
+            Boolean(resolvedAnsweredAt) || (durationSeconds ?? 0) > 0;
+          const event =
+            normalized.direction === "INBOUND" ? "call_received" : "call_made";
+          await fireTrigger(event, {
+            contactId: call.contactId ?? crmMetadata.contactId ?? undefined,
+            dealId: resolvedDealId ?? undefined,
+            data: {
+              callId: call.id,
+              provider: input.provider,
+              direction: normalized.direction,
+              status: normalized.status,
+              answered,
+              durationSeconds: durationSeconds ?? null,
+              from: fromNormalized,
+              to: toNormalized,
+              crmUserId: crmMetadata.crmUserId ?? null,
+            },
+          }).catch((err) => {
+            log.warn({ err }, "[calls] fireTrigger de ligação falhou — ignorando");
+          });
         }
 
         return { ok: true as const, callId: call.id, callEventId: callEvent.id };

@@ -19,6 +19,8 @@ export const AUTOMATION_TRIGGER_TYPES = [
   "agent_changed",
   "message_received",
   "message_sent",
+  "call_received",
+  "call_made",
 ] as const;
 
 export type AutomationTriggerType = (typeof AUTOMATION_TRIGGER_TYPES)[number];
@@ -211,6 +213,19 @@ export function evaluateTrigger(
           if (!dataDealStatus) return false;
           if (!accepted.includes(dataDealStatus.toUpperCase())) return false;
         }
+      }
+      return true;
+    }
+    case "call_received":
+    case "call_made": {
+      // Filtro por resultado da ligação. O payload (services/calls.ts)
+      // inclui `answered: boolean`. status "" = qualquer; "answered" =
+      // só atendidas; "missed" = só não atendidas.
+      const status = readString(cfg, "status");
+      if (status === "answered" || status === "missed") {
+        const answered = data.answered === true;
+        if (status === "answered" && !answered) return false;
+        if (status === "missed" && answered) return false;
       }
       return true;
     }

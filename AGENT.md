@@ -5,6 +5,44 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-26 — Ação `send_product`, sync de ligações (Api4com CDR) e gatilhos de ligação
+
+**Decisão.**
+1. **Ação de automação `send_product`** (`lib/automation-workflow.ts` +
+   `case` no `automation-executor.ts`). Faz lookup do `Product`, injeta
+   variáveis `{{produto.nome|preco|sku|descricao|unidade}}` via `__variables`
+   e **delega** ao `send_whatsapp_message` — reaproveita envio Meta,
+   fallback de template, persistência e SSE. Texto vazio = resumo padrão.
+2. **Sync/reconciliação de chamadas** em `services/call-sync-api4com.ts`
+   (`GET /api/v1/calls` da Api4com), exposto em `POST /api/calls/sync`.
+   Filtra por `metadata.gateway` (só chamadas deste CRM) e faz upsert
+   idempotente por `(org, "api4com", providerCallId)`. **Não** dispara
+   automações (evita "explodir" gatilhos em chamadas antigas no 1º sync).
+3. **Persistência extra no upsert do webhook** (`services/calls.ts`):
+   `dealId`, `extensionId` (via `crm_user_id` → SipExtension) e `metadata`.
+4. **Gatilhos `call_received`/`call_made`** disparados via `fireTrigger` no
+   evento terminal do webhook + `evaluateTrigger` (filtro answered/missed)
+   em `services/automations.ts`.
+5. **Shape de `GET /api/calls`** serializado para o `CallRecord` do
+   frontend (`phone`/`recordUrl`/datas ISO) — antes vazava row cru do Prisma.
+
+**Contexto.** O registro em `/calls` dependia só do webhook Api4com, que
+falha silenciosamente quando o gateway diverge / `APP_URL` ausente. A doc
+oficial expõe `GET /calls` (CDR completo), então o sync garante o histórico
+independentemente do webhook. `send_product` evita uma 2ª implementação de
+envio WhatsApp.
+
+**Alternativas descartadas.**
+- *Disparar automação de ligação a partir do sync*: rejeitado (firing em
+  massa no backfill). Tempo real fica só no webhook.
+- *Card de catálogo WhatsApp em send_product*: adiado (exige catálogo Meta).
+
+**Impacto.** Aditivo; sem migration nova (campos `dealId`/`extensionId`/
+`metadata` já existiam em `Call`). Worker de automação precisa do código
+novo para `send_product`/gatilhos de ligação.
+
+---
+
 ### 2026-06-25 — Permissões por canal: eixos `initiate`/`manage` + `deny` + grupos
 
 **Contexto.** O scope-grants atual cobre só `channel.view` e `channel.send`

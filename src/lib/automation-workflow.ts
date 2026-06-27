@@ -17,6 +17,8 @@ export type AutomationTriggerType =
   | "agent_changed"
   | "message_received"
   | "message_sent"
+  | "call_received"
+  | "call_made"
   | "manual";
 
 export type AutomationStep = {
@@ -38,6 +40,8 @@ export const AUTOMATION_TRIGGER_TYPES: AutomationTriggerType[] = [
   "agent_changed",
   "message_received",
   "message_sent",
+  "call_received",
+  "call_made",
   "manual",
 ];
 
@@ -71,6 +75,7 @@ export const ACTION_STEP_TYPES = [
   "transfer_to_ai_agent",
   "execute_distribution",
   "inventory.adjust",
+  "send_product",
 ] as const;
 
 export type ActionStepType = (typeof ACTION_STEP_TYPES)[number];
@@ -89,6 +94,8 @@ export function triggerTypeLabel(t: string): string {
     agent_changed: "Agente alterado",
     message_received: "Mensagem recebida",
     message_sent: "Mensagem enviada",
+    call_received: "Ligação recebida",
+    call_made: "Ligação realizada",
     manual: "Manual (executar pela conversa)",
   };
   return map[t] ?? t;
@@ -125,6 +132,7 @@ export function stepTypeLabel(t: string): string {
     transfer_to_ai_agent: "Transferir para agente IA",
     execute_distribution: "Executar distribuição",
     "inventory.adjust": "Ajustar alocação (estoque/vagas)",
+    send_product: "Enviar produto",
   };
   return map[t] ?? t;
 }
@@ -184,6 +192,15 @@ export function summarizeTriggerConfig(
     case "message_sent": {
       const ch = c.channel;
       return ch ? `Canal: ${String(ch)}` : "Qualquer canal";
+    }
+    case "call_received":
+    case "call_made": {
+      const status = c.status ? String(c.status) : "";
+      const statusLabel: Record<string, string> = {
+        answered: "Atendidas",
+        missed: "Não atendidas",
+      };
+      return status ? (statusLabel[status] ?? status) : "Qualquer ligação";
     }
     case "manual":
       return "Disparada manualmente da conversa";
@@ -303,6 +320,11 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
       const t = c.distributionType ? String(c.distributionType) : "";
       return t ? `Distribuição: ${t}` : "Distribuição padrão";
     }
+    case "send_product": {
+      const name = c.productName ? String(c.productName) : "";
+      if (name) return `Produto: ${name}`;
+      return c.productId ? `Produto: ${String(c.productId).slice(0, 8)}…` : "Selecionar produto";
+    }
     default:
       return "—";
   }
@@ -320,6 +342,8 @@ export function isStepIncomplete(stepType: string, config: unknown): boolean {
   switch (stepType) {
     case "send_whatsapp_message":
       return !str(c.content);
+    case "send_product":
+      return !str(c.productId);
     case "send_whatsapp_template":
       return !str(c.templateName);
     case "send_whatsapp_media":
@@ -362,6 +386,10 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       return { type: "TASK", title: "", description: "" };
     case "send_whatsapp_message":
       return { content: "" };
+    case "send_product":
+      // content: texto livre com variáveis {{produto.*}}. Vazio = monta um
+      // resumo padrão do produto no executor.
+      return { productId: "", productName: "", content: "" };
     case "send_whatsapp_template":
       return { templateName: "", languageCode: "pt_BR" };
     case "send_whatsapp_media":
@@ -590,6 +618,10 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
     case "message_received":
     case "message_sent":
       return { channel: "" };
+    case "call_received":
+    case "call_made":
+      // status: "" (qualquer) | "answered" | "missed"
+      return { status: "" };
     case "manual":
       return {};
     default:

@@ -51,7 +51,30 @@ export async function GET(request: Request) {
 
     try {
       const result = await listCalls(filters);
-      return NextResponse.json(result);
+      // Serializa para o shape `CallRecord` esperado pelo frontend
+      // (phone = outra ponta, recordUrl, datas em ISO). Antes o front
+      // recebia o row cru do Prisma (fromNumber/toNumber/recordingUrl) e
+      // exibia "undefined"/datas inválidas.
+      const calls = result.calls.map((c) => ({
+        id: c.id,
+        direction: c.direction,
+        status: c.status,
+        phone: c.direction === "INBOUND" ? c.fromNumber : c.toNumber,
+        durationSeconds: c.durationSeconds ?? null,
+        startedAt: (c.startedAt ?? c.createdAt)?.toISOString() ?? null,
+        endedAt: c.endedAt ? c.endedAt.toISOString() : null,
+        recordUrl: c.recordingUrl ?? null,
+        contactId: c.contactId ?? null,
+        dealId: c.dealId ?? null,
+        extensionId: c.extensionId ?? null,
+        contact: c.contact ?? null,
+      }));
+      return NextResponse.json({
+        calls,
+        total: result.total,
+        page: result.page,
+        perPage: result.perPage,
+      });
     } catch (e) {
       console.error("[calls] GET:", e);
       return NextResponse.json({ message: "Erro ao listar chamadas." }, { status: 500 });
