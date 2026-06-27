@@ -27,6 +27,7 @@ import { getLogger } from "@/lib/logger";
 import { normalizePhone } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
+import { sseBus } from "@/lib/sse-bus";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { logEvent } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -35,6 +36,15 @@ import { getAdapter } from "./call-adapters";
 import { findConfigByWebhookToken, decryptWebhookSecret } from "./call-provider-configs";
 
 const log = getLogger("calls-service");
+
+/** Duração legível pra o aviso de chamada no chat (ex.: "2min 12s", "45s"). */
+function formatCallDuration(totalSeconds: number): string {
+  const s = Math.max(0, Math.round(totalSeconds));
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  if (m <= 0) return `${sec}s`;
+  return sec > 0 ? `${m}min ${sec}s` : `${m}min`;
+}
 
 // ── Tipos públicos ────────────────────────────────────────────────────────
 
@@ -415,31 +425,118 @@ export async function processWebhookEvent(
           normalized.status === "BUSY" ||
           normalized.status === "FAILED";
 
-        if (isTerminal && resolvedDealId) {
-          const deal = await prisma.deal.findUnique({
-            where: { id: resolvedDealId },
-            select: { id: true, title: true },
-          });
-          if (deal) {
-            const eventType =
-              normalized.status === "COMPLETED" ? "CALL_COMPLETED" : "CALL_MISSED";
+        // Guard de idempotência: só registra no primeiro evento terminal.
+        // Se o provedor reenviar o hangup, `existingCall.endedAt` já estará
+        // setado e evitamos duplicar log/timeline/aviso no chat.
+        const firstTerminal = isTerminal && !existingCall?.endedAt;
+
+        if (firstTerminal) {
+          const isInbound = normalized.direction === "INBOUND";
+          const answered =
+            Boolean(resolvedAnsweredAt) || (durationSeconds ?? 0) > 0;
+          const eventType = answered ? "CALL_COMPLETED" : "CALL_MISSED";
+          const contactIdForLog = call.contactId ?? crmMetadata.contactId ?? null;
+          const durationSec = durationSeconds ?? null;
+
+          // Conversa mais recente do contato — dá conversationId pro log e
+          // hospeda o aviso no chat. Decisão de produto: NÃO criar conversa
+          // nova só pra isso; sem conversa, fica só log + timeline.
+          let conversationId: string | null = null;
+          if (contactIdForLog) {
+            const conv = await prisma.conversation.findFirst({
+              where: { contactId: contactIdForLog },
+              orderBy: { updatedAt: "desc" },
+              select: { id: true },
+            });
+            conversationId = conv?.id ?? null;
+          }
+
+          const dealForLog = resolvedDealId
+            ? await prisma.deal.findUnique({
+                where: { id: resolvedDealId },
+                select: { id: true, title: true },
+              })
+            : null;
+
+          // ── 10a. Log de atividade / timeline (sempre que terminal) ─────
+          // Escopo DEAL quando há negócio; senão CONTACT. `meta` alinhada ao
+          // que o event-config do frontend espera (initiatedBy, durationSec)
+          // + chaves cruas pra debugging.
+          if (dealForLog || contactIdForLog) {
             await logEvent({
               type: eventType,
-              entityType: "DEAL",
-              entityId: deal.id,
-              entityLabel: deal.title,
-              dealId: deal.id,
-              contactId: call.contactId ?? crmMetadata.contactId ?? null,
+              entityType: dealForLog ? "DEAL" : "CONTACT",
+              entityId: dealForLog?.id ?? contactIdForLog ?? call.id,
+              entityLabel: dealForLog?.title ?? null,
+              dealId: dealForLog?.id ?? null,
+              contactId: contactIdForLog,
+              conversationId,
               meta: {
                 callId: call.id,
                 provider: input.provider,
                 direction: normalized.direction,
-                durationSeconds: durationSeconds ?? null,
+                initiatedBy: isInbound ? "contact" : "company",
+                durationSec,
+                durationSeconds: durationSec,
+                answered,
                 hangupCause: normalized.hangupCause ?? null,
                 from: fromNormalized,
                 to: toNormalized,
               },
+            }).catch((err) =>
+              log.warn({ err }, "[calls] logEvent de ligação falhou — ignorando"),
+            );
+          }
+
+          // ── 10b. Aviso no chat (se houver conversa) ────────────────────
+          if (conversationId) {
+            const callMessageDirection: "in" | "out" = isInbound ? "in" : "out";
+            const label = isInbound ? "Ligação recebida" : "Ligação realizada";
+            const suffix = answered
+              ? durationSec && durationSec > 0
+                ? ` · ${formatCallDuration(durationSec)}`
+                : ""
+              : " · não atendida";
+            const chatLine = `${label}${suffix}`;
+            const dedupeKey = `sip_call:${call.id}`;
+            const already = await prisma.message.findFirst({
+              where: { conversationId, externalId: dedupeKey },
+              select: { id: true },
             });
+            if (!already) {
+              const eventNow = new Date();
+              await prisma.message.create({
+                data: withOrg(
+                  {
+                    conversationId,
+                    content: chatLine,
+                    direction: callMessageDirection,
+                    messageType: "sip_call",
+                    senderName: "Telefonia",
+                    externalId: dedupeKey,
+                    sendStatus: "delivered",
+                  },
+                  organizationId,
+                ),
+              });
+              await prisma.conversation
+                .update({
+                  where: { id: conversationId },
+                  data: {
+                    updatedAt: eventNow,
+                    lastMessageDirection: callMessageDirection,
+                  },
+                })
+                .catch(() => {});
+              sseBus.publish("new_message", {
+                organizationId,
+                conversationId,
+                contactId: contactIdForLog ?? undefined,
+                direction: callMessageDirection,
+                content: chatLine,
+                timestamp: eventNow,
+              });
+            }
           }
         }
 

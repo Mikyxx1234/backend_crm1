@@ -5,6 +5,35 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-26 — Aviso de ligação no chat + log/timeline (webhook de chamadas)
+
+**Decisão.** No `processWebhookEvent` (`services/calls.ts`), no **primeiro**
+evento terminal (guard por `existingCall.endedAt` pra idempotência):
+1. **Log de atividade sempre** (`CALL_COMPLETED`/`CALL_MISSED`), escopo `DEAL`
+   quando há negócio, senão `CONTACT`, com `conversationId` quando há conversa.
+   `meta` agora inclui `initiatedBy` + `durationSec` (o que o event-config do
+   frontend espera) além das chaves cruas — antes só logava com `dealId` e o
+   `meta` não casava com a timeline.
+2. **Aviso no chat**: cria uma `Message` `messageType: "sip_call"`
+   (`direction` in/out, dedupe por `externalId = sip_call:<callId>`, SSE
+   `new_message`) na **conversa mais recente do contato** — mesmo padrão das
+   chamadas de WhatsApp.
+
+**Contexto.** Ligações SIP/Api4com não deixavam rastro no chat e o log só
+existia com `dealId`. O pedido foi mostrar a ligação na conversa (inbox e
+pipeline), no log e na timeline.
+
+**Alternativas descartadas.**
+- *Criar conversa nova só pra hospedar o aviso*: rejeitado — sem conversa
+  existente, fica só log + timeline (evita conversas vazias).
+- *Disparar o aviso pelo sync de CDR*: rejeitado — backfill geraria spam de
+  mensagens/log; o aviso é só pelo webhook (tempo real).
+
+**Impacto.** Aditivo, sem migration (usa `Message`/`ActivityEvent`
+existentes). Novo `messageType: "sip_call"` que o frontend renderiza.
+
+---
+
 ### 2026-06-26 — Ação `send_product`, sync de ligações (Api4com CDR) e gatilhos de ligação
 
 **Decisão.**
