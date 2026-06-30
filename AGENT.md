@@ -186,6 +186,74 @@ nesta entrada.
 
 ---
 
+### 2026-06-30 — Webhook Meta: remover fallback de match por `profile.name`
+
+**Decisão.** `src/lib/meta-webhook/handler.ts::resolveWebhookContact()`
+não faz mais o terceiro fallback que casava contatos por `name` quando
+BSUID / phone / fuzzy-phone falhassem (linhas ~457-463). A partir daqui,
+`wa_id` (E.164) + BSUID (`user_id`/`from_user_id`) são os ÚNICOS
+identificadores válidos do remetente; sem match exato/fuzzy nesses, o
+handler cria contato novo (caminho `createIfMissing`).
+
+**Sintoma reportado.** Operador da DNAWork: "mando mensagem para o cliente
+e dá erro 'fora da janela de 24h', mas o cliente acabou de me responder
+agora". Análise via wamid (cada `externalId` da Meta tem o número do
+remetente embutido em base64 — ver `_diag/decode_wamids.py`) mostrou que
+**a mensagem inbound recente NÃO veio do número gravado no contato**:
+veio de outro WhatsApp cujo `profile.name` coincidia com o nome do
+contato no CRM. O composer enviava corretamente para o phone do contato,
+mas a Meta validava a janela contra esse phone — e ELE estava de fato
+fora dos 24h.
+
+**Escala do problema (30d, db_crm prod, antes do fix).**
+
+| Métrica | Quantidade |
+| --- | --- |
+| Inbounds mal-roteadas | 1.801 |
+| Conversas afetadas | 429 |
+| Contatos com mistura de números | 429 |
+
+Único tenant afetado: DNAWork. Causa: funil de recrutamento com volume
+alto de leads de primeiro nome curto ("Mari", "Eduardo", "Kauã",
+"Luciano"...) — colisões inevitáveis no `findFirst({ name })`.
+
+**Por que o fallback existia.** O comentário original sugeria recuperar
+contatos importados sem `phone` (ex.: planilhas, importação Kommo).
+Trade-off mal calibrado: em qualquer org com >100 leads, a chance de
+colisão de primeiro nome explode, e o `findFirst` retorna QUALQUER um
+deles arbitrariamente (sem `orderBy`).
+
+**Alternativas descartadas.**
+
+1. **Restringir o match por nome a contatos sem `phone`** — mitiga, mas
+   não elimina (assim que o primeiro número fica gravado, todos os
+   homônimos subsequentes ainda colam). E adiciona estado oculto.
+2. **Match por nome + similaridade de phone** — complexidade alta para
+   ganho marginal; o caminho fuzzy-phone já existente
+   (`endsWith(suffix.slice(-10))`) cobre os casos de formato inconsistente
+   (DDI, +9 prefix BR etc.).
+3. **Migration de saneamento (separar as 1.801 inbounds dos 429 contatos
+   bagunçados)** — risco real de quebrar relatórios, deals e dashboards.
+   Fica como follow-up planejado separado; aqui só estancamos o
+   sangramento. As conversas atuais continuam mostrando mensagens de
+   pessoas diferentes até alguém criar os contatos certos manualmente.
+
+**Pós-deploy.** Inbounds de números desconhecidos com nome igual a
+contato existente passam a virar contato novo (fluxo `createIfMissing`
+abaixo na mesma função), com `lifecycleStage: LEAD` e `source` derivada
+do canal. Comportamento esperado e correto para todos os tenants.
+
+**Investigação rastreada em:**
+
+- `_diag/decode_wamids.py` — extrai phone do `externalId` de cada
+  mensagem da conversa investigada.
+- `_diag/estimate_damage.py` — varre 30d de inbounds com wamid e
+  contabiliza divergência entre `wamid_phone` e `contact.phone`.
+- Diff: `src/lib/meta-webhook/handler.ts` linhas 457-463 → bloco de
+  comentário substituindo o `findFirst({ name })`.
+
+---
+
 ### 2026-06-30 — Promoção dev→prod: aplicar 8 migrations em `db_crm` manualmente
 
 **Decisão.** Aplicadas 8 migrations pendentes em `db_crm` (Postgres 17.9,
