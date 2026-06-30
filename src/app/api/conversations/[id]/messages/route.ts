@@ -9,6 +9,7 @@ import {
 } from "@/lib/authz/resource-policy";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { requireConversationAccess } from "@/lib/conversation-access";
+import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaWhatsApp, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
@@ -322,11 +323,43 @@ export async function POST(request: Request, context: RouteContext) {
         : "outgoing";
     const isPrivateNote = b.private === true || messageType === "note";
 
+    // Override de canal vindo do composer (UI permite escolher por qual
+    // WhatsApp enviar quando a org tem >1 conectado). Quando ausente ou
+    // igual ao canal "atual" da conversa, comportamento legacy preservado.
+    // Notas privadas ignoram override — são internas e não passam pelo canal.
+    const requestedChannelId =
+      typeof b.channelId === "string" ? b.channelId : null;
+
     // Escopo de canal: enviar mensagem exige permissão de "send" no canal
     // da conversa. Notas privadas são internas e não passam pelo canal.
     if (!isPrivateNote) {
       const sendDenied = await requireChannelScope(authResult.user, "send", conv.channelId);
       if (sendDenied) return sendDenied;
+    }
+
+    // Resolve o canal de envio (com override se válido). Vem ANTES do
+    // `prisma.message.create` para que o snapshot `message.channelId` já
+    // grave o canal certo.
+    let outboundChannelRef = conv.channelRef;
+    let outboundChannelId = conv.channelId;
+    if (!isPrivateNote) {
+      const resolved = await resolveOutboundChannel({
+        conv: {
+          channelId: conv.channelId,
+          channelRef: conv.channelRef,
+          organizationId: conv.organizationId,
+        },
+        user: authResult.user as {
+          id: string;
+          role?: string | null;
+          organizationId: string | null;
+          isSuperAdmin?: boolean;
+        },
+        requestedChannelId,
+      });
+      if (!resolved.ok) return resolved.response;
+      outboundChannelRef = resolved.channelRef;
+      outboundChannelId = resolved.channelId;
     }
 
     const senderName = authResult.user.name ?? authResult.user.email ?? "Agente";
@@ -410,9 +443,9 @@ export async function POST(request: Request, context: RouteContext) {
 
     // ── Send via WhatsApp (Meta Cloud API or Baileys) ──
 
-    const useBaileys = isBaileysChannel(conv.channelRef);
+    const useBaileys = isBaileysChannel(outboundChannelRef);
 
-    const channelConfig = conv.channelRef?.config as Record<string, unknown> | null | undefined;
+    const channelConfig = outboundChannelRef?.config as Record<string, unknown> | null | undefined;
     const metaClient = useBaileys ? metaWhatsApp : metaClientFromConfig(channelConfig);
 
     // Modo "local/test": sem canal WhatsApp configurado (conversas mock ou
@@ -434,7 +467,7 @@ export async function POST(request: Request, context: RouteContext) {
     const saved = await prisma.message.create({
       data: withOrgFromCtx({
         conversationId: conv.id,
-        channelId: conv.channelId ?? undefined,
+        channelId: outboundChannelId ?? undefined,
         content,
         direction: "out",
         messageType: "text",
@@ -461,7 +494,7 @@ export async function POST(request: Request, context: RouteContext) {
       : await sendWhatsAppText({
           conversationId: conv.id,
           contactId: conv.contactId,
-          channelRef: conv.channelRef,
+          channelRef: outboundChannelRef,
           content,
           messageId: saved.id,
           replyContextWamid,
@@ -548,6 +581,7 @@ export async function POST(request: Request, context: RouteContext) {
         replyToId: replyParentInternalId,
         replyToPreview,
         status: sendErrorMsg ? "FAILED" : "SENT",
+        channelId: outboundChannelId ?? null,
       } satisfies InboxMessageDto,
       ...(sendErrorMsg ? { metaError: sendErrorMsg } : {}),
     }, { status: 201 });
