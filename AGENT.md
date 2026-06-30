@@ -90,6 +90,100 @@ trabalho.
   `PUT /api/automations/:id` em `components/pipeline/funnel-automations.tsx`
   (código morto, não importado), que pode ser reaproveitada.
 
+> **Atualização (mesmo dia):** o follow-up acima foi fechado pela próxima
+> entrada deste AGENT.md ("Editor de pipeline: persistência das automações").
+
+---
+
+### 2026-06-30 — Editor de pipeline: persistência das automações (criar/mover/trocar trigger/desativar)
+
+**Decisão.** `frontend/src/app/(app)/settings/pipeline/client-page.tsx`
+agora persiste **todas** as ações sobre automações dentro do botão "Salvar
+alterações". Antes da entrada anterior só hidratávamos a leitura; o write
+(adicionar/copiar/editar/excluir) vivia somente em React state — usuário
+mexia, nenhuma mudança batia em `hasChanges` e nada ia pro backend.
+
+**Modelo de diff.** No `useEffect` de hidratação capturamos
+`automationsBaselineRef` = `Map<realAutomationId, { stageId, trigger,
+triggerType, triggerConfig }>` no mesmo passo em que populamos
+`stageAutomationsMap`. Em `handleSaveAll`, comparamos baseline ↔ estado e
+geramos uma lista de ops:
+
+- **create** — card com `id` prefixado `local-auto-(add|copy)-${baseId}-${ts}`.
+  Origem: drawer "Adicionar" ou menu "Copiar para outro estágio". Resolução:
+  `GET /api/automations/:baseId` → `POST /api/automations` clonando
+  `name`+`description`+`steps`, **com `triggerConfig` novo** apontando para
+  o estágio destino. Original fica intacta em `/automations` (escolha de
+  produto confirmada com o operador — "duplicate", não "move").
+- **update** — `id` real do baseline com `stageId` ou `trigger` diferente.
+  `PUT /api/automations/:id` só com `triggerType`+`triggerConfig`. Não
+  toca em `steps` (evita race entre o editor de pipeline e o canvas de
+  automação aberto em outra aba).
+- **unbind** — `id` real do baseline ausente do mapa atual.
+  `PUT /api/automations/:id` com `{ active: false }`. Mantém
+  `triggerConfig`/`steps`/`name` intactos — automação fica em
+  `/automations` desligada e pode ser religada lá. **Escolha do operador:**
+  "só desvincular (recomendado), pode ser religada depois" — preferida
+  sobre `DELETE` (irreversível, perde steps).
+
+Para automações desativadas saírem do editor de pipeline (UX consistente
+com a semântica de "Excluir"), `isAutomationForStage` ganhou um parâmetro
+`active` e retorna `false` quando `active === false`. Filtra cedo, antes
+de checar `triggerConfig` — `/automations` continua mostrando todas.
+
+**Por que `baseAutomationId` no tipo `Automation`.** Quando o operador
+copia uma cópia (clica "Copiar para X" num card que ainda é local), o
+`auto.id` já é sintético e perdeu a referência do backend. Persistimos o
+`baseAutomationId` no card desde o `handleCopyAutomation` /
+`handleDrawerConfirm` para o `handleSaveAll` sempre saber qual
+automação real ler com `GET /api/automations/:baseId` na hora de clonar.
+
+**Mapeamento label → trigger.** Centralizado em `triggerFromLabel(label,
+pipelineId, stageId)`. Cobre os 6 labels visíveis hoje
+(`STAGE_TRIGGER_LABELS` e `BACKEND_TRIGGER_LABELS`) e devolve o par
+`{ triggerType, triggerConfig }` aceito pelo backend (`deal_created`,
+`stage_changed` com `toStageId`/`fromStageId`, `deal_won`, `deal_lost`,
+`message_received`, `manual`). Label desconhecido aborta o save com toast
+de erro — defensivo contra labels novos que não tenham mapping.
+
+**Alternativas descartadas:**
+
+1. **DELETE em vez de `active: false`** — atende o caso "limpeza geral"
+   mas é destrutivo: perde steps customizados que o operador investiu.
+   Operador escolheu unbind explicitamente, e isso reduz risco em
+   produção (DNAWork tem automações com lógica de cobrança configurada
+   nos steps — apagar por engano seria caro).
+2. **PATCH `/api/automations/:id` em vez de PUT** — `replaceAutomation`
+   no client SDK usa PUT (route handler declara só PUT). PATCH retorna
+   405. Mantemos `fetch` direto com PUT, igual ao resto do
+   `handleSaveAll`.
+3. **Persistir step-a-step durante a edição (sem botão "Salvar")** —
+   quebraria o pattern de batch já estabelecido para nome/cor/ordem dos
+   estágios e exigiria invalidations granulares + tratamento de erro
+   inline. Mantemos batch.
+4. **FK direta `Automation.stageId`** — discutido na entrada anterior;
+   continua inviável no escopo do bugfix.
+
+**Limites conhecidos (não bloqueiam):**
+
+- `steps` são clonados **sem `id`** no `create`, ou seja, o backend gera
+  novos cuids. Quem usa referências cruzadas entre steps
+  (`nextStepId`, `gotoStepId`, `branches[].nextStepId`) precisa reabrir
+  a automação clonada e revalidar o grafo no canvas — fora do escopo
+  deste fix; o `PUT /api/automations/:id` separado preserva ids quando
+  enviados (ver comment em `app/api/automations/route.ts` linha 105).
+- Se um card for movido pra um estágio recém-criado (`local-stage-...`),
+  o `handleSaveAll` cria o estágio primeiro, popula `localToRealId`, e
+  depois usa o ID real ao persistir o `triggerConfig` — coberto.
+
+**Contexto.** Reporte do operador: "algumas movimentações de trigger,
+exclusão, clonar, não aparece para salvar as alterações, como se ele
+não tivesse lida nenhuma mudança". Causa raiz dupla: (a) `hasChanges`
+não monitorava `stageAutomationsMap`, então o botão "Salvar alterações"
+não habilitava nem aparecia; (b) `handleSaveAll` não tinha nenhum
+caminho para persistir essas mudanças no backend. Ambos resolvidos
+nesta entrada.
+
 ---
 
 ### 2026-06-30 — Promoção dev→prod: aplicar 8 migrations em `db_crm` manualmente
