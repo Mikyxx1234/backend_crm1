@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { requireConversationAccess } from "@/lib/conversation-access";
+import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import {
   convertToOgg,
   guessInputExt,
@@ -105,10 +106,38 @@ export async function POST(request: Request, context: RouteContext) {
 
       const raw = form.get("file");
       const caption = (form.get("caption") as string) ?? "";
+      // Override de canal vindo do composer (mesmo contrato do route de
+      // /messages). Multipart envia como string; vazio == ausência.
+      const requestedChannelIdRaw = form.get("channelId");
+      const requestedChannelId =
+        typeof requestedChannelIdRaw === "string" && requestedChannelIdRaw.trim()
+          ? requestedChannelIdRaw.trim()
+          : null;
 
       if (!raw || !isFileLike(raw) || raw.size === 0) {
         return NextResponse.json({ message: "Nenhum arquivo enviado." }, { status: 400 });
       }
+
+      // Resolve o canal de envio (com override se válido). Vem ANTES dos
+      // metaClient/baileys para que `channelId` snapshotado em
+      // `message.channelId` já reflita o canal escolhido.
+      const resolved = await resolveOutboundChannel({
+        conv: {
+          channelId: conv.channelId,
+          channelRef: conv.channelRef,
+          organizationId: conv.organizationId,
+        },
+        user: session.user as {
+          id: string;
+          role?: string | null;
+          organizationId: string | null;
+          isSuperAdmin?: boolean;
+        },
+        requestedChannelId,
+      });
+      if (!resolved.ok) return resolved.response;
+      const outboundChannelRef = resolved.channelRef;
+      const outboundChannelId = resolved.channelId;
 
       if (raw.size > MAX_FILE_SIZE) {
         return NextResponse.json({ message: "Arquivo muito grande (máx 16 MB)." }, { status: 400 });
@@ -148,7 +177,7 @@ export async function POST(request: Request, context: RouteContext) {
 
       // ── Send via WhatsApp (Meta Cloud API or Baileys) ──
 
-      const useBaileys = isBaileysChannel(conv.channelRef);
+      const useBaileys = isBaileysChannel(outboundChannelRef);
 
       let metaSendError: string | null = null;
       let externalId: string | null = null;
@@ -158,7 +187,7 @@ export async function POST(request: Request, context: RouteContext) {
         const msgRow = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: conv.id,
-            channelId: conv.channelRef?.id ?? undefined,
+            channelId: outboundChannelId ?? undefined,
             content: caption || `📎 ${fileName}`,
             direction: "out",
             messageType: mediaType,
@@ -169,7 +198,7 @@ export async function POST(request: Request, context: RouteContext) {
         const baileysResult = await sendWhatsAppMedia({
           conversationId: conv.id,
           contactId: conv.contactId,
-          channelRef: conv.channelRef,
+          channelRef: outboundChannelRef,
           messageId: msgRow.id,
           mediaUrl: publicUrl,
           messageType: mediaType,
@@ -236,12 +265,11 @@ export async function POST(request: Request, context: RouteContext) {
       const to = digits.length >= 8 ? digits : undefined;
       const recipient = contact?.whatsappBsuid?.trim() || undefined;
 
-      // CRITICO: respeitar o canal da conversa em vez de usar o singleton
-      // global (que pega META_WHATSAPP_* do env — credenciais legacy da
-      // primeira org). Sem isso, midias de qualquer org saiam pelo numero
-      // do .env -> cross-tenant leak (mensagens da DNA chegavam pelo
-      // numero da Eduit).
-      const channelConfig = conv.channelRef?.config as Record<string, unknown> | null | undefined;
+      // CRITICO: respeitar o canal RESOLVIDO (com override) em vez do
+      // singleton global. Sem isso, midias da org saiam pelo numero do .env
+      // -> cross-tenant leak. Com override, o usuário pode escolher por
+      // qual número da org enviar (caso `outboundChannelId != conv.channelId`).
+      const channelConfig = outboundChannelRef?.config as Record<string, unknown> | null | undefined;
       const metaClient = metaClientFromConfig(channelConfig);
 
       if (metaClient.configured && (to || recipient)) {
@@ -288,8 +316,8 @@ export async function POST(request: Request, context: RouteContext) {
           );
 
           externalId = result.messages?.[0]?.id ?? null;
-          const channelLabel = conv.channelRef?.id
-            ? `channel=${conv.channelRef.id}`
+          const channelLabel = outboundChannelRef?.id
+            ? `channel=${outboundChannelRef.id}`
             : "channel=ENV(global)";
           console.log(
             `[meta-attach] Enviado ${mediaType} (${to ?? "—"}/${recipient ?? "—"}) | ${channelLabel} | mime=${uploadMime} | mediaId=${mediaId} | wamid=${externalId} | voice=${sendAsVoice}`
@@ -301,7 +329,7 @@ export async function POST(request: Request, context: RouteContext) {
         }
       } else if (!metaClient.configured) {
         console.warn(
-          `[meta-attach] Meta API nao configurada para o canal (channel=${conv.channelRef?.id ?? "ENV"}), midia salva apenas localmente`,
+          `[meta-attach] Meta API nao configurada para o canal (channel=${outboundChannelRef?.id ?? "ENV"}), midia salva apenas localmente`,
         );
       } else if (!to && !recipient) {
         console.warn("[meta-attach] Contato sem telefone nem BSUID WhatsApp");
@@ -315,7 +343,7 @@ export async function POST(request: Request, context: RouteContext) {
       await prisma.message.create({
         data: withOrgFromCtx({
           conversationId: conv.id,
-          channelId: conv.channelRef?.id ?? undefined,
+          channelId: outboundChannelId ?? undefined,
           content: displayContent,
           direction: "out",
           messageType: mediaType,

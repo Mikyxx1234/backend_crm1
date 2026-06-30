@@ -5,6 +5,93 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-30 — Override de canal de envio: `channelId` opcional no POST de mensagens/anexos
+
+**Decisão.** O envio outbound em `POST /api/conversations/:id/messages` e
+`POST /api/conversations/:id/attachments` agora aceita `channelId?`
+opcional. Quando ausente, comportamento legacy preservado (usa
+`conv.channelId` / `conv.channelRef`). Quando presente, helper compartilhado
+`src/lib/outbound-channel.ts::resolveOutboundChannel()` valida e devolve
+o `channelRef` correto:
+
+- canal pertence à mesma org da conversa
+- `type === "WHATSAPP"` (override só para WhatsApp neste escopo)
+- `status === "CONNECTED"` (não enfileira em canal off → evita pending eterno)
+- `requireChannelScope(user, "send", channelId)` (scope-grants granulares)
+
+**Contexto.** Orgs com múltiplos WhatsApps (ex.: DNAWork — funil A → número 1,
+funil B → número 2) não conseguiam escolher por qual canal responder uma
+conversa. O canal "atual" da conversa é sempre sobrescrito pelo último
+inbound (lógica do webhook Meta/Baileys em `lib/meta-webhook/handler.ts` e
+`workers/baileys/message-handler.ts`), e o composer ficava preso a esse canal.
+
+**Comportamento do snapshot.** O override **não** altera `conversation.channelId`
+— continua refletindo o último inbound. Apenas `message.channelId` é gravado
+com o canal escolhido. Isso preserva o modelo de 1 conversa por contato
+WhatsApp e ativa automaticamente os divisores de troca de conexão
+(`ConnectionDivider`) já existentes no chat e no deal-chat-binding.
+
+**Alternativas descartadas:**
+
+- **1 conversa por canal (par único `contactId+channelId`).** Quebraria
+  inbox (1 card por contato), deal binding, `conversations/create skipSend`,
+  stakeholder notify e o helper `findOrCreateConversation` em Baileys/Meta.
+  O schema já é desenhado para o oposto (comentário em `Message.channelId`).
+- **Atualizar `conversation.channelId` no envio outbound.** "Rouba" o canal
+  da conversa: agente responde por outro número e o webhook do contato
+  original passaria a casar errado. Quebra a propriedade "canal atual = último
+  inbound", que outras partes do código assumem.
+- **Override também em `template/forward/IA-autônoma`.** Fora do escopo
+  reportado e cada um tem regras próprias (template precisa estar aprovado
+  no canal Meta de destino; IA autônoma tem o próprio agente vinculado ao
+  canal). Próximos PRs decidem caso a caso.
+
+**Impacto:** zero quebra de contrato. Clientes antigos (sem `channelId` no
+body) continuam funcionando idênticos. Frontend novo (com seletor)
+ativa o override apenas quando `selectedChannelId !== conversationChannelId`,
+poupando round-trip de validação no caso comum.
+
+**UI:** novo `useWhatsappChannels()` + `<ChannelSelector />` renderizado no
+`Composer`. Aparece somente quando a org tem >1 canal WHATSAPP CONNECTED
+(default invisível para orgs single-channel). Persistência da escolha em
+`localStorage` por conversa (`eduit:inbox:selected-channel:<convId>`). Mesmo
+hook `useSelectedOutboundChannel()` consumido pelo `_v2-client.tsx` do Inbox
+e pelo `deal-chat-binding.tsx` do painel de Deal — comportamento idêntico
+nas duas telas. Não fixou na agenda: o seletor é **opcional**; sem trocar,
+canal usado é o atual da conversa (igual ao comportamento anterior).
+
+---
+
+### 2026-06-30 — Editor de pipeline: hidratar automações por estágio a partir do backend
+
+**Decisão.** `frontend/src/app/(app)/settings/pipeline/client-page.tsx`
+agora hidrata `stageAutomationsMap` lendo `GET /api/automations` e filtrando
+por `triggerConfig.{pipelineId,stageId,toStageId,fromStageId}` — antes o
+mapa começava `{}` e só era preenchido (em memória) ao clicar em "Adicionar
+automação". Resultado: a tela mostrava sempre "Sem automações" em todas as
+colunas, mesmo com automações ativas no `/automations`.
+
+**Por que aqui (e não em uma query de stage).** O backend modela
+Automação→Estágio dentro do JSON `Automation.triggerConfig` (sem FK no
+schema). Mudar isso para FK exigiria migration + refactor de todos os
+`fireTrigger`/`automation-executor.ts` que consomem `triggerConfig`.
+Inviável no escopo do bugfix; filtragem client-side com `useEffect` faz o
+trabalho.
+
+**Limites conhecidos (follow-ups, não bloqueiam):**
+
+- `perPage: 100` no `useAutomations` (máx aceito pelo backend em
+  `app/api/automations/route.ts`). Orgs com >100 automações precisariam de
+  paginação adicional no editor.
+- O drawer "Adicionar automação" ainda persiste só em estado local — ao
+  recarregar, automações novas adicionadas pelo drawer somem. Isso é
+  separado do bug reportado (não aparecer as existentes) e fica como
+  próximo follow-up. Já existe a lógica de persistência via
+  `PUT /api/automations/:id` em `components/pipeline/funnel-automations.tsx`
+  (código morto, não importado), que pode ser reaproveitada.
+
+---
+
 ### 2026-06-30 — Promoção dev→prod: aplicar 8 migrations em `db_crm` manualmente
 
 **Decisão.** Aplicadas 8 migrations pendentes em `db_crm` (Postgres 17.9,
