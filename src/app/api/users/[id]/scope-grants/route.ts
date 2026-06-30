@@ -13,6 +13,7 @@
 
 import { NextResponse } from "next/server";
 
+import { logAuditAsync } from "@/lib/audit/log";
 import { withOrgContext, requireAuthWithCtx } from "@/lib/auth-helpers";
 import { can } from "@/lib/authz";
 import {
@@ -54,8 +55,18 @@ export async function GET(_req: Request, ctx: Ctx) {
     const pipelineIds = grants.pipeline?.users?.[userId] ?? null;
     const channelViewIds = grants.channel?.view?.users?.[userId] ?? null;
     const channelSendIds = grants.channel?.send?.users?.[userId] ?? null;
+    const channelInitiateIds = grants.channel?.initiate?.users?.[userId] ?? null;
+    const channelManageIds = grants.channel?.manage?.users?.[userId] ?? null;
+    const channelDenyIds = grants.channel?.deny?.users?.[userId] ?? null;
 
-    return NextResponse.json({ pipelineIds, channelViewIds, channelSendIds });
+    return NextResponse.json({
+      pipelineIds,
+      channelViewIds,
+      channelSendIds,
+      channelInitiateIds,
+      channelManageIds,
+      channelDenyIds,
+    });
   });
 }
 
@@ -76,8 +87,12 @@ export async function PUT(request: Request, ctx: Ctx) {
     const pipelineIds = parseField(body, "pipelineIds");
     const channelViewIds = parseField(body, "channelViewIds");
     const channelSendIds = parseField(body, "channelSendIds");
+    const channelInitiateIds = parseField(body, "channelInitiateIds");
+    const channelManageIds = parseField(body, "channelManageIds");
+    const channelDenyIds = parseField(body, "channelDenyIds");
 
-    // Read-merge-write: preserva todas as outras chaves dos grants.
+    // Read-merge-write: preserva TODAS as outras chaves dos grants (outros
+    // usuários, roles, groups e eixos não mexidos por esta requisição).
     const grants = await getScopeGrants();
     const next: ScopeGrants = {
       ...grants,
@@ -89,10 +104,27 @@ export async function PUT(request: Request, ctx: Ctx) {
         view: {
           users: { ...(grants.channel?.view?.users ?? {}) },
           roles: { ...(grants.channel?.view?.roles ?? {}) },
+          groups: { ...(grants.channel?.view?.groups ?? {}) },
         },
         send: {
           users: { ...(grants.channel?.send?.users ?? {}) },
           roles: { ...(grants.channel?.send?.roles ?? {}) },
+          groups: { ...(grants.channel?.send?.groups ?? {}) },
+        },
+        initiate: {
+          users: { ...(grants.channel?.initiate?.users ?? {}) },
+          roles: { ...(grants.channel?.initiate?.roles ?? {}) },
+          groups: { ...(grants.channel?.initiate?.groups ?? {}) },
+        },
+        manage: {
+          users: { ...(grants.channel?.manage?.users ?? {}) },
+          roles: { ...(grants.channel?.manage?.roles ?? {}) },
+          groups: { ...(grants.channel?.manage?.groups ?? {}) },
+        },
+        deny: {
+          users: { ...(grants.channel?.deny?.users ?? {}) },
+          roles: { ...(grants.channel?.deny?.roles ?? {}) },
+          groups: { ...(grants.channel?.deny?.groups ?? {}) },
         },
       },
     };
@@ -112,15 +144,40 @@ export async function PUT(request: Request, ctx: Ctx) {
     applyField(next.pipeline!.users!, pipelineIds);
     applyField(next.channel!.view!.users!, channelViewIds);
     applyField(next.channel!.send!.users!, channelSendIds);
+    applyField(next.channel!.initiate!.users!, channelInitiateIds);
+    applyField(next.channel!.manage!.users!, channelManageIds);
+    applyField(next.channel!.deny!.users!, channelDenyIds);
 
     await setScopeGrants(next);
 
     const saved = await getScopeGrants();
-    return NextResponse.json({
-      ok: true,
+    const after = {
       pipelineIds: saved.pipeline?.users?.[userId] ?? null,
       channelViewIds: saved.channel?.view?.users?.[userId] ?? null,
       channelSendIds: saved.channel?.send?.users?.[userId] ?? null,
+      channelInitiateIds: saved.channel?.initiate?.users?.[userId] ?? null,
+      channelManageIds: saved.channel?.manage?.users?.[userId] ?? null,
+      channelDenyIds: saved.channel?.deny?.users?.[userId] ?? null,
+    };
+
+    // Bloco E (25/jun/26): auditoria de mudanças de grants. Snapshot
+    // antes/depois pro reviewer entender exatamente o que mudou.
+    logAuditAsync({
+      entity: "settings",
+      action: "permission.scope.update",
+      entityId: userId,
+      before: {
+        pipelineIds: grants.pipeline?.users?.[userId] ?? null,
+        channelViewIds: grants.channel?.view?.users?.[userId] ?? null,
+        channelSendIds: grants.channel?.send?.users?.[userId] ?? null,
+        channelInitiateIds: grants.channel?.initiate?.users?.[userId] ?? null,
+        channelManageIds: grants.channel?.manage?.users?.[userId] ?? null,
+        channelDenyIds: grants.channel?.deny?.users?.[userId] ?? null,
+      },
+      after,
+      metadata: { target: "user", targetId: userId },
     });
+
+    return NextResponse.json({ ok: true, ...after });
   });
 }

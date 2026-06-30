@@ -480,10 +480,13 @@ async function resolveWebhookContact(
       contactRow = { ...contactRow, ...updates };
     }
 
-    // Garante deal aberto para contato pré-existente (idempotente). Sem
-    // isso, contatos antigos sem deal ficavam "órfãos" no Painel CRM do
-    // Inbox ("Nenhum negócio aberto") mesmo conversando ativamente.
-    // `channelId` roteia o lead para o funil configurado no canal de origem.
+    // Contato JÁ EXISTE: a função só auto-cria deal se ele nunca tiver
+    // tido um (raro — ex.: contato importado sem deal). Se já houve
+    // OPEN/WON/LOST, NÃO recria — o controle passa pras automações
+    // configuradas pelo operador (trigger `message_received` com
+    // filtro `dealStatus`). Isso evita re-disparar `deal_created` em
+    // leads descartados ou clientes que já compraram. Ver `auto-deals.ts`
+    // (changelog v3 — jun/2026).
     const existingRoutingChannelId =
       (await findChannelByPhoneNumberId(phoneNumberId))?.id ?? null;
     ensureOpenDealForContact({
@@ -584,7 +587,9 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     if (Object.keys(updates).length > 0) {
       await prisma.conversation.update({ where: { id: existing.id }, data: updates });
     }
-    return existing;
+    // Retorna o channelId já reconciliado com o canal que recebeu (targetChannel),
+    // para o caller carimbar a mensagem inbound na conexão correta.
+    return { ...existing, channelId: targetChannel?.id ?? existing.channelId };
   }
 
   const contact = await prisma.contact.findUnique({
@@ -1794,6 +1799,7 @@ async function executePostBody(
             return tx.message.create({
               data: withOrgFromCtx({
                 conversationId: conversation.id,
+                channelId: conversation.channelId ?? undefined,
                 content: parsed.text,
                 direction: isSystemMessage ? "system" : "in",
                 messageType: inboundMsgType,

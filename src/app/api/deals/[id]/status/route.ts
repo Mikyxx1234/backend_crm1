@@ -74,7 +74,13 @@ export async function PUT(request: Request, context: RouteContext) {
       return NextResponse.json(deal);
     } catch (err: unknown) {
       if (err instanceof Error && err.message === "INVALID_LOST_REASON") {
-        return NextResponse.json({ message: "Motivo da perda inválido." }, { status: 400 });
+        return NextResponse.json(
+          {
+            message:
+              "Motivo da perda inválido. Selecione um dos motivos cadastrados em Configurações → Motivos de perda.",
+          },
+          { status: 400 },
+        );
       }
       throw err;
     }

@@ -5,6 +5,677 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-30 — Promoção dev→prod: aplicar 8 migrations em `db_crm` manualmente
+
+**Decisão.** Aplicadas 8 migrations pendentes em `db_crm` (Postgres 17.9,
+187.127.27.39), mantendo `SKIP_PRISMA_MIGRATE=1` e registradas à mão em
+`_prisma_migrations` — segue o mesmo padrão estabelecido na promoção de
+2026-06-09 (entrada abaixo) e no script `scripts/dev/apply-dev-branch-migrations.mjs`.
+
+**Migrations aplicadas (em ordem cronológica, idempotentes — todas usam
+`CREATE TABLE IF NOT EXISTS` / `ALTER ... ADD COLUMN IF NOT EXISTS` / `DO`
+blocks com `EXCEPTION WHEN duplicate_object`):**
+
+1. `20260607134036_add_catalog_module` — vinha da branch
+   `feature/sprint5-crm-deal-panel-improvements`, nunca chegou na
+   `DEV_BRANCH`. Cria 6 tabelas (`price_tables`, `price_table_items`,
+   `contracts`, `contract_items`, `stock_movements`, `discount_requests`)
+   + 6 colunas em `products` + 5 colunas em `deal_products`.
+2. `20260607180000_permissions_v2_extend_catalog` — órfã (sprint5).
+   `UPDATE roles.permissions` (append) nos presets MANAGER/MEMBER.
+3. `20260607180100_permissions_v2_add_user_groups` — órfã (sprint5).
+   Cria `user_groups`, `user_group_members` + ADD COLUMN `roles.scope_config`.
+4. `20260607180200_remove_role_scope_config` — órfã (sprint5).
+   DROP COLUMN `roles.scope_config` (cancela a anterior, mesmo step
+   conceitual).
+5. `20260616110000_add_softphone_module` — `DEV_BRANCH`. 4 tabelas
+   (`sip_extensions`, `calls`, `call_events`, `call_provider_configs`) +
+   5 enums (`SipExtensionStatus`, `CallDirection`, `CallStatus`,
+   `WebhookAuthMode`, `RecordingDelivery`).
+6. `20260622120000_api4com_provisioning` — `DEV_BRANCH`. ADD COLUMNs em
+   `sip_extensions`/`calls` + enum `TelephonyProvisioningStep`.
+7. `20260624140000_add_calls_history_widget` — `DEV_BRANCH`. INSERT em
+   `widgets` + backfill em `organization_widgets` (idempotente via
+   `ON CONFLICT DO NOTHING`) + UPDATE `roles.permissions` adicionando
+   `nav:calls` aos presets MANAGER/MEMBER.
+8. `20260630120000_add_messages_channel_id` — **criada nessa promoção**.
+   ADD COLUMN `messages.channelId` TEXT + FK para `channels(id)` ON DELETE
+   SET NULL + índice `messages_channelId_idx`. Era `db push` órfão: o
+   `schema.prisma` da `DEV_BRANCH` já declarava `Message.channelRef` mas
+   nenhuma migration tinha sido commitada — sem essa migration o app
+   quebraria em prod nas queries que resolvem o canal de origem da mensagem.
+
+**Procedimento.** Backup completo antes (`pg_dump -Fc` → 31 MB +
+`--schema-only` → 550 KB, ambos em `_db_audit/`). Aplicação via
+`psql -1 -v ON_ERROR_STOP=1` (uma transação por arquivo). INSERT em
+`_prisma_migrations` com `checksum = sha256(conteúdo CRLF)` — mesmo formato
+das 99 entradas já existentes, geradas originalmente em Windows.
+
+**Branch.** `chore/sync-orphan-migrations-from-sprint5` baseada em
+`DEV_BRANCH`, traz 5 pastas `prisma/migrations/` (4 órfãs da sprint5 +
+a nova do `channelId`) para o Git ficar consistente com o estado do banco.
+
+**Verificação pós.** Snapshot novo de `db_crm` confronta zero deltas
+estruturais com `crm` (DEV) — sobra só ruído esperado: 5 tabelas
+`_bkp_dbcrm_*` legadas, coluna `ai_agent_knowledge_chunks.embedding`
+(pgvector — DEV não tem a extensão), e ~80 índices renomeados pelo
+Prisma. Dados em prod inalterados (contagens das tabelas existentes
+batem antes/depois).
+
+**Alternativas descartadas.**
+- *Remover `SKIP_PRISMA_MIGRATE=1`*: cairia no fallback bruto do
+  entrypoint por causa do drift histórico em `_prisma_migrations` (init
+  duplicado + 3 variantes de `add_contact_ad_tracking`).
+- *Esperar até reconciliar o `_prisma_migrations`*: bloquearia features
+  prontas há semanas (catálogo, softphone, api4com). Reconciliação fica
+  para o cutover definitivo.
+- *Aplicar via `apply-dev-branch-migrations.mjs` existente*: ele tem
+  `TARGETS` hardcoded apontando para as 12 da fase anterior. Para a
+  próxima promoção, atualizar a lista naquele script é a forma canônica.
+
+**Impacto / pendências.**
+- Manter `SKIP_PRISMA_MIGRATE=1` no EasyPanel (prod compartilha o drift).
+- Rebuild do app em prod traz o código novo da `DEV_BRANCH` que já
+  encontra a estrutura toda criada.
+- Instalar `pgvector` no Postgres do Easypanel do banco DEV (`crm`) ou
+  recriá-lo de um dump anonimizado de prod — DEV está sem extensão
+  `vector` e o módulo de IA não roda em local.
+- Banco DEV tem 8 colunas com defaults/NOT NULL "relaxados" (`db push`
+  acidental): `organization_subscriptions.id` perdeu `gen_random_uuid()`,
+  `roles.permissions` virou NULL, etc. **Não propagou para prod** (porque
+  o `schema.prisma` mantém os defaults), mas é cosmético no DEV.
+- Tabelas `_bkp_dbcrm_*` em prod podem ser dropadas em janela à parte.
+
+---
+
+### 2026-06-26 — Aviso de ligação no chat + log/timeline (webhook de chamadas)
+
+**Decisão.** No `processWebhookEvent` (`services/calls.ts`), no **primeiro**
+evento terminal (guard por `existingCall.endedAt` pra idempotência):
+1. **Log de atividade sempre** (`CALL_COMPLETED`/`CALL_MISSED`), escopo `DEAL`
+   quando há negócio, senão `CONTACT`, com `conversationId` quando há conversa.
+   `meta` agora inclui `initiatedBy` + `durationSec` (o que o event-config do
+   frontend espera) além das chaves cruas — antes só logava com `dealId` e o
+   `meta` não casava com a timeline.
+2. **Aviso no chat**: cria uma `Message` `messageType: "sip_call"`
+   (`direction` in/out, dedupe por `externalId = sip_call:<callId>`, SSE
+   `new_message`) na **conversa mais recente do contato** — mesmo padrão das
+   chamadas de WhatsApp.
+
+**Contexto.** Ligações SIP/Api4com não deixavam rastro no chat e o log só
+existia com `dealId`. O pedido foi mostrar a ligação na conversa (inbox e
+pipeline), no log e na timeline.
+
+**Alternativas descartadas.**
+- *Criar conversa nova só pra hospedar o aviso*: rejeitado — sem conversa
+  existente, fica só log + timeline (evita conversas vazias).
+- *Disparar o aviso pelo sync de CDR*: rejeitado — backfill geraria spam de
+  mensagens/log; o aviso é só pelo webhook (tempo real).
+
+**Impacto.** Aditivo, sem migration (usa `Message`/`ActivityEvent`
+existentes). Novo `messageType: "sip_call"` que o frontend renderiza.
+
+---
+
+### 2026-06-26 — Ação `send_product`, sync de ligações (Api4com CDR) e gatilhos de ligação
+
+**Decisão.**
+1. **Ação de automação `send_product`** (`lib/automation-workflow.ts` +
+   `case` no `automation-executor.ts`). Faz lookup do `Product`, injeta
+   variáveis `{{produto.nome|preco|sku|descricao|unidade}}` via `__variables`
+   e **delega** ao `send_whatsapp_message` — reaproveita envio Meta,
+   fallback de template, persistência e SSE. Texto vazio = resumo padrão.
+2. **Sync/reconciliação de chamadas** em `services/call-sync-api4com.ts`
+   (`GET /api/v1/calls` da Api4com), exposto em `POST /api/calls/sync`.
+   Filtra por `metadata.gateway` (só chamadas deste CRM) e faz upsert
+   idempotente por `(org, "api4com", providerCallId)`. **Não** dispara
+   automações (evita "explodir" gatilhos em chamadas antigas no 1º sync).
+3. **Persistência extra no upsert do webhook** (`services/calls.ts`):
+   `dealId`, `extensionId` (via `crm_user_id` → SipExtension) e `metadata`.
+4. **Gatilhos `call_received`/`call_made`** disparados via `fireTrigger` no
+   evento terminal do webhook + `evaluateTrigger` (filtro answered/missed)
+   em `services/automations.ts`.
+5. **Shape de `GET /api/calls`** serializado para o `CallRecord` do
+   frontend (`phone`/`recordUrl`/datas ISO) — antes vazava row cru do Prisma.
+
+**Contexto.** O registro em `/calls` dependia só do webhook Api4com, que
+falha silenciosamente quando o gateway diverge / `APP_URL` ausente. A doc
+oficial expõe `GET /calls` (CDR completo), então o sync garante o histórico
+independentemente do webhook. `send_product` evita uma 2ª implementação de
+envio WhatsApp.
+
+**Alternativas descartadas.**
+- *Disparar automação de ligação a partir do sync*: rejeitado (firing em
+  massa no backfill). Tempo real fica só no webhook.
+- *Card de catálogo WhatsApp em send_product*: adiado (exige catálogo Meta).
+
+**Impacto.** Aditivo; sem migration nova (campos `dealId`/`extensionId`/
+`metadata` já existiam em `Call`). Worker de automação precisa do código
+novo para `send_product`/gatilhos de ligação.
+
+---
+
+### 2026-06-25 — Permissões por canal: eixos `initiate`/`manage` + `deny` + grupos
+
+**Contexto.** O scope-grants atual cobre só `channel.view` e `channel.send`
+(modelo aditivo permissivo), e grupos existem apenas pra RBAC booleano
+(`GroupPermission`) — não pra grants por instância de canal. As rotas
+`/api/channels/[id]/*` não validam permissão alguma além de `auth()`,
+qualquer usuário logado pode reconfigurar/desconectar canal. O plano de
+Gestão de Canais (Fase 1) exige granularidade maior: distinguir "ver",
+"responder em conversa existente", "iniciar nova conversa" e "administrar
+o canal", além de poder **negar** acesso a um canal específico pra um
+usuário mesmo que ele tenha grant via role.
+
+**Decisão.**
+
+1. **Estender `ScopeGrants.channel`** com 4 eixos + override `deny`:
+   - `view` (já existia), `send` (já existia), `initiate` (NOVO),
+     `manage` (NOVO), `deny` (NOVO).
+   - Cada eixo aceita `{ users?, roles?, groups? }` — grupos passam a ser
+     principal de 1ª classe no scope-grants (não só RBAC).
+   - **`deny` é GLOBAL ao canal** (não por eixo): listar `chId` em
+     `deny.users[uid]` nega `view`/`send`/`initiate`/`manage` daquele canal
+     para aquele usuário. Decisão consciente: simplicidade > granularidade.
+     Casos que exigem deny granular (raros) podem usar combinação de grants
+     positivos limitados.
+
+2. **Precedência (fixa no `canAccessChannelForUser`).**
+   - ADMIN (enum legado) → bypass total (ignora deny inclusive).
+   - `manage` global no canal (grant que cobre o canal sendo testado) →
+     ignora deny do mesmo canal. **Anti-lockout**: quem administra o canal
+     não pode ser bloqueado dele por accident.
+   - Senão: deny vence grant (user/role/group). Sem deny, modelo
+     permissivo aditivo OR entre users/roles/groups.
+
+3. **Dependências entre eixos:**
+   - `send` exige `view` (não dá pra enviar em canal que não vê).
+   - `initiate` exige `view` (mesma lógica).
+   - `manage` implica `view` + `send` + `initiate` (admin do canal pode tudo).
+
+4. **Enforcement de `initiate` e `manage`** (Bloco B, próximo PR):
+   - `initiate` em `POST /api/conversations/create` (qualquer caminho que
+     cria conversa nova — incluindo `skipSend: true` se já tem outro
+     critério). `send` continua exigido no caminho com mensagem inicial.
+   - `manage` em rotas **operacionais** `/api/channels/[id]/*`:
+     `PUT`, `DELETE`, `POST connect`, `POST disconnect`, `GET qr`.
+     `GET status` e `GET [id]` continuam sob `view` (monitoramento e
+     leitura de configuração não precisam de admin).
+   - `skipSend: true` em `conversations/create` exige **`view`** do canal
+     (não `initiate`). Decisão: abrir chat de visualização ≠ iniciar
+     conversa nova com cliente.
+
+**Alternativas descartadas.**
+
+- `deny` por eixo (`deny.view`, `deny.send`, ...): mais granular, mas a
+  UI fica com 8+ inputs por canal — confusão garantida. Casos reais
+  resolvem com grants positivos.
+- Tornar `manage` uma key RBAC (`channel:manage`) em vez de eixo
+  scope-grants: misturaria os dois sistemas. Scope-grants já cobre grants
+  por instância — `manage` segue o mesmo padrão pra consistência.
+- Eliminar `view` e usar só `manage` implícito: quebra retro-
+  compatibilidade brutal — todos os grants existentes seriam invalidados.
+
+**Impacto.**
+
+- **Backend:** `scope-grants-shared.ts` ganha 3 eixos e 1 override; novo
+  `getUserGroupIds(userId)`; `canAccessChannelForUser` e
+  `listAllowedChannelIdsForUser` ganham `action` estendida + `groupIds` +
+  precedência deny. `parseScopeGrants` normaliza novos campos. Nenhuma
+  migração SQL — JSON aditivo (campos novos são opcionais; orgs sem
+  upgrade ficam funcionalmente idênticas).
+- **Frontend:** cópia desincronizada de `scope-grants-shared.ts` precisa
+  ser atualizada agora (já estava sem `roles` em channel). UI editor
+  ganha controles pros 4 níveis + deny (Bloco D, PR separado).
+- **Compat:** grants existentes (`channel.view` e `channel.send`) seguem
+  funcionando idênticos. Quem não setar `initiate` / `manage` / `deny`
+  cai no comportamento atual permissivo (nada quebra).
+- **Auditoria:** entrega habilita Bloco E (logAudit em PUTs de grants
+  emitindo `permission.granted` / `permission.revoked` no `AuditLog`).
+- **Rollout:** 5 PRs sequenciais (A modelagem → B enforcement →
+  C composer canReply → D UI editor → E grupos+auditoria). PRs B+ são
+  estritamente aditivos em runtime — orgs continuam funcionando sem
+  novos grants graças à precedência permissiva pré-existente.
+
+---
+
+### 2026-06-24 — Telefonia como widget (`calls_history`) — seed + gate
+
+**Contexto.** A telefonia (rotas `/api/calls/*`, `/api/sip-extensions/*`,
+`/api/call-provider-configs/*`) era uma feature sempre ativa. Frontend
+decidiu convertê-la em widget plugável (mesmo padrão de
+`smart_distribution`) — o backend precisa acompanhar com seed do
+catálogo e instalação automática nas orgs existentes pra não quebrar
+quem já usa.
+
+**Decisão.** Migration `20260624140000_add_calls_history_widget` faz três
+coisas em uma transação:
+
+1. **Seed do widget no catálogo global** (`widgets`): slug
+   `calls_history`, INTERNAL, ONLINE, categoria "Comunicação", ícone
+   `phone`. `ON CONFLICT (slug) DO NOTHING` pra idempotência.
+2. **Permissão `nav:calls`** anexada aos presets MANAGER e MEMBER via
+   `UPDATE roles ... permissions || ARRAY['nav:calls']` (idempotente
+   via `NOT 'nav:calls' = ANY(permissions)`). Sincroniza o catálogo de
+   permissões em `lib/authz/permissions.ts` que ganhou
+   `{ action: "calls", label: "Chamadas (histórico)" }` no resource `nav`.
+3. **Backfill `organization_widgets`** — pra TODAS as orgs existentes
+   insere `(orgId, calls_history, ACTIVE)`. Sem esse passo, todas as
+   orgs em produção veriam a telefonia desaparecer no deploy (página,
+   softphone flutuante e botão de ligar somem).
+
+ID determinístico (`ow_<orgId>_calls_history`) garante que o backfill
+sobrevive a re-aplicação parcial via `ON CONFLICT (organizationId, widgetSlug)`.
+
+**Gate dedicado.** `assertCallsHistoryEnabled()` em
+`services/organization-widgets.ts` espelha o
+`assertSmartDistributionEnabled()` — disponível pra uso futuro nas rotas
+`/api/calls/*` como defesa em profundidade quando o frontend não puder
+mais ser confiado isoladamente. **NÃO foi aplicado ainda** nas rotas:
+o webhook do Api4Com (`POST /api/calls/webhook/api4com`) entra sem
+org-context da org do cliente (é assinado pelo provedor, não autenticado
+por sessão), então gateá-lo agora bloquearia o ingresso de calls. Aplicar
+seletivamente nas rotas autenticadas (`GET /api/calls`,
+`POST /api/sip-extensions/me/connect-api4com`) é o próximo passo se/quando
+o backend precisar reforçar o gate.
+
+**Alternativa descartada.** Default `installed=false` + migration que só
+ativa orgs com calls > 0 nos últimos 90 dias — mais "limpo" mas exigiria
+suporte manual pra orgs com uso esporádico que ficariam fora do recorte.
+`installed=true` por padrão + admin desinstala se quiser é mais
+previsível.
+
+**Impacto.**
+- `prisma/migrations/20260624140000_add_calls_history_widget/migration.sql`
+  (novo): seed catálogo + permissão + backfill installations.
+- `src/services/organization-widgets.ts`: novo helper
+  `assertCallsHistoryEnabled()`.
+- `src/lib/sidebar-catalog.ts`: novo entry `calls` com
+  `requiredWidgetSlug: "calls_history"` e `href: "/widgets/calls"`.
+- `src/lib/authz/permissions.ts`: `nav:calls` no catálogo.
+- `src/lib/authz/presets.ts`: MANAGER e MEMBER ganham `nav:calls`.
+
+---
+
+### 2026-06-24 — Motivos de perda: gate `allow_other` no service (defesa em profundidade)
+
+**Contexto.** Demanda do cliente: poluição da lista de `Deal.lostReason`
+em produção, vendedores usando o botão "Outro…" como saída livre. UI
+do CRM ganhou toggle "Permitir motivo personalizado" para o admin
+controlar (vide AGENT.md do frontend). Backend precisava complementar:
+sem gate no service, qualquer cliente HTTP autenticado (DevTools,
+integração externa, worker) poderia continuar mandando string livre.
+
+**Decisão.** Nova helper `assertLostReasonAllowed(reason)` em
+`services/deals.ts` lê `deals.loss_reason_allow_other` (default `true`)
+via `getOrgSettingBool`. Quando `false`, valida que `reason` bate
+EXATAMENTE com algum `LossReason.label` ativo da org corrente —
+`prisma.lossReason.findFirst({ where: { label, isActive: true }})`.
+Não casou → `throw new Error("INVALID_LOST_REASON")`, traduzido pra
+HTTP 400 nos routes.
+
+Chamadas inseridas em **3 pontos de entrada** que cobrem todos os caminhos
+de gravação real de `lostReason`:
+- `markDealLost(id, reason)` — usado por `PUT /api/deals/[id]/status`
+  e por `POST /api/deals/bulk` action `mark_lost`.
+- `moveDeal(dealId, stageId, position, { lostReason })` — usado por
+  `PATCH /api/deals/[id]/move` quando o destino é estágio terminal LOST.
+- Route `POST /api/deals/bulk` action `move_stage` — valida ANTES de
+  decidir entre path síncrono e enfileirar `BulkMoveStagePayload`. Isso
+  cobre o worker async `bulk-move-stage.job.ts` sem precisar duplicar
+  a leitura de org settings dentro do worker (que roda fora de
+  RequestContext).
+
+**Modo permissivo defensivo.** Se a leitura da setting falhar (ex.: chamada
+do service de cron job que não populou `RequestContext`), a helper loga
+e CAI PRO DEFAULT permissivo (`allow_other = true`) em vez de bloquear
+o update. O gate é uma melhoria de UX/qualidade de dados, não uma regra
+de segurança crítica — bloquear updates legítimos em situação degradada
+seria pior que aceitar um motivo livre.
+
+**Alternativas descartadas.**
+- *Validar dentro de `buildStatusSyncPatch`*: função é síncrona e parte
+  de várias transações. Tornar async cascateava em 6+ call sites e
+  exigia repassar `tx` por dentro da validação (não dá pra usar `prisma`
+  global em transação ativa por causa do isolamento). Validar no caller
+  ANTES de abrir a transação é mais barato e mais claro.
+- *Validar só no Zod do route*: cada route teria que carregar a lista
+  de motivos e replicar a regra. Centralizar no service garante que
+  `automation-executor` (que também marca deals como perdido via
+  automação) fica coberto sem mudança extra.
+- *Cache em memória da lista de `LossReason`*: hot path? hoje cada
+  marcação roda 1 SELECT por validação quando setting=false. Volume
+  esperado é baixíssimo (humano clicando no kanban) — premature
+  optimization. Se virar gargalo, adicionar `cache.wrap` na própria
+  helper depois.
+
+**Impacto.**
+- Adicionado: `assertLostReasonAllowed` em `services/deals.ts` (export).
+- Modificado: `markDealLost` (1 await no início), `moveDeal` (1 await
+  pré-transação), `POST /api/deals/bulk` (2 try/catch translation).
+- Comentário em `jobs/leads/bulk-move-stage.job.ts` documentando por que
+  o worker não revalida.
+- Mensagem de erro padrão: "Motivo da perda inválido. Selecione um dos
+  motivos cadastrados em Configurações → Motivos de perda." (orienta o
+  caminho de correção, evita ticket de suporte).
+
+---
+
+### 2026-06-23 — Api4com: setup de webhook no `connect-api4com` (user token + fallback manual)
+
+**Contexto.** O fluxo manual `POST /api/sip-extensions/connect-api4com`
+(usado pela UI "Conectar Api4Com" em Configurações → Softphone) só
+salvava o ramal SIP no banco. Faltava (a) criar o `CallProviderConfig`
+com `webhookToken` único pra org e (b) chamar `PATCH /integrations` na
+Api4com pra configurar o `webhookUrl`. Sem isso, a Api4com nunca dispara
+`channel-hangup` pro nosso `/api/webhooks/calls/api4com?token=...` →
+`processWebhookEvent` nunca roda → `Call` nunca é criado → a tela
+`/calls` fica vazia, mesmo a chamada tendo acontecido. Sintoma reportado:
+"fiz a ligação, mas o histórico está em branco".
+
+**Decisão.** Estender o próprio `connect-api4com` pra completar o setup
+de webhook usando o user token (o mesmo token de login email/senha que
+sai do `loginApi4Com`). Caminho de melhor UX possível dentro do fluxo
+que o operador já está fazendo — sem env adicional, sem endpoint novo,
+sem segunda tela. A função `upsertApi4ComWebhookWithUserToken` em
+`services/telephony-providers/api4com.ts` faz o `PATCH /integrations`
+direto na Api4com com o token do operador (em vez do
+`API4COM_SERVICE_TOKEN` admin que o `Api4ComClient` usa).
+
+Idempotência: `getOrCreateApi4ComProviderConfig` no
+`call-provider-configs.ts` reutiliza o `CallProviderConfig` existente
+da org (`findFirst({ providerKey: "api4com" })` org-scoped) — só o
+primeiro operador que conecta cria, os demais herdam o mesmo
+`webhookToken`.
+
+Fallback explícito: se o `PATCH /integrations` falhar (403/permissão,
+plano sem feature, etc.), o response inclui
+`{ webhook: { configured: false, webhookUrl, reason } }` em vez de
+mascarar como sucesso. A UI mostra a URL pronta pra colar no portal
+Api4com → Integrações → Webhook. Operador resolve em 30s sem precisar
+admin nem env nova. Pra ambientes sem `APP_URL`/`NEXT_PUBLIC_APP_URL`
+setada, o fallback é forçado (sem domínio, a Api4com não tem pra onde
+mandar).
+
+**Alternativas descartadas.**
+- *Forçar `API4COM_SERVICE_TOKEN` no env e usar o `Api4ComClient` admin*:
+  duplica o fluxo de `enableTelephony` do `provisioning.ts`, que já é
+  o "caminho automático completo" (provisiona user + ramal +
+  integração) e é incompatível com quem já tem conta Api4com prévia
+  (não quer re-provisionar). Além disso, exige token admin no `.env` —
+  fricção operacional desnecessária.
+- *Endpoint dedicado `POST /api/sip-extensions/setup-webhook`*: pra
+  cobrir o caso de operadores que já estão conectados mas sem webhook,
+  parece útil. Mas adiciona superfície de API e é trivialmente
+  substituível por "desconectar e reconectar" via UI atual. Adicionar
+  só se vier demanda real.
+- *Configurar webhook em `getMyCredentials`*: side-effect num GET é
+  anti-pattern. E o GET roda toda vez que a sessão recarrega — overhead
+  desnecessário e race condition se vários operadores logarem ao mesmo
+  tempo na mesma org.
+- *Persistir `webhookConfigured: true` em `SipExtension.providerMeta`*:
+  útil pra evitar refazer o `PATCH /integrations` toda reconexão, mas
+  prematuro — `PATCH /integrations` é idempotente na Api4com (segunda
+  chamada com mesmo `gateway` retorna 200 sem efeito colateral). Pode
+  ser adicionado depois se o tempo da chamada começar a importar.
+
+**Impacto.**
+- Operadores existentes que já fizeram `connect-api4com` antes desta
+  mudança continuam sem webhook configurado. Pra ativar histórico
+  pra eles: re-conectar via UI. UI agora mostra explicitamente se
+  o webhook está configurado ou se requer setup manual.
+- Multi-tenant seguro: `getOrCreateApi4ComProviderConfig` usa
+  `getOrgIdOrThrow()` via Prisma extension, garantindo que o
+  `webhookToken` é único por org. Webhook de uma org NUNCA processa
+  evento de outra (o `findConfigByWebhookToken` resolve org direto
+  pelo token).
+- Compatível com o fluxo `enableTelephony` (provisioning admin via
+  `API4COM_SERVICE_TOKEN`): ambos chamam o mesmo `PATCH /integrations`
+  com o mesmo formato. Se o admin já tinha rodado provisioning antes,
+  o `getOrCreateApi4ComProviderConfig` reaproveita o config existente.
+- Frontend `Api4ComConnectForm` ganhou bloco condicional de UI:
+  verde "webhook configurado" ou caixa amarela com URL + botão copiar
+  quando manual. Sem ambiguidade pra o operador.
+
+---
+
+### 2026-06-23 — Hotfix: migration `20260616110000_add_softphone_module` faltante
+
+**Contexto.** Deploy do DEV_BRANCH quebrou a UI de Softphone com erro
+`Tabela sip_extensions ausente. Aplique a migration
+20260616110000_add_softphone_module e reinicie o backend.` O código (commit
+572f06e — `feat(softphone)`) referencia essa migration na mensagem de erro
+e a migration seguinte (`20260622120000_api4com_provisioning`) faz
+`ALTER TABLE sip_extensions / calls` assumindo que ela existe, mas a
+migration **não foi commitada no repo** — o mfpi provavelmente sincronizou
+o schema local via `prisma db push` antes de gerar a migration de
+`api4com_provisioning`. Como o DB de DEV roda com `SKIP_PRISMA_MIGRATE=1`,
+nenhum deploy nunca aplicou esses CREATE TABLE.
+
+**Decisão.** Gerar a migration faltante a partir do schema (`prisma/schema.prisma`
+linhas 4015–4216), nomeada exatamente como o código de erro espera
+(`20260616110000_add_softphone_module`), criando as 4 tabelas
+(`sip_extensions`, `calls`, `call_events`, `call_provider_configs`) e os 5
+enums (`SipExtensionStatus`, `CallDirection`, `CallStatus`,
+`WebhookAuthMode`, `RecordingDelivery`). Não inclui as colunas/índices/FK
+adicionadas pela `20260622120000_api4com_provisioning` (`telephony_enabled`,
+`api4com_user_id`, `api4com_gateway`, `provisioning_step`,
+`provisioning_error`, `provisioned_at`, `calls.deal_id`, `calls.metadata`,
+FK `calls→deals`, índice `calls_organizationId_dealId_idx`, enum
+`TelephonyProvisioningStep`) — a `20260622120000` segue sendo a fonte da
+verdade pra esses ADDs. Toda a migration é idempotente (`IF NOT EXISTS` +
+`DO $$ ... EXCEPTION WHEN duplicate_object`) seguindo o padrão da
+`20260615120100_groups_kommo` (precedente do mesmo problema), pra rodar com
+segurança em DBs onde o mfpi aplicou parcialmente via `db push`.
+
+**Alternativas descartadas.**
+- *Esperar mfpi commitar a migration original*: bloqueia teste da telefonia
+  agora; conflito futuro com a versão dele é mais barato que ambiente
+  travado.
+- *`prisma db push` no banco de DEV*: corrige o sintoma mas não cria
+  histórico em `_prisma_migrations` — próximo `prisma migrate deploy`
+  ignoraria as tabelas existentes e quebraria de novo na próxima migration.
+- *Aplicar SQL direto sem criar migration*: idem acima + zero
+  rastreabilidade no repo.
+
+**Impacto.**
+- Próximo `prisma migrate deploy` aplica `20260616110000_add_softphone_module`
+  + `20260622120000_api4com_provisioning` na ordem correta sem erros.
+- DEV continua com `SKIP_PRISMA_MIGRATE=1` — operador roda
+  `npx prisma migrate deploy` manualmente no container quando há migration
+  nova (procedimento documentado em conversa de implementação).
+- Quando o mfpi commitar a versão dele da migration, gera conflito de
+  pasta com mesmo nome — resolver mantendo a versão que está no DB
+  (provavelmente a nossa, já aplicada).
+
+---
+
+### 2026-06-22 — auto-deals v3: respeitar histórico do contato em inbounds passivos
+
+**Contexto.** Operador reportou que automação com trigger `deal_created`
+re-disparava cada vez que cliente com deal LOST voltava a mandar mensagem.
+Causa raiz: `ensureOpenDealForContact` em `src/services/auto-deals.ts`
+checava apenas `status = OPEN`; se contato tinha só LOST/WON, criava deal
+novo e disparava `fireTrigger("deal_created")` — comportamento intencional
+da v2 pra resolver "contatos órfãos" no Painel CRM do Inbox, mas
+incompatível com o modelo declarativo de automações ("o controle deve
+ser pelos gatilhos que eu configurei, não pelo backend").
+
+**Decisão.** Novo default: `ensureOpenDealForContact` só auto-cria deal
+quando o contato NUNCA teve deal algum. Se tem histórico (OPEN/WON/LOST),
+delega a decisão pras automações configuradas pelo operador (trigger
+`message_received` + filtro `dealStatus` + step `create_deal`). Opt-in
+explícito via `reopenLostContacts: true` mantém comportamento v2 para
+chamadores que precisam garantir destino pros dados (WhatsApp Flow
+Response — formulário preenchido precisa de deal pra anexar campos; e
+scripts de backfill manuais).
+
+**Alternativas descartadas.**
+- *Filtro `dealStatus` em `deal_created`*: paliativo — backend continuaria
+  criando deal desnecessariamente, só não dispararia. Custo computacional
+  e poluição da base de deals iguais ao bug original.
+- *Setting por organização*: complexidade desproporcional pra uma regra
+  que é claramente certa por default. Quem quiser reativação automática
+  configura via automação (caminho declarativo) ou usa o opt-in nos
+  callers específicos.
+- *Reabrir deal LOST em vez de criar novo*: alteraria semântica histórica
+  (deal LOST representa decisão deliberada do operador) e dispararia outro
+  problema (qual evento emitir — `deal_reopened` não existe ainda).
+
+**Impacto.**
+- Callers de inbound passivo (`workers/baileys/message-handler.ts`,
+  `lib/meta-webhook/handler.ts`) automaticamente herdam o novo default
+  — nenhuma mudança no caller foi necessária além de atualizar comentários.
+- Callers que precisam preservar o comportamento legado (`services/whatsapp-flow-response.ts`,
+  scripts `backfill-deals-for-contacts.ts` e `backfill-inbox-deals.ts`)
+  recebem `reopenLostContacts: true` com justificativa inline.
+- Novo `EnsureOpenDealResult.reason: "contact_has_closed_deal"` — callers
+  que tratavam `skipped` como genérico continuam funcionando (any-reason
+  pattern); quem quiser logar por motivo específico pode discriminar.
+- Operadores que dependiam de reativação automática precisam criar uma
+  automação `message_received` (filtro `dealStatus=LOST` + step `create_deal`).
+  Esse fluxo já é suportado pela infra existente — não exige mudança no
+  worker de automações.
+
+---
+
+### 2026-06-22 — Api4com: Provisionamento + Singleton JsSIP + Revisão [DECISÃO — agente OPUS]
+
+**Contexto.** Fases 2, 5 e 6 do plano de integração Api4com (`docs/PLAN-api4com.md`),
+executadas em Opus conforme governança de modelos.
+
+**Decisão 1 — Prisma migration `20260622120000_api4com_provisioning`.** Adicionados:
+- Enum `TelephonyProvisioningStep` (8 estados da máquina de provisionamento).
+- Campos em `SipExtension`: `telephonyEnabled`, `api4comUserId`, `api4comGateway`,
+  `provisioningStep`, `provisioningError`, `provisionedAt`.
+- Campos em `Call`: `dealId` (FK → `Deal`, onDelete SetNull), `metadata` (JSONB).
+- Índice `(organizationId, dealId)` em `calls`.
+
+**Decisão 2 — ProvisioningService máquina de estados.** Serviço stateless em
+`services/api4com/provisioning.ts`. Cada passo persiste `provisioningStep` ANTES de
+avançar (retomada segura após crash). 409 em POST /users = skip para CREATE_EXTENSION.
+Toggle OFF: marca DISABLED + INACTIVE sem apagar ramal remoto.
+
+**Decisão 3 — Singleton JsSIP em escopo de módulo.** Variáveis `moduleUA`,
+`moduleSession`, etc. vivem no escopo do módulo (`use-softphone.ts`), NÃO em
+`useRef` de componente. Motivo: remount não perde registro SIP. `beforeunload`
+garante cleanup ao fechar aba. `disconnect()` explícito destrói o UA.
+
+**Decisão 4 — Auto-answer por header SIP.** Além do `pendingDial` (heurística 1),
+inspeciona `X-Api4comintegratedcall: true` na INVITE inbound (heurística 2). Permite
+auto-answer mesmo em cenários de retry pelo PBX onde o dial REST não precede
+diretamente a INVITE.
+
+**Decisão 5 — Verificação cross-org na rota PATCH /users/:id/telephony.** Admin de
+org A não pode provisionar user de org B. Verificação explícita com
+`prisma.user.findFirst({ id, organizationId })` antes de chamar `enableTelephony`.
+
+---
+
+### 2026-06-16 — Módulo de Softphone (SIP/WebRTC) [DECISÃO — agente OPUS]
+
+**Contexto.** Briefing pede softphone que registra ramal SIP e faz/recebe chamada
+WebRTC **no navegador**, com histórico alimentado por webhook do provedor, gravações
+disponíveis e UI no DS v2. Provedor é genérico (qualquer ramal SIP padrão). Spec
+completo em `docs/superpowers/specs/2026-06-16-softphone-sip-webrtc-design.md`.
+
+**Decisão 1 — Mídia/registro no client, backend só persiste.** O registro SIP e o
+áudio rodam no navegador via **JsSIP** (escolhido sobre SIP.js por foco em
+registrar ramal + chamada contra PBX). Backend NUNCA registra ramal nem processa
+mídia: só guarda credenciais cifradas, entrega ao próprio dono e processa o webhook.
+
+**Decisão 2 — Domínio próprio multi-tenant.** Models novos `sip_extensions`,
+`calls`, `call_events`, `call_provider_configs` (cuid, camelCase + `@map`,
+`organizationId` direto, em `RLS_PROTECTED_TABLES` e `SCOPED_MODELS`). Migration
+idempotente. Reuso de `lib/crypto/secrets.ts` (`KEYRING_SECRET`) para
+`authPasswordEncrypted` e `webhookSecretEncrypted` — sem cripto nova.
+
+**Decisão 3 — `CallProviderConfig` (entidade não prevista no briefing).** Criada por
+dois motivos: (a) resolver o tenant num webhook **público** via `webhookToken` único
+(consulta sistêmica com `prismaBase`, depois `withResolvedContext({ organizationId })`
+para o restante do fluxo); (b) tornar o adapter genérico **configurável** sem deploy
+(`fieldMappings` + mapa de status). Auth do webhook suporta **HMAC e/ou token**.
+
+**Decisão 4 — Idempotência por `(organizationId, provider, providerCallId)`.** O
+histórico é alimentado pelo webhook (fonte da verdade), não pelo JsSIP — chamada de
+ramal físico/perdida também entra. Reenvio do mesmo evento só atualiza
+status/timestamps/duração, nunca duplica.
+
+**Decisão 5 — Gravações no storage local existente.** Re-hospedadas via
+`saveFile` no bucket `recordings` (já na whitelist), URL própria `/api/storage/...`
+— não depende de link que expira no provedor. Sem S3.
+
+**Decisão 6 — Adapter plugável.** `services/call-adapters/` com interface
+`normalizeCallEvent` + registry; `generic-sip` dirigido por config. Ponto claro para
+plugar `asterisk` etc. no futuro, sem assumir payload fixo.
+
+**Decisão 7 — Widget global persistente.** Montado em `(app)/layout.tsx` (irmão de
+`{children}`, `z-[55]`), estado em Zustand (`softphone-store`), lógica SIP isolada em
+`useSoftphone`. Não atrelado a rota — chamada não cai ao navegar.
+
+---
+
+### 2026-06-16 — Módulo de E-mail (IMAP/SMTP multi-conta) como DOMÍNIO NOVO, sem "tipo de canal" especial [DECISÃO — agente OPUS]
+
+**Contexto.** Briefing pede caixa de entrada de e-mail multi-conta (IMAP/SMTP),
+envio, e vínculo automático com contatos/leads, com UI 100% no Design System v2.
+Já existe `ChannelType.EMAIL` no enum de canais, mas aquele domínio é orientado a
+mensageria WhatsApp/Meta (Baileys, templates, webhooks) e **não** modela
+caixa-postal IMAP/SMTP. Reaproveitá-lo acoplaria conceitos distintos.
+
+**Decisão 1 — Domínio próprio, não estende `Channel`.** Duas tabelas novas,
+`email_accounts` e `emails`, com `organizationId` direto (multi-tenant) entrando
+em `RLS_PROTECTED_TABLES` (`lib/rls.ts`). Enforcement primário continua sendo a
+Prisma Extension app-layer (`withOrgFromCtx`/`withOrgContext`), igual ao resto do
+CRM — RLS é a 2ª camada (ainda não ENABLE em prod). Migration idempotente
+(`IF NOT EXISTS` + `DO $$`), no padrão das demais.
+
+**Decisão 2 — Reuso de criptografia existente.** A senha IMAP/SMTP usa
+`encryptSecret`/`decryptSecret` (`lib/crypto/secrets.ts`, AES-256-GCM, env
+`KEYRING_SECRET`). Coluna `passwordEncrypted` (`@map("password_encrypted")`).
+Senha **nunca** retorna em nenhuma resposta de API nem é logada; descriptografa
+só no momento de abrir a conexão. NÃO criar serviço de cripto novo.
+
+**Decisão 3 — Dependências.** `imapflow` (IMAP, TS-first, promises) + `nodemailer`
+(SMTP de facto + `verify()` para teste de conexão). Não havia lib IMAP/SMTP no
+backend; estas são as escolhas mantidas/ativas em 2026.
+
+**Decisão 4 — Contrato de erro por campo.** Endpoints de conta retornam
+`{ ok:false, field, message }` no 1º erro. Ordem de teste obrigatória: IMAP
+**depois** SMTP, parando no 1º erro — é o que define qual campo destacar. Camada
+`email-imap.ts`/`email-smtp.ts` traduz exceções do provedor para `{ field, message }`.
+
+**Decisão 5 — Vínculo de contato via use-case existente.** A resolução de
+`contactId` na sincronização usa `getContacts({ emailExact })` para match e
+`createContact(...)` (services/contacts.ts) para criação — que já dispara
+`logEvent`/efeitos colaterais. PROIBIDO inserir em `contacts` direto. Criação só
+quando `createContactsForReplies = true`.
+
+**Decisão 6 — Visibilidade no BACKEND.** `shared` = visível a quem tem
+`email_account:view`; `personal` = só `ownerUserId` (gate `email_account:view_own`).
+Caixa combinada (`GET /emails` sem accountId) = união das contas acessíveis ao
+usuário, resolvida no serviço, não na UI. Novo resource `email_account` no
+catálogo de permissões + item `email` na sidebar (backend + catálogo FE espelhado).
+
+**Decisão 7 — Estrutura de arquivos (segue convenção do repo).**
+- Backend services: `email-accounts.ts` (CRUD + orquestra teste), `email-imap.ts`,
+  `email-smtp.ts`, `email-sync.ts` (IMAP→DB→resolução de contato).
+- Rotas: `app/api/email-accounts/**` e `app/api/emails/**` (padrão `withOrgContext`).
+- Frontend: feature `src/features/email-v2/` (types/api/hooks/components) + page
+  fina `src/app/(app)/email/page.tsx`. UI só com componentes/tokens do DS v2.
+- `checkbox` e `segmented-control` não existem em `components/ui` — criar seguindo
+  tokens do DS v2 (não componentes soltos fora do DS).
+
+**Decisão 8 — Threading e dedup.** `threadId` = assunto normalizado (sem
+`Re:`/`Fwd:`) quando `groupInThreads`, senão `messageId`. Unicidade
+`(accountId, messageId)` evita reinserção em re-sync.
+
+**Aberto (defaults assumidos, ajustáveis):** leitura da mensagem via `Sheet`
+(drawer) do DS v2; RLS das tabelas novas fica "policy-ready" mas não ENABLE
+(mesmo estado do resto do schema).
+
+---
+
 ### 2026-06-22 — Auto-deal não recria negócio em reengajamento de deal fechado (decisão fica na automação) [DECISÃO — agente Opus]
 
 **Decisão.** `services/auto-deals.ts` (`ensureOpenDealForContact`): quando o

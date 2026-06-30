@@ -65,6 +65,11 @@ async function main() {
           contactName: c.name,
           source: "backfill_inbox",
           logTag: "backfill-inbox",
+          // Backfill manual: garante deal pra todos os candidatos, mesmo
+          // se já tiverem deals fechados no histórico. Sem isso o script
+          // ficaria ineficaz pra contatos com WON/LOST antigo (situação
+          // comum quando rodando o backfill em base existente).
+          reopenLostContacts: true,
         }),
       );
       if (result.status === "created") {

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import QRCode from "qrcode";
 
 import { auth } from "@/lib/auth";
+import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import {
   getChannelById,
@@ -60,6 +61,11 @@ export async function GET(request: Request, context: RouteContext) {
     if (!channel) {
       return NextResponse.json({ message: "Canal não encontrado." }, { status: 404 });
     }
+
+    // Bloco B (25/jun/26): GET qr exige `manage` (operação de pareamento,
+    // não é leitura inofensiva — expõe credencial visual do canal).
+    const manageDenied = await requireChannelScope(session.user, "manage", id);
+    if (manageDenied) return manageDenied;
 
     if (channel.provider === "BAILEYS_MD") {
       return NextResponse.json({

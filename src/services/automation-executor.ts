@@ -1358,6 +1358,60 @@ async function executeStep(
       return {};
     }
 
+    case "send_product": {
+      const productId = readString(cfg, "productId")?.trim();
+      if (!productId) throw new Error("send_product: productId obrigatório");
+
+      // findFirst (não findUnique) para respeitar o escopo de org do
+      // Prisma extension — evita vazar produto de outra organização.
+      const product = await prisma.product.findFirst({
+        where: { id: productId },
+        select: { id: true, name: true, description: true, sku: true, price: true, unit: true },
+      });
+      if (!product) throw new Error(`send_product: produto ${productId} não encontrado`);
+
+      const priceNumber = Number(product.price ?? 0);
+      const priceLabel = `R$ ${priceNumber.toFixed(2).replace(".", ",")}`;
+      const produtoVars = {
+        produto: {
+          nome: product.name ?? "",
+          preco: priceLabel,
+          preco_numero: priceNumber,
+          sku: product.sku ?? "",
+          descricao: product.description ?? "",
+          unidade: product.unit ?? "",
+        },
+      };
+
+      // Texto vazio → resumo padrão do produto. Texto preenchido → o operador
+      // controla 100% do conteúdo, usando {{produto.*}} e variáveis de contexto.
+      const contentRaw = readString(cfg, "content")?.trim();
+      const content =
+        contentRaw && contentRaw.length > 0
+          ? contentRaw
+          : [
+              `*${product.name ?? "Produto"}*`,
+              product.description ? product.description : null,
+              `Valor: ${priceLabel}`,
+            ]
+              .filter(Boolean)
+              .join("\n");
+
+      const existingVars = asRecord((cfg as Record<string, unknown>)["__variables"]) ?? {};
+
+      // Reaproveita TODO o fluxo de send_whatsapp_message (resolução de
+      // conexão, envio Meta, fallback de template, persistência + SSE).
+      return executeStep(
+        "send_whatsapp_message",
+        {
+          ...cfg,
+          content,
+          __variables: { ...existingVars, ...produtoVars },
+        },
+        rt,
+      );
+    }
+
     case "send_whatsapp_template": {
       const cfgPhone = readString(cfg, "phone")?.trim() || "";
       const phoneRaw = cfgPhone || rt.contact?.phone || "";
@@ -2365,6 +2419,7 @@ const WA_SEND_STEP_TYPES = new Set([
   "send_whatsapp_template",
   "send_whatsapp_media",
   "send_whatsapp_interactive",
+  "send_product",
   "question",
 ]);
 
@@ -2726,6 +2781,7 @@ const STEP_TYPE_LABELS: Record<string, string> = {
   send_whatsapp_template: "Template WhatsApp",
   send_whatsapp_media: "Mídia WhatsApp",
   send_whatsapp_interactive: "Botões WhatsApp",
+  send_product: "Enviar produto",
   webhook: "Webhook",
   delay: "Atraso",
   condition: "Condição",

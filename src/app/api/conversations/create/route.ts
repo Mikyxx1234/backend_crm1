@@ -47,6 +47,14 @@ export async function POST(request: Request) {
       // If skipSend, create/reuse conversation record without sending a message.
       // Used when opening chat for a contact with no prior conversations.
       if (skipSend) {
+        // Bloco B (25/jun/26): exige `view` quando channelId é informado.
+        // Sem channelId não há canal pra escopar (conversa criada sem
+        // channelId, caso legado) — mantém o comportamento anterior.
+        if (channelId) {
+          const viewDenied = await requireChannelScope(session.user, "view", channelId);
+          if (viewDenied) return viewDenied;
+        }
+
         const existing = await prisma.conversation.findFirst({
           where: { contactId: contact.id, channel: "whatsapp" },
           select: {
@@ -121,6 +129,11 @@ export async function POST(request: Request) {
         return NextResponse.json({ message: "Canal não encontrado." }, { status: 404 });
       }
 
+      // Bloco B (25/jun/26): caminho "nova conversa com mensagem" exige
+      // ambos `initiate` (iniciar conversa com cliente) e `send` (enviar
+      // mensagem). `initiate` implica `view`, então checa nessa ordem.
+      const initiateDenied = await requireChannelScope(session.user, "initiate", channel.id);
+      if (initiateDenied) return initiateDenied;
       const sendDenied = await requireChannelScope(session.user, "send", channel.id);
       if (sendDenied) return sendDenied;
 
@@ -183,6 +196,7 @@ export async function POST(request: Request) {
         const msgRow = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: conversation.id,
+            channelId: channel.id,
             content: message,
             direction: "out",
             messageType: "text",
@@ -221,6 +235,7 @@ export async function POST(request: Request) {
         await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: conversation.id,
+            channelId: channel.id,
             content: message,
             direction: "out",
             messageType: "text",

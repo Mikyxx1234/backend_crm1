@@ -3,7 +3,10 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { userOrgFilter } from "@/lib/auth-helpers";
 import type { AppUserRole } from "@/lib/auth-types";
-import { requireChannelScope } from "@/lib/authz/resource-policy";
+import {
+  canDoChannelAction,
+  requireChannelScope,
+} from "@/lib/authz/resource-policy";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
@@ -52,6 +55,21 @@ export type InboxMessageDto = {
    * (✓ / ✓✓ / ✓✓ azul) no balão do chat.
    */
   status?: "PENDING" | "SENT" | "DELIVERED" | "READ" | "FAILED";
+  /**
+   * Conexão (Channel) por onde ESTA mensagem trafegou. Permite ao chat
+   * distinguir, na mesma conversa, mensagens de contas distintas do mesmo
+   * canal (ex.: dois WhatsApps da org). `null` = histórica/sem vínculo
+   * (o frontend trata como "herda a conexão anterior", sem marcador).
+   */
+  channelId?: string | null;
+};
+
+/** Resumo de uma conexão (Channel) para exibir o canal na UI do inbox/contato. */
+export type ConnectionRefDto = {
+  id: string;
+  name: string;
+  type: string;
+  phoneNumber: string | null;
 };
 
 /** Normaliza o `sendStatus` (string livre) para o enum de status do DTO. */
@@ -133,7 +151,7 @@ export async function GET(request: Request, context: RouteContext) {
         id: true, externalId: true, content: true, createdAt: true,
         direction: true, messageType: true, isPrivate: true, senderName: true,
         mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
-        sendStatus: true, sendError: true,
+        sendStatus: true, sendError: true, channelId: true,
       },
     });
 
@@ -192,12 +210,54 @@ export async function GET(request: Request, context: RouteContext) {
       sendStatus: r.sendStatus,
       sendError: r.sendError ?? undefined,
       status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
+      channelId: r.channelId ?? null,
     }));
+
+    // Mapa de conexões referenciadas (canais das mensagens + canal atual da
+    // conversa). Permite ao frontend rotular cada mensagem e o header com o
+    // apelido + número da conexão sem N+1 queries no client.
+    const referencedChannelIds = Array.from(
+      new Set(
+        [
+          conv.channelId,
+          ...rows.map((r) => r.channelId),
+        ].filter((v): v is string => Boolean(v)),
+      ),
+    );
+    const channelsMap: Record<string, ConnectionRefDto> = {};
+    if (referencedChannelIds.length > 0) {
+      const channelRows = await prisma.channel.findMany({
+        where: {
+          id: { in: referencedChannelIds },
+          ...userOrgFilter({ user: authResult.user }),
+        },
+        select: { id: true, name: true, type: true, phoneNumber: true },
+      });
+      for (const ch of channelRows) {
+        channelsMap[ch.id] = {
+          id: ch.id,
+          name: ch.name,
+          type: ch.type,
+          phoneNumber: ch.phoneNumber ?? null,
+        };
+      }
+    }
+    const currentChannel: ConnectionRefDto | null =
+      (conv.channelId && channelsMap[conv.channelId]) || null;
+
+    // Bloco C (25/jun/26): expõe `canReply` no payload pra o composer
+    // entrar em modo leitura quando o usuário não tem `channel.send` no
+    // canal. Derivado do mesmo enforcement do POST messages — fonte de
+    // verdade é o backend; client usa só pra UX (desabilitar input + aviso).
+    const canReply = await canDoChannelAction(accessUser, "send", conv.channelId);
 
     return NextResponse.json({
       messages,
       pinnedNoteId,
       channelProvider: conv.channelRef?.provider ?? null,
+      channel: currentChannel,
+      channels: channelsMap,
+      canReply,
       session: {
         lastInboundAt: lastInboundAt?.toISOString() ?? null,
         active: sessionActive,
@@ -374,6 +434,7 @@ export async function POST(request: Request, context: RouteContext) {
     const saved = await prisma.message.create({
       data: withOrgFromCtx({
         conversationId: conv.id,
+        channelId: conv.channelId ?? undefined,
         content,
         direction: "out",
         messageType: "text",

@@ -16,6 +16,8 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
+import { getScopeGrants } from "@/lib/authz/scope-grants";
+import { listAllowedChannelIdsForUser } from "@/lib/authz/scope-grants-shared";
 import { prismaBase } from "@/lib/prisma-base";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -118,12 +120,56 @@ export async function GET(_req: Request, ctx: Ctx) {
         systemPreset: a.role.systemPreset,
       }));
 
+      // Bloco E (25/jun/26): popula `groups` e `channelGrants` reais.
+      // Antes esses campos eram stubs vazios; agora o frontend pode
+      // exibir membership real e canais efetivos sem chamada extra.
+      const groupMemberships = await prismaBase.groupMember.findMany({
+        where: {
+          userId: id,
+          organizationId: user.organizationId ?? undefined,
+        },
+        select: {
+          group: { select: { id: true, name: true } },
+        },
+      });
+      const groups = groupMemberships.map((m) => ({
+        id: m.group.id,
+        name: m.group.name,
+      }));
+
+      // Canais efetivos: união dos grants (user + roles + groups), com deny
+      // aplicado. Retorna nomes dos canais quando há restrição (array
+      // possivelmente vazio); `null` indicaria "sem restrição" — convertemos
+      // pra `[]` no payload pra simplificar consumo no client (UI exibe
+      // "Todos os canais" quando vazio + permissão de view geral).
+      // Lê grants da org do user-alvo (não do caller — super-admin pode
+      // estar auditando user de outra org). Sem org → grants vazios.
+      const grants = await getScopeGrants(user.organizationId ?? null);
+      const allowedIds = listAllowedChannelIdsForUser({
+        grants,
+        role: user.role,
+        userId: id,
+        roleIds: roles.map((r) => r.id),
+        groupIds: groups.map((g) => g.id),
+      });
+      let channelGrants: { id: string; name: string }[] = [];
+      if (allowedIds && allowedIds.length > 0) {
+        const chs = await prismaBase.channel.findMany({
+          where: {
+            id: { in: allowedIds },
+            organizationId: user.organizationId ?? undefined,
+          },
+          select: { id: true, name: true },
+        });
+        channelGrants = chs.map((c) => ({ id: c.id, name: c.name }));
+      }
+
       return NextResponse.json({
         permissions,
-        channelGrants: [],
+        channelGrants,
         stageGrants: [],
         roles,
-        groups: [],
+        groups,
       });
     } catch (e) {
       return NextResponse.json(

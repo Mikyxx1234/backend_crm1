@@ -1,30 +1,33 @@
 /**
- * auto-deals — Garante que todo contato que tem interação ativa (mensagem
- * inbound, conversa aberta) tenha pelo menos um deal OPEN vinculado ao
- * primeiro pipeline ativo.
+ * auto-deals — Garante destino para inbounds quando o contato AINDA NÃO
+ * possui histórico de deals.
  *
- * Originalmente, a criação automática de deal só rodava quando o contato
- * era NOVO (`resolveOrCreateContact` → `autoCreateDeal`). Isso deixava
- * contatos antigos (importados, manuais, ou vindos de um canal antes
- * da feature existir) sem deal mesmo recebendo mensagens novas —
- * resultado visível: no Inbox a sidebar "Painel CRM" mostra "Nenhum
- * negócio aberto", e no Kanban deals criados manualmente sem contato
- * deixam o workspace sem dados laterais.
+ * Histórico:
+ *  - v1: auto-criava deal só pra contato NOVO. Contatos antigos sem deal
+ *    ficavam órfãos no Painel CRM do Inbox ("Nenhum negócio aberto").
+ *  - v2: passou a chamar `ensureOpenDealForContact` em TODO inbound,
+ *    criando deal sempre que não houvesse OPEN — mesmo com WON/LOST no
+ *    histórico. Resolveu os órfãos mas trouxe efeito colateral: cliente
+ *    com deal LOST que voltasse a conversar re-disparava `deal_created`
+ *    a cada mensagem, executando automações que não deveriam rodar de
+ *    novo (ex.: boas-vindas pra lead já descartado).
+ *  - v3 (jun/2026): "controle pelos gatilhos" — o backend NÃO reabre
+ *    lead descartado nem recria deal pra cliente que já comprou. Quem
+ *    decide o que fazer ao chegar uma mensagem em contato com deal
+ *    fechado é a automação que o operador configurou (ex.: trigger
+ *    `message_received` filtrando por `dealStatus=LOST` + step
+ *    `create_deal` para reativação manual).
  *
- * Agora o fluxo é idempotente: chamamos `ensureOpenDealForContact` em
- * TODO inbound.
+ * Regra atual (default `reopenLostContacts: false`):
+ *  - Contato sem deal algum         → cria deal + dispara `deal_created`
+ *  - Contato com deal OPEN          → retorna existente, sem disparar
+ *  - Contato com último deal LOST   → NÃO faz nada (skipped)
+ *  - Contato com último deal WON    → NÃO faz nada (skipped)
  *
- * 22/jun/26 — Regra de criação ajustada para não duplicar negócios em
- * reengajamento:
- *   • Contato com deal OPEN  → reusa o existente (no-op).
- *   • Contato SEM deal OPEN mas com deal fechado (WON/LOST) → NÃO cria.
- *     O reengajamento de negócio fechado é decisão de NEGÓCIO e deve ser
- *     tratado por uma automação `message_received` (filtrada por
- *     `dealStatus` WON/LOST) que decide criar novo deal ou reabrir/mover.
- *     Se o auto-deal criasse aqui, geraria card duplicado E o gatilho
- *     `message_received` veria `dealStatus = OPEN`, impedindo a automação.
- *   • Contato SEM nenhum deal (primeiro contato) → cria e dispara
- *     `deal_created` (regra de recepção preservada para leads novos).
+ * Opt-in `reopenLostContacts: true` mantém o comportamento v2 para
+ * fluxos onde o caller PRECISA garantir um destino pros dados — ex.:
+ * WhatsApp Flow Response (formulário preenchido precisa anexar campos
+ * a algum deal) e scripts de backfill manual.
  */
 
 import { prisma } from "@/lib/prisma";
@@ -49,54 +52,86 @@ type EnsureOpenDealOptions = {
    * Ausente ou sem funil configurado → fallback para o funil padrão da org.
    */
   channelId?: string | null;
+  /**
+   * Opt-in pro comportamento legado (v2): cria deal sempre que não
+   * houver um OPEN, mesmo que o contato tenha deals fechados (WON/LOST).
+   *
+   * Default `false`: respeita o histórico de deals do contato e só cria
+   * automaticamente quando o contato NUNCA teve deal algum. Quem decide
+   * o que fazer com um contato cujo último deal está fechado é a
+   * automação configurada pelo operador (trigger `message_received` +
+   * filtro `dealStatus` + step `create_deal`).
+   *
+   * Use `true` apenas em casos onde o caller precisa de um destino
+   * garantido pros dados (ex.: WhatsApp Flow Response, scripts de
+   * backfill manual).
+   */
+  reopenLostContacts?: boolean;
 };
 
 type EnsureOpenDealResult =
   | { status: "existing"; dealId: string }
   | { status: "created"; dealId: string }
-  | { status: "skipped"; reason: "no_pipeline" | "has_closed_deal" };
+  | {
+      status: "skipped";
+      reason: "no_pipeline" | "contact_has_closed_deal";
+    };
 
 /**
- * Garante que o contato tenha um deal OPEN. Se já existe, retorna o
- * existente. Se não existe nenhum, cria um novo no estágio de entrada
- * do primeiro pipeline e dispara o trigger `deal_created` (para que o
- * "Funil de Automações" seja acionado).
+ * Decide se um inbound passivo merece um deal automático e, em caso
+ * positivo, o cria no estágio de entrada do funil de destino disparando
+ * `deal_created`.
  *
- * Retorna `{ status: "skipped" }` se não há pipeline configurado (setup
- * inicial) — caller deve tratar como no-op silencioso.
+ * Resultados possíveis:
+ *  - `existing`  → contato já tinha um deal OPEN; retorna o id sem efeitos.
+ *  - `created`   → criou deal novo + disparou `deal_created`.
+ *  - `skipped`   → não criou nada. `reason` indica o motivo:
+ *      - `"no_pipeline"`              setup inicial sem funil configurado
+ *      - `"contact_has_closed_deal"`  contato tem WON/LOST no histórico
+ *                                     (default v3 — ver header do arquivo)
+ *
+ * Caller deve tratar `skipped` como no-op silencioso. Quando precisa
+ * forçar criação mesmo com deals fechados, passa `reopenLostContacts: true`.
  */
 export async function ensureOpenDealForContact(
   options: EnsureOpenDealOptions,
 ): Promise<EnsureOpenDealResult> {
-  const { contactId, contactName, source = "auto_whatsapp", logTag = "auto-deals", channelId } = options;
+  const {
+    contactId,
+    contactName,
+    source = "auto_whatsapp",
+    logTag = "auto-deals",
+    channelId,
+    reopenLostContacts = false,
+  } = options;
 
-  // Fast path: contato já tem deal aberto → nada a fazer.
-  const existing = await prisma.deal.findFirst({
-    where: { contactId, status: "OPEN" },
-    select: { id: true },
-    orderBy: { createdAt: "desc" },
-  });
-  if (existing) {
-    return { status: "existing", dealId: existing.id };
-  }
-
-  // 22/jun/26 — Reengajamento de negócio fechado NÃO cria deal novo aqui.
-  // Se o contato já teve negócio (WON/LOST) e não tem nenhum OPEN, deixamos
-  // o negócio fechado intacto para que uma automação `message_received`
-  // (filtrada por dealStatus WON/LOST) decida no builder: criar novo deal
-  // (step create_deal) ou reabrir/mover (step move_stage). Criar aqui
-  // duplicaria o card e faria o gatilho `message_received` ver dealStatus
-  // OPEN, neutralizando a automação de reengajamento.
-  const closedDeal = await prisma.deal.findFirst({
-    where: { contactId, status: { in: ["WON", "LOST"] } },
-    select: { id: true },
-    orderBy: { closedAt: "desc" },
-  });
-  if (closedDeal) {
-    console.log(
-      `[${logTag}] Contato ${contactName} tem negócio fechado e nenhum OPEN — não criando (reengajamento fica a cargo da automação message_received).`,
-    );
-    return { status: "skipped", reason: "has_closed_deal" };
+  // Modo padrão (v3): só auto-cria deal pra contato SEM histórico.
+  // Se o contato já teve qualquer deal (mesmo fechado), respeita o
+  // estado declarado e delega a decisão pras automações configuradas
+  // — evita re-disparar `deal_created` em lead descartado / cliente
+  // que já comprou.
+  if (!reopenLostContacts) {
+    const latest = await prisma.deal.findFirst({
+      where: { contactId },
+      select: { id: true, status: true },
+      orderBy: { createdAt: "desc" },
+    });
+    if (latest) {
+      if (latest.status === "OPEN") {
+        return { status: "existing", dealId: latest.id };
+      }
+      return { status: "skipped", reason: "contact_has_closed_deal" };
+    }
+  } else {
+    // Modo legado: só reusa quando há OPEN; cria novo se tiver só WON/LOST.
+    const existingOpen = await prisma.deal.findFirst({
+      where: { contactId, status: "OPEN" },
+      select: { id: true },
+      orderBy: { createdAt: "desc" },
+    });
+    if (existingOpen) {
+      return { status: "existing", dealId: existingOpen.id };
+    }
   }
 
   // Roteamento por canal: se o inbound veio de um canal com `defaultPipelineId`

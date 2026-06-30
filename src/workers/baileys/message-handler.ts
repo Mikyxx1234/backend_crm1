@@ -78,9 +78,13 @@ async function resolveContact(
       prisma.contact.update({ where: { id: existing.id }, data: { name: resolvedName } }).catch(() => {});
     }
 
-    // Idempotente: se o contato já tem deal OPEN nada acontece; caso
-    // contrário cria um — cobre contatos importados ou criados antes
-    // desta feature existir que voltaram a conversar.
+    // Contato JÁ EXISTE: só auto-cria deal se ele nunca tiver tido um
+    // (raro — ex.: contato importado sem deal nenhum). Se tem histórico
+    // (OPEN/WON/LOST), o controle passa pras automações configuradas
+    // — não re-disparamos `deal_created` em lead descartado nem em
+    // cliente que já comprou. Pra reativar lead LOST automaticamente,
+    // criar automação `message_received` filtrada por dealStatus=LOST
+    // com step `create_deal`. Ver `auto-deals.ts` (changelog v3).
     ensureOpenDealForContact({
       contactId: existing.id,
       contactName: resolvedName,
@@ -227,11 +231,12 @@ async function syncContactAvatar(
   }
 }
 
-// A lógica de auto-criação de deal foi extraída para
-// `src/services/auto-deals.ts` (`ensureOpenDealForContact`). O chamador
-// passa a invocar o helper a cada inbound (novo ou existente), garantindo
-// que contatos pré-existentes também passem a ter deal no primeiro
-// contato via WhatsApp QR.
+// A lógica de auto-criação de deal está em `src/services/auto-deals.ts`
+// (`ensureOpenDealForContact`). Desde v3 (jun/2026) o helper só
+// auto-cria deal pra contato SEM histórico de deals; contatos com
+// OPEN/WON/LOST passam pelo helper mas viram no-op — a reativação fica
+// a cargo das automações configuradas pelo operador (trigger
+// `message_received` + filtro `dealStatus`).
 
 async function findOrCreateConversation(contactId: string, channelId: string, rawJid: string) {
   const existing = await prisma.conversation.findFirst({
@@ -523,6 +528,7 @@ export async function handleBaileysMessage(
       await tx.message.create({
         data: withOrgFromCtx({
           conversationId: conversation.id,
+          channelId,
           content: parsed.text,
           direction: "in",
           messageType: parsed.messageType,

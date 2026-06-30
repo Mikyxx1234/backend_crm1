@@ -62,6 +62,10 @@ async function main() {
         contactName: c.name,
         source: "backfill",
         logTag: "backfill",
+        // Script de backfill é ação MANUAL/explícita do operador — quer
+        // garantir que contatos antigos sem OPEN ganhem um deal mesmo se
+        // já tiverem WON/LOST no histórico. Mantém comportamento legado.
+        reopenLostContacts: true,
       });
       if (result.status === "created") created++;
       else if (result.status === "existing") existing++;

@@ -102,11 +102,46 @@ type LeadsBulkBasePayload = {
   initiatedByUserId: string | null;
 };
 
+/** Par (customFieldId, value) aplicado via upsert. */
+export type BulkFieldValue = { fieldId: string; value: string };
+
+/**
+ * Campos NATIVOS do Deal a sobrescrever em massa. Apenas chaves presentes
+ * são aplicadas (skip-empty já resolvido no produtor/rota). `value` é string
+ * numérica (Decimal); `expectedClose` é ISO date ou null para limpar.
+ */
+export type BulkDealNativePatch = {
+  title?: string;
+  value?: string;
+  expectedClose?: string | null;
+};
+
+/**
+ * Campos NATIVOS do Contato vinculado a sobrescrever em massa. Aplicados ao
+ * `contactId` de cada deal (contatos compartilhados recebem o mesmo valor —
+ * idempotente). Nenhum desses é `@unique` no schema atual, então bulk-set do
+ * mesmo valor não viola constraint.
+ */
+export type BulkContactNativePatch = {
+  name?: string;
+  email?: string;
+  phone?: string;
+  source?: string;
+};
+
 export type BulkUpdateFieldsPayload = LeadsBulkBasePayload & {
   /** IDs dos deals a atualizar (validados como pertencentes à org no handler). */
   dealIds: string[];
-  /** Lista de pares (customFieldId, value) a aplicar via upsert em cada deal. */
-  updates: Array<{ fieldId: string; value: string }>;
+  /** Custom fields de DEAL a aplicar via upsert em cada deal (compat histórico). */
+  updates: BulkFieldValue[];
+  /** Custom fields de CONTATO a aplicar no contato vinculado de cada deal. */
+  contactCustom?: BulkFieldValue[];
+  /** Campos nativos do Deal a sobrescrever (opcional). */
+  dealNative?: BulkDealNativePatch;
+  /** Campos nativos do Contato vinculado a sobrescrever (opcional). */
+  contactNative?: BulkContactNativePatch;
+  /** Tags a adicionar no Deal (idempotente). IDs já resolvidos/criados na rota. */
+  tagIds?: string[];
 };
 
 export type BulkMoveStagePayload = LeadsBulkBasePayload & {

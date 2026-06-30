@@ -17,6 +17,7 @@
 
 import { NextResponse } from "next/server";
 
+import { logAuditAsync } from "@/lib/audit/log";
 import { withOrgContext, requireAuthWithCtx } from "@/lib/auth-helpers";
 import { can } from "@/lib/authz";
 import {
@@ -57,8 +58,17 @@ export async function GET(_req: Request, ctx: Ctx) {
 
     const channelViewIds = grants.channel?.view?.roles?.[roleId] ?? null;
     const channelSendIds = grants.channel?.send?.roles?.[roleId] ?? null;
+    const channelInitiateIds = grants.channel?.initiate?.roles?.[roleId] ?? null;
+    const channelManageIds = grants.channel?.manage?.roles?.[roleId] ?? null;
+    const channelDenyIds = grants.channel?.deny?.roles?.[roleId] ?? null;
 
-    return NextResponse.json({ channelViewIds, channelSendIds });
+    return NextResponse.json({
+      channelViewIds,
+      channelSendIds,
+      channelInitiateIds,
+      channelManageIds,
+      channelDenyIds,
+    });
   });
 }
 
@@ -78,9 +88,12 @@ export async function PUT(request: Request, ctx: Ctx) {
 
     const channelViewIds = parseField(body, "channelViewIds");
     const channelSendIds = parseField(body, "channelSendIds");
+    const channelInitiateIds = parseField(body, "channelInitiateIds");
+    const channelManageIds = parseField(body, "channelManageIds");
+    const channelDenyIds = parseField(body, "channelDenyIds");
 
     // Read-merge-write: preserva TODAS as outras chaves dos grants (outros
-    // papéis, overrides por usuário e demais eixos).
+    // papéis, overrides por usuário/grupo e demais eixos).
     const grants = await getScopeGrants();
     const next: ScopeGrants = {
       ...grants,
@@ -88,10 +101,27 @@ export async function PUT(request: Request, ctx: Ctx) {
         view: {
           users: { ...(grants.channel?.view?.users ?? {}) },
           roles: { ...(grants.channel?.view?.roles ?? {}) },
+          groups: { ...(grants.channel?.view?.groups ?? {}) },
         },
         send: {
           users: { ...(grants.channel?.send?.users ?? {}) },
           roles: { ...(grants.channel?.send?.roles ?? {}) },
+          groups: { ...(grants.channel?.send?.groups ?? {}) },
+        },
+        initiate: {
+          users: { ...(grants.channel?.initiate?.users ?? {}) },
+          roles: { ...(grants.channel?.initiate?.roles ?? {}) },
+          groups: { ...(grants.channel?.initiate?.groups ?? {}) },
+        },
+        manage: {
+          users: { ...(grants.channel?.manage?.users ?? {}) },
+          roles: { ...(grants.channel?.manage?.roles ?? {}) },
+          groups: { ...(grants.channel?.manage?.groups ?? {}) },
+        },
+        deny: {
+          users: { ...(grants.channel?.deny?.users ?? {}) },
+          roles: { ...(grants.channel?.deny?.roles ?? {}) },
+          groups: { ...(grants.channel?.deny?.groups ?? {}) },
         },
       },
     };
@@ -110,14 +140,37 @@ export async function PUT(request: Request, ctx: Ctx) {
 
     applyField(next.channel!.view!.roles!, channelViewIds);
     applyField(next.channel!.send!.roles!, channelSendIds);
+    applyField(next.channel!.initiate!.roles!, channelInitiateIds);
+    applyField(next.channel!.manage!.roles!, channelManageIds);
+    applyField(next.channel!.deny!.roles!, channelDenyIds);
 
     await setScopeGrants(next);
 
     const saved = await getScopeGrants();
-    return NextResponse.json({
-      ok: true,
+    const after = {
       channelViewIds: saved.channel?.view?.roles?.[roleId] ?? null,
       channelSendIds: saved.channel?.send?.roles?.[roleId] ?? null,
+      channelInitiateIds: saved.channel?.initiate?.roles?.[roleId] ?? null,
+      channelManageIds: saved.channel?.manage?.roles?.[roleId] ?? null,
+      channelDenyIds: saved.channel?.deny?.roles?.[roleId] ?? null,
+    };
+
+    // Bloco E (25/jun/26): auditoria de mudanças de grants por role.
+    logAuditAsync({
+      entity: "settings",
+      action: "permission.scope.update",
+      entityId: roleId,
+      before: {
+        channelViewIds: grants.channel?.view?.roles?.[roleId] ?? null,
+        channelSendIds: grants.channel?.send?.roles?.[roleId] ?? null,
+        channelInitiateIds: grants.channel?.initiate?.roles?.[roleId] ?? null,
+        channelManageIds: grants.channel?.manage?.roles?.[roleId] ?? null,
+        channelDenyIds: grants.channel?.deny?.roles?.[roleId] ?? null,
+      },
+      after,
+      metadata: { target: "role", targetId: roleId },
     });
+
+    return NextResponse.json({ ok: true, ...after });
   });
 }

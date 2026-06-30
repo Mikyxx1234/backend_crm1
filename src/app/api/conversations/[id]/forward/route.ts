@@ -144,6 +144,7 @@ export async function POST(request: Request, context: RouteContext) {
       const saved = await prisma.message.create({
         data: withOrgFromCtx({
           conversationId: targetConversationId,
+          channelId: targetConv.channelRef?.id ?? undefined,
           content,
           direction: "out",
           messageType: "text",
