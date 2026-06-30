@@ -454,13 +454,29 @@ async function resolveWebhookContact(
     if (byFuzzy) contactRow = byFuzzy;
   }
 
-  if (!contactRow && profileName && phone) {
-    const byName = await prisma.contact.findFirst({
-      where: { name: { equals: profileName, mode: "insensitive" } },
-      select: { id: true, name: true, phone: true, whatsappBsuid: true },
-    });
-    if (byName) contactRow = byName;
-  }
+  // Fallback por `profile.name` REMOVIDO em 2026-06-30.
+  //
+  // Histórico: havia um terceiro fallback aqui — se BSUID/phone/fuzzy-phone
+  // não casassem, fazia `findFirst({ name: equals(profileName) })`. A ideia
+  // era recuperar contatos importados sem phone, mas o efeito real em
+  // produção foi catastrófico para orgs com funil de recrutamento (DNAWork):
+  // qualquer pessoa com `profile.name = "Mari"` (ou "Eduardo", "Kauã", etc.)
+  // tinha suas mensagens grudadas no PRIMEIRO contato existente com aquele
+  // nome — mesmo sendo um número totalmente diferente.
+  //
+  // Diagnóstico: 1.801 inbounds mal-roteadas em 30 dias na DNAWork,
+  // afetando 429 conversas. Sintoma reportado: composer responde para o
+  // phone gravado no contato (correto), mas Meta retorna `131047 Fora da
+  // janela de 24h` porque o NÚMERO REAL daquele contato não enviou nada
+  // — quem enviou foi outra pessoa que caiu na mesma conversa por
+  // homonímia. Ver investigação em `_diag/decode_wamids.py` /
+  // `_diag/estimate_damage.py` no workspace.
+  //
+  // Decisão: `wa_id` (E.164) é a fonte de verdade no protocolo Meta —
+  // fallback por nome é fundamentalmente inseguro em qualquer escala.
+  // Sem este match, números novos passam a criar contatos novos
+  // (comportamento correto). Saneamento dos dados já bagunçados não é
+  // feito aqui (migration separada, fora deste escopo).
 
   if (contactRow) {
     const updates: { name?: string; phone?: string | null; whatsappBsuid?: string } = {};
