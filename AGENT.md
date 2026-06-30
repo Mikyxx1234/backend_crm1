@@ -5,6 +5,89 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-06-30 — Promoção dev→prod: aplicar 8 migrations em `db_crm` manualmente
+
+**Decisão.** Aplicadas 8 migrations pendentes em `db_crm` (Postgres 17.9,
+187.127.27.39), mantendo `SKIP_PRISMA_MIGRATE=1` e registradas à mão em
+`_prisma_migrations` — segue o mesmo padrão estabelecido na promoção de
+2026-06-09 (entrada abaixo) e no script `scripts/dev/apply-dev-branch-migrations.mjs`.
+
+**Migrations aplicadas (em ordem cronológica, idempotentes — todas usam
+`CREATE TABLE IF NOT EXISTS` / `ALTER ... ADD COLUMN IF NOT EXISTS` / `DO`
+blocks com `EXCEPTION WHEN duplicate_object`):**
+
+1. `20260607134036_add_catalog_module` — vinha da branch
+   `feature/sprint5-crm-deal-panel-improvements`, nunca chegou na
+   `DEV_BRANCH`. Cria 6 tabelas (`price_tables`, `price_table_items`,
+   `contracts`, `contract_items`, `stock_movements`, `discount_requests`)
+   + 6 colunas em `products` + 5 colunas em `deal_products`.
+2. `20260607180000_permissions_v2_extend_catalog` — órfã (sprint5).
+   `UPDATE roles.permissions` (append) nos presets MANAGER/MEMBER.
+3. `20260607180100_permissions_v2_add_user_groups` — órfã (sprint5).
+   Cria `user_groups`, `user_group_members` + ADD COLUMN `roles.scope_config`.
+4. `20260607180200_remove_role_scope_config` — órfã (sprint5).
+   DROP COLUMN `roles.scope_config` (cancela a anterior, mesmo step
+   conceitual).
+5. `20260616110000_add_softphone_module` — `DEV_BRANCH`. 4 tabelas
+   (`sip_extensions`, `calls`, `call_events`, `call_provider_configs`) +
+   5 enums (`SipExtensionStatus`, `CallDirection`, `CallStatus`,
+   `WebhookAuthMode`, `RecordingDelivery`).
+6. `20260622120000_api4com_provisioning` — `DEV_BRANCH`. ADD COLUMNs em
+   `sip_extensions`/`calls` + enum `TelephonyProvisioningStep`.
+7. `20260624140000_add_calls_history_widget` — `DEV_BRANCH`. INSERT em
+   `widgets` + backfill em `organization_widgets` (idempotente via
+   `ON CONFLICT DO NOTHING`) + UPDATE `roles.permissions` adicionando
+   `nav:calls` aos presets MANAGER/MEMBER.
+8. `20260630120000_add_messages_channel_id` — **criada nessa promoção**.
+   ADD COLUMN `messages.channelId` TEXT + FK para `channels(id)` ON DELETE
+   SET NULL + índice `messages_channelId_idx`. Era `db push` órfão: o
+   `schema.prisma` da `DEV_BRANCH` já declarava `Message.channelRef` mas
+   nenhuma migration tinha sido commitada — sem essa migration o app
+   quebraria em prod nas queries que resolvem o canal de origem da mensagem.
+
+**Procedimento.** Backup completo antes (`pg_dump -Fc` → 31 MB +
+`--schema-only` → 550 KB, ambos em `_db_audit/`). Aplicação via
+`psql -1 -v ON_ERROR_STOP=1` (uma transação por arquivo). INSERT em
+`_prisma_migrations` com `checksum = sha256(conteúdo CRLF)` — mesmo formato
+das 99 entradas já existentes, geradas originalmente em Windows.
+
+**Branch.** `chore/sync-orphan-migrations-from-sprint5` baseada em
+`DEV_BRANCH`, traz 5 pastas `prisma/migrations/` (4 órfãs da sprint5 +
+a nova do `channelId`) para o Git ficar consistente com o estado do banco.
+
+**Verificação pós.** Snapshot novo de `db_crm` confronta zero deltas
+estruturais com `crm` (DEV) — sobra só ruído esperado: 5 tabelas
+`_bkp_dbcrm_*` legadas, coluna `ai_agent_knowledge_chunks.embedding`
+(pgvector — DEV não tem a extensão), e ~80 índices renomeados pelo
+Prisma. Dados em prod inalterados (contagens das tabelas existentes
+batem antes/depois).
+
+**Alternativas descartadas.**
+- *Remover `SKIP_PRISMA_MIGRATE=1`*: cairia no fallback bruto do
+  entrypoint por causa do drift histórico em `_prisma_migrations` (init
+  duplicado + 3 variantes de `add_contact_ad_tracking`).
+- *Esperar até reconciliar o `_prisma_migrations`*: bloquearia features
+  prontas há semanas (catálogo, softphone, api4com). Reconciliação fica
+  para o cutover definitivo.
+- *Aplicar via `apply-dev-branch-migrations.mjs` existente*: ele tem
+  `TARGETS` hardcoded apontando para as 12 da fase anterior. Para a
+  próxima promoção, atualizar a lista naquele script é a forma canônica.
+
+**Impacto / pendências.**
+- Manter `SKIP_PRISMA_MIGRATE=1` no EasyPanel (prod compartilha o drift).
+- Rebuild do app em prod traz o código novo da `DEV_BRANCH` que já
+  encontra a estrutura toda criada.
+- Instalar `pgvector` no Postgres do Easypanel do banco DEV (`crm`) ou
+  recriá-lo de um dump anonimizado de prod — DEV está sem extensão
+  `vector` e o módulo de IA não roda em local.
+- Banco DEV tem 8 colunas com defaults/NOT NULL "relaxados" (`db push`
+  acidental): `organization_subscriptions.id` perdeu `gen_random_uuid()`,
+  `roles.permissions` virou NULL, etc. **Não propagou para prod** (porque
+  o `schema.prisma` mantém os defaults), mas é cosmético no DEV.
+- Tabelas `_bkp_dbcrm_*` em prod podem ser dropadas em janela à parte.
+
+---
+
 ### 2026-06-26 — Aviso de ligação no chat + log/timeline (webhook de chamadas)
 
 **Decisão.** No `processWebhookEvent` (`services/calls.ts`), no **primeiro**
