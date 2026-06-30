@@ -676,6 +676,46 @@ catálogo de permissões + item `email` na sidebar (backend + catálogo FE espel
 
 ---
 
+### 2026-06-22 — Auto-deal não recria negócio em reengajamento de deal fechado (decisão fica na automação) [DECISÃO — agente Opus]
+
+**Decisão.** `services/auto-deals.ts` (`ensureOpenDealForContact`): quando o
+contato não tem negócio `OPEN` mas já possui um negócio fechado (WON/LOST), o
+auto-deal **não cria** um novo (retorna `skipped` / `has_closed_deal`). Mantém o
+negócio fechado intacto. Para contato **sem nenhum negócio** (primeiro contato),
+o comportamento é o de antes: cria e dispara `deal_created` (regra de recepção
+preservada).
+
+**Contexto.** Bug do contato `+5511940571366`: deal #2493 foi para "Perdido"
+(LOST); ao reengajar, o auto-deal — que só checava `OPEN` — criou o #3729 e
+re-disparou `receptivo_geral` (gatilho `deal_created`), gerando negócio
+duplicado. Além de duplicar o card, criar um OPEN aqui faz o gatilho
+`message_received` enxergar `dealStatus = OPEN` (ver `enrichContext`),
+impossibilitando uma automação de reengajamento filtrada por WON/LOST.
+
+**Direção de produto (definida pelo usuário).** O reengajamento de negócio
+fechado é **regra de negócio** e deve ser modelado no builder: uma automação
+com gatilho `message_received` filtrado por `dealStatus = WON,LOST`, usando
+`condition` para decidir entre `create_deal` (novo) ou `move_stage` (reabre —
+mover para estágio não-terminal já seta `status = OPEN`). O código apenas para
+de duplicar e devolve o controle para essa automação.
+
+**Alternativas descartadas.**
+- *Auto-deal reabrir LOST automaticamente / filtro `onlyIfFirstDeal` no
+  `deal_created`* (implementado e revertido): hardcoda a decisão e mexe na regra
+  `deal_created`, que o usuário quer preservar.
+- *Janela de reativação por tempo*: rejeitada (não se aplica ao negócio).
+
+**Pendências/caveats.** (1) `whatsapp-flow-response.ts` usa o mesmo helper: para
+um lead com deal fechado, a gravação de campos de formulário fica sem deal
+(alerta "nenhum negócio aberto") até a automação reabrir — a automação de
+reengajamento deve reabrir antes de depender de campos de deal. (2) Rodar
+`npm install` + `next build` antes do deploy (clone sem `node_modules`).
+(3) Avaliar limpeza dos duplicados já existentes. (4) Guard de reentrada em
+`automation-executor.ts` foi **revertido** antes do deploy em prod — escopo
+mínimo: só `auto-deals.ts` para não introduzir efeito colateral não validado.
+
+---
+
 ### 2026-06-15 — Migração DEV_BRANCH → prod (DNA): nova migration `backfill_catalog_permissions` e protocolo manual de aplicação [DECISÃO — agente Opus]
 
 **Decisão.** Antes do merge `DEV_BRANCH → main`, aplicar manualmente em prod
