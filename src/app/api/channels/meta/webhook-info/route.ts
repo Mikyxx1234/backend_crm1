@@ -32,8 +32,25 @@ function generateVerifyToken(): string {
 }
 
 function backendBaseUrl(request: Request): string {
+  // Prioridade: env explicita (config de deploy). Em produtos Easypanel /
+  // atras de proxy reverso, `request.url` chega com o host interno
+  // (0.0.0.0:3000), o que nao serve pro cliente colar no painel Meta.
   const envBase = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
   if (envBase) return envBase.replace(/\/$/, "");
+
+  const forwardedHost = request.headers.get("x-forwarded-host");
+  const forwardedProto = request.headers.get("x-forwarded-proto");
+  if (forwardedHost) {
+    const proto = forwardedProto?.split(",")[0]?.trim() || "https";
+    return `${proto}://${forwardedHost.split(",")[0]?.trim()}`;
+  }
+
+  const hostHeader = request.headers.get("host");
+  if (hostHeader && !hostHeader.startsWith("0.0.0.0") && !hostHeader.startsWith("127.")) {
+    const proto = forwardedProto || "https";
+    return `${proto}://${hostHeader}`;
+  }
+
   try {
     const url = new URL(request.url);
     return `${url.protocol}//${url.host}`;
