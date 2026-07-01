@@ -1,22 +1,30 @@
 /**
- * GET /api/channels/meta/webhook-info
+ * POST /api/channels/meta/webhook-info
  *
- * Retorna Callback URL + Verify Token + Webhook ID (per-channel, aleatorios).
- * A URL usa um id aleatorio no path (`/api/webhooks/meta/<webhookId>`) em
- * vez do slug da organizacao -- URL opaca por canal.
+ * Pre-cria um Channel em status CONNECTING com webhookId + verifyToken
+ * aleatorios, retornando Callback URL pra o cliente colar no painel Meta.
+ *
+ * Por que pre-criar: no momento do "Verify and save" na Meta, a Meta faz
+ * um GET no callback com o verifyToken -- se o canal nao existe ainda,
+ * /api/webhooks/meta/<webhookId> retorna 404. Criando o canal ja com o
+ * webhookId+verifyToken persistidos, o handshake funciona.
  *
  * Fluxo:
- *   1. Usuario clica "Webhook" no dialog de criacao -> este endpoint.
- *   2. Cola callbackUrl + verifyToken no painel Meta.
- *   3. Ao clicar "Criar canal", o frontend passa `webhookId` + `verifyToken`
- *      pro POST /api/channels/manual-cloud, que persiste ambos em
- *      Channel.config -- assim a rota /api/webhooks/meta/<webhookId>
- *      resolve corretamente o canal + org na hora do handshake e das
- *      mensagens de entrada.
+ *   1. Usuario clica "Webhook" -> POST este endpoint -> cria Channel CONNECTING.
+ *   2. Retorna { channelId, callbackUrl, verifyToken, webhookId }.
+ *   3. Cliente cola callbackUrl + verifyToken no painel Meta -> Verify OK.
+ *   4. Cliente clica "Criar canal" -> POST /api/channels/manual-cloud com
+ *      channelId -> ATUALIZA o canal pra CONNECTED, popula accessToken,
+ *      phoneNumberId, wabaId etc.
+ *
+ * GET continua existindo pra backward compat (nao cria canal, so retorna
+ * ids aleatorios -- util pra clientes que ja tem canal e querem re-gerar
+ * um webhookId).
  */
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { createChannel } from "@/services/channels";
 
 const CHARSET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -69,7 +77,27 @@ function backendBaseUrl(request: Request): { base: string; source: string } {
   }
 }
 
-export async function GET(request: Request) {
+function buildResponse(request: Request, opts: {
+  webhookId: string;
+  verifyToken: string;
+  channelId?: string;
+}) {
+  const { base, source } = backendBaseUrl(request);
+  const callbackUrl = `${base}/api/webhooks/meta/${opts.webhookId}`;
+  const isFromHeader = source.startsWith("header:") || source === "request.url";
+  return NextResponse.json({
+    channelId: opts.channelId ?? null,
+    callbackUrl,
+    verifyToken: opts.verifyToken,
+    webhookId: opts.webhookId,
+    resolvedFrom: source,
+    warning: isFromHeader
+      ? "URL derivada de header HTTP. Se apontar pro dominio errado, configure BACKEND_PUBLIC_URL no deploy do backend."
+      : null,
+  });
+}
+
+export async function POST(request: Request) {
   return withOrgContext(async (session) => {
     const orgId = session.user.organizationId;
     if (!orgId) {
@@ -79,26 +107,53 @@ export async function GET(request: Request) {
       );
     }
 
-    const { base, source } = backendBaseUrl(request);
-    // Id aleatorio por canal: URL opaca, nao vaza slug/nome da org.
-    // Persistido em Channel.config.webhookId no POST /api/channels/manual-cloud.
+    let name = "";
+    try {
+      const body = (await request.json()) as { name?: unknown };
+      if (typeof body.name === "string") name = body.name.trim();
+    } catch {
+      // body opcional; se nao vier, usa nome padrao
+    }
+
     const webhookId = generateRandomId(24);
     const verifyToken = generateRandomId(40);
-    const callbackUrl = `${base}/api/webhooks/meta/${webhookId}`;
 
-    // Warning: se a base veio de header (x-forwarded-host / host), pode
-    // estar apontando pro dominio errado (ex.: frontend proxying a request).
-    // Nesses casos o operator deve setar BACKEND_PUBLIC_URL no deploy.
-    const isFromHeader = source.startsWith("header:") || source === "request.url";
+    // Cria canal em CONNECTING pra que o handshake Meta encontre o
+    // webhookId no banco. As credenciais reais (accessToken, phoneNumberId,
+    // wabaId) sao populadas depois via /api/channels/manual-cloud, que faz
+    // UPDATE deste canal e move status pra CONNECTED.
+    const channel = await createChannel({
+      name: name || "Nova conexao WhatsApp",
+      type: "WHATSAPP",
+      provider: "META_CLOUD_API",
+      config: {
+        webhookId,
+        verifyToken,
+      },
+    });
 
-    return NextResponse.json({
-      callbackUrl,
-      verifyToken,
+    return buildResponse(request, {
       webhookId,
-      resolvedFrom: source,
-      warning: isFromHeader
-        ? "URL derivada de header HTTP. Se apontar pro dominio errado, configure BACKEND_PUBLIC_URL no deploy do backend."
-        : null,
+      verifyToken,
+      channelId: channel.id,
+    });
+  });
+}
+
+// GET (legacy / preview): nao cria canal, so devolve ids. Uso: ferramentas
+// de dev, ou UI que so quer preview antes de comprometer com criacao.
+export async function GET(request: Request) {
+  return withOrgContext(async (session) => {
+    const orgId = session.user.organizationId;
+    if (!orgId) {
+      return NextResponse.json(
+        { message: "Sem organizacao no contexto." },
+        { status: 403 },
+      );
+    }
+    return buildResponse(request, {
+      webhookId: generateRandomId(24),
+      verifyToken: generateRandomId(40),
     });
   });
 }

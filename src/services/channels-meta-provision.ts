@@ -187,7 +187,10 @@ export async function provisionMetaCloudChannel(
   let channel: Channel;
   let created = false;
   if (input.channelId) {
+    // Se o cliente pre-criou o canal (fluxo do botao "Webhook") ha um
+    // webhookId em config -- preservamos ao mesclar com o config novo.
     channel = await updateChannel(input.channelId, {
+      name: input.name?.trim() || undefined,
       config,
       phoneNumber: displayPhone,
       status: "CONNECTED",
