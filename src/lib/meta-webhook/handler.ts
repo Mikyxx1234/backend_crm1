@@ -1355,12 +1355,19 @@ export async function handleMetaWebhookGet(
       })
       .filter((t) => t.length > 0);
 
+    // Fallback: canais provisionados via App Meta global do CRM (conexao
+    // manual token-based / embedded signup) NAO gravam verifyToken proprio —
+    // o handshake da Meta usa o META_WEBHOOK_VERIFY_TOKEN global do env,
+    // configurado uma unica vez no painel do App Meta do CRM. Aceitamos
+    // tanto per-channel (canais legacy Opcao B) quanto o global.
+    if (VERIFY_TOKEN) tokens.push(VERIFY_TOKEN);
+
     if (tokens.length === 0) {
       log.error(
-        `org="${scope.organizationSlug}" sem verifyToken cadastrado em nenhum canal Meta — recusando verificacao`,
+        `org="${scope.organizationSlug}" sem verifyToken cadastrado em nenhum canal Meta e sem META_WEBHOOK_VERIFY_TOKEN global — recusando verificacao`,
       );
       return NextResponse.json(
-        { error: "verifyToken not configured for this organization" },
+        { error: "verifyToken not configured" },
         { status: 503 },
       );
     }
@@ -1407,11 +1414,14 @@ export async function handleMetaWebhookGet(
 async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
   const secrets = new Set<string>();
 
-  // Quando scope: NAO usa CRM_META_APP_SECRET global — cada cliente tem seu app
-  // proprio (verifyToken/appSecret per-channel). Isso garante que se um cliente
-  // rotacionar o secret dele, nao consigo validar com o secret de outro.
-  // Sem scope (legacy): inclui CRM_META_APP_SECRET pra retrocompat.
-  if (!scope && CRM_META_APP_SECRET) secrets.add(CRM_META_APP_SECRET);
+  // Inclui SEMPRE o CRM_META_APP_SECRET global — desde a introducao da
+  // conexao manual token-based (App Meta global do CRM, igual Datacrazy),
+  // canais podem ser assinados via subscribed_apps ao app do CRM e portanto
+  // suas mensagens chegam assinadas com o secret global. Canais legacy
+  // (com App Secret proprio no config) continuam sendo aceitos pelo
+  // collector abaixo — o verifier testa multiplos secrets ate encontrar um
+  // que valide (any-match).
+  if (CRM_META_APP_SECRET) secrets.add(CRM_META_APP_SECRET);
 
   try {
     // Usa prismaBase quando ha scope explicito: queremos buscar APENAS da org,
