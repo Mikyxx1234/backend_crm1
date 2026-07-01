@@ -43,6 +43,10 @@ export async function POST(request: Request) {
         typeof b.channelId === "string" && b.channelId.trim()
           ? b.channelId.trim()
           : undefined;
+      const verifyToken =
+        typeof b.verifyToken === "string" && b.verifyToken.trim()
+          ? b.verifyToken.trim()
+          : undefined;
 
       if (!accessToken || !phoneNumberId || !wabaId) {
         return NextResponse.json(
@@ -68,6 +72,7 @@ export async function POST(request: Request) {
         name: name || undefined,
         channelId,
         embeddedSignup: false,
+        verifyToken,
       });
 
       return NextResponse.json(
