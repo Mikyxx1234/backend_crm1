@@ -1452,10 +1452,11 @@ async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
   if (CRM_META_APP_SECRET) secrets.add(CRM_META_APP_SECRET);
 
   try {
-    // Usa prismaBase quando ha scope explicito: queremos buscar APENAS da org,
-    // sem depender da Prisma extension (que precisa de RequestContext ativo).
-    // Sem scope (legacy): usa prisma scoped — vai dar erro "fora de RequestContext"
-    // pra forcar migracao.
+    // Usa prismaBase sempre: no path scoped filtramos por organizationId
+    // explicitamente; no path legacy (sem slug — agora padrao oficial da
+    // conexao manual token-based) buscamos cross-org e o handler routeia
+    // pelo phone_number_id do payload. prismaBase evita a exigencia de
+    // RequestContext ativo da Prisma extension.
     const where = scope
       ? {
           organizationId: scope.organizationId,
@@ -1463,8 +1464,7 @@ async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
           provider: "META_CLOUD_API" as const,
         }
       : { type: "WHATSAPP" as const, provider: "META_CLOUD_API" as const };
-    const client = scope ? prismaBase : prisma;
-    const channels = await client.channel.findMany({
+    const channels = await prismaBase.channel.findMany({
       where,
       select: { config: true },
     });
@@ -1496,21 +1496,89 @@ export async function handleMetaWebhookPost(
   request: Request,
   scope?: WebhookScope,
 ): Promise<Response> {
-  if (!scope) {
-    log.warn(
-      "[DEPRECATED] webhook POST sem orgSlug. Migre o callback Meta pra /api/webhooks/meta/<slug-da-org>",
-    );
-  }
-  // Quando ha scope, encapsula TODA a logica em withSystemContext(orgId).
-  // A Prisma extension entao injeta organizationId em CADA query scoped
-  // (Channel, Contact, Conversation, Message, etc.) — isolamento total
-  // sem precisar tocar em cada call site.
+  // Quando ha scope explicito na URL (/api/webhooks/meta/<slug>), usa direto.
   if (scope) {
     return withSystemContext(scope.organizationId, () =>
       executePostBody(request, scope),
     );
   }
-  return executePostBody(request, undefined);
+
+  // Path slugless (padrao oficial da conexao manual token-based): tem que
+  // resolver a org DO PAYLOAD (phone_number_id -> Channel.organizationId)
+  // ANTES de executar, pra que todas as queries scoped downstream tenham
+  // RequestContext. Consumimos o body aqui e reconstruimos a Request pro
+  // executor poder re-ler rawBody pra validacao de assinatura.
+  let bodyText: string;
+  try {
+    bodyText = await request.text();
+  } catch (err) {
+    log.error("Erro ao ler body do webhook Meta:", err);
+    return NextResponse.json({ error: "Invalid body" }, { status: 400 });
+  }
+
+  let inferredScope: WebhookScope | undefined;
+  try {
+    const parsed = JSON.parse(bodyText) as Record<string, unknown>;
+    const phoneNumberId = extractFirstPhoneNumberId(parsed);
+    if (phoneNumberId) {
+      const channel = await prismaBase.channel.findFirst({
+        where: {
+          type: "WHATSAPP",
+          provider: "META_CLOUD_API",
+          config: { path: ["phoneNumberId"], equals: phoneNumberId },
+        },
+        select: { organizationId: true, organization: { select: { slug: true } } },
+      });
+      if (channel) {
+        inferredScope = {
+          organizationId: channel.organizationId,
+          organizationSlug: channel.organization?.slug ?? "",
+        };
+      } else {
+        log.debug(
+          `Legacy POST: phone_number_id=${phoneNumberId} nao mapeado a nenhum canal — ignorando`,
+        );
+      }
+    }
+  } catch (err) {
+    log.warn("Legacy POST: falha ao parsear body pra inferir org:", err);
+  }
+
+  // Rebuild a request equivalent que o executor consegue re-ler.
+  const rebuilt = new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+    body: bodyText,
+  });
+
+  if (inferredScope) {
+    return withSystemContext(inferredScope.organizationId, () =>
+      executePostBody(rebuilt, inferredScope),
+    );
+  }
+
+  // Sem canal correspondente: aceita o evento (200) pra Meta nao retentar,
+  // mas nao processa nada. Assinatura ja foi verificada dentro do executor,
+  // entao precisamos ainda passar pelo rebuild.
+  return executePostBody(rebuilt, undefined);
+}
+
+function extractFirstPhoneNumberId(body: Record<string, unknown>): string | null {
+  const entries = Array.isArray(body.entry) ? body.entry : [];
+  for (const entry of entries) {
+    const e = (entry ?? {}) as Record<string, unknown>;
+    const changes = Array.isArray(e.changes) ? e.changes : [];
+    for (const change of changes) {
+      const ch = (change ?? {}) as Record<string, unknown>;
+      const value = (ch.value ?? {}) as Record<string, unknown>;
+      const metadata = (value.metadata ?? {}) as Record<string, unknown>;
+      const pid = typeof metadata.phone_number_id === "string"
+        ? metadata.phone_number_id.trim()
+        : "";
+      if (pid) return pid;
+    }
+  }
+  return null;
 }
 
 async function executePostBody(
