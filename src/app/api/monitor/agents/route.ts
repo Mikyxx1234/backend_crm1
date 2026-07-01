@@ -27,10 +27,12 @@ type AgentRow = {
  * Fallback: se a coluna ainda não existe no banco (migration pendente),
  * retorna lista sem lastActivityAt (tratado como null no UI).
  *
- * Multi-tenancy: super-admin v\u00ea agentes de todas as orgs (uso EduIT
- * para suporte). Tenants veem apenas a pr\u00f3pria org. O filtro \u00e9
- * aplicado tanto no $queryRawUnsafe quanto no fallback (prisma.user usa
- * a extension scoped automaticamente quando tem orgId no ctx).
+ * Multi-tenancy: filtro por organizationId da sess\u00e3o \u00e9 SEMPRE
+ * aplicado quando presente -- inclusive para super-admin logado dentro
+ * de uma org espec\u00edfica (o padr\u00e3o antigo "super-admin v\u00ea tudo"
+ * vazava agentes entre tenants no widget do dashboard). Cross-org s\u00f3
+ * quando super-admin est\u00e1 SEM contexto de org (organizationId === null),
+ * cen\u00e1rio War Room top-level. Ver comentario HOTFIX 01/jul/26 abaixo.
  */
 export async function GET() {
   const session = await auth();
@@ -47,10 +49,17 @@ export async function GET() {
     );
   }
 
+  // HOTFIX 01/jul/26: sem escopo cross-org quando a sess\u00e3o tem
+  // organizationId. Antes o super-admin recebia agentes de TODAS as orgs
+  // mesmo estando logado dentro de uma org espec\u00edfica -- isso vazava
+  // agentes de outros tenants no widget "Equipe online" do dashboard.
+  // Regra correta multi-tenant: super-admin herda o escopo da org atual;
+  // s\u00f3 ignora filtro quando organizationId === null (War Room fora
+  // de contexto de tenant).
+  const scopeCrossOrg = isSuperAdmin && !orgId;
+
   try {
-    // Quando \u00e9 super-admin, n\u00e3o injetamos filtro (ve todas as orgs).
-    // Caso contr\u00e1rio, filtra por u."organizationId" = $1.
-    const rows = isSuperAdmin
+    const rows = scopeCrossOrg
       ? await prisma.$queryRawUnsafe<AgentRow[]>(`
           SELECT
             u.id                               AS "userId",
@@ -110,10 +119,12 @@ export async function GET() {
     // Fallback sem lastActivityAt (coluna ainda não existe em prod).
     // CORRECAO 24/abr/26: User NAO esta no SCOPED_MODELS, filtro precisa
     // ser MANUAL pra evitar leak entre tenants no fallback.
+    // HOTFIX 01/jul/26: mesmo super-admin passa a filtrar por org quando
+    // a sess\u00e3o tem organizationId (ver comentario acima na branch principal).
     const users = await prisma.user.findMany({
       where: {
         type: "HUMAN",
-        ...(isSuperAdmin ? {} : { organizationId: orgId! }),
+        ...(scopeCrossOrg ? {} : { organizationId: orgId! }),
       },
       select: {
         id: true,
