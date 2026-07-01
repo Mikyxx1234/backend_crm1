@@ -31,12 +31,41 @@ import {
 
 type Ctx = { params: Promise<{ orgSlug: string }> };
 
-async function resolveScope(orgSlug: string) {
+// O path param historicamente era Organization.slug, mas agora tambem
+// aceita Channel.config.webhookId (id aleatorio gerado pelo botao
+// "Webhook" na criacao de canal). Isso permite URLs opacas por canal
+// sem vazar o nome/slug da organizacao no callback publico da Meta.
+async function resolveScope(param: string) {
+  // 1) Tenta como webhookId (per-channel, id aleatorio).
+  const channel = await prismaBase.channel.findFirst({
+    where: {
+      type: "WHATSAPP",
+      provider: "META_CLOUD_API",
+      config: { path: ["webhookId"], equals: param },
+    },
+    select: {
+      organizationId: true,
+      organization: { select: { slug: true, status: true } },
+    },
+  });
+  if (channel) {
+    if (channel.organization?.status !== "ACTIVE") {
+      return { error: "organization not active", status: 403 } as const;
+    }
+    return {
+      scope: {
+        organizationId: channel.organizationId,
+        organizationSlug: channel.organization.slug,
+      },
+    } as const;
+  }
+
+  // 2) Fallback legacy: param como Organization.slug.
   const org = await prismaBase.organization.findUnique({
-    where: { slug: orgSlug },
+    where: { slug: param },
     select: { id: true, slug: true, status: true },
   });
-  if (!org) return { error: "organization not found", status: 404 } as const;
+  if (!org) return { error: "webhook target not found", status: 404 } as const;
   if (org.status !== "ACTIVE") {
     return { error: "organization not active", status: 403 } as const;
   }

@@ -40,9 +40,16 @@ export type ProvisionMetaCloudChannelInput = {
    * Opcional: verify token que o cliente vai colar no painel Meta -> WhatsApp
    * -> Configuracao (fluxo em que o cliente usa seu proprio App Meta em vez
    * do App global do CRM). Persistimos em `config.verifyToken` para o handler
-   * scoped do webhook (/api/webhooks/meta/{slug}) validar o handshake da Meta.
+   * do webhook validar o handshake da Meta.
    */
   verifyToken?: string;
+  /**
+   * Opcional: id aleatorio gerado pelo GET /api/channels/meta/webhook-info
+   * usado no path da callback URL (`/api/webhooks/meta/<webhookId>`).
+   * Persistimos em `config.webhookId` -- o handler da rota scoped resolve
+   * o canal + org por esse id (evita expor slug/nome da org no callback).
+   */
+  webhookId?: string;
 };
 
 export type ProvisionMetaCloudChannelResult = {
@@ -172,6 +179,9 @@ export async function provisionMetaCloudChannel(
   if (input.embeddedSignup) config.embeddedSignup = true;
   if (input.verifyToken && input.verifyToken.trim()) {
     config.verifyToken = input.verifyToken.trim();
+  }
+  if (input.webhookId && input.webhookId.trim()) {
+    config.webhookId = input.webhookId.trim();
   }
 
   let channel: Channel;

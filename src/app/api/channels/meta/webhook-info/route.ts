@@ -1,31 +1,32 @@
 /**
  * GET /api/channels/meta/webhook-info
  *
- * Retorna o Callback URL scoped por organizacao (para colar no painel
- * Meta -> WhatsApp -> Configuracao) e sugere um Verify Token novo aleatorio.
+ * Retorna Callback URL + Verify Token + Webhook ID (per-channel, aleatorios).
+ * A URL usa um id aleatorio no path (`/api/webhooks/meta/<webhookId>`) em
+ * vez do slug da organizacao -- URL opaca por canal.
  *
- * Usado pela tela de criacao de canal (botao "Webhook") para o cliente
- * que quer configurar o webhook no proprio App Meta -- fluxo alternativo
- * ao provisionamento automatico via subscribed_apps do App Meta global.
- *
- * O Verify Token retornado deve ser enviado depois no POST /api/channels/manual-cloud
- * como campo `verifyToken` para persistir no `Channel.config.verifyToken`
- * antes de o cliente clicar "Verify and save" no painel Meta.
+ * Fluxo:
+ *   1. Usuario clica "Webhook" no dialog de criacao -> este endpoint.
+ *   2. Cola callbackUrl + verifyToken no painel Meta.
+ *   3. Ao clicar "Criar canal", o frontend passa `webhookId` + `verifyToken`
+ *      pro POST /api/channels/manual-cloud, que persiste ambos em
+ *      Channel.config -- assim a rota /api/webhooks/meta/<webhookId>
+ *      resolve corretamente o canal + org na hora do handshake e das
+ *      mensagens de entrada.
  */
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 
-const VERIFY_TOKEN_CHARSET =
+const CHARSET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-const VERIFY_TOKEN_LEN = 40;
 
-function generateVerifyToken(): string {
-  const bytes = new Uint8Array(VERIFY_TOKEN_LEN);
+function generateRandomId(length: number): string {
+  const bytes = new Uint8Array(length);
   crypto.getRandomValues(bytes);
   let out = "";
   for (let i = 0; i < bytes.length; i++) {
-    out += VERIFY_TOKEN_CHARSET[bytes[i] % VERIFY_TOKEN_CHARSET.length];
+    out += CHARSET[bytes[i] % CHARSET.length];
   }
   return out;
 }
@@ -79,11 +80,11 @@ export async function GET(request: Request) {
     }
 
     const { base, source } = backendBaseUrl(request);
-    // Sem slug: a URL slugless usa o handler legacy, que agora aceita
-    // Channel.config.verifyToken de qualquer canal (any-match). Assim o
-    // cliente configura o painel Meta com uma URL fixa e o token
-    // per-channel gerado aqui valida o handshake normalmente.
-    const callbackUrl = `${base}/api/webhooks/meta`;
+    // Id aleatorio por canal: URL opaca, nao vaza slug/nome da org.
+    // Persistido em Channel.config.webhookId no POST /api/channels/manual-cloud.
+    const webhookId = generateRandomId(24);
+    const verifyToken = generateRandomId(40);
+    const callbackUrl = `${base}/api/webhooks/meta/${webhookId}`;
 
     // Warning: se a base veio de header (x-forwarded-host / host), pode
     // estar apontando pro dominio errado (ex.: frontend proxying a request).
@@ -92,7 +93,8 @@ export async function GET(request: Request) {
 
     return NextResponse.json({
       callbackUrl,
-      verifyToken: generateVerifyToken(),
+      verifyToken,
+      webhookId,
       resolvedFrom: source,
       warning: isFromHeader
         ? "URL derivada de header HTTP. Se apontar pro dominio errado, configure BACKEND_PUBLIC_URL no deploy do backend."
