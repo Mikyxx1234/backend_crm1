@@ -3,17 +3,12 @@ import { NextResponse } from "next/server";
 import { auth } from "@/lib/auth";
 import { CRM_META_APP_ID, CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import {
-  createChannel,
-  getChannelById,
-  updateChannel,
-} from "@/services/channels";
+  MetaProvisionError,
+  provisionMetaCloudChannel,
+} from "@/services/channels-meta-provision";
 
 const GRAPH_API_VERSION = "v21.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
-
-function randomPin(): string {
-  return String(Math.floor(100000 + Math.random() * 900000));
-}
 
 export async function POST(request: Request) {
   try {
@@ -58,20 +53,10 @@ export async function POST(request: Request) {
       );
     }
 
-    if (channelId) {
-      const existing = await getChannelById(channelId);
-      if (!existing) {
-        return NextResponse.json(
-          { message: "Canal não encontrado." },
-          { status: 404 },
-        );
-      }
-    }
-
     const appId = CRM_META_APP_ID;
     const appSecret = reqAppSecret || CRM_META_APP_SECRET;
 
-    // Step 1: Exchange code for business token (30s TTL on code)
+    // Troca o code por access_token (30s TTL no code).
     const tokenUrl = new URL(`${GRAPH_BASE}/oauth/access_token`);
     tokenUrl.searchParams.set("client_id", appId);
     tokenUrl.searchParams.set("client_secret", appSecret);
@@ -100,91 +85,25 @@ export async function POST(request: Request) {
       );
     }
 
-    // Step 2: Subscribe to webhooks on the customer's WABA
-    const subRes = await fetch(
-      `${GRAPH_BASE}/${wabaId}/subscribed_apps`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${accessToken}` },
-      },
-    );
-    if (!subRes.ok) {
-      const subErr = (await subRes.json()) as Record<string, unknown>;
-      console.error("Embedded Signup webhook subscribe error:", subErr);
-    }
-
-    // Step 3: Register the phone number
-    const pin = randomPin();
-    const regRes = await fetch(`${GRAPH_BASE}/${phoneNumberId}/register`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify({ messaging_product: "whatsapp", pin }),
-    });
-    if (!regRes.ok) {
-      const regErr = (await regRes.json()) as Record<string, unknown>;
-      console.error("Embedded Signup phone register error:", regErr);
-      // Non-fatal: phone may already be registered
-    }
-
-    // Step 4: Get display phone number
-    let displayPhone = phoneNumberId;
-    let verifiedName = "";
-    try {
-      const phoneRes = await fetch(
-        `${GRAPH_BASE}/${phoneNumberId}?fields=display_phone_number,verified_name`,
-        { headers: { Authorization: `Bearer ${accessToken}` } },
-      );
-      if (phoneRes.ok) {
-        const phoneData = (await phoneRes.json()) as Record<string, unknown>;
-        if (typeof phoneData.display_phone_number === "string") {
-          displayPhone = phoneData.display_phone_number;
-        }
-        if (typeof phoneData.verified_name === "string") {
-          verifiedName = phoneData.verified_name;
-        }
-      }
-    } catch {
-      // Non-fatal
-    }
-
-    const config = {
+    // Passos 2-5: subscribed_apps + register + fetch phone + persist.
+    // O helper compartilha esta lógica com a conexão manual.
+    const result = await provisionMetaCloudChannel({
       accessToken,
       phoneNumberId,
-      businessAccountId: wabaId,
+      wabaId,
+      name: channelName,
+      channelId,
       embeddedSignup: true,
-      verifiedName: verifiedName || undefined,
-      twoStepPin: pin,
-    };
+    });
 
-    // Step 5: Create or update channel
-    let channel;
-    if (channelId) {
-      channel = await updateChannel(channelId, {
-        config,
-        phoneNumber: displayPhone,
-        status: "CONNECTED",
-        lastConnectedAt: new Date(),
-        qrCode: null,
-      });
-    } else {
-      channel = await createChannel({
-        name: channelName || verifiedName || `WhatsApp ${displayPhone}`,
-        type: "WHATSAPP",
-        provider: "META_CLOUD_API",
-        config,
-        phoneNumber: displayPhone,
-      });
-      channel = await updateChannel(channel.id, {
-        status: "CONNECTED",
-        lastConnectedAt: new Date(),
-      });
-    }
-
-    return NextResponse.json({ channel }, { status: channelId ? 200 : 201 });
+    return NextResponse.json(
+      { channel: result.channel },
+      { status: result.created ? 201 : 200 },
+    );
   } catch (e: unknown) {
+    if (e instanceof MetaProvisionError) {
+      return NextResponse.json({ message: e.message }, { status: e.status });
+    }
     console.error("Embedded Signup error:", e);
     const msg =
       e instanceof Error ? e.message : "Erro no Embedded Signup.";

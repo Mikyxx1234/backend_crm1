@@ -249,6 +249,11 @@ const detailInclude = {
   contact: {
     select: {
       id: true, number: true, name: true, email: true, phone: true, avatarUrl: true,
+      // `source` (nativo de Contact) usado pelo deal detail (frontend
+      // mostra/edita inline no cabecalho fixo da sidebar via
+      // InlineNativeEditor). Antes o painel tentava ler `Deal.source` que
+      // nao existe no schema; passou a usar contact.source.
+      source: true,
       conversations: {
         orderBy: { updatedAt: "desc" as const },
         select: {
