@@ -50,6 +50,13 @@ export type ProvisionMetaCloudChannelInput = {
    * o canal + org por esse id (evita expor slug/nome da org no callback).
    */
   webhookId?: string;
+  /**
+   * Opcional: App Secret do App Meta do cliente. Necessario no fluxo
+   * "webhook manual" (cliente usa o proprio App Meta) pra validar
+   * `x-hub-signature-256` dos POSTs recebidos. Persistido encriptado em
+   * `config.appSecret` pela `createChannel`/`updateChannel`.
+   */
+  appSecret?: string;
 };
 
 export type ProvisionMetaCloudChannelResult = {
@@ -182,6 +189,9 @@ export async function provisionMetaCloudChannel(
   }
   if (input.webhookId && input.webhookId.trim()) {
     config.webhookId = input.webhookId.trim();
+  }
+  if (input.appSecret && input.appSecret.trim()) {
+    config.appSecret = input.appSecret.trim();
   }
 
   let channel: Channel;
