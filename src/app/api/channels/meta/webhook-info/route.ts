@@ -15,7 +15,6 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { prismaBase } from "@/lib/prisma-base";
 
 const VERIFY_TOKEN_CHARSET =
   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
@@ -31,31 +30,41 @@ function generateVerifyToken(): string {
   return out;
 }
 
-function backendBaseUrl(request: Request): string {
-  // Prioridade: env explicita (config de deploy). Em produtos Easypanel /
-  // atras de proxy reverso, `request.url` chega com o host interno
-  // (0.0.0.0:3000), o que nao serve pro cliente colar no painel Meta.
-  const envBase = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
-  if (envBase) return envBase.replace(/\/$/, "");
+function backendBaseUrl(request: Request): { base: string; source: string } {
+  // Prioridade: env explicita do BACKEND. Em Easypanel / proxy reverso,
+  // a request pode vir pelo rewrite do frontend, entao `x-forwarded-host`
+  // e o dominio do frontend -- errado pra Meta chamar de volta.
+  //
+  // Setar no deploy do backend uma dessas envs (aponta pra si mesmo):
+  //   BACKEND_PUBLIC_URL=https://seu-backend.easypanel.host
+  //   ou NEXT_PUBLIC_API_BASE_URL=https://seu-backend.easypanel.host
+  const envBackend = process.env.BACKEND_PUBLIC_URL?.trim();
+  if (envBackend) return { base: envBackend.replace(/\/$/, ""), source: "env:BACKEND_PUBLIC_URL" };
+
+  const envApi = process.env.NEXT_PUBLIC_API_BASE_URL?.trim();
+  if (envApi) return { base: envApi.replace(/\/$/, ""), source: "env:NEXT_PUBLIC_API_BASE_URL" };
 
   const forwardedHost = request.headers.get("x-forwarded-host");
   const forwardedProto = request.headers.get("x-forwarded-proto");
   if (forwardedHost) {
     const proto = forwardedProto?.split(",")[0]?.trim() || "https";
-    return `${proto}://${forwardedHost.split(",")[0]?.trim()}`;
+    return {
+      base: `${proto}://${forwardedHost.split(",")[0]?.trim()}`,
+      source: "header:x-forwarded-host",
+    };
   }
 
   const hostHeader = request.headers.get("host");
   if (hostHeader && !hostHeader.startsWith("0.0.0.0") && !hostHeader.startsWith("127.")) {
     const proto = forwardedProto || "https";
-    return `${proto}://${hostHeader}`;
+    return { base: `${proto}://${hostHeader}`, source: "header:host" };
   }
 
   try {
     const url = new URL(request.url);
-    return `${url.protocol}//${url.host}`;
+    return { base: `${url.protocol}//${url.host}`, source: "request.url" };
   } catch {
-    return "";
+    return { base: "", source: "none" };
   }
 }
 
@@ -69,21 +78,25 @@ export async function GET(request: Request) {
       );
     }
 
-    const org = await prismaBase.organization.findUnique({
-      where: { id: orgId },
-      select: { slug: true },
-    });
+    const { base, source } = backendBaseUrl(request);
+    // Sem slug: a URL slugless usa o handler legacy, que agora aceita
+    // Channel.config.verifyToken de qualquer canal (any-match). Assim o
+    // cliente configura o painel Meta com uma URL fixa e o token
+    // per-channel gerado aqui valida o handshake normalmente.
+    const callbackUrl = `${base}/api/webhooks/meta`;
 
-    const slug = org?.slug ?? "";
-    const base = backendBaseUrl(request);
-    const callbackUrl = slug
-      ? `${base}/api/webhooks/meta/${slug}`
-      : `${base}/api/webhooks/meta`;
+    // Warning: se a base veio de header (x-forwarded-host / host), pode
+    // estar apontando pro dominio errado (ex.: frontend proxying a request).
+    // Nesses casos o operator deve setar BACKEND_PUBLIC_URL no deploy.
+    const isFromHeader = source.startsWith("header:") || source === "request.url";
 
     return NextResponse.json({
       callbackUrl,
       verifyToken: generateVerifyToken(),
-      organizationSlug: slug,
+      resolvedFrom: source,
+      warning: isFromHeader
+        ? "URL derivada de header HTTP. Se apontar pro dominio errado, configure BACKEND_PUBLIC_URL no deploy do backend."
+        : null,
     });
   });
 }

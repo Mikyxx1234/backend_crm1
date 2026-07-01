@@ -1387,25 +1387,53 @@ export async function handleMetaWebhookGet(
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
   }
 
-  // Legacy (sem slug): usa env global. Marcado deprecated.
-  log.warn(
-    "[DEPRECATED] webhook GET sem orgSlug. Migre o callback Meta pra /api/webhooks/meta/<slug-da-org>",
-  );
+  // Legacy (sem slug): aceita VERIFY_TOKEN global (env) OU qualquer
+  // Channel.config.verifyToken de qualquer canal Meta (any-match).
+  // Fluxo novo: /api/channels/manual-cloud grava verifyToken per-channel
+  // e o cliente configura no painel Meta a URL slugless — este ramo
+  // valida contra todos os canais (mesma logica do collectAppSecrets).
+  const legacyTokens: string[] = [];
+  if (VERIFY_TOKEN) legacyTokens.push(VERIFY_TOKEN);
+  try {
+    const channels = await prismaBase.channel.findMany({
+      where: { type: "WHATSAPP", provider: "META_CLOUD_API" },
+      select: { id: true, config: true },
+    });
+    for (const c of channels) {
+      const cfg = c.config as Record<string, unknown> | null;
+      const raw = typeof cfg?.verifyToken === "string" ? cfg.verifyToken.trim() : "";
+      if (!raw) continue;
+      let secret = raw;
+      if (isEncryptedSecret(raw)) {
+        try {
+          secret = decryptSecret(raw);
+        } catch (err) {
+          log.error(
+            `Falha ao decriptar verifyToken do canal ${c.id}: ${err instanceof Error ? err.message : err}`,
+          );
+          continue;
+        }
+      }
+      if (secret) legacyTokens.push(secret);
+    }
+  } catch (e) {
+    log.warn("Erro ao buscar verifyTokens dos canais (legacy GET):", e);
+  }
 
-  if (!VERIFY_TOKEN) {
-    log.error("META_WEBHOOK_VERIFY_TOKEN não configurado — verificação desabilitada");
+  if (legacyTokens.length === 0) {
+    log.error("Nenhum verifyToken configurado (env META_WEBHOOK_VERIFY_TOKEN nem Channel.config.verifyToken) — verificacao desabilitada");
     return NextResponse.json(
       { error: "Webhook verification not configured" },
       { status: 503 },
     );
   }
 
-  if (mode === "subscribe" && token && timingSafeStringEqual(token, VERIFY_TOKEN)) {
-    log.info("Verificação do webhook Meta: OK (legacy)");
+  if (mode === "subscribe" && token && legacyTokens.some((t) => timingSafeStringEqual(token, t))) {
+    log.info(`Verificação do webhook Meta: OK (legacy, ${legacyTokens.length} token(s) testado(s))`);
     return new Response(challenge ?? "", { status: 200 });
   }
 
-  log.warn("Verificação do webhook Meta falhou:", { mode, token: token?.slice(0, 6) });
+  log.warn("Verificação do webhook Meta falhou:", { mode, token: token?.slice(0, 6), triedTokens: legacyTokens.length });
   return NextResponse.json({ error: "Forbidden" }, { status: 403 });
 }
 
