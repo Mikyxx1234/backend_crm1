@@ -30,6 +30,11 @@ on:
     branches: [main, DEV_BRANCH]
   workflow_dispatch:
 
+# Cancela runs anteriores da mesma branch quando um push novo chega.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: mikyxx1234/backend_crm1
