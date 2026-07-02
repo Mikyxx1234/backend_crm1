@@ -90,8 +90,13 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.env.outputs.TAG }}
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Scope por branch + fallback pra main: builds de DEV_BRANCH
+          # aproveitam camadas ja cacheadas por main quando o proprio
+          # cache esta frio (antes DEV rodava ~5min vs 2min em main).
+          cache-from: |
+            type=gha,scope=${{ github.ref_name }}
+            type=gha,scope=main
+          cache-to: type=gha,scope=${{ github.ref_name }},mode=max
 
       - name: Trigger Easypanel redeploy
         if: steps.env.outputs.WEBHOOK != ''
