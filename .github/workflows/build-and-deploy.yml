@@ -46,14 +46,31 @@ jobs:
 
       - name: Resolve environment
         id: env
+        # Passar via `env:` (nao inline ${{ }}) e trim de \r\n protege
+        # contra valores com Enter acidental colados no GitHub UI, que
+        # quebravam o parser de $GITHUB_OUTPUT com "Invalid format".
+        env:
+          BRANCH_REF: ${{ github.ref }}
+          S_WEBHOOK_PROD: ${{ secrets.EASYPANEL_WEBHOOK_PROD }}
+          S_WEBHOOK_DEV: ${{ secrets.EASYPANEL_WEBHOOK_DEV }}
         run: |
-          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
-            echo "TAG=latest"                                    >> "$GITHUB_OUTPUT"
-            echo "WEBHOOK=${{ secrets.EASYPANEL_WEBHOOK_PROD }}" >> "$GITHUB_OUTPUT"
+          if [ "$BRANCH_REF" = "refs/heads/main" ]; then
+            TAG=latest
+            WEBHOOK="$S_WEBHOOK_PROD"
           else
-            echo "TAG=dev"                                       >> "$GITHUB_OUTPUT"
-            echo "WEBHOOK=${{ secrets.EASYPANEL_WEBHOOK_DEV }}"  >> "$GITHUB_OUTPUT"
+            TAG=dev
+            WEBHOOK="$S_WEBHOOK_DEV"
           fi
+          TAG=$(printf '%s' "$TAG" | tr -d '\r\n')
+          WEBHOOK=$(printf '%s' "$WEBHOOK" | tr -d '\r\n')
+          {
+            echo "TAG=$TAG"
+            echo "WEBHOOK=$WEBHOOK"
+          } >> "$GITHUB_OUTPUT"
+          echo "::group::env resolved (values masked)"
+          [ -n "$TAG" ]     && echo "TAG=<set>"     || echo "TAG=<EMPTY>"
+          [ -n "$WEBHOOK" ] && echo "WEBHOOK=<set>" || echo "WEBHOOK=<EMPTY>"
+          echo "::endgroup::"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
