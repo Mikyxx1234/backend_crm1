@@ -10,17 +10,22 @@ COPY prisma ./prisma
 # binario do GitHub Releases, que intermitentemente responde 504 (gateway
 # timeout) e quebra o build inteiro. Re-tentamos algumas vezes com espera
 # crescente para neutralizar a flakiness de rede sem precisar de cache.
-RUN npm install --no-audit --no-fund \
- || (echo "[npm install] falhou — retry 1/3 em 15s..." && sleep 15 && npm install --no-audit --no-fund) \
- || (echo "[npm install] falhou — retry 2/3 em 30s..." && sleep 30 && npm install --no-audit --no-fund) \
- || (echo "[npm install] falhou — retry 3/3 em 60s..." && sleep 60 && npm install --no-audit --no-fund)
+# Cache do npm entre builds (BuildKit cache mount) -- reduz ~30s/build.
+RUN --mount=type=cache,target=/root/.npm \
+    ( npm install --no-audit --no-fund \
+   || (echo "[npm install] falhou — retry 1/3 em 15s..." && sleep 15 && npm install --no-audit --no-fund) \
+   || (echo "[npm install] falhou — retry 2/3 em 30s..." && sleep 30 && npm install --no-audit --no-fund) \
+   || (echo "[npm install] falhou — retry 3/3 em 60s..." && sleep 60 && npm install --no-audit --no-fund) )
 
 COPY . .
 # Pasta `public` pode não existir no clone (vazia não vai pro Git); o runner precisa dela.
 RUN mkdir -p public
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npx prisma generate
-RUN npm run build
+# Cache do .next/cache (webpack incremental) -- corta 50-70% do build em
+# rebuilds. Requer BuildKit (padrao no docker/build-push-action).
+RUN --mount=type=cache,target=/app/.next/cache \
+    npm run build
 # Workers BullMQ: compilar TS → JS standalone (CJS) com esbuild. Não usamos
 # `tsx` em prod porque o `.next/standalone` (único node_modules copiado pro
 # runner) não inclui o `tsx` — ele só está no node_modules de dev/build.
