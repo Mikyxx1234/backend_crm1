@@ -165,6 +165,12 @@ export async function POST(request: Request, context: RouteContext) {
     let externalId: string | null = null;
     let resolvedFlowToken: string | null = null;
     try {
+      // strictFlowEnrich=false: se a consulta da definição do template na Meta
+      // falhar (token sem permissão de GET individual, template fora da primeira
+      // página de listagem, etc.), NÃO bloqueia o envio. Templates simples (só
+      // BODY) funcionam sem enrichment. Templates com Flow perdem o botão
+      // interativo mas ainda enviam — Meta reporta o erro real, se houver, em
+      // vez de a CRM lançar `MetaFlowEnrichError`.
       const enrichResult = await enrichTemplateComponentsForFlowSend(metaClient, {
         templateName,
         languageCode,
@@ -172,6 +178,7 @@ export async function POST(request: Request, context: RouteContext) {
         flowToken,
         flowActionData,
         templateGraphId,
+        strictFlowEnrich: false,
       });
       resolvedFlowToken = enrichResult.flowToken;
       const result = await metaClient.sendTemplate(
