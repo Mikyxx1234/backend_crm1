@@ -124,12 +124,54 @@ type TemplateDefinitionResolution = {
     | "getMessageTemplateByGraphId_empty"
     | "getMessageTemplateByGraphId_error"
     | "listMessageTemplates"
+    | "listMessageTemplates_after_gid_failure"
     | "listMessageTemplates_none";
+  /**
+   * Preenchido quando o GET individual (`getMessageTemplateByGraphId`) falhou e caímos
+   * na listagem. Útil pra propagar a razão original caso a listagem tampouco encontre
+   * o template — assim o operador vê o erro real da Meta, não só "template ausente".
+   */
+  gidFailureMessage?: string;
 };
+
+/**
+ * Percorre `listMessageTemplates` até encontrar o template por nome+idioma.
+ * Extraído pra ser reutilizado tanto no caminho sem `templateGraphId` quanto
+ * como fallback quando o GET individual falha (token com escopo suficiente pra
+ * listar mas não pra ler individual — gotcha comum da Graph API).
+ */
+async function findTemplateByListing(
+  client: MetaWhatsAppClient,
+  templateName: string,
+  languageCode: string,
+): Promise<ListTemplatesRow | null> {
+  let after: string | undefined;
+  for (let page = 0; page < 40; page++) {
+    let listRaw: unknown;
+    try {
+      listRaw = await client.listMessageTemplates({ limit: 500, after });
+    } catch {
+      listRaw = null;
+    }
+    const rows = extractTemplatesData(listRaw);
+    const row = pickTemplateRow(rows, templateName, languageCode);
+    if (row) return row;
+    after = extractPagingAfter(listRaw);
+    if (!after) break;
+  }
+  return null;
+}
 
 /**
  * Resolve a linha do template (nome + idioma + components) via ID Graph
  * ou listagem paginada — evita falhar quando o template não está na primeira página.
+ *
+ * Ordem de tentativas quando `templateGraphId` está presente:
+ *  1. `GET /{template_id}` (mais direto).
+ *  2. Se (1) falhar/retornar vazio, cai pra `GET /{waba}/message_templates` paginado —
+ *     necessário porque tokens que conseguem listar nem sempre conseguem GET individual
+ *     (permissão granular diferente do lado da Meta).
+ *  3. Só declara "template não existe" quando ambos falham.
  */
 async function resolveTemplateDefinitionRow(
   client: MetaWhatsAppClient,
@@ -142,52 +184,78 @@ async function resolveTemplateDefinitionRow(
 ): Promise<TemplateDefinitionResolution> {
   const gid = args.templateGraphId?.trim();
   if (gid) {
+    let gidFailureMessage: string | undefined;
+    let gidFailurePath:
+      | "getMessageTemplateByGraphId_empty"
+      | "getMessageTemplateByGraphId_error"
+      | null = null;
+
     try {
       const raw = await client.getMessageTemplateByGraphId(gid);
       const o = asRecord(raw);
-      if (!o) {
-        if (args.strictFlowEnrich) {
-          throw new MetaFlowEnrichError(
-            `[meta-flow-enrich] GET message_template retornou corpo vazio para templateGraphId=${gid}`,
-          );
-        }
-        return { row: null, resolutionPath: "getMessageTemplateByGraphId_empty" };
+      if (o) {
+        return {
+          row: {
+            name: typeof o.name === "string" ? o.name : args.templateName,
+            language: typeof o.language === "string" ? o.language : args.languageCode,
+            components: o.components,
+          },
+          resolutionPath: "getMessageTemplateByGraphId",
+        };
       }
-      return {
-        row: {
-          name: typeof o.name === "string" ? o.name : args.templateName,
-          language: typeof o.language === "string" ? o.language : args.languageCode,
-          components: o.components,
-        },
-        resolutionPath: "getMessageTemplateByGraphId",
-      };
+      gidFailurePath = "getMessageTemplateByGraphId_empty";
+      gidFailureMessage = `GET message_template retornou corpo vazio para templateGraphId=${gid}`;
     } catch (e) {
-      if (args.strictFlowEnrich) {
-        if (e instanceof MetaFlowEnrichError) throw e;
-        const msg = e instanceof Error ? e.message : String(e);
-        throw new MetaFlowEnrichError(
-          `[meta-flow-enrich] Falha ao obter template por ID Graph ${gid}: ${msg}`,
-        );
-      }
-      return { row: null, resolutionPath: "getMessageTemplateByGraphId_error" };
+      if (e instanceof MetaFlowEnrichError) throw e;
+      gidFailurePath = "getMessageTemplateByGraphId_error";
+      gidFailureMessage =
+        e instanceof Error ? e.message : String(e);
     }
+
+    console.warn(
+      "[meta-flow-enrich]",
+      JSON.stringify({
+        phase: "gid_lookup_failed_falling_back_to_listing",
+        templateGraphId: gid,
+        reason: gidFailurePath,
+        message: gidFailureMessage,
+      }),
+    );
+
+    const fallbackRow = await findTemplateByListing(
+      client,
+      args.templateName,
+      args.languageCode,
+    );
+    if (fallbackRow) {
+      return {
+        row: fallbackRow,
+        resolutionPath: "listMessageTemplates_after_gid_failure",
+      };
+    }
+
+    if (args.strictFlowEnrich) {
+      throw new MetaFlowEnrichError(
+        `[meta-flow-enrich] Falha ao obter template por ID Graph ${gid}` +
+          (gidFailureMessage ? `: ${gidFailureMessage}` : "") +
+          ` — e listagem paginada tampouco encontrou "${args.templateName}" (${args.languageCode}).`,
+      );
+    }
+    return {
+      row: null,
+      resolutionPath: gidFailurePath ?? "getMessageTemplateByGraphId_error",
+      gidFailureMessage,
+    };
   }
 
-  let after: string | undefined;
-  for (let page = 0; page < 40; page++) {
-    let listRaw: unknown;
-    try {
-      listRaw = await client.listMessageTemplates({ limit: 500, after });
-    } catch {
-      listRaw = null;
-    }
-    const rows = extractTemplatesData(listRaw);
-    const row = pickTemplateRow(rows, args.templateName, args.languageCode);
-    if (row) return { row, resolutionPath: "listMessageTemplates" };
-    after = extractPagingAfter(listRaw);
-    if (!after) break;
-  }
-  return { row: null, resolutionPath: "listMessageTemplates_none" };
+  const row = await findTemplateByListing(
+    client,
+    args.templateName,
+    args.languageCode,
+  );
+  return row
+    ? { row, resolutionPath: "listMessageTemplates" }
+    : { row: null, resolutionPath: "listMessageTemplates_none" };
 }
 
 export function buildFlowButtonComponent(
