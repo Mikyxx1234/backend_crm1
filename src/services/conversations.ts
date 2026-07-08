@@ -7,6 +7,7 @@ import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label"
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
+import { SOURCE_NONE } from "@/services/kanban-filters";
 
 /** Abas de categoria (filtro OR em "Todos" para membros com escopo limitado). */
 export const INBOX_CATEGORY_TABS = [
@@ -40,6 +41,10 @@ export type GetConversationsParams = {
   ownerId?: string;
   stageId?: string;
   tagIds?: string[];
+  /** Origens do contato (Contact.source). Pode incluir `SOURCE_NONE`. */
+  sources?: string[];
+  /** true = só conversas cujo contato não tem origem. */
+  withoutSource?: boolean;
   sortBy?: "updatedAt" | "createdAt" | "unreadCount";
   sortOrder?: "asc" | "desc";
   /**
@@ -171,6 +176,27 @@ async function lastMessagePreviewsBatch(
   return map;
 }
 
+function buildConversationSourceCondition(
+  sources?: string[],
+  withoutSource?: boolean,
+): Prisma.ConversationWhereInput | null {
+  const real = (sources ?? []).filter((s) => s && s !== SOURCE_NONE);
+  const wantNone = withoutSource === true || (sources ?? []).includes(SOURCE_NONE);
+  const or: Prisma.ConversationWhereInput[] = [];
+  if (real.length) or.push({ contact: { source: { in: real } } });
+  if (wantNone) {
+    or.push({
+      OR: [
+        { contactId: null },
+        { contact: { is: { source: null } } },
+        { contact: { is: { source: "" } } },
+      ],
+    });
+  }
+  if (or.length === 0) return null;
+  return or.length === 1 ? or[0] : { OR: or };
+}
+
 function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
   switch (tab) {
     case "entrada":
@@ -267,6 +293,11 @@ export async function getConversations(
       contact: { tags: { some: { tagId: { in: params.tagIds } } } },
     });
   }
+  const sourceCond = buildConversationSourceCondition(
+    params.sources,
+    params.withoutSource,
+  );
+  if (sourceCond) conditions.push(sourceCond);
 
   const where: Prisma.ConversationWhereInput =
     conditions.length > 0 ? { AND: conditions } : {};

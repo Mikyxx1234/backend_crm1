@@ -50,9 +50,10 @@ export async function GET() {
           select: { id: true, name: true, label: true, type: true, options: true, entity: true },
         }),
         prisma.contact.findMany({
-          where: { source: { not: null } },
+          where: { AND: [{ source: { not: null } }, { source: { not: "" } }] },
           distinct: ["source"],
           select: { source: true },
+          orderBy: { source: "asc" },
           take: 200,
         }),
         // Motivos de perda: catálogo configurado + motivos livres ("Outro…")
@@ -88,7 +89,10 @@ export async function GET() {
         tags,
         dealCustomFields,
         contactCustomFields,
-        sources: sources.map((s) => s.source).filter((s): s is string => !!s),
+        sources: sources
+          .map((s) => s.source?.trim())
+          .filter((s): s is string => !!s)
+          .sort((a, b) => a.localeCompare(b, "pt-BR")),
         lossReasons,
       });
     } catch (e) {
