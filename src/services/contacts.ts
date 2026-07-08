@@ -1,6 +1,7 @@
 import type { LifecycleStage, Prisma } from "@prisma/client";
 
 import { resolveHighlight, type ResolvedHighlight } from "@/lib/highlight";
+import { normalizePhone } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -9,6 +10,23 @@ import { getLogger } from "@/lib/logger";
 import { logEvent } from "@/services/activity-log";
 
 const log = getLogger("contacts-service");
+
+/**
+ * Normaliza o telefone recebido em Create/Update para E.164 (BR-first).
+ * Se o input for null/undefined, propaga o valor original.
+ * Se a normalização falhar (input não reconhecido), mantém o valor original
+ * já trimado para não descartar entrada do usuário.
+ */
+function normalizeContactPhoneInput(
+  input: string | null | undefined,
+): string | null | undefined {
+  if (input === undefined) return undefined;
+  if (input === null) return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const normalized = normalizePhone(trimmed);
+  return normalized ?? trimmed;
+}
 
 const LIFECYCLE_STAGES: LifecycleStage[] = [
   "SUBSCRIBER",
@@ -675,6 +693,7 @@ function isPrismaUniqueViolation(err: unknown): boolean {
 }
 
 export async function createContact(data: CreateContactInput) {
+  const normalizedPhone = normalizeContactPhoneInput(data.phone);
   let lastErr: unknown;
   for (let attempt = 0; attempt < CONTACT_NUMBER_MAX_RETRIES; attempt++) {
     const number = await nextContactNumber();
@@ -686,7 +705,7 @@ export async function createContact(data: CreateContactInput) {
           name: data.name,
           externalId: data.externalId === undefined ? undefined : data.externalId,
           email: data.email ?? undefined,
-          phone: data.phone ?? undefined,
+          phone: normalizedPhone ?? undefined,
           avatarUrl: data.avatarUrl ?? undefined,
           leadScore: data.leadScore ?? undefined,
           lifecycleStage: data.lifecycleStage ?? undefined,
@@ -748,7 +767,9 @@ export async function updateContact(id: string, data: UpdateContactInput) {
 
   if (data.name !== undefined) updateData.name = data.name;
   if (data.email !== undefined) updateData.email = data.email;
-  if (data.phone !== undefined) updateData.phone = data.phone;
+  if (data.phone !== undefined) {
+    updateData.phone = normalizeContactPhoneInput(data.phone) ?? null;
+  }
   if (data.avatarUrl !== undefined) updateData.avatarUrl = data.avatarUrl;
   if (data.leadScore !== undefined) updateData.leadScore = data.leadScore;
   if (data.lifecycleStage !== undefined) updateData.lifecycleStage = data.lifecycleStage;
