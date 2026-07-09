@@ -423,6 +423,26 @@ export async function POST(request: Request, context: RouteContext) {
               orderBy: { updatedAt: "desc" },
             }).catch(() => null)
           : null;
+
+        // Persistir também na tabela `Note` — assim a nota escrita no chat
+        // aparece no "histórico de notas" (aba Notas do deal/contato), que
+        // lê `Note`, não `Message`. Sem isto a nota só existia como mensagem
+        // interna e ficava invisível fora da conversa. Criamos direto via
+        // prisma (sem createDealEvent) pra não duplicar o NOTE_ADDED que já
+        // é logado logo abaixo.
+        if (conv.contactId || openDeal?.id) {
+          await prisma.note
+            .create({
+              data: withOrgFromCtx({
+                content,
+                contactId: conv.contactId ?? undefined,
+                dealId: openDeal?.id ?? undefined,
+                userId: authResult.user.id,
+              }),
+            })
+            .catch(() => null);
+        }
+
         await logEvent({
           type: "NOTE_ADDED",
           entityType: "MESSAGE",
