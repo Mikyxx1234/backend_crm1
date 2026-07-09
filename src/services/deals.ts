@@ -328,7 +328,8 @@ export type CreateDealInput = {
   id?: string;
   /** ID externo do lead (ex.: Kommo). */
   externalId?: string | null;
-  title: string;
+  /** Opcional: sem título vira "Negócio - #<number>" (ver createDeal). */
+  title?: string | null;
   value?: number | string;
   status?: DealStatus;
   expectedClose?: Date | string | null;
@@ -368,8 +369,12 @@ function isPrismaUniqueViolation(err: unknown): boolean {
 }
 
 export async function createDeal(data: CreateDealInput) {
-  const title = data.title.trim();
-  if (!title) throw new Error("INVALID_TITLE");
+  // Nome opcional: negócios criados sem título ganham nome automático
+  // "Negócio - #<number>" (o `number` sequencial por org, mesmo id
+  // exibido no card/header). Assim o operador pode criar um negócio
+  // rápido sem digitar nome. O fallback é resolvido dentro do loop
+  // porque depende do `number` alocado.
+  const rawTitle = data.title?.trim() ?? "";
 
   const maxPos = await prisma.deal.aggregate({
     where: { stageId: data.stageId },
@@ -383,6 +388,7 @@ export async function createDeal(data: CreateDealInput) {
   let lastErr: unknown;
   for (let attempt = 0; attempt < DEAL_NUMBER_MAX_RETRIES; attempt++) {
     const number = await nextDealNumber();
+    const title = rawTitle || `Negócio - #${number}`;
     try {
       return await prisma.deal.create({
         data: withOrgFromCtx({

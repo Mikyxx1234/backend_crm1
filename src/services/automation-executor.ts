@@ -2124,7 +2124,9 @@ async function executeStep(
       if (!rt.contactId) throw new Error("create_deal: contactId ausente");
       const stageId = readString(cfg, "stageId");
       if (!stageId) throw new Error("create_deal: stageId obrigatório");
-      const title = readString(cfg, "title") ?? "Novo negócio";
+      // Título opcional: sem nome configurado, o deal é batizado como
+      // "Negócio - #<number>" (resolvido dentro do loop, depende do number).
+      const rawTitle = readString(cfg, "title")?.trim() ?? "";
       const rawValue = readNumber(cfg, "value");
       const stage = await prisma.stage.findUnique({
         where: { id: stageId },
@@ -2137,6 +2139,7 @@ async function executeStep(
       let lastErr: unknown;
       for (let attempt = 0; attempt < 5; attempt++) {
         const number = await nextDealNumber();
+        const title = rawTitle || `Negócio - #${number}`;
         try {
           deal = await prisma.deal.create({
             data: withOrgFromCtx({

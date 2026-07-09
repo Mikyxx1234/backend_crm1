@@ -96,8 +96,10 @@ export async function POST(request: Request) {
 
     const b = body as Record<string, unknown>;
 
-    if (typeof b.title !== "string" || b.title.trim().length < 1) {
-      return NextResponse.json({ message: "Título é obrigatório." }, { status: 400 });
+    // Título opcional: negócio sem nome é batizado automaticamente como
+    // "Negócio - #<number>" em createDeal. Só validamos o tipo quando vem.
+    if (b.title !== undefined && b.title !== null && typeof b.title !== "string") {
+      return NextResponse.json({ message: "Título inválido." }, { status: 400 });
     }
     if (typeof b.stageId !== "string" || !b.stageId) {
       return NextResponse.json({ message: "stageId é obrigatório." }, { status: 400 });
@@ -138,7 +140,7 @@ export async function POST(request: Request) {
       const stageScope = await requireStageScope(authResult.user, "move", b.stageId);
       if (stageScope) return stageScope;
       const deal = await createDeal({
-        title: b.title,
+        title: typeof b.title === "string" ? b.title : undefined,
         stageId: b.stageId,
         value: typeof b.value === "number" ? b.value : undefined,
         status:
