@@ -10,6 +10,7 @@ const UpdateSchema = z.object({
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/)
     .optional(),
+  icon: z.string().min(1).max(10).optional(),
 });
 
 export async function PUT(

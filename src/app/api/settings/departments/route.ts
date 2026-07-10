@@ -11,6 +11,7 @@ const CreateSchema = z.object({
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/)
     .default("#6366f1"),
+  icon: z.string().min(1).max(10).default("🏢"),
 });
 
 export async function GET() {
@@ -52,20 +53,29 @@ export async function POST(request: Request) {
         { status: 400 },
       );
     }
-    const department = await prisma.department.create({
-      data: withOrgFromCtx({ ...parsed.data }),
-    });
-    await prisma.auditLog.create({
-      data: {
-        organizationId: session.user.organizationId,
-        actorId: session.user.id,
-        actorEmail: session.user.email,
-        entity: "Department",
-        entityId: department.id,
-        action: "create",
-        after: { name: department.name, color: department.color },
-      },
-    });
-    return NextResponse.json(department, { status: 201 });
+    try {
+      const department = await prisma.department.create({
+        data: withOrgFromCtx({ ...parsed.data }),
+      });
+      await prisma.auditLog.create({
+        data: {
+          organizationId: session.user.organizationId,
+          actorId: session.user.id,
+          actorEmail: session.user.email,
+          entity: "Department",
+          entityId: department.id,
+          action: "create",
+          after: { name: department.name, color: department.color, icon: department.icon },
+        },
+      });
+      return NextResponse.json(department, { status: 201 });
+    } catch (err) {
+      console.error("[POST /settings/departments]", err);
+      const message =
+        err instanceof Error && err.message.includes("does not exist")
+          ? "A tabela de departamentos ainda não existe. Aguarde a migração ser aplicada."
+          : "Erro ao criar departamento. Tente novamente.";
+      return NextResponse.json({ message }, { status: 503 });
+    }
   });
 }

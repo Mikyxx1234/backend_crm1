@@ -2726,6 +2726,7 @@ model Department {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name           String
   color          String       @default("#6366f1")
+  icon           String       @default("🏢")
   businessHoursId String?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt

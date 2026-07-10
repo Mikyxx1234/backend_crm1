@@ -4,6 +4,7 @@ CREATE TABLE "departments" (
     "organizationId" TEXT NOT NULL,
     "name" TEXT NOT NULL,
     "color" TEXT NOT NULL DEFAULT '#6366f1',
+    "icon" TEXT NOT NULL DEFAULT '🏢',
     "businessHoursId" TEXT,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
