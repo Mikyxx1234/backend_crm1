@@ -524,7 +524,8 @@ model User {
   /// erase: name = "Usuario removido", email = "erased+<id>@anon.local",
   /// hashedPassword = NULL, phone/avatarUrl/signature = NULL.
   isErased                       Boolean                   @default(false)
-  agentPermissions               AgentPermission[]
+  agentPermission                AgentPermission?
+  createdQuickReplies            QuickReply[]     @relation("QuickReplyCreatedBy")
 
   @@index([type])
   @@index([organizationId])
@@ -2705,6 +2706,7 @@ model QuickReply {
   group           QuickReplyGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
   attachmentUrl   String?
   createdByUserId String?
+  createdBy       User?        @relation("QuickReplyCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
@@ -2741,7 +2743,7 @@ model Department {
 model AgentPermission {
   id             String   @id @default(cuid())
   organizationId String
-  userId         String
+  userId         String   @unique
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -2774,6 +2776,7 @@ model QuickReplyGroup {
   name           String
   order          Int          @default(0)
   createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
 
   quickReplies   QuickReply[]
 

@@ -37,6 +37,7 @@ CREATE TABLE "quick_reply_groups" (
     "name" TEXT NOT NULL,
     "order" INTEGER NOT NULL DEFAULT 0,
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "quick_reply_groups_pkey" PRIMARY KEY ("id")
 );
@@ -54,6 +55,9 @@ CREATE INDEX "departments_organizationId_idx" ON "departments"("organizationId")
 
 -- CreateIndex
 CREATE INDEX "agent_permissions_organizationId_idx" ON "agent_permissions"("organizationId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "agent_permissions_userId_key" ON "agent_permissions"("userId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "agent_permissions_organizationId_userId_key" ON "agent_permissions"("organizationId", "userId");
@@ -81,3 +85,6 @@ ALTER TABLE "conversations" ADD CONSTRAINT "conversations_departmentId_fkey" FOR
 
 -- AddForeignKey
 ALTER TABLE "quick_replies" ADD CONSTRAINT "quick_replies_groupId_fkey" FOREIGN KEY ("groupId") REFERENCES "quick_reply_groups"("id") ON DELETE SET NULL ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "quick_replies" ADD CONSTRAINT "quick_replies_createdByUserId_fkey" FOREIGN KEY ("createdByUserId") REFERENCES "users"("id") ON DELETE SET NULL ON UPDATE CASCADE;
