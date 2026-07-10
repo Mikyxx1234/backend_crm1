@@ -86,16 +86,18 @@ export async function DELETE(
       );
     }
 
-    await prisma.department.delete({ where: { id } });
+    await prisma.$transaction(async (tx) => {
+      await tx.department.delete({ where: { id } });
 
-    // Clean up stale allowedDepartmentIds references in AgentPermission.
-    // Cannot use FK here because allowedDepartmentIds is a String[] array.
-    await prisma.$executeRaw`
-      UPDATE agent_permissions
-      SET "allowedDepartmentIds" = array_remove("allowedDepartmentIds", ${dept.id})
-      WHERE ${dept.id} = ANY("allowedDepartmentIds")
-        AND "organizationId" = ${session.user.organizationId}
-    `;
+      // Clean up stale allowedDepartmentIds references in AgentPermission.
+      // Cannot use FK here because allowedDepartmentIds is a String[] array.
+      await tx.$executeRaw`
+        UPDATE agent_permissions
+        SET "allowedDepartmentIds" = array_remove("allowedDepartmentIds", ${dept.id})
+        WHERE ${dept.id} = ANY("allowedDepartmentIds")
+          AND "organizationId" = ${session.user.organizationId}
+      `;
+    });
 
     await prisma.auditLog.create({
       data: {
