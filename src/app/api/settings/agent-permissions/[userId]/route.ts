@@ -40,6 +40,14 @@ export async function GET(
 
     const { userId } = await params;
 
+    const targetUser = await prisma.user.findFirst({
+      where: { id: userId, organizationId: session.user.organizationId!, isErased: false },
+      select: { id: true },
+    });
+    if (!targetUser) {
+      return NextResponse.json({ message: "Usuário não encontrado." }, { status: 404 });
+    }
+
     const permission = await prisma.agentPermission.findUnique({
       where: { userId },
     });

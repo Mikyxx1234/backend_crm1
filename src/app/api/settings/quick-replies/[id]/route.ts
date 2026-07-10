@@ -27,6 +27,16 @@ export async function PUT(request: Request, ctx: Ctx) {
       return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });
     }
 
+    if (data.groupId) {
+      const group = await prisma.quickReplyGroup.findFirst({
+        where: { id: data.groupId as string, organizationId: user.organizationId },
+        select: { id: true },
+      });
+      if (!group) {
+        return NextResponse.json({ message: "Grupo não encontrado." }, { status: 404 });
+      }
+    }
+
     const updated = await prisma.quickReply.update({
       where: { id, organizationId: user.organizationId },
       data,
@@ -48,9 +58,16 @@ export async function DELETE(_req: Request, ctx: Ctx) {
     }
 
     const { id } = await ctx.params;
-    await prisma.quickReply.delete({
+
+    const existing = await prisma.quickReply.findFirst({
       where: { id, organizationId: user.organizationId },
+      select: { id: true },
     });
+    if (!existing) {
+      return NextResponse.json({ message: "Não encontrado." }, { status: 404 });
+    }
+
+    await prisma.quickReply.delete({ where: { id } });
     return NextResponse.json({ ok: true });
   } catch (e) {
     console.error(e);

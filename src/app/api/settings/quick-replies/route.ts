@@ -60,6 +60,16 @@ export async function POST(request: Request) {
     const attachmentUrl =
       typeof body.attachmentUrl === "string" && body.attachmentUrl ? body.attachmentUrl : null;
 
+    if (groupId) {
+      const group = await prisma.quickReplyGroup.findFirst({
+        where: { id: groupId, organizationId: user.organizationId },
+        select: { id: true },
+      });
+      if (!group) {
+        return NextResponse.json({ message: "Grupo não encontrado." }, { status: 404 });
+      }
+    }
+
     const position = await prisma.quickReply.count({
       where: { organizationId: user.organizationId, groupId },
     });
