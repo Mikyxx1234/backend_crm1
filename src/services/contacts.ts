@@ -561,7 +561,7 @@ export async function getContactById(id: string) {
             // pipelineId direto no schema. O frontend (contact-aside +
             // inbox v2) usa `stageName`/`pipelineId` flat, então o map
             // de retorno achata para esse formato.
-            stage: { select: { id: true, name: true, color: true, pipelineId: true } },
+            stage: { select: { id: true, name: true, color: true, pipelineId: true, pipeline: { select: { name: true } } } },
             owner: { select: assignedToSelect },
           },
         }),
@@ -569,7 +569,7 @@ export async function getContactById(id: string) {
         ReturnType<
           typeof prisma.deal.findMany<{
             include: {
-              stage: { select: { id: true; name: true; color: true; pipelineId: true } };
+              stage: { select: { id: true; name: true; color: true; pipelineId: true; pipeline: { select: { name: true } } } };
               owner: { select: typeof assignedToSelect };
             };
           }>
@@ -664,6 +664,7 @@ export async function getContactById(id: string) {
       stageName: d.stage?.name ?? null,
       stageColor: d.stage?.color ?? null,
       pipelineId: d.stage?.pipelineId ?? null,
+      pipelineName: d.stage?.pipeline?.name ?? null,
     })),
     notes,
     conversations,
