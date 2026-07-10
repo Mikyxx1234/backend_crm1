@@ -1,0 +1,51 @@
+import { NextResponse } from "next/server";
+
+import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+
+export async function GET() {
+  try {
+    const session = await auth();
+    const user = session?.user as { id?: string; organizationId?: string | null } | undefined;
+    if (!user?.id || !user.organizationId) {
+      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+    }
+
+    const groups = await prisma.quickReplyGroup.findMany({
+      where: { organizationId: user.organizationId },
+      orderBy: { order: "asc" },
+      include: { _count: { select: { quickReplies: true } } },
+    });
+    return NextResponse.json(groups);
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ message: "Erro ao listar grupos." }, { status: 500 });
+  }
+}
+
+export async function POST(request: Request) {
+  try {
+    const session = await auth();
+    const user = session?.user as { id?: string; organizationId?: string | null } | undefined;
+    if (!user?.id || !user.organizationId) {
+      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
+    }
+
+    const body = (await request.json()) as Record<string, unknown>;
+    const name = typeof body.name === "string" ? body.name.trim() : "";
+    if (!name) return NextResponse.json({ message: "Nome é obrigatório." }, { status: 400 });
+
+    const count = await prisma.quickReplyGroup.count({
+      where: { organizationId: user.organizationId },
+    });
+
+    const group = await prisma.quickReplyGroup.create({
+      data: { name, order: count, organizationId: user.organizationId },
+      include: { _count: { select: { quickReplies: true } } },
+    });
+    return NextResponse.json(group, { status: 201 });
+  } catch (e) {
+    console.error(e);
+    return NextResponse.json({ message: "Erro ao criar grupo." }, { status: 500 });
+  }
+}
