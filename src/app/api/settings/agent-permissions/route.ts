@@ -13,6 +13,8 @@ export async function GET() {
     }
 
     try {
+      // Query users without agentPermission join — the agent_permissions table
+      // may not exist yet if the migration hasn't run on this environment.
       const users = await prisma.user.findMany({
         where: {
           organizationId: session.user.organizationId!,
@@ -25,14 +27,23 @@ export async function GET() {
           email: true,
           role: true,
           avatarUrl: true,
-          agentPermission: true,
-          // One-to-one relation — gives the current status directly (no array).
           agentStatus: {
             select: { status: true },
           },
         },
         orderBy: { name: "asc" },
       });
+
+      // Fetch permissions separately so a missing table degrades gracefully.
+      let permMap = new Map<string, object>();
+      try {
+        const perms = await prisma.agentPermission.findMany({
+          where: { organizationId: session.user.organizationId! },
+        });
+        for (const p of perms) permMap.set(p.userId, p);
+      } catch {
+        // Table doesn't exist yet (migration pending) — permissions will be null.
+      }
 
       const result = users.map((u) => ({
         id: u.id,
@@ -41,7 +52,7 @@ export async function GET() {
         role: u.role,
         avatarUrl: u.avatarUrl,
         isOnline: u.agentStatus?.status === "ONLINE",
-        permissions: u.agentPermission ?? null,
+        permissions: permMap.get(u.id) ?? null,
       }));
 
       return NextResponse.json(result);

@@ -49,9 +49,12 @@ export async function GET(
       return NextResponse.json({ message: "Usuário não encontrado." }, { status: 404 });
     }
 
-    const permission = await prisma.agentPermission.findUnique({
-      where: { userId },
-    });
+    let permission = null;
+    try {
+      permission = await prisma.agentPermission.findUnique({ where: { userId } });
+    } catch {
+      // Table doesn't exist yet (migration pending) — return defaults.
+    }
 
     return NextResponse.json(permission ?? { userId, ...DEFAULT_PERMISSIONS });
   });

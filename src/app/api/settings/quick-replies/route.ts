@@ -30,12 +30,21 @@ export async function GET(request: Request) {
       ];
     }
 
-    const replies = await prisma.quickReply.findMany({
-      where,
-      orderBy: { position: "asc" },
-      include: { group: { select: { id: true, name: true } } },
-    });
-    return NextResponse.json(replies);
+    try {
+      const replies = await prisma.quickReply.findMany({
+        where,
+        orderBy: { position: "asc" },
+        include: { group: { select: { id: true, name: true } } },
+      });
+      return NextResponse.json(replies);
+    } catch {
+      // group relation may not exist yet (migration pending) — try without include.
+      const replies = await prisma.quickReply.findMany({
+        where: { organizationId: user.organizationId },
+        orderBy: { position: "asc" },
+      });
+      return NextResponse.json(replies.map((r) => ({ ...r, group: null })));
+    }
   } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao listar respostas rápidas." }, { status: 500 });

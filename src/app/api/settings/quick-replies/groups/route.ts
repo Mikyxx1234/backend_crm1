@@ -11,12 +11,17 @@ export async function GET() {
       return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
     }
 
-    const groups = await prisma.quickReplyGroup.findMany({
-      where: { organizationId: user.organizationId },
-      orderBy: { order: "asc" },
-      include: { _count: { select: { quickReplies: true } } },
-    });
-    return NextResponse.json(groups);
+    try {
+      const groups = await prisma.quickReplyGroup.findMany({
+        where: { organizationId: user.organizationId },
+        orderBy: { order: "asc" },
+        include: { _count: { select: { quickReplies: true } } },
+      });
+      return NextResponse.json(groups);
+    } catch {
+      // Table doesn't exist yet (migration pending) — return empty list.
+      return NextResponse.json([]);
+    }
   } catch (e) {
     console.error(e);
     return NextResponse.json({ message: "Erro ao listar grupos." }, { status: 500 });

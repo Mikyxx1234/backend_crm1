@@ -19,14 +19,19 @@ export async function GET() {
     if (role !== "ADMIN" && role !== "MANAGER") {
       return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
-    const departments = await prisma.department.findMany({
-      where: { organizationId: session.user.organizationId! },
-      include: {
-        _count: { select: { conversations: { where: { status: "OPEN" } } } },
-      },
-      orderBy: { name: "asc" },
-    });
-    return NextResponse.json(departments);
+    try {
+      const departments = await prisma.department.findMany({
+        where: { organizationId: session.user.organizationId! },
+        include: {
+          _count: { select: { conversations: { where: { status: "OPEN" } } } },
+        },
+        orderBy: { name: "asc" },
+      });
+      return NextResponse.json(departments);
+    } catch {
+      // Table doesn't exist yet (migration pending) — return empty list.
+      return NextResponse.json([]);
+    }
   });
 }
 
