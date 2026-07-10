@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -107,8 +108,8 @@ export async function PUT(
         entity: "AgentPermission",
         entityId: updated.id,
         action: "upsert",
-        before: before ?? null,
-        after: updated,
+        before: before ? ({ ...before } as unknown as Prisma.InputJsonValue) : Prisma.JsonNull,
+        after: { ...updated } as unknown as Prisma.InputJsonValue,
       },
     });
 
