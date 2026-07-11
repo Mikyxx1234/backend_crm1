@@ -85,6 +85,7 @@ export async function POST(request: Request) {
       const supportsPanel = entity === "contact" || entity === "deal";
       const showInInboxLeadPanel =
         supportsPanel && body.showInInboxLeadPanel === true;
+      const showInDealPanel = entity === "deal" && body.showInDealPanel === true;
       let inboxLeadPanelOrder: number | null | undefined;
       if (supportsPanel && body.inboxLeadPanelOrder !== undefined && body.inboxLeadPanelOrder !== null) {
         const n = Number(body.inboxLeadPanelOrder);
@@ -102,6 +103,7 @@ export async function POST(request: Request) {
         entity,
         showInInboxLeadPanel,
         inboxLeadPanelOrder: inboxLeadPanelOrder ?? null,
+        showInDealPanel,
         ...(Array.isArray(body.highlightRules) ? { highlightRules: body.highlightRules } : {}),
       });
       return NextResponse.json(field, { status: 201 });

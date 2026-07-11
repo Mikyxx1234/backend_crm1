@@ -24,6 +24,7 @@ export async function createCustomField(data: {
   entity?: string;
   showInInboxLeadPanel?: boolean;
   inboxLeadPanelOrder?: number | null;
+  showInDealPanel?: boolean;
   highlightRules?: unknown;
 }) {
   return prisma.customField.create({
@@ -36,6 +37,7 @@ export async function createCustomField(data: {
       entity: data.entity ?? "contact",
       showInInboxLeadPanel: data.showInInboxLeadPanel ?? false,
       inboxLeadPanelOrder: data.inboxLeadPanelOrder ?? null,
+      showInDealPanel: data.showInDealPanel ?? false,
       ...(data.highlightRules !== undefined
         ? { highlightRules: parseHighlightRules(data.highlightRules) as unknown as Prisma.InputJsonValue }
         : {}),
@@ -52,6 +54,7 @@ export async function updateCustomField(
     required?: boolean;
     showInInboxLeadPanel?: boolean;
     inboxLeadPanelOrder?: number | null;
+    showInDealPanel?: boolean;
     highlightRules?: unknown;
   }
 ) {
