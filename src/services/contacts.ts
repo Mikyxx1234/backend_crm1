@@ -4,7 +4,7 @@ import { resolveHighlight, type ResolvedHighlight } from "@/lib/highlight";
 import { normalizePhone } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { getLogger } from "@/lib/logger";
 import { logEvent } from "@/services/activity-log";
@@ -446,10 +446,29 @@ export async function getDealPanelFieldsForDeal(
       where: { entity: "deal", showInDealPanel: true },
     });
   } catch {
-    // Fallback: coluna showInDealPanel ainda não foi migrada — usa showInInboxLeadPanel
-    fields = await prisma.customField.findMany({
-      where: { entity: "deal", showInInboxLeadPanel: true },
-    });
+    // Fallback: coluna showInDealPanel ainda não foi migrada. Um findMany
+    // (mesmo filtrando por showInInboxLeadPanel) ainda SELECIONA showInDealPanel
+    // e falharia de novo — por isso usamos raw sem referenciar a coluna ausente.
+    const ctx = getRequestContext();
+    const orgId = ctx?.organizationId ?? null;
+    const rows = orgId
+      ? await prisma.$queryRaw<Record<string, unknown>[]>`
+          SELECT id, name, label, "type", options, required, entity,
+                 "showInInboxLeadPanel", "inboxLeadPanelOrder",
+                 "highlightRules", "organizationId"
+          FROM custom_fields
+          WHERE entity = 'deal' AND "showInInboxLeadPanel" = true
+            AND "organizationId" = ${orgId}
+        `
+      : await prisma.$queryRaw<Record<string, unknown>[]>`
+          SELECT id, name, label, "type", options, required, entity,
+                 "showInInboxLeadPanel", "inboxLeadPanelOrder",
+                 "highlightRules", "organizationId"
+          FROM custom_fields
+          WHERE entity = 'deal' AND "showInInboxLeadPanel" = true
+        `;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    fields = rows.map((r) => ({ ...r, showInDealPanel: false })) as any;
   }
 
   fields.sort((a, b) =>
