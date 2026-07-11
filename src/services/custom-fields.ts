@@ -2,21 +2,49 @@ import type { CustomFieldType, Prisma } from "@prisma/client";
 
 import { parseHighlightRules, resolveHighlight } from "@/lib/highlight";
 import { prisma } from "@/lib/prisma";
+import { prismaBase } from "@/lib/prisma-base";
+import { getRequestContext } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 export async function getCustomFields(entity = "contact"): Promise<
   (Awaited<ReturnType<typeof prisma.customField.findMany>> extends (infer T)[] ? T : never)[]
 > {
+  // Resolve organizationId a partir do contexto da request para filtrar explicitamente,
+  // evitando dependência da extensão de org-scope do prisma scoped.
+  const ctx = getRequestContext();
+  const orgId = ctx?.organizationId ?? null;
+
   try {
+    // Usa prismaBase com filtro explícito quando temos orgId (mais robusto).
+    // Fallback para o cliente scoped nos raros casos sem orgId (ex: scripts).
+    if (orgId) {
+      return await prismaBase.customField.findMany({
+        where: { entity, organizationId: orgId },
+        orderBy: { name: "asc" },
+      });
+    }
     return await prisma.customField.findMany({
       where: { entity },
       orderBy: { name: "asc" },
     });
   } catch {
     // Fallback para quando a coluna showInDealPanel ainda não existe na DB
-    // (migração pendente). Retorna os campos sem ela.
-    const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
-      SELECT id, name, label, type, options, required, entity,
+    // (migração pendente). Retorna os campos sem ela usando SQL raw.
+    if (orgId) {
+      const rows = await prismaBase.$queryRaw<Record<string, unknown>[]>`
+        SELECT id, name, label, "type", options, required, entity,
+               "showInInboxLeadPanel", "inboxLeadPanelOrder",
+               "highlightRules", "organizationId",
+               "createdAt", "updatedAt"
+        FROM custom_fields
+        WHERE entity = ${entity} AND "organizationId" = ${orgId}
+        ORDER BY name ASC
+      `;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      return rows.map((r) => ({ ...r, showInDealPanel: false })) as any;
+    }
+    const rows = await prismaBase.$queryRaw<Record<string, unknown>[]>`
+      SELECT id, name, label, "type", options, required, entity,
              "showInInboxLeadPanel", "inboxLeadPanelOrder",
              "highlightRules", "organizationId",
              "createdAt", "updatedAt"
