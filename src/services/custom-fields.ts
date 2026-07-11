@@ -4,7 +4,9 @@ import { parseHighlightRules, resolveHighlight } from "@/lib/highlight";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
-export async function getCustomFields(entity = "contact") {
+export async function getCustomFields(entity = "contact"): Promise<
+  (Awaited<ReturnType<typeof prisma.customField.findMany>> extends (infer T)[] ? T : never)[]
+> {
   try {
     return await prisma.customField.findMany({
       where: { entity },
@@ -22,7 +24,8 @@ export async function getCustomFields(entity = "contact") {
       WHERE entity = ${entity}
       ORDER BY name ASC
     `;
-    return rows.map((r) => ({ ...r, showInDealPanel: false }));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return rows.map((r) => ({ ...r, showInDealPanel: false })) as any;
   }
 }
 

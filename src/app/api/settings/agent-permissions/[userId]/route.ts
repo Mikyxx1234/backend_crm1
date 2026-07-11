@@ -12,6 +12,7 @@ const DEFAULT_PERMISSIONS = {
   canCloseConversation: true,
   canDeleteConversation: false,
   canManageQuickMessages: false,
+  canConfigureFieldVisibility: false,
   allowedConnectionIds: [] as string[],
   allowedDepartmentIds: [] as string[],
 };
@@ -23,6 +24,7 @@ const PermissionsSchema = z.object({
   canCloseConversation: z.boolean().optional(),
   canDeleteConversation: z.boolean().optional(),
   canManageQuickMessages: z.boolean().optional(),
+  canConfigureFieldVisibility: z.boolean().optional(),
   allowedConnectionIds: z.array(z.string()).optional(),
   allowedDepartmentIds: z.array(z.string()).optional(),
 });
@@ -92,16 +94,28 @@ export async function PUT(
 
     const before = await prisma.agentPermission.findUnique({ where: { userId } });
 
-    const updated = await prisma.agentPermission.upsert({
-      where: { userId },
-      create: {
-        organizationId: session.user.organizationId!,
-        userId,
-        ...DEFAULT_PERMISSIONS,
-        ...parsed.data,
-      },
-      update: parsed.data,
-    });
+    let updated;
+    try {
+      updated = await prisma.agentPermission.upsert({
+        where: { userId },
+        create: {
+          organizationId: session.user.organizationId!,
+          userId,
+          ...DEFAULT_PERMISSIONS,
+          ...parsed.data,
+        },
+        update: parsed.data,
+      });
+    } catch {
+      // Fallback: canConfigureFieldVisibility column might not exist yet — retry without it.
+      const { canConfigureFieldVisibility: _omit, ...safeData } = parsed.data;
+      const { canConfigureFieldVisibility: _omitDef, ...safeDefaults } = DEFAULT_PERMISSIONS;
+      updated = await prisma.agentPermission.upsert({
+        where: { userId },
+        create: { organizationId: session.user.organizationId!, userId, ...safeDefaults, ...safeData },
+        update: safeData,
+      });
+    }
 
     await prisma.auditLog.create({
       data: {

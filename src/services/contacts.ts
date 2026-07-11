@@ -432,6 +432,56 @@ export async function getInboxLeadPanelFieldsForDeal(
 }
 
 /**
+ * Campos de negócio marcados para o painel do Deal Detail (com valor ou vazio).
+ * Filtra por showInDealPanel em vez de showInInboxLeadPanel — visibilidade
+ * configurada separadamente da Inbox. Fallback resiliente para quando a coluna
+ * ainda não existe na DB.
+ */
+export async function getDealPanelFieldsForDeal(
+  dealId: string
+): Promise<InboxLeadPanelFieldRow[]> {
+  let fields: Awaited<ReturnType<typeof prisma.customField.findMany>>;
+  try {
+    fields = await prisma.customField.findMany({
+      where: { entity: "deal", showInDealPanel: true },
+    });
+  } catch {
+    // Fallback: coluna showInDealPanel ainda não foi migrada — usa showInInboxLeadPanel
+    fields = await prisma.customField.findMany({
+      where: { entity: "deal", showInInboxLeadPanel: true },
+    });
+  }
+
+  fields.sort((a, b) =>
+    (a.inboxLeadPanelOrder ?? 9999) - (b.inboxLeadPanelOrder ?? 9999) ||
+    a.label.localeCompare(b.label, "pt-BR")
+  );
+
+  if (fields.length === 0) return [];
+
+  const fieldIds = fields.map((f) => f.id);
+  const values = await prisma.dealCustomFieldValue.findMany({
+    where: { dealId, customFieldId: { in: fieldIds } },
+    select: { customFieldId: true, value: true },
+  });
+  const valueByField = new Map(values.map((v) => [v.customFieldId, v.value]));
+
+  return fields.map((f) => {
+    const value = valueByField.get(f.id) ?? null;
+    return {
+      fieldId: f.id,
+      name: f.name,
+      label: f.label,
+      type: f.type,
+      options: f.options,
+      value,
+      highlightRules: Array.isArray(f.highlightRules) ? f.highlightRules : [],
+      highlight: resolveHighlight(value, f.highlightRules),
+    };
+  });
+}
+
+/**
  * Verifica apenas se existe um contato com o id. Usa findUnique mínimo
  * (sem includes) pra não arrastar falhas de relações — garantindo que
  * endpoints DELETE/PUT possam checar existência mesmo quando alguma

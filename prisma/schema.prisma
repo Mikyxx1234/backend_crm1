@@ -2756,6 +2756,7 @@ model AgentPermission {
   canCloseConversation             Boolean  @default(true)
   canDeleteConversation            Boolean  @default(false)
   canManageQuickMessages           Boolean  @default(false)
+  canConfigureFieldVisibility      Boolean  @default(false)
 
   allowedConnectionIds  String[] @default([])
   allowedDepartmentIds  String[] @default([])
