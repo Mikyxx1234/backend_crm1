@@ -59,7 +59,14 @@ export async function GET(request: Request) {
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Erro ao listar campos.";
-    return NextResponse.json({ message: msg }, { status: 500 });
+    const stack = e instanceof Error ? e.stack : undefined;
+    // Log detalhado no servidor para diagnóstico.
+    console.error("[GET /api/custom-fields] erro:", msg, stack);
+    // Expõe detalhe do erro na resposta (ambiente dev) para captura via Network tab.
+    return NextResponse.json(
+      { message: msg, detail: msg, stack: stack?.split("\n").slice(0, 5) },
+      { status: 500 },
+    );
   }
 }
 
