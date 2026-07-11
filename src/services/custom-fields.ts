@@ -5,10 +5,25 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 export async function getCustomFields(entity = "contact") {
-  return prisma.customField.findMany({
-    where: { entity },
-    orderBy: { name: "asc" },
-  });
+  try {
+    return await prisma.customField.findMany({
+      where: { entity },
+      orderBy: { name: "asc" },
+    });
+  } catch {
+    // Fallback para quando a coluna showInDealPanel ainda não existe na DB
+    // (migração pendente). Retorna os campos sem ela.
+    const rows = await prisma.$queryRaw<Record<string, unknown>[]>`
+      SELECT id, name, label, type, options, required, entity,
+             "showInInboxLeadPanel", "inboxLeadPanelOrder",
+             "highlightRules", "organizationId",
+             "createdAt", "updatedAt"
+      FROM custom_fields
+      WHERE entity = ${entity}
+      ORDER BY name ASC
+    `;
+    return rows.map((r) => ({ ...r, showInDealPanel: false }));
+  }
 }
 
 export async function getCustomFieldById(id: string) {
@@ -27,22 +42,41 @@ export async function createCustomField(data: {
   showInDealPanel?: boolean;
   highlightRules?: unknown;
 }) {
-  return prisma.customField.create({
-    data: withOrgFromCtx({
-      name: data.name,
-      label: data.label,
-      type: data.type,
-      options: data.options ?? [],
-      required: data.required ?? false,
-      entity: data.entity ?? "contact",
-      showInInboxLeadPanel: data.showInInboxLeadPanel ?? false,
-      inboxLeadPanelOrder: data.inboxLeadPanelOrder ?? null,
-      showInDealPanel: data.showInDealPanel ?? false,
-      ...(data.highlightRules !== undefined
-        ? { highlightRules: parseHighlightRules(data.highlightRules) as unknown as Prisma.InputJsonValue }
-        : {}),
-    }),
-  });
+  try {
+    return await prisma.customField.create({
+      data: withOrgFromCtx({
+        name: data.name,
+        label: data.label,
+        type: data.type,
+        options: data.options ?? [],
+        required: data.required ?? false,
+        entity: data.entity ?? "contact",
+        showInInboxLeadPanel: data.showInInboxLeadPanel ?? false,
+        inboxLeadPanelOrder: data.inboxLeadPanelOrder ?? null,
+        showInDealPanel: data.showInDealPanel ?? false,
+        ...(data.highlightRules !== undefined
+          ? { highlightRules: parseHighlightRules(data.highlightRules) as unknown as Prisma.InputJsonValue }
+          : {}),
+      }),
+    });
+  } catch {
+    // Fallback: cria sem showInDealPanel se a coluna ainda não existir
+    return await prisma.customField.create({
+      data: withOrgFromCtx({
+        name: data.name,
+        label: data.label,
+        type: data.type,
+        options: data.options ?? [],
+        required: data.required ?? false,
+        entity: data.entity ?? "contact",
+        showInInboxLeadPanel: data.showInInboxLeadPanel ?? false,
+        inboxLeadPanelOrder: data.inboxLeadPanelOrder ?? null,
+        ...(data.highlightRules !== undefined
+          ? { highlightRules: parseHighlightRules(data.highlightRules) as unknown as Prisma.InputJsonValue }
+          : {}),
+      }),
+    });
+  }
 }
 
 export async function updateCustomField(
@@ -58,16 +92,28 @@ export async function updateCustomField(
     highlightRules?: unknown;
   }
 ) {
-  const { highlightRules, ...rest } = data;
-  return prisma.customField.update({
-    where: { id },
-    data: {
-      ...rest,
-      ...(highlightRules !== undefined
-        ? { highlightRules: parseHighlightRules(highlightRules) as unknown as Prisma.InputJsonValue }
-        : {}),
-    },
-  });
+  const { highlightRules, showInDealPanel, ...rest } = data;
+  const baseData = {
+    ...rest,
+    ...(highlightRules !== undefined
+      ? { highlightRules: parseHighlightRules(highlightRules) as unknown as Prisma.InputJsonValue }
+      : {}),
+  };
+  try {
+    return await prisma.customField.update({
+      where: { id },
+      data: {
+        ...baseData,
+        ...(showInDealPanel !== undefined ? { showInDealPanel } : {}),
+      },
+    });
+  } catch {
+    // Fallback: atualiza sem showInDealPanel se a coluna ainda não existir
+    return await prisma.customField.update({
+      where: { id },
+      data: baseData,
+    });
+  }
 }
 
 export async function deleteCustomField(id: string) {
