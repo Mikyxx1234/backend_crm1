@@ -11,7 +11,7 @@ const CreateSchema = z.object({
     .string()
     .regex(/^#[0-9a-fA-F]{6}$/)
     .default("#6366f1"),
-  icon: z.string().min(1).max(10).default("🏢"),
+  icon: z.string().min(1).max(40).default("IconBuilding"),
 });
 
 export async function GET() {
