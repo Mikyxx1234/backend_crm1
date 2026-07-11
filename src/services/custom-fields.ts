@@ -34,8 +34,7 @@ export async function getCustomFields(entity = "contact"): Promise<
       const rows = await prismaBase.$queryRaw<Record<string, unknown>[]>`
         SELECT id, name, label, "type", options, required, entity,
                "showInInboxLeadPanel", "inboxLeadPanelOrder",
-               "highlightRules", "organizationId",
-               "createdAt", "updatedAt"
+               "highlightRules", "organizationId"
         FROM custom_fields
         WHERE entity = ${entity} AND "organizationId" = ${orgId}
         ORDER BY name ASC
@@ -46,8 +45,7 @@ export async function getCustomFields(entity = "contact"): Promise<
     const rows = await prismaBase.$queryRaw<Record<string, unknown>[]>`
       SELECT id, name, label, "type", options, required, entity,
              "showInInboxLeadPanel", "inboxLeadPanelOrder",
-             "highlightRules", "organizationId",
-             "createdAt", "updatedAt"
+             "highlightRules", "organizationId"
       FROM custom_fields
       WHERE entity = ${entity}
       ORDER BY name ASC
