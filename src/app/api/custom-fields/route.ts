@@ -51,16 +51,9 @@ export async function GET(request: Request) {
     return await runWithApiUserContext(authResult.user, async () => {
       const url = new URL(request.url);
       const entity = url.searchParams.get("entity") || undefined;
-      if ((entity ?? "contact") === "deal") {
-        // Quem tem deal:view OU settings:custom_fields pode listar definições de campos de negócio.
-        // settings:custom_fields é necessário para o FieldConfigPanel (admin/manager)
-        // que precisa carregar as definições de campos de deal para configurar visibilidade.
-        const deniedDealView = await requirePermissionForUser(authResult.user, "deal:view");
-        if (deniedDealView) {
-          const deniedSettings = await requirePermissionForUser(authResult.user, "settings:custom_fields");
-          if (deniedSettings) return deniedDealView;
-        }
-      }
+      // Definições de campos (label, type, options) são metadados não sensíveis —
+      // qualquer usuário autenticado pode listá-las. Valores específicos por contato/
+      // deal são protegidos nas rotas /contacts/:id/custom-fields e /deals/:id/custom-fields.
       const fields = await getCustomFields(entity);
       return NextResponse.json(fields);
     });
