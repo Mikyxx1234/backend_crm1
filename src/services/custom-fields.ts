@@ -276,25 +276,72 @@ export async function deleteCustomField(id: string) {
 }
 
 export async function getContactCustomFieldValues(contactId: string) {
-  const fields = await prisma.customField.findMany({
-    where: { entity: "contact" },
-    orderBy: { name: "asc" },
-    include: {
-      values: { where: { contactId } },
-    },
-  });
+  try {
+    const fields = await prisma.customField.findMany({
+      where: { entity: "contact" },
+      orderBy: { name: "asc" },
+      include: {
+        values: { where: { contactId } },
+      },
+    });
 
-  return fields.map((f) => {
-    const value = f.values[0]?.value ?? null;
+    return fields.map((f) => {
+      const value = f.values[0]?.value ?? null;
+      return {
+        fieldId: f.id,
+        name: f.name,
+        label: f.label,
+        type: f.type,
+        options: f.options,
+        required: f.required,
+        value,
+        highlight: resolveHighlight(value, f.highlightRules),
+      };
+    });
+  } catch {
+    // Mesmo fallback de coluna showInDealPanel ausente (ver topo do arquivo):
+    // esse findMany não referencia a coluna, mas o Prisma seleciona todas as
+    // colunas do model por padrão e falha do mesmo jeito.
+    return getContactCustomFieldValuesRaw(contactId);
+  }
+}
+
+async function getContactCustomFieldValuesRaw(contactId: string) {
+  const ctx = getRequestContext();
+  const orgId = ctx?.organizationId ?? null;
+  const rows = orgId
+    ? await prismaBase.$queryRaw<Record<string, unknown>[]>`
+        SELECT id, name, label, "type", options, required, "highlightRules"
+        FROM custom_fields
+        WHERE entity = 'contact' AND "organizationId" = ${orgId}
+        ORDER BY name ASC
+      `
+    : await prismaBase.$queryRaw<Record<string, unknown>[]>`
+        SELECT id, name, label, "type", options, required, "highlightRules"
+        FROM custom_fields
+        WHERE entity = 'contact'
+        ORDER BY name ASC
+      `;
+  if (rows.length === 0) return [];
+
+  const fieldIds = rows.map((r) => r.id as string);
+  const values = await prisma.contactCustomFieldValue.findMany({
+    where: { contactId, customFieldId: { in: fieldIds } },
+    select: { customFieldId: true, value: true },
+  });
+  const valueByField = new Map(values.map((v) => [v.customFieldId, v.value]));
+
+  return rows.map((f) => {
+    const value = valueByField.get(f.id as string) ?? null;
     return {
-      fieldId: f.id,
-      name: f.name,
-      label: f.label,
-      type: f.type,
-      options: f.options,
-      required: f.required,
+      fieldId: f.id as string,
+      name: f.name as string,
+      label: f.label as string,
+      type: f.type as string,
+      options: (f.options as string[]) ?? [],
+      required: Boolean(f.required),
       value,
-      highlight: resolveHighlight(value, f.highlightRules),
+      highlight: resolveHighlight(value, f.highlightRules as unknown[]),
     };
   });
 }
@@ -324,25 +371,70 @@ export async function upsertContactCustomFieldValues(
 }
 
 export async function getDealCustomFieldValues(dealId: string) {
-  const fields = await prisma.customField.findMany({
-    where: { entity: "deal" },
-    orderBy: { name: "asc" },
-    include: {
-      dealValues: { where: { dealId } },
-    },
-  });
+  try {
+    const fields = await prisma.customField.findMany({
+      where: { entity: "deal" },
+      orderBy: { name: "asc" },
+      include: {
+        dealValues: { where: { dealId } },
+      },
+    });
 
-  return fields.map((f) => {
-    const value = f.dealValues[0]?.value ?? null;
+    return fields.map((f) => {
+      const value = f.dealValues[0]?.value ?? null;
+      return {
+        fieldId: f.id,
+        name: f.name,
+        label: f.label,
+        type: f.type,
+        options: f.options,
+        required: f.required,
+        value,
+        highlight: resolveHighlight(value, f.highlightRules),
+      };
+    });
+  } catch {
+    // Mesmo fallback de coluna showInDealPanel ausente (ver topo do arquivo).
+    return getDealCustomFieldValuesRaw(dealId);
+  }
+}
+
+async function getDealCustomFieldValuesRaw(dealId: string) {
+  const ctx = getRequestContext();
+  const orgId = ctx?.organizationId ?? null;
+  const rows = orgId
+    ? await prismaBase.$queryRaw<Record<string, unknown>[]>`
+        SELECT id, name, label, "type", options, required, "highlightRules"
+        FROM custom_fields
+        WHERE entity = 'deal' AND "organizationId" = ${orgId}
+        ORDER BY name ASC
+      `
+    : await prismaBase.$queryRaw<Record<string, unknown>[]>`
+        SELECT id, name, label, "type", options, required, "highlightRules"
+        FROM custom_fields
+        WHERE entity = 'deal'
+        ORDER BY name ASC
+      `;
+  if (rows.length === 0) return [];
+
+  const fieldIds = rows.map((r) => r.id as string);
+  const values = await prisma.dealCustomFieldValue.findMany({
+    where: { dealId, customFieldId: { in: fieldIds } },
+    select: { customFieldId: true, value: true },
+  });
+  const valueByField = new Map(values.map((v) => [v.customFieldId, v.value]));
+
+  return rows.map((f) => {
+    const value = valueByField.get(f.id as string) ?? null;
     return {
-      fieldId: f.id,
-      name: f.name,
-      label: f.label,
-      type: f.type,
-      options: f.options,
-      required: f.required,
+      fieldId: f.id as string,
+      name: f.name as string,
+      label: f.label as string,
+      type: f.type as string,
+      options: (f.options as string[]) ?? [],
+      required: Boolean(f.required),
       value,
-      highlight: resolveHighlight(value, f.highlightRules),
+      highlight: resolveHighlight(value, f.highlightRules as unknown[]),
     };
   });
 }
