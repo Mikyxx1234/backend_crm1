@@ -7,6 +7,31 @@ import { prismaBase } from "@/lib/prisma-base";
 import { getRequestContext } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
+/**
+ * Auto-cura da migração 20260711000000_add_show_in_deal_panel quando o
+ * `prisma migrate deploy` do container ainda não rodou/aplicou nesse banco.
+ * `ADD COLUMN IF NOT EXISTS` é idempotente e barato — tentamos uma vez por
+ * cold start; se funcionar, os fallbacks raw abaixo passam a ser inertes
+ * (o Prisma normal volta a funcionar). Sem isso, showInDealPanel nunca é
+ * persistido de fato (o fallback raw explicitamente não escreve essa
+ * coluna, por não poder referenciá-la), e o toggle de exibir/ocultar no
+ * painel do negócio parece "não fazer nada".
+ */
+let showInDealPanelColumnEnsured = false;
+async function ensureShowInDealPanelColumn(): Promise<boolean> {
+  if (showInDealPanelColumnEnsured) return true;
+  try {
+    await prismaBase.$executeRawUnsafe(
+      `ALTER TABLE "custom_fields" ADD COLUMN IF NOT EXISTS "showInDealPanel" BOOLEAN NOT NULL DEFAULT false`,
+    );
+    showInDealPanelColumnEnsured = true;
+    return true;
+  } catch {
+    // Sem permissão de DDL (ou outro erro) — segue usando os fallbacks raw.
+    return false;
+  }
+}
+
 export async function getCustomFields(entity = "contact"): Promise<
   (Awaited<ReturnType<typeof prisma.customField.findMany>> extends (infer T)[] ? T : never)[]
 > {
@@ -118,7 +143,31 @@ export async function createCustomField(data: {
     // Fallback: coluna showInDealPanel ainda não migrada na DB. Repetir com o
     // mesmo client Prisma (mesmo sem showInDealPanel no `data`) falha de novo,
     // pois o RETURNING implícito do create() ainda seleciona a coluna
-    // ausente — ver mesmo raciocínio em updateCustomFieldRaw.
+    // ausente — ver mesmo raciocínio em updateCustomFieldRaw. Tenta se
+    // auto-curar antes (ver ensureShowInDealPanelColumn) para não perder o
+    // valor de showInDealPanel no fallback raw.
+    if (await ensureShowInDealPanelColumn()) {
+      try {
+        return await prisma.customField.create({
+          data: withOrgFromCtx({
+            name: data.name,
+            label: data.label,
+            type: data.type,
+            options: data.options ?? [],
+            required: data.required ?? false,
+            entity: data.entity ?? "contact",
+            showInInboxLeadPanel: data.showInInboxLeadPanel ?? false,
+            inboxLeadPanelOrder: data.inboxLeadPanelOrder ?? null,
+            showInDealPanel: data.showInDealPanel ?? false,
+            ...(data.highlightRules !== undefined
+              ? { highlightRules: parseHighlightRules(data.highlightRules) as unknown as Prisma.InputJsonValue }
+              : {}),
+          }),
+        });
+      } catch {
+        // segue para o fallback raw abaixo
+      }
+    }
     return createCustomFieldRaw(data);
   }
 }
@@ -207,9 +256,24 @@ export async function updateCustomField(
     // O client Prisma padrão sempre seleciona TODAS as colunas do model no
     // retorno — mesmo um update()/findUnique() que não referencia
     // showInDealPanel no `data` falha, pois a SELECT/RETURNING implícita
-    // ainda tenta ler a coluna ausente. Repetir a chamada com o mesmo client
-    // (como antes) falha de novo pelo mesmo motivo — por isso o retry aqui é
-    // via SQL raw, sem referenciar showInDealPanel.
+    // ainda tenta ler a coluna ausente.
+    //
+    // Antes de cair no fallback raw (que NÃO consegue persistir
+    // showInDealPanel, já que não pode referenciar uma coluna ausente),
+    // tenta se auto-curar criando a coluna e repete a chamada Prisma normal.
+    if (await ensureShowInDealPanelColumn()) {
+      try {
+        return await prisma.customField.update({
+          where: { id },
+          data: {
+            ...baseData,
+            ...(showInDealPanel !== undefined ? { showInDealPanel } : {}),
+          },
+        });
+      } catch {
+        // segue para o fallback raw abaixo
+      }
+    }
     return updateCustomFieldRaw(id, baseData);
   }
 }
