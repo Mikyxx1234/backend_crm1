@@ -398,9 +398,36 @@ export async function getInboxLeadPanelFieldsForContact(
 export async function getInboxLeadPanelFieldsForDeal(
   dealId: string
 ): Promise<InboxLeadPanelFieldRow[]> {
-  const fields = await prisma.customField.findMany({
-    where: { entity: "deal", showInInboxLeadPanel: true },
-  });
+  let fields: Awaited<ReturnType<typeof prisma.customField.findMany>>;
+  try {
+    fields = await prisma.customField.findMany({
+      where: { entity: "deal", showInInboxLeadPanel: true },
+    });
+  } catch {
+    // Fallback: coluna showInDealPanel ainda não foi migrada. Um findMany
+    // (mesmo filtrando por showInInboxLeadPanel) ainda SELECIONA showInDealPanel
+    // e falharia de novo — por isso usamos raw sem referenciar a coluna ausente.
+    const ctx = getRequestContext();
+    const orgId = ctx?.organizationId ?? null;
+    const rows = orgId
+      ? await prisma.$queryRaw<Record<string, unknown>[]>`
+          SELECT id, name, label, "type", options, required, entity,
+                 "showInInboxLeadPanel", "inboxLeadPanelOrder",
+                 "highlightRules", "organizationId"
+          FROM custom_fields
+          WHERE entity = 'deal' AND "showInInboxLeadPanel" = true
+            AND "organizationId" = ${orgId}
+        `
+      : await prisma.$queryRaw<Record<string, unknown>[]>`
+          SELECT id, name, label, "type", options, required, entity,
+                 "showInInboxLeadPanel", "inboxLeadPanelOrder",
+                 "highlightRules", "organizationId"
+          FROM custom_fields
+          WHERE entity = 'deal' AND "showInInboxLeadPanel" = true
+        `;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    fields = rows.map((r) => ({ ...r, showInDealPanel: false })) as any;
+  }
   fields.sort(
     (a, b) =>
       (a.inboxLeadPanelOrder ?? 9999) - (b.inboxLeadPanelOrder ?? 9999) ||
