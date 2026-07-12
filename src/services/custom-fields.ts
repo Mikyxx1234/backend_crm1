@@ -1,4 +1,5 @@
-import type { CustomFieldType, Prisma } from "@prisma/client";
+import { Prisma, type CustomFieldType } from "@prisma/client";
+import { randomUUID } from "crypto";
 
 import { parseHighlightRules, resolveHighlight } from "@/lib/highlight";
 import { prisma } from "@/lib/prisma";
@@ -56,7 +57,32 @@ export async function getCustomFields(entity = "contact"): Promise<
 }
 
 export async function getCustomFieldById(id: string) {
-  return prisma.customField.findUnique({ where: { id } });
+  try {
+    return await prisma.customField.findUnique({ where: { id } });
+  } catch {
+    // Mesmo fallback de coluna ausente (showInDealPanel) usado no resto do
+    // arquivo. Chamado antes de update/delete no route.ts — sem esse
+    // fallback, qualquer PUT/DELETE em /api/custom-fields/[id] falharia
+    // aqui mesmo, antes de chegar no updateCustomField.
+    const ctx = getRequestContext();
+    const orgId = ctx?.organizationId ?? null;
+    const rows = orgId
+      ? await prismaBase.$queryRaw<Record<string, unknown>[]>`
+          SELECT id, name, label, "type", options, required, entity,
+                 "showInInboxLeadPanel", "inboxLeadPanelOrder",
+                 "highlightRules", "organizationId"
+          FROM custom_fields WHERE id = ${id} AND "organizationId" = ${orgId}
+        `
+      : await prismaBase.$queryRaw<Record<string, unknown>[]>`
+          SELECT id, name, label, "type", options, required, entity,
+                 "showInInboxLeadPanel", "inboxLeadPanelOrder",
+                 "highlightRules", "organizationId"
+          FROM custom_fields WHERE id = ${id}
+        `;
+    const row = rows[0];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    return row ? ({ ...row, showInDealPanel: false } as any) : null;
+  }
 }
 
 export async function createCustomField(data: {
@@ -89,23 +115,56 @@ export async function createCustomField(data: {
       }),
     });
   } catch {
-    // Fallback: cria sem showInDealPanel se a coluna ainda não existir
-    return await prisma.customField.create({
-      data: withOrgFromCtx({
-        name: data.name,
-        label: data.label,
-        type: data.type,
-        options: data.options ?? [],
-        required: data.required ?? false,
-        entity: data.entity ?? "contact",
-        showInInboxLeadPanel: data.showInInboxLeadPanel ?? false,
-        inboxLeadPanelOrder: data.inboxLeadPanelOrder ?? null,
-        ...(data.highlightRules !== undefined
-          ? { highlightRules: parseHighlightRules(data.highlightRules) as unknown as Prisma.InputJsonValue }
-          : {}),
-      }),
-    });
+    // Fallback: coluna showInDealPanel ainda não migrada na DB. Repetir com o
+    // mesmo client Prisma (mesmo sem showInDealPanel no `data`) falha de novo,
+    // pois o RETURNING implícito do create() ainda seleciona a coluna
+    // ausente — ver mesmo raciocínio em updateCustomFieldRaw.
+    return createCustomFieldRaw(data);
   }
+}
+
+async function createCustomFieldRaw(data: {
+  name: string;
+  label: string;
+  type: CustomFieldType;
+  options?: string[];
+  required?: boolean;
+  entity?: string;
+  showInInboxLeadPanel?: boolean;
+  inboxLeadPanelOrder?: number | null;
+  highlightRules?: unknown;
+}) {
+  const ctx = getRequestContext();
+  const orgId = ctx?.organizationId ?? null;
+  if (!orgId) throw new Error("createCustomField: organizationId ausente no contexto.");
+
+  const id = randomUUID();
+  const options = data.options ?? [];
+  const required = data.required ?? false;
+  const entity = data.entity ?? "contact";
+  const showInInboxLeadPanel = data.showInInboxLeadPanel ?? false;
+  const inboxLeadPanelOrder = data.inboxLeadPanelOrder ?? null;
+  const highlightRules =
+    data.highlightRules !== undefined ? parseHighlightRules(data.highlightRules) : [];
+
+  await prismaBase.$executeRaw`
+    INSERT INTO custom_fields
+      (id, name, label, "type", options, required, entity,
+       "showInInboxLeadPanel", "inboxLeadPanelOrder", "highlightRules", "organizationId")
+    VALUES
+      (${id}, ${data.name}, ${data.label}, ${data.type}::"CustomFieldType", ${options},
+       ${required}, ${entity}, ${showInInboxLeadPanel}, ${inboxLeadPanelOrder},
+       ${JSON.stringify(highlightRules)}::jsonb, ${orgId})
+  `;
+
+  const rows = await prismaBase.$queryRaw<Record<string, unknown>[]>`
+    SELECT id, name, label, "type", options, required, entity,
+           "showInInboxLeadPanel", "inboxLeadPanelOrder",
+           "highlightRules", "organizationId"
+    FROM custom_fields WHERE id = ${id}
+  `;
+  const row = rows[0];
+  return row ? { ...row, showInDealPanel: false } : null;
 }
 
 export async function updateCustomField(
@@ -129,6 +188,12 @@ export async function updateCustomField(
       : {}),
   };
   try {
+    // Nada para persistir (ex.: PUT tentando setar showInDealPanel num campo
+    // entity=contact, que o route.ts ignora): Prisma rejeita `data: {}` com erro
+    // de validação. Retorna o registro atual sem chamar update.
+    if (Object.keys(baseData).length === 0 && showInDealPanel === undefined) {
+      return (await prisma.customField.findUnique({ where: { id } })) ?? undefined;
+    }
     return await prisma.customField.update({
       where: { id },
       data: {
@@ -137,16 +202,77 @@ export async function updateCustomField(
       },
     });
   } catch {
-    // Fallback: atualiza sem showInDealPanel se a coluna ainda não existir
-    return await prisma.customField.update({
-      where: { id },
-      data: baseData,
-    });
+    // Fallback: coluna showInDealPanel ainda não migrada na DB (mesmo cenário
+    // de getCustomFields/getDealPanelFieldsForDeal/getInboxLeadPanelFieldsForDeal).
+    // O client Prisma padrão sempre seleciona TODAS as colunas do model no
+    // retorno — mesmo um update()/findUnique() que não referencia
+    // showInDealPanel no `data` falha, pois a SELECT/RETURNING implícita
+    // ainda tenta ler a coluna ausente. Repetir a chamada com o mesmo client
+    // (como antes) falha de novo pelo mesmo motivo — por isso o retry aqui é
+    // via SQL raw, sem referenciar showInDealPanel.
+    return updateCustomFieldRaw(id, baseData);
   }
 }
 
+async function updateCustomFieldRaw(id: string, baseData: Record<string, unknown>) {
+  const ctx = getRequestContext();
+  const orgId = ctx?.organizationId ?? null;
+  const orgFilter = orgId ? Prisma.sql`AND "organizationId" = ${orgId}` : Prisma.empty;
+
+  if (typeof baseData.label === "string") {
+    await prismaBase.$executeRaw`UPDATE custom_fields SET label = ${baseData.label} WHERE id = ${id} ${orgFilter}`;
+  }
+  if (typeof baseData.type === "string") {
+    await prismaBase.$executeRaw`UPDATE custom_fields SET "type" = ${baseData.type}::"CustomFieldType" WHERE id = ${id} ${orgFilter}`;
+  }
+  if (Array.isArray(baseData.options)) {
+    await prismaBase.$executeRaw`UPDATE custom_fields SET options = ${baseData.options} WHERE id = ${id} ${orgFilter}`;
+  }
+  if (typeof baseData.required === "boolean") {
+    await prismaBase.$executeRaw`UPDATE custom_fields SET required = ${baseData.required} WHERE id = ${id} ${orgFilter}`;
+  }
+  if (typeof baseData.showInInboxLeadPanel === "boolean") {
+    await prismaBase.$executeRaw`UPDATE custom_fields SET "showInInboxLeadPanel" = ${baseData.showInInboxLeadPanel} WHERE id = ${id} ${orgFilter}`;
+  }
+  if ("inboxLeadPanelOrder" in baseData) {
+    const order = (baseData.inboxLeadPanelOrder ?? null) as number | null;
+    await prismaBase.$executeRaw`UPDATE custom_fields SET "inboxLeadPanelOrder" = ${order} WHERE id = ${id} ${orgFilter}`;
+  }
+  if (baseData.highlightRules !== undefined) {
+    await prismaBase.$executeRaw`UPDATE custom_fields SET "highlightRules" = ${JSON.stringify(baseData.highlightRules)}::jsonb WHERE id = ${id} ${orgFilter}`;
+  }
+  // showInDealPanel é deliberadamente ignorado aqui: é o motivo de estarmos
+  // neste fallback (coluna ausente na DB atual).
+
+  const rows = orgId
+    ? await prismaBase.$queryRaw<Record<string, unknown>[]>`
+        SELECT id, name, label, "type", options, required, entity,
+               "showInInboxLeadPanel", "inboxLeadPanelOrder",
+               "highlightRules", "organizationId"
+        FROM custom_fields WHERE id = ${id} AND "organizationId" = ${orgId}
+      `
+    : await prismaBase.$queryRaw<Record<string, unknown>[]>`
+        SELECT id, name, label, "type", options, required, entity,
+               "showInInboxLeadPanel", "inboxLeadPanelOrder",
+               "highlightRules", "organizationId"
+        FROM custom_fields WHERE id = ${id}
+      `;
+  const row = rows[0];
+  return row ? { ...row, showInDealPanel: false } : null;
+}
+
 export async function deleteCustomField(id: string) {
-  return prisma.customField.delete({ where: { id } });
+  try {
+    return await prisma.customField.delete({ where: { id } });
+  } catch {
+    // Mesmo fallback de coluna showInDealPanel ausente: o delete() também
+    // retorna o registro apagado por padrão (RETURNING implícito).
+    const ctx = getRequestContext();
+    const orgId = ctx?.organizationId ?? null;
+    const orgFilter = orgId ? Prisma.sql`AND "organizationId" = ${orgId}` : Prisma.empty;
+    await prismaBase.$executeRaw`DELETE FROM custom_fields WHERE id = ${id} ${orgFilter}`;
+    return { id };
+  }
 }
 
 export async function getContactCustomFieldValues(contactId: string) {
