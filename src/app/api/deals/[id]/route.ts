@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent, deleteDeal, getDealById, isValidDealStatus, updateDeal } from "@/services/deals";
+import { getDealPanelFieldsForDeal } from "@/services/contacts";
 import { logEvent } from "@/services/activity-log";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -48,9 +49,13 @@ export async function GET(request: Request, context: RouteContext) {
     // e disparava o warning de "unique key" no React.
     type NestedTag = { tag: { id: string; name: string; color: string | null } };
     const flattenTags = (arr?: NestedTag[] | null) => (arr ?? []).map((t) => t.tag);
+    // Campos do negócio visíveis no painel Deal Detail (filtrados por showInDealPanel)
+    const dealPanelFields = await getDealPanelFieldsForDeal(id).catch(() => []);
+
     const responseDeal = {
       ...deal,
       tags: flattenTags(deal.tags as unknown as NestedTag[]),
+      dealPanelFields,
       contact: deal.contact
         ? {
             ...deal.contact,

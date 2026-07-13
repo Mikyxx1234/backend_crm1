@@ -164,6 +164,22 @@ export async function GET(_req: Request, ctx: Ctx) {
         channelGrants = chs.map((c) => ({ id: c.id, name: c.name }));
       }
 
+      // Bloco F: se o usuário tem canConfigureFieldVisibility no AgentPermission,
+      // adicionar settings:custom_fields às permissões efetivas (sem duplicar).
+      if (!permissions.includes("*") && !permissions.includes("settings:custom_fields")) {
+        try {
+          const agentPerm = await prismaBase.$queryRaw<{ canConfigureFieldVisibility: boolean }[]>`
+            SELECT "canConfigureFieldVisibility" FROM "agent_permissions"
+            WHERE "userId" = ${id} LIMIT 1
+          `;
+          if (agentPerm?.[0]?.canConfigureFieldVisibility === true) {
+            permissions = [...permissions, "settings:custom_fields"];
+          }
+        } catch {
+          // Column might not exist yet — ignore.
+        }
+      }
+
       return NextResponse.json({
         permissions,
         channelGrants,

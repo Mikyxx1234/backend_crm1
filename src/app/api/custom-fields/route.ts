@@ -51,16 +51,22 @@ export async function GET(request: Request) {
     return await runWithApiUserContext(authResult.user, async () => {
       const url = new URL(request.url);
       const entity = url.searchParams.get("entity") || undefined;
-      if ((entity ?? "contact") === "deal") {
-        const denied = await requirePermissionForUser(authResult.user, "deal:view");
-        if (denied) return denied;
-      }
+      // Definições de campos (label, type, options) são metadados não sensíveis —
+      // qualquer usuário autenticado pode listá-las. Valores específicos por contato/
+      // deal são protegidos nas rotas /contacts/:id/custom-fields e /deals/:id/custom-fields.
       const fields = await getCustomFields(entity);
       return NextResponse.json(fields);
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Erro ao listar campos.";
-    return NextResponse.json({ message: msg }, { status: 500 });
+    const stack = e instanceof Error ? e.stack : undefined;
+    // Log detalhado no servidor para diagnóstico.
+    console.error("[GET /api/custom-fields] erro:", msg, stack);
+    // Expõe detalhe do erro na resposta (ambiente dev) para captura via Network tab.
+    return NextResponse.json(
+      { message: msg, detail: msg, stack: stack?.split("\n").slice(0, 5) },
+      { status: 500 },
+    );
   }
 }
 
@@ -85,6 +91,7 @@ export async function POST(request: Request) {
       const supportsPanel = entity === "contact" || entity === "deal";
       const showInInboxLeadPanel =
         supportsPanel && body.showInInboxLeadPanel === true;
+      const showInDealPanel = entity === "deal" && body.showInDealPanel === true;
       let inboxLeadPanelOrder: number | null | undefined;
       if (supportsPanel && body.inboxLeadPanelOrder !== undefined && body.inboxLeadPanelOrder !== null) {
         const n = Number(body.inboxLeadPanelOrder);
@@ -102,6 +109,7 @@ export async function POST(request: Request) {
         entity,
         showInInboxLeadPanel,
         inboxLeadPanelOrder: inboxLeadPanelOrder ?? null,
+        showInDealPanel,
         ...(Array.isArray(body.highlightRules) ? { highlightRules: body.highlightRules } : {}),
       });
       return NextResponse.json(field, { status: 201 });

@@ -36,6 +36,15 @@ export type InboxMessageDto = {
   isPrivate?: boolean;
   senderName?: string | null;
   /**
+   * Autoria explícita da mensagem (`human` | `bot` | `system`). Setado
+   * pelos serviços que criam mensagens (automation-executor, AI handler,
+   * whatsapp-flow-response). Usado pela UI para renderizar a badge
+   * "AUTOMAÇÃO" independentemente do texto de `senderName` — antes a
+   * detecção dependia de `senderName === "Automação"` hardcoded, o que
+   * impedia mostrar o NOME da automação que executou o passo.
+   */
+  authorType?: "human" | "bot" | "system";
+  /**
    * URL da foto de perfil do agente que assinou a mensagem (resolvido
    * server-side via match de `senderName` com `User.name` no workspace).
    * Permite que o avatar exibido no balão out (chat-window) HERDE a
@@ -151,6 +160,7 @@ export async function GET(request: Request, context: RouteContext) {
       select: {
         id: true, externalId: true, content: true, createdAt: true,
         direction: true, messageType: true, isPrivate: true, senderName: true,
+        authorType: true,
         mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
         sendStatus: true, sendError: true, channelId: true,
       },
@@ -200,6 +210,7 @@ export async function GET(request: Request, context: RouteContext) {
       messageType: r.messageType,
       isPrivate: r.isPrivate || undefined,
       senderName: r.senderName,
+      authorType: r.authorType as "human" | "bot" | "system",
       senderImageUrl:
         r.direction === "out" && r.senderName
           ? senderAvatarMap.get(r.senderName.trim().toLowerCase()) ?? null
@@ -412,6 +423,26 @@ export async function POST(request: Request, context: RouteContext) {
               orderBy: { updatedAt: "desc" },
             }).catch(() => null)
           : null;
+
+        // Persistir também na tabela `Note` — assim a nota escrita no chat
+        // aparece no "histórico de notas" (aba Notas do deal/contato), que
+        // lê `Note`, não `Message`. Sem isto a nota só existia como mensagem
+        // interna e ficava invisível fora da conversa. Criamos direto via
+        // prisma (sem createDealEvent) pra não duplicar o NOTE_ADDED que já
+        // é logado logo abaixo.
+        if (conv.contactId || openDeal?.id) {
+          await prisma.note
+            .create({
+              data: withOrgFromCtx({
+                content,
+                contactId: conv.contactId ?? undefined,
+                dealId: openDeal?.id ?? undefined,
+                userId: authResult.user.id,
+              }),
+            })
+            .catch(() => null);
+        }
+
         await logEvent({
           type: "NOTE_ADDED",
           entityType: "MESSAGE",

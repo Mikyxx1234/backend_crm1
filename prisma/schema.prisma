@@ -137,6 +137,9 @@ model Organization {
   calls                    Call[]
   callEvents               CallEvent[]
   callProviderConfigs      CallProviderConfig[]
+  departments              Department[]
+  agentPermissions         AgentPermission[]
+  quickReplyGroups         QuickReplyGroup[]
 
   @@index([status])
   @@map("organizations")
@@ -521,6 +524,8 @@ model User {
   /// erase: name = "Usuario removido", email = "erased+<id>@anon.local",
   /// hashedPassword = NULL, phone/avatarUrl/signature = NULL.
   isErased                       Boolean                   @default(false)
+  agentPermission                AgentPermission?
+  createdQuickReplies            QuickReply[]     @relation("QuickReplyCreatedBy")
 
   @@index([type])
   @@index([organizationId])
@@ -1244,10 +1249,12 @@ model CustomField {
   options              String[]
   required             Boolean         @default(false)
   entity               String          @default("contact")
-  /// Quando true (apenas entity=contact), o valor aparece no painel lateral Lead na Inbox.
+  /// Quando true (entity=contact ou deal), o valor aparece no painel lateral Lead na Inbox.
   showInInboxLeadPanel Boolean         @default(false)
   /// Ordem no painel (menor = mais acima). Nulo = depois dos que têm ordem.
   inboxLeadPanelOrder  Int?
+  /// Quando true (apenas entity=deal), o valor aparece no painel do Negócio (DealDetail).
+  showInDealPanel      Boolean         @default(false)
   /// Formatação condicional do valor no painel lateral. JSON livre:
   /// HighlightRule[] = [{ op, value?, severity, label? }]. Quando uma regra
   /// casa, o valor é exibido como badge colorido (severity). Resolvido em
@@ -2326,6 +2333,9 @@ model Conversation {
   assignedToId String?
   assignedTo   User?   @relation("ConversationAssignedTo", fields: [assignedToId], references: [id], onDelete: SetNull)
 
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
   messages               Message[]
   whatsappCallEvents     WhatsappCallEvent[]
   scheduledWhatsappCalls ScheduledWhatsappCall[]
@@ -2694,12 +2704,88 @@ model QuickReply {
   content        String
   category       String?
   position       Int          @default(0)
+  groupId         String?
+  group           QuickReplyGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  attachmentUrl   String?
+  createdByUserId String?
+  createdBy       User?        @relation("QuickReplyCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   @@index([organizationId])
   @@index([organizationId, category])
+  @@index([organizationId, groupId])
   @@map("quick_replies")
+}
+
+// ──────────────────────────────────────────────
+// Departments
+// ──────────────────────────────────────────────
+
+model Department {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  color          String       @default("#6366f1")
+  icon           String       @default("🏢")
+  businessHoursId String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  conversations    Conversation[]
+
+  @@index([organizationId])
+  @@map("departments")
+}
+
+// ──────────────────────────────────────────────
+// Agent Permissions
+// ──────────────────────────────────────────────
+
+model AgentPermission {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String   @unique
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  canViewOtherAgentsConversations  Boolean  @default(false)
+  disableConversationsWithoutAgent Boolean  @default(false)
+  canTransferConversation          Boolean  @default(true)
+  canCloseConversation             Boolean  @default(true)
+  canDeleteConversation            Boolean  @default(false)
+  canManageQuickMessages           Boolean  @default(false)
+  canConfigureFieldVisibility      Boolean  @default(false)
+
+  allowedConnectionIds  String[] @default([])
+  allowedDepartmentIds  String[] @default([])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@map("agent_permissions")
+}
+
+// ──────────────────────────────────────────────
+// Quick Reply Groups
+// ──────────────────────────────────────────────
+
+model QuickReplyGroup {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  order          Int          @default(0)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  quickReplies   QuickReply[]
+
+  @@index([organizationId])
+  @@map("quick_reply_groups")
 }
 
 model MessageTemplate {

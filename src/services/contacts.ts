@@ -1,15 +1,32 @@
 import type { LifecycleStage, Prisma } from "@prisma/client";
 
 import { resolveHighlight, type ResolvedHighlight } from "@/lib/highlight";
+import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrThrow } from "@/lib/request-context";
-import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
+import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { getLogger } from "@/lib/logger";
 import { logEvent } from "@/services/activity-log";
 
 const log = getLogger("contacts-service");
+
+/**
+ * Normaliza o telefone recebido em Create/Update para E.164 (BR-first).
+ * Se o input for null/undefined, propaga o valor original.
+ * Se a normalização falhar (input não reconhecido), mantém o valor original
+ * já trimado para não descartar entrada do usuário.
+ */
+function normalizeContactPhoneInput(
+  input: string | null | undefined,
+): string | null | undefined {
+  if (input === undefined) return undefined;
+  if (input === null) return null;
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const normalized = normalizePhone(trimmed);
+  return normalized ?? trimmed;
+}
 
 const LIFECYCLE_STAGES: LifecycleStage[] = [
   "SUBSCRIBER",
@@ -381,9 +398,36 @@ export async function getInboxLeadPanelFieldsForContact(
 export async function getInboxLeadPanelFieldsForDeal(
   dealId: string
 ): Promise<InboxLeadPanelFieldRow[]> {
-  const fields = await prisma.customField.findMany({
-    where: { entity: "deal", showInInboxLeadPanel: true },
-  });
+  let fields: Awaited<ReturnType<typeof prisma.customField.findMany>>;
+  try {
+    fields = await prisma.customField.findMany({
+      where: { entity: "deal", showInInboxLeadPanel: true },
+    });
+  } catch {
+    // Fallback: coluna showInDealPanel ainda não foi migrada. Um findMany
+    // (mesmo filtrando por showInInboxLeadPanel) ainda SELECIONA showInDealPanel
+    // e falharia de novo — por isso usamos raw sem referenciar a coluna ausente.
+    const ctx = getRequestContext();
+    const orgId = ctx?.organizationId ?? null;
+    const rows = orgId
+      ? await prisma.$queryRaw<Record<string, unknown>[]>`
+          SELECT id, name, label, "type", options, required, entity,
+                 "showInInboxLeadPanel", "inboxLeadPanelOrder",
+                 "highlightRules", "organizationId"
+          FROM custom_fields
+          WHERE entity = 'deal' AND "showInInboxLeadPanel" = true
+            AND "organizationId" = ${orgId}
+        `
+      : await prisma.$queryRaw<Record<string, unknown>[]>`
+          SELECT id, name, label, "type", options, required, entity,
+                 "showInInboxLeadPanel", "inboxLeadPanelOrder",
+                 "highlightRules", "organizationId"
+          FROM custom_fields
+          WHERE entity = 'deal' AND "showInInboxLeadPanel" = true
+        `;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    fields = rows.map((r) => ({ ...r, showInDealPanel: false })) as any;
+  }
   fields.sort(
     (a, b) =>
       (a.inboxLeadPanelOrder ?? 9999) - (b.inboxLeadPanelOrder ?? 9999) ||
@@ -417,10 +461,9 @@ export async function getInboxLeadPanelFieldsForDeal(
 /**
  * Versão em LOTE de `getInboxLeadPanelFieldsForDeal` para vários negócios de
  * uma vez. Retorna um mapa `dealId → campos` (cada negócio recebe TODOS os
- * custom fields marcados para o painel, com o valor daquele negócio ou null).
- *
- * Faz 2 queries no total (defs + valores de todos os deals) em vez de 2 por
- * negócio — usado no painel do contato/deal, que pode ter vários cards.
+ * custom fields marcados para o painel da Inbox, com o valor daquele negócio
+ * ou null). Faz 2 queries no total (defs + valores de todos os deals) em vez
+ * de 2 por negócio — usado no painel do contato, que pode ter vários cards.
  */
 export async function getInboxLeadPanelFieldsForDeals(
   dealIds: string[]
@@ -472,6 +515,75 @@ export async function getInboxLeadPanelFieldsForDeals(
   }
 
   return result;
+}
+
+/**
+ * Campos de negócio marcados para o painel do Deal Detail (com valor ou vazio).
+ * Filtra por showInDealPanel em vez de showInInboxLeadPanel — visibilidade
+ * configurada separadamente da Inbox. Fallback resiliente para quando a coluna
+ * ainda não existe na DB.
+ */
+export async function getDealPanelFieldsForDeal(
+  dealId: string
+): Promise<InboxLeadPanelFieldRow[]> {
+  let fields: Awaited<ReturnType<typeof prisma.customField.findMany>>;
+  try {
+    fields = await prisma.customField.findMany({
+      where: { entity: "deal", showInDealPanel: true },
+    });
+  } catch {
+    // Fallback: coluna showInDealPanel ainda não foi migrada. Um findMany
+    // (mesmo filtrando por showInInboxLeadPanel) ainda SELECIONA showInDealPanel
+    // e falharia de novo — por isso usamos raw sem referenciar a coluna ausente.
+    const ctx = getRequestContext();
+    const orgId = ctx?.organizationId ?? null;
+    const rows = orgId
+      ? await prisma.$queryRaw<Record<string, unknown>[]>`
+          SELECT id, name, label, "type", options, required, entity,
+                 "showInInboxLeadPanel", "inboxLeadPanelOrder",
+                 "highlightRules", "organizationId"
+          FROM custom_fields
+          WHERE entity = 'deal' AND "showInInboxLeadPanel" = true
+            AND "organizationId" = ${orgId}
+        `
+      : await prisma.$queryRaw<Record<string, unknown>[]>`
+          SELECT id, name, label, "type", options, required, entity,
+                 "showInInboxLeadPanel", "inboxLeadPanelOrder",
+                 "highlightRules", "organizationId"
+          FROM custom_fields
+          WHERE entity = 'deal' AND "showInInboxLeadPanel" = true
+        `;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    fields = rows.map((r) => ({ ...r, showInDealPanel: false })) as any;
+  }
+
+  fields.sort((a, b) =>
+    (a.inboxLeadPanelOrder ?? 9999) - (b.inboxLeadPanelOrder ?? 9999) ||
+    a.label.localeCompare(b.label, "pt-BR")
+  );
+
+  if (fields.length === 0) return [];
+
+  const fieldIds = fields.map((f) => f.id);
+  const values = await prisma.dealCustomFieldValue.findMany({
+    where: { dealId, customFieldId: { in: fieldIds } },
+    select: { customFieldId: true, value: true },
+  });
+  const valueByField = new Map(values.map((v) => [v.customFieldId, v.value]));
+
+  return fields.map((f) => {
+    const value = valueByField.get(f.id) ?? null;
+    return {
+      fieldId: f.id,
+      name: f.name,
+      label: f.label,
+      type: f.type,
+      options: f.options,
+      value,
+      highlightRules: Array.isArray(f.highlightRules) ? f.highlightRules : [],
+      highlight: resolveHighlight(value, f.highlightRules),
+    };
+  });
 }
 
 /**
@@ -604,7 +716,7 @@ export async function getContactById(id: string) {
             // pipelineId direto no schema. O frontend (contact-aside +
             // inbox v2) usa `stageName`/`pipelineId` flat, então o map
             // de retorno achata para esse formato.
-            stage: { select: { id: true, name: true, color: true, pipelineId: true } },
+            stage: { select: { id: true, name: true, color: true, pipelineId: true, pipeline: { select: { name: true } } } },
             owner: { select: assignedToSelect },
           },
         }),
@@ -612,7 +724,7 @@ export async function getContactById(id: string) {
         ReturnType<
           typeof prisma.deal.findMany<{
             include: {
-              stage: { select: { id: true; name: true; color: true; pipelineId: true } };
+              stage: { select: { id: true; name: true; color: true; pipelineId: true; pipeline: { select: { name: true } } } };
               owner: { select: typeof assignedToSelect };
             };
           }>
@@ -708,6 +820,7 @@ export async function getContactById(id: string) {
       stageName: d.stage?.name ?? null,
       stageColor: d.stage?.color ?? null,
       pipelineId: d.stage?.pipelineId ?? null,
+      pipelineName: d.stage?.pipeline?.name ?? null,
     })),
     notes,
     conversations,
@@ -757,11 +870,7 @@ export async function findContactIdByPhone(
 }
 
 export async function createContact(data: CreateContactInput) {
-  // Normaliza o telefone para E.164 na gravação — garante que webhook e
-  // importação gravem no mesmo formato e que o matching por variantes
-  // funcione. Se não for normalizável, preserva o valor cru (não perde dado).
-  const normalizedPhone =
-    data.phone == null ? data.phone : normalizePhone(data.phone) ?? data.phone;
+  const normalizedPhone = normalizeContactPhoneInput(data.phone);
   let lastErr: unknown;
   for (let attempt = 0; attempt < CONTACT_NUMBER_MAX_RETRIES; attempt++) {
     const number = await nextContactNumber();
@@ -836,8 +945,7 @@ export async function updateContact(id: string, data: UpdateContactInput) {
   if (data.name !== undefined) updateData.name = data.name;
   if (data.email !== undefined) updateData.email = data.email;
   if (data.phone !== undefined) {
-    // Normaliza para E.164; preserva o valor cru se não for normalizável.
-    updateData.phone = data.phone == null ? data.phone : normalizePhone(data.phone) ?? data.phone;
+    updateData.phone = normalizeContactPhoneInput(data.phone) ?? null;
   }
   if (data.avatarUrl !== undefined) updateData.avatarUrl = data.avatarUrl;
   if (data.leadScore !== undefined) updateData.leadScore = data.leadScore;

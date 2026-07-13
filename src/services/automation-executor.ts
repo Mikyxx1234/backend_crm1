@@ -406,6 +406,11 @@ type DealWithNames = Deal & {
 
 type RuntimeContext = {
   automationId: string;
+  /** Nome da automação em execução — usado como `senderName` nas
+      mensagens postadas pelos steps, pra que a UI exiba a badge
+      "AUTOMAÇÃO — <nome>" e o operador identifique qual regra
+      disparou. `null`/undefined mantém fallback "Automação" no front. */
+  automationName?: string | null;
   contactId?: string;
   dealId?: string;
   event: string;
@@ -580,7 +585,8 @@ async function loadConversationSnapshot(
 
 async function resolveRuntimeContext(
   automationId: string,
-  payload: AutomationJobPayload
+  payload: AutomationJobPayload,
+  automationName?: string | null,
 ): Promise<RuntimeContext | null> {
   const ctx = payload.context;
   const data = asRecord(ctx.data) ?? {};
@@ -666,6 +672,7 @@ async function resolveRuntimeContext(
 
   return {
     automationId,
+    automationName: automationName ?? null,
     contactId,
     dealId,
     event: ctx.event,
@@ -1307,7 +1314,7 @@ async function executeStep(
                 content,
                 direction: "out",
                 messageType: "text",
-                senderName: "Automação",
+                senderName: rt.automationName ?? "Automação", authorType: "bot",
                 sendStatus: "failed",
                 sendError: formatMetaSendError(hardFailure).slice(0, 500),
               }),
@@ -1332,7 +1339,7 @@ async function executeStep(
             content: sentContent,
             direction: "out",
             messageType: msgType,
-            senderName: "Automação",
+            senderName: rt.automationName ?? "Automação", authorType: "bot",
             externalId,
             ...(typeof outFlowToken === "string" && outFlowToken.trim()
               ? { flowToken: outFlowToken.trim() }
@@ -1516,7 +1523,7 @@ async function executeStep(
             content: tplContent,
             direction: "out",
             messageType: "template",
-            senderName: "Automação",
+            senderName: rt.automationName ?? "Automação", authorType: "bot",
             externalId: tplExternalId,
             ...(typeof enrichTpl.flowToken === "string" && enrichTpl.flowToken.trim()
               ? { flowToken: enrichTpl.flowToken.trim() }
@@ -1655,7 +1662,7 @@ async function executeStep(
               content: displayContent,
               direction: "out",
               messageType: mediaType,
-              senderName: "Automação",
+              senderName: rt.automationName ?? "Automação", authorType: "bot",
               externalId: mediaExternalId,
               mediaUrl,
             }),
@@ -1736,7 +1743,7 @@ async function executeStep(
                 content: displayContent,
                 direction: "out",
                 messageType: "interactive",
-                senderName: "Automação",
+                senderName: rt.automationName ?? "Automação", authorType: "bot",
                 sendStatus: "failed",
                 sendError: errMsg.slice(0, 500),
               }),
@@ -1756,7 +1763,7 @@ async function executeStep(
             content: displayContent,
             direction: "out",
             messageType: "interactive",
-            senderName: "Automação",
+            senderName: rt.automationName ?? "Automação", authorType: "bot",
             externalId,
           }),
         });
@@ -2001,7 +2008,7 @@ async function executeStep(
           const externalId = sendResult.messages?.[0]?.id ?? null;
           if (conv) {
             await prisma.message.create({
-              data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: "Automação", externalId }),
+              data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", externalId }),
             });
             sseBus.publish("new_message", { organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
           }
@@ -2117,7 +2124,9 @@ async function executeStep(
       if (!rt.contactId) throw new Error("create_deal: contactId ausente");
       const stageId = readString(cfg, "stageId");
       if (!stageId) throw new Error("create_deal: stageId obrigatório");
-      const title = readString(cfg, "title") ?? "Novo negócio";
+      // Título opcional: sem nome configurado, o deal é batizado como
+      // "Negócio - #<number>" (resolvido dentro do loop, depende do number).
+      const rawTitle = readString(cfg, "title")?.trim() ?? "";
       const rawValue = readNumber(cfg, "value");
       const stage = await prisma.stage.findUnique({
         where: { id: stageId },
@@ -2130,6 +2139,7 @@ async function executeStep(
       let lastErr: unknown;
       for (let attempt = 0; attempt < 5; attempt++) {
         const number = await nextDealNumber();
+        const title = rawTitle || `Negócio - #${number}`;
         try {
           deal = await prisma.deal.create({
             data: withOrgFromCtx({
@@ -2561,7 +2571,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     metaWebhookEventId,
   });
 
-  const rt = await resolveRuntimeContext(automationId, payload);
+  const rt = await resolveRuntimeContext(automationId, payload, automation.name);
   if (!rt) {
     await logStep({ automationId, contactId: context.contactId, dealId: context.dealId, status: "FAILED", message: `Contato ou negócio não encontrado` });
     return;
@@ -2747,7 +2757,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
             direction: "out",
             messageType: "note",
             isPrivate: true,
-            senderName: "Automação",
+            senderName: rt.automationName ?? "Automação", authorType: "bot",
           }),
         });
         await prisma.conversation
@@ -2854,6 +2864,7 @@ export async function continueFromStep(
 
   const rt: RuntimeContext = {
     automationId,
+    automationName: automation.name,
     contactId,
     dealId: deal?.id,
     event: "continue",

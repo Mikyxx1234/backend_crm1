@@ -124,12 +124,127 @@ type TemplateDefinitionResolution = {
     | "getMessageTemplateByGraphId_empty"
     | "getMessageTemplateByGraphId_error"
     | "listMessageTemplates"
+    | "listMessageTemplates_after_gid_failure"
     | "listMessageTemplates_none";
+  /**
+   * Preenchido quando o GET individual (`getMessageTemplateByGraphId`) falhou e caímos
+   * na listagem. Útil pra propagar a razão original caso a listagem tampouco encontre
+   * o template — assim o operador vê o erro real da Meta, não só "template ausente".
+   */
+  gidFailureMessage?: string;
 };
+
+type ListingLookupResult = {
+  row: ListTemplatesRow | null;
+  /** Motivo pelo qual não achou (só populado quando row=null). Vai pro log/erro final. */
+  reason?:
+    | { kind: "listing_throw"; message: string; page: number }
+    | { kind: "not_found"; pagesScanned: number; totalRowsScanned: number; sameNameDifferentLanguage?: string[] };
+};
+
+/**
+ * Percorre `listMessageTemplates` até encontrar o template por nome+idioma.
+ * Extraído pra ser reutilizado tanto no caminho sem `templateGraphId` quanto
+ * como fallback quando o GET individual falha (token com escopo suficiente pra
+ * listar mas não pra ler individual — gotcha comum da Graph API).
+ *
+ * Devolve motivo estruturado quando falha — o chamador propaga isso pro erro
+ * final pra que a causa real chegue ao operador em vez de "template ausente"
+ * genérico.
+ */
+async function findTemplateByListing(
+  client: MetaWhatsAppClient,
+  templateName: string,
+  languageCode: string,
+): Promise<ListingLookupResult> {
+  let after: string | undefined;
+  let totalRowsScanned = 0;
+  const sameNameDifferentLanguage: Set<string> = new Set();
+
+  // `limit: 200` — valor comprovado seguro pra `message_templates` (usado em
+  // outros pontos do backend). Alguns tokens rejeitam >200 com 400.
+  for (let page = 0; page < 40; page++) {
+    let listRaw: unknown;
+    try {
+      listRaw = await client.listMessageTemplates({ limit: 200, after });
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      console.error(
+        "[meta-flow-enrich]",
+        JSON.stringify({
+          phase: "listing_fallback_threw",
+          page,
+          message,
+        }),
+      );
+      return { row: null, reason: { kind: "listing_throw", message, page } };
+    }
+    const rows = extractTemplatesData(listRaw);
+    totalRowsScanned += rows.length;
+
+    for (const r of rows) {
+      if (
+        String(r.name ?? "") === templateName &&
+        String(r.language ?? "").toLowerCase() !== languageCode.toLowerCase()
+      ) {
+        const lang = typeof r.language === "string" ? r.language : "";
+        if (lang) sameNameDifferentLanguage.add(lang);
+      }
+    }
+
+    const row = pickTemplateRow(rows, templateName, languageCode);
+    if (row) return { row };
+
+    after = extractPagingAfter(listRaw);
+    if (!after) break;
+  }
+
+  const langHint =
+    sameNameDifferentLanguage.size > 0
+      ? Array.from(sameNameDifferentLanguage).sort()
+      : undefined;
+  console.warn(
+    "[meta-flow-enrich]",
+    JSON.stringify({
+      phase: "listing_fallback_not_found",
+      templateName,
+      languageCode,
+      totalRowsScanned,
+      sameNameDifferentLanguage: langHint,
+    }),
+  );
+  return {
+    row: null,
+    reason: {
+      kind: "not_found",
+      pagesScanned: Math.min(40, Math.ceil((totalRowsScanned || 1) / 200)),
+      totalRowsScanned,
+      sameNameDifferentLanguage: langHint,
+    },
+  };
+}
+
+function describeListingFailure(reason: ListingLookupResult["reason"]): string {
+  if (!reason) return "listagem sem detalhes";
+  if (reason.kind === "listing_throw") {
+    return `listagem falhou na página ${reason.page}: ${reason.message}`;
+  }
+  const langHint = reason.sameNameDifferentLanguage
+    ? ` — nome existe em outros idiomas: [${reason.sameNameDifferentLanguage.join(", ")}]`
+    : "";
+  return `listagem escaneou ${reason.totalRowsScanned} template(s) e não achou match${langHint}`;
+}
 
 /**
  * Resolve a linha do template (nome + idioma + components) via ID Graph
  * ou listagem paginada — evita falhar quando o template não está na primeira página.
+ *
+ * Ordem de tentativas quando `templateGraphId` está presente:
+ *  1. `GET /{template_id}` (mais direto).
+ *  2. Se (1) falhar/retornar vazio, cai pra `GET /{waba}/message_templates` paginado —
+ *     necessário porque tokens que conseguem listar nem sempre conseguem GET individual
+ *     (permissão granular diferente do lado da Meta).
+ *  3. Só declara "template não existe" quando ambos falham.
  */
 async function resolveTemplateDefinitionRow(
   client: MetaWhatsAppClient,
@@ -137,14 +252,17 @@ async function resolveTemplateDefinitionRow(
     templateName: string;
     languageCode: string;
     templateGraphId?: string | null;
+    strictFlowEnrich: boolean;
   },
 ): Promise<TemplateDefinitionResolution> {
   const gid = args.templateGraphId?.trim();
   if (gid) {
-    // Tenta obter a definição pelo ID Graph salvo na config. Se o ID estiver
-    // obsoleto (template recriado/apagado na Meta → 400 code 100/33) ou o corpo
-    // vier vazio, NÃO falha o envio: cai no fallback de listagem por nome+idioma
-    // abaixo, que é uma fonte igualmente autoritativa para detectar botão Flow.
+    let gidFailureMessage: string | undefined;
+    let gidFailurePath:
+      | "getMessageTemplateByGraphId_empty"
+      | "getMessageTemplateByGraphId_error"
+      | null = null;
+
     try {
       const raw = await client.getMessageTemplateByGraphId(gid);
       const o = asRecord(raw);
@@ -158,32 +276,59 @@ async function resolveTemplateDefinitionRow(
           resolutionPath: "getMessageTemplateByGraphId",
         };
       }
-      console.warn(
-        `[meta-flow-enrich] GET message_template vazio para templateGraphId=${gid}; tentando listagem por nome.`,
-      );
+      gidFailurePath = "getMessageTemplateByGraphId_empty";
+      gidFailureMessage = `GET message_template retornou corpo vazio para templateGraphId=${gid}`;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn(
-        `[meta-flow-enrich] Falha ao obter template por ID Graph ${gid} (${msg}); tentando listagem por nome.`,
+      if (e instanceof MetaFlowEnrichError) throw e;
+      gidFailurePath = "getMessageTemplateByGraphId_error";
+      gidFailureMessage =
+        e instanceof Error ? e.message : String(e);
+    }
+
+    console.warn(
+      "[meta-flow-enrich]",
+      JSON.stringify({
+        phase: "gid_lookup_failed_falling_back_to_listing",
+        templateGraphId: gid,
+        reason: gidFailurePath,
+        message: gidFailureMessage,
+      }),
+    );
+
+    const fallback = await findTemplateByListing(
+      client,
+      args.templateName,
+      args.languageCode,
+    );
+    if (fallback.row) {
+      return {
+        row: fallback.row,
+        resolutionPath: "listMessageTemplates_after_gid_failure",
+      };
+    }
+
+    if (args.strictFlowEnrich) {
+      throw new MetaFlowEnrichError(
+        `[meta-flow-enrich] Falha ao obter template por ID Graph ${gid}` +
+          (gidFailureMessage ? `: ${gidFailureMessage}` : "") +
+          ` — e ${describeListingFailure(fallback.reason)}.`,
       );
     }
+    return {
+      row: null,
+      resolutionPath: gidFailurePath ?? "getMessageTemplateByGraphId_error",
+      gidFailureMessage,
+    };
   }
 
-  let after: string | undefined;
-  for (let page = 0; page < 40; page++) {
-    let listRaw: unknown;
-    try {
-      listRaw = await client.listMessageTemplates({ limit: 500, after });
-    } catch {
-      listRaw = null;
-    }
-    const rows = extractTemplatesData(listRaw);
-    const row = pickTemplateRow(rows, args.templateName, args.languageCode);
-    if (row) return { row, resolutionPath: "listMessageTemplates" };
-    after = extractPagingAfter(listRaw);
-    if (!after) break;
-  }
-  return { row: null, resolutionPath: "listMessageTemplates_none" };
+  const result = await findTemplateByListing(
+    client,
+    args.templateName,
+    args.languageCode,
+  );
+  return result.row
+    ? { row: result.row, resolutionPath: "listMessageTemplates" }
+    : { row: null, resolutionPath: "listMessageTemplates_none" };
 }
 
 export function buildFlowButtonComponent(
@@ -283,6 +428,7 @@ export async function enrichTemplateComponentsForFlowSend(
     templateName: args.templateName,
     languageCode: args.languageCode,
     templateGraphId: args.templateGraphId ?? null,
+    strictFlowEnrich,
   });
   const row = resolved.row;
   console.log(

@@ -5,6 +5,7 @@ import { listAllowedPipelineIds, requirePermissionForUser, requireStageScope } f
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, getDeals, isValidDealStatus } from "@/services/deals";
+import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 
 function parseIntParam(v: string | null, fallback: number) {
   if (v === null || v === "") return fallback;
@@ -95,8 +96,10 @@ export async function POST(request: Request) {
 
     const b = body as Record<string, unknown>;
 
-    if (typeof b.title !== "string" || b.title.trim().length < 1) {
-      return NextResponse.json({ message: "Título é obrigatório." }, { status: 400 });
+    // Título opcional: negócio sem nome é batizado automaticamente como
+    // "Negócio - #<number>" em createDeal. Só validamos o tipo quando vem.
+    if (b.title !== undefined && b.title !== null && typeof b.title !== "string") {
+      return NextResponse.json({ message: "Título inválido." }, { status: 400 });
     }
     if (typeof b.stageId !== "string" || !b.stageId) {
       return NextResponse.json({ message: "stageId é obrigatório." }, { status: 400 });
@@ -137,7 +140,7 @@ export async function POST(request: Request) {
       const stageScope = await requireStageScope(authResult.user, "move", b.stageId);
       if (stageScope) return stageScope;
       const deal = await createDeal({
-        title: b.title,
+        title: typeof b.title === "string" ? b.title : undefined,
         stageId: b.stageId,
         value: typeof b.value === "number" ? b.value : undefined,
         status:
@@ -171,6 +174,34 @@ export async function POST(request: Request) {
         contactId: deal.contactId ?? undefined,
         data: { stageId: b.stageId, toStageId: b.stageId },
       }).catch(() => {});
+
+      // Deal criado pelo pipeline com contato que tem telefone: garante que
+      // exista uma Conversation WhatsApp já com `channelId` correto. Sem
+      // isso, o painel do deal cria conversa "solta" no primeiro clique de
+      // "abrir chat" (via /api/conversations/create com skipSend) e o envio
+      // de template cai no env singleton — leak entre orgs.
+      // Await intencional: precisa rodar dentro do RequestContext ativo
+      // (`runWithApiUserContext`) pra que a Prisma extension escope pela org.
+      // Erros são apenas logados — não bloqueiam o 201 do deal, já que a
+      // conversa é conveniência, não pré-requisito.
+      if (deal.contactId) {
+        try {
+          const res = await ensureWhatsAppConversationForContact(deal.contactId);
+          if (
+            res.status === "created" ||
+            res.status === "backfilled_channel"
+          ) {
+            console.log(
+              `[deals.create] conversation ${res.status} conv=${res.conversationId} channel=${res.channelId} deal=${deal.id}`,
+            );
+          }
+        } catch (e) {
+          console.error(
+            "[deals.create] ensureWhatsAppConversationForContact falhou",
+            e,
+          );
+        }
+      }
 
       return NextResponse.json(deal, { status: 201 });
     } catch (err: unknown) {

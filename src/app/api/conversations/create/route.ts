@@ -11,6 +11,7 @@ import {
   parseChannelConfigDecrypted,
 } from "@/services/channels";
 import { logEvent } from "@/services/activity-log";
+import { resolveDefaultWhatsAppChannel } from "@/services/whatsapp-conversation";
 
 function str(cfg: Record<string, unknown>, key: string): string | undefined {
   const v = cfg[key];
@@ -59,26 +60,48 @@ export async function POST(request: Request) {
           where: { contactId: contact.id, channel: "whatsapp" },
           select: {
             id: true, externalId: true, channel: true,
-            status: true, inboxName: true, createdAt: true, updatedAt: true,
+            status: true, inboxName: true, channelId: true,
+            createdAt: true, updatedAt: true,
           },
         });
 
+        // Resolve o canal alvo:
+        //  1. Se o cliente passou `channelId`, ele manda.
+        //  2. Senão, cai pro canal Meta CONNECTED default da org (mesma
+        //     regra do automation-executor). CRÍTICO: sem isso a conversa
+        //     nasce sem `channelId` e o envio de template subsequente cai
+        //     no env singleton (leak entre orgs).
+        let effectiveChannelId: string | null = channelId || null;
         let channelName: string | null = null;
         if (channelId) {
           const ch = await getChannelById(channelId);
           channelName = ch?.name ?? null;
         }
-        if (!channelName) {
-          const firstChannel = await prisma.channel.findFirst({
-            where: { type: "WHATSAPP", status: "CONNECTED" },
-            select: { name: true },
-          });
-          channelName = firstChannel?.name ?? null;
+        if (!effectiveChannelId) {
+          const defaultCh = await resolveDefaultWhatsAppChannel();
+          if (defaultCh) {
+            effectiveChannelId = defaultCh.id;
+            channelName = defaultCh.name;
+          }
         }
 
         let conversation;
         if (existing) {
-          conversation = existing;
+          // Backfill: conversa já existia mas sem canal (caso legado das
+          // conversas "soltas" criadas antes deste fix). Se resolvemos um
+          // channelId default agora, gruda ele.
+          if (!existing.channelId && effectiveChannelId) {
+            await prisma.conversation.update({
+              where: { id: existing.id },
+              data: {
+                channelId: effectiveChannelId,
+                inboxName: existing.inboxName ?? channelName,
+              },
+            });
+            conversation = { ...existing, channelId: effectiveChannelId };
+          } else {
+            conversation = existing;
+          }
         } else {
           conversation = await prisma.conversation.create({
             data: withOrgFromCtx({
@@ -86,11 +109,13 @@ export async function POST(request: Request) {
               status: "OPEN" as const,
               inboxName: channelName,
               contactId: contact.id,
+              ...(effectiveChannelId ? { channelId: effectiveChannelId } : {}),
               ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
             }),
             select: {
               id: true, externalId: true, channel: true,
-              status: true, inboxName: true, createdAt: true, updatedAt: true,
+              status: true, inboxName: true, channelId: true,
+              createdAt: true, updatedAt: true,
             },
           });
           void logEvent({
@@ -100,7 +125,12 @@ export async function POST(request: Request) {
             entityLabel: contact.name ?? contact.phone ?? null,
             conversationId: conversation.id,
             contactId: contact.id,
-            meta: { channel: "whatsapp", inboxName: channelName, source: "ui" },
+            meta: {
+              channel: "whatsapp",
+              inboxName: channelName,
+              channelId: effectiveChannelId,
+              source: "ui",
+            },
           });
         }
 
