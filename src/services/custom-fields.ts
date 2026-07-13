@@ -166,3 +166,28 @@ export async function upsertDealCustomFieldValues(
 
   return prisma.$transaction(ops);
 }
+
+/**
+ * Grava valores de campos personalizados de um deal RECÉM-CRIADO em um único
+ * round-trip (`createMany`). Otimização para importação em massa: como o deal
+ * acabou de ser criado, não há valores pré-existentes, então não precisamos do
+ * upsert (que faz N round-trips numa transação). `skipDuplicates` protege
+ * contra corrida improvável. Para deals existentes, use
+ * `upsertDealCustomFieldValues`.
+ */
+export async function createDealCustomFieldValues(
+  dealId: string,
+  values: { fieldId: string; value: string }[]
+) {
+  if (values.length === 0) return;
+  await prisma.dealCustomFieldValue.createMany({
+    data: values.map((v) =>
+      withOrgFromCtx({
+        dealId,
+        customFieldId: v.fieldId,
+        value: v.value,
+      }),
+    ),
+    skipDuplicates: true,
+  });
+}

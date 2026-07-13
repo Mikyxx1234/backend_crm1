@@ -118,6 +118,30 @@ export function readUpdateExistingFlag(formData: FormData): boolean {
   return !(s === "false" || s === "0" || s === "no");
 }
 
+/**
+ * Modo de importação, escolhido no wizard (apenas deals por ora):
+ *   "create"  → só cria leads novos; linhas que casam com um lead existente
+ *               (por chave técnica: id / deal_number / external_id) são
+ *               IGNORADAS (não duplica nem atualiza).
+ *   "update"  → só atualiza leads existentes (casa por external_id / chave
+ *               técnica); linhas sem correspondência são ignoradas.
+ *   "upsert"  → cria e atualiza (comportamento histórico).
+ */
+export type ImportMode = "create" | "update" | "upsert";
+
+/**
+ * Lê o modo de importação do FormData. Retorna `null` quando ausente — o
+ * caller decide o fallback (ex.: derivar de `updateExisting` para manter
+ * compatibilidade com clientes antigos).
+ */
+export function readImportModeFlag(formData: FormData): ImportMode | null {
+  const raw = formData.get("importMode");
+  if (raw === null) return null;
+  const s = String(raw).trim().toLowerCase();
+  if (s === "create" || s === "update" || s === "upsert") return s;
+  return null;
+}
+
 /** Lê o delimitador opcional do FormData. */
 export function readDelimiterFlag(formData: FormData): CsvDelimiter | undefined {
   const raw = formData.get("delimiter");

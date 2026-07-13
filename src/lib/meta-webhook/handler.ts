@@ -4,6 +4,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
+import { phoneMatchVariants } from "@/lib/phone";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { nextContactNumber } from "@/services/contacts";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
@@ -419,8 +420,11 @@ async function resolveWebhookContact(
 
   let byPh: ContactRow | null = null;
   if (phone) {
+    // Match por variantes E.164 (cobre com/sem 9º dígito BR). Já é
+    // org-scoped pela extensão do Prisma dentro de withSystemContext.
+    const variants = phoneMatchVariants(phone);
     byPh = await prisma.contact.findFirst({
-      where: { phone },
+      where: variants.length > 0 ? { phone: { in: variants } } : { phone },
       select: { id: true, name: true, phone: true, whatsappBsuid: true },
     });
   }
@@ -441,17 +445,25 @@ async function resolveWebhookContact(
   }
 
   if (!contactRow && phone) {
-    const phoneSuffix = waIdRaw!.replace(/\D/g, "");
-    const candidates = await prisma.contact.findMany({
-      where: { phone: { not: null } },
-      select: { id: true, name: true, phone: true, whatsappBsuid: true },
-      take: 500,
-    });
-    const byFuzzy = candidates.find((c) => {
-      const d = (c.phone ?? "").replace(/\D/g, "");
-      return d.length >= 10 && phoneSuffix.length >= 10 && d.endsWith(phoneSuffix.slice(-10));
-    });
-    if (byFuzzy) contactRow = byFuzzy;
+    // Fallback para bases legadas ainda NÃO normalizadas (telefone gravado
+    // fora do E.164). Filtra por sufixo dos 8 dígitos do assinante — que é
+    // idêntico com ou sem o 9º dígito — e confirma pela comparação de
+    // variantes (que reintroduz o DDD, evitando colisão entre DDDs). Sem o
+    // antigo `take: 500`, que fazia o match silenciosamente incompleto em
+    // orgs grandes; `endsWith` mantém o conjunto de candidatos pequeno.
+    const digits = phone.replace(/\D/g, "");
+    const last8 = digits.slice(-8);
+    if (last8.length === 8) {
+      const variantSet = new Set(phoneMatchVariants(phone));
+      const candidates = await prisma.contact.findMany({
+        where: { phone: { endsWith: last8 } },
+        select: { id: true, name: true, phone: true, whatsappBsuid: true },
+      });
+      const byFuzzy = candidates.find((c) =>
+        phoneMatchVariants(c.phone).some((v) => variantSet.has(v)),
+      );
+      if (byFuzzy) contactRow = byFuzzy;
+    }
   }
 
   // Fallback por `profile.name` REMOVIDO em 2026-06-30.

@@ -10,10 +10,13 @@ import {
   IMPORT_ETL_JOB_NAMES,
   IMPORT_ETL_QUEUE_NAME,
   type ContactImportPayload,
+  type DealImportPayload,
+  type ImportEtlPayload,
 } from "@/lib/queue";
 import { withSystemContext } from "@/lib/webhook-context";
 
 import { processContactImport } from "@/jobs/import/contact-import.job";
+import { processDealImport } from "@/jobs/import/deal-import.job";
 import {
   markOperationFailed,
   truncateErrorMessage,
@@ -41,7 +44,7 @@ function envInt(name: string, defaultValue: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : defaultValue;
 }
 
-async function router(job: Job<ContactImportPayload>): Promise<void> {
+async function router(job: Job<ImportEtlPayload>): Promise<void> {
   const { operationId, organizationId } = job.data;
   const jobCtx = log.child({
     operationId,
@@ -90,10 +93,13 @@ async function router(job: Job<ContactImportPayload>): Promise<void> {
   await withSystemContext(organizationId, () => dispatch(job));
 }
 
-async function dispatch(job: Job<ContactImportPayload>): Promise<void> {
+async function dispatch(job: Job<ImportEtlPayload>): Promise<void> {
   switch (job.name) {
     case IMPORT_ETL_JOB_NAMES.contactImport:
-      await processContactImport(job.data, job);
+      await processContactImport(job.data as ContactImportPayload, job as Job<ContactImportPayload>);
+      return;
+    case IMPORT_ETL_JOB_NAMES.dealImport:
+      await processDealImport(job.data as DealImportPayload, job as Job<DealImportPayload>);
       return;
     default: {
       const { operationId, organizationId } = job.data;
@@ -112,7 +118,7 @@ export function startEtlWorker() {
   const connection = duplicateBullConnection();
   getBullConnection();
 
-  const worker = new Worker<ContactImportPayload>(
+  const worker = new Worker<ImportEtlPayload>(
     IMPORT_ETL_QUEUE_NAME,
     router,
     { connection, concurrency },

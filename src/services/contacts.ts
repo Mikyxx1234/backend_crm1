@@ -4,6 +4,7 @@ import { resolveHighlight, type ResolvedHighlight } from "@/lib/highlight";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { getLogger } from "@/lib/logger";
 import { logEvent } from "@/services/activity-log";
@@ -414,6 +415,66 @@ export async function getInboxLeadPanelFieldsForDeal(
 }
 
 /**
+ * Versão em LOTE de `getInboxLeadPanelFieldsForDeal` para vários negócios de
+ * uma vez. Retorna um mapa `dealId → campos` (cada negócio recebe TODOS os
+ * custom fields marcados para o painel, com o valor daquele negócio ou null).
+ *
+ * Faz 2 queries no total (defs + valores de todos os deals) em vez de 2 por
+ * negócio — usado no painel do contato/deal, que pode ter vários cards.
+ */
+export async function getInboxLeadPanelFieldsForDeals(
+  dealIds: string[]
+): Promise<Record<string, InboxLeadPanelFieldRow[]>> {
+  const result: Record<string, InboxLeadPanelFieldRow[]> = {};
+  if (dealIds.length === 0) return result;
+
+  const fields = await prisma.customField.findMany({
+    where: { entity: "deal", showInInboxLeadPanel: true },
+  });
+  fields.sort(
+    (a, b) =>
+      (a.inboxLeadPanelOrder ?? 9999) - (b.inboxLeadPanelOrder ?? 9999) ||
+      a.label.localeCompare(b.label, "pt-BR")
+  );
+  if (fields.length === 0) return result;
+
+  const fieldIds = fields.map((f) => f.id);
+  const values = await prisma.dealCustomFieldValue.findMany({
+    where: { dealId: { in: dealIds }, customFieldId: { in: fieldIds } },
+    select: { dealId: true, customFieldId: true, value: true },
+  });
+
+  const byDeal = new Map<string, Map<string, string>>();
+  for (const v of values) {
+    let m = byDeal.get(v.dealId);
+    if (!m) {
+      m = new Map<string, string>();
+      byDeal.set(v.dealId, m);
+    }
+    m.set(v.customFieldId, v.value);
+  }
+
+  for (const dealId of dealIds) {
+    const valueByField = byDeal.get(dealId) ?? new Map<string, string>();
+    result[dealId] = fields.map((f) => {
+      const value = valueByField.get(f.id) ?? null;
+      return {
+        fieldId: f.id,
+        name: f.name,
+        label: f.label,
+        type: f.type,
+        options: f.options,
+        value,
+        highlightRules: Array.isArray(f.highlightRules) ? f.highlightRules : [],
+        highlight: resolveHighlight(value, f.highlightRules),
+      };
+    });
+  }
+
+  return result;
+}
+
+/**
  * Verifica apenas se existe um contato com o id. Usa findUnique mínimo
  * (sem includes) pra não arrastar falhas de relações — garantindo que
  * endpoints DELETE/PUT possam checar existência mesmo quando alguma
@@ -617,18 +678,19 @@ export async function getContactById(id: string) {
     safe("inboxLeadPanelFields", () => getInboxLeadPanelFieldsForContact(id), [] as InboxLeadPanelFieldRow[]),
   ]);
 
-  const activeDeal = deals.find((d) => d.status === "OPEN");
-  const dealInboxPanelFields: Record<string, InboxLeadPanelFieldRow[]> = {};
-  if (activeDeal) {
-    const dealFields = await safe(
-      "dealInboxPanelFields",
-      () => getInboxLeadPanelFieldsForDeal(activeDeal.id),
-      [] as InboxLeadPanelFieldRow[],
-    );
-    if (dealFields.length > 0) {
-      dealInboxPanelFields[activeDeal.id] = dealFields;
-    }
-  }
+  // Campos de painel de TODOS os negócios do contato (não só o "primeiro
+  // aberto"). O frontend abre um negócio específico e busca
+  // `dealInboxPanelFields[dealAberto]` — se preenchêssemos só um negócio, abrir
+  // qualquer outro do mesmo contato (ex.: reimport que gerou 2 cards) mostraria
+  // a lateral vazia. Batched: 1 query pros defs + 1 pros valores de todos.
+  const dealInboxPanelFields: Record<string, InboxLeadPanelFieldRow[]> =
+    deals.length > 0
+      ? await safe(
+          "dealInboxPanelFields",
+          () => getInboxLeadPanelFieldsForDeals(deals.map((d) => d.id)),
+          {} as Record<string, InboxLeadPanelFieldRow[]>,
+        )
+      : {};
 
   return {
     ...core,
@@ -674,7 +736,32 @@ function isPrismaUniqueViolation(err: unknown): boolean {
   );
 }
 
+/**
+ * Busca o id de um contato existente (na org atual) por telefone, tolerando
+ * diferenças de formato e a ambiguidade do 9º dígito BR. Requer que os
+ * telefones estejam gravados em E.164 (garantido por `createContact`/
+ * `updateContact` + backfill `scripts/backfill-phone-e164.mjs`).
+ */
+export async function findContactIdByPhone(
+  orgId: string,
+  rawPhone: string | null | undefined,
+): Promise<string | null> {
+  const variants = phoneMatchVariants(rawPhone);
+  if (variants.length === 0) return null;
+  const c = await prisma.contact.findFirst({
+    where: { organizationId: orgId, phone: { in: variants } },
+    select: { id: true },
+    orderBy: { createdAt: "asc" },
+  });
+  return c?.id ?? null;
+}
+
 export async function createContact(data: CreateContactInput) {
+  // Normaliza o telefone para E.164 na gravação — garante que webhook e
+  // importação gravem no mesmo formato e que o matching por variantes
+  // funcione. Se não for normalizável, preserva o valor cru (não perde dado).
+  const normalizedPhone =
+    data.phone == null ? data.phone : normalizePhone(data.phone) ?? data.phone;
   let lastErr: unknown;
   for (let attempt = 0; attempt < CONTACT_NUMBER_MAX_RETRIES; attempt++) {
     const number = await nextContactNumber();
@@ -686,7 +773,7 @@ export async function createContact(data: CreateContactInput) {
           name: data.name,
           externalId: data.externalId === undefined ? undefined : data.externalId,
           email: data.email ?? undefined,
-          phone: data.phone ?? undefined,
+          phone: normalizedPhone ?? undefined,
           avatarUrl: data.avatarUrl ?? undefined,
           leadScore: data.leadScore ?? undefined,
           lifecycleStage: data.lifecycleStage ?? undefined,
@@ -748,7 +835,10 @@ export async function updateContact(id: string, data: UpdateContactInput) {
 
   if (data.name !== undefined) updateData.name = data.name;
   if (data.email !== undefined) updateData.email = data.email;
-  if (data.phone !== undefined) updateData.phone = data.phone;
+  if (data.phone !== undefined) {
+    // Normaliza para E.164; preserva o valor cru se não for normalizável.
+    updateData.phone = data.phone == null ? data.phone : normalizePhone(data.phone) ?? data.phone;
+  }
   if (data.avatarUrl !== undefined) updateData.avatarUrl = data.avatarUrl;
   if (data.leadScore !== undefined) updateData.leadScore = data.leadScore;
   if (data.lifecycleStage !== undefined) updateData.lifecycleStage = data.lifecycleStage;

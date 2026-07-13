@@ -137,39 +137,35 @@ async function resolveTemplateDefinitionRow(
     templateName: string;
     languageCode: string;
     templateGraphId?: string | null;
-    strictFlowEnrich: boolean;
   },
 ): Promise<TemplateDefinitionResolution> {
   const gid = args.templateGraphId?.trim();
   if (gid) {
+    // Tenta obter a definição pelo ID Graph salvo na config. Se o ID estiver
+    // obsoleto (template recriado/apagado na Meta → 400 code 100/33) ou o corpo
+    // vier vazio, NÃO falha o envio: cai no fallback de listagem por nome+idioma
+    // abaixo, que é uma fonte igualmente autoritativa para detectar botão Flow.
     try {
       const raw = await client.getMessageTemplateByGraphId(gid);
       const o = asRecord(raw);
-      if (!o) {
-        if (args.strictFlowEnrich) {
-          throw new MetaFlowEnrichError(
-            `[meta-flow-enrich] GET message_template retornou corpo vazio para templateGraphId=${gid}`,
-          );
-        }
-        return { row: null, resolutionPath: "getMessageTemplateByGraphId_empty" };
+      if (o) {
+        return {
+          row: {
+            name: typeof o.name === "string" ? o.name : args.templateName,
+            language: typeof o.language === "string" ? o.language : args.languageCode,
+            components: o.components,
+          },
+          resolutionPath: "getMessageTemplateByGraphId",
+        };
       }
-      return {
-        row: {
-          name: typeof o.name === "string" ? o.name : args.templateName,
-          language: typeof o.language === "string" ? o.language : args.languageCode,
-          components: o.components,
-        },
-        resolutionPath: "getMessageTemplateByGraphId",
-      };
+      console.warn(
+        `[meta-flow-enrich] GET message_template vazio para templateGraphId=${gid}; tentando listagem por nome.`,
+      );
     } catch (e) {
-      if (args.strictFlowEnrich) {
-        if (e instanceof MetaFlowEnrichError) throw e;
-        const msg = e instanceof Error ? e.message : String(e);
-        throw new MetaFlowEnrichError(
-          `[meta-flow-enrich] Falha ao obter template por ID Graph ${gid}: ${msg}`,
-        );
-      }
-      return { row: null, resolutionPath: "getMessageTemplateByGraphId_error" };
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn(
+        `[meta-flow-enrich] Falha ao obter template por ID Graph ${gid} (${msg}); tentando listagem por nome.`,
+      );
     }
   }
 
@@ -287,7 +283,6 @@ export async function enrichTemplateComponentsForFlowSend(
     templateName: args.templateName,
     languageCode: args.languageCode,
     templateGraphId: args.templateGraphId ?? null,
-    strictFlowEnrich,
   });
   const row = resolved.row;
   console.log(
