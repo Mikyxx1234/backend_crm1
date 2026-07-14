@@ -16,27 +16,12 @@
  */
 
 import { NextResponse } from "next/server";
-import path from "path";
 
 import { auth } from "@/lib/auth";
+import { extForMime, sniffImageMime } from "@/lib/file-sniff";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 
 const MAX_AVATAR_SIZE = 4 * 1024 * 1024;
-
-function mimeToExt(mime: string): string {
-  switch (mime) {
-    case "image/jpeg":
-      return ".jpg";
-    case "image/png":
-      return ".png";
-    case "image/webp":
-      return ".webp";
-    case "image/gif":
-      return ".gif";
-    default:
-      return ".bin";
-  }
-}
 
 export async function POST(request: Request) {
   try {
@@ -72,14 +57,6 @@ export async function POST(request: Request) {
 
     const file = raw as Blob & { name?: string };
 
-    const mime = file.type || "application/octet-stream";
-    if (!mime.startsWith("image/")) {
-      return NextResponse.json(
-        { message: "Envie uma imagem (JPG, PNG, WEBP ou GIF)." },
-        { status: 415 },
-      );
-    }
-
     if (file.size > MAX_AVATAR_SIZE) {
       return NextResponse.json(
         {
@@ -89,13 +66,25 @@ export async function POST(request: Request) {
       );
     }
 
-    const ext = (path.extname(file.name ?? "") || mimeToExt(mime)).replace(/^\./, "");
+    const buffer = Buffer.from(await file.arrayBuffer());
+
+    // Defesa em profundidade: valida via magic bytes em vez de confiar
+    // no Content-Type do cliente. Rejeita SVG (vetor XSS) e qualquer
+    // formato que não seja JPEG/PNG/WEBP/GIF.
+    const sniffed = sniffImageMime(buffer);
+    if (!sniffed) {
+      return NextResponse.json(
+        { message: "Envie uma imagem JPG, PNG, WEBP ou GIF." },
+        { status: 415 },
+      );
+    }
+
+    const mime = sniffed;
+    const ext = extForMime(sniffed);
     const safeName = generateFileName({
       prefix: `u${session.user.id.slice(0, 8)}`,
       ext,
     });
-
-    const buffer = Buffer.from(await file.arrayBuffer());
 
     // PR 1.3: avatares passam a viver em `<STORAGE_ROOT>/<orgId>/avatars/`.
     const saved = await saveFile({

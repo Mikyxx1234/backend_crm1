@@ -2,22 +2,7 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { convertToMp3, guessInputExt } from "@/lib/audio-convert";
-
-/**
- * Domínios Meta autorizados para fetch direto. Qualquer outro host
- * exige que a URL seja relativa ao próprio app (servida por
- * `/uploads` ou pela rota `/api/media/proxy`).
- */
-const META_DOMAINS = ["lookaside.fbsbx.com", "scontent.whatsapp.net", "graph.facebook.com"];
-
-function isMetaUrl(url: string): boolean {
-  try {
-    const host = new URL(url).hostname;
-    return META_DOMAINS.some((d) => host.endsWith(d));
-  } catch {
-    return false;
-  }
-}
+import { isAllowedMetaMediaUrl } from "@/lib/meta-media-url";
 
 /**
  * Resolve uma URL (absoluta ou relativa) num Buffer de áudio bruto.
@@ -37,7 +22,7 @@ async function fetchAudioBuffer(
 ): Promise<{ buffer: Buffer; contentType: string; urlPath: string }> {
   const decoded = decodeURIComponent(rawUrl);
 
-  if (isMetaUrl(decoded)) {
+  if (isAllowedMetaMediaUrl(decoded)) {
     const token = process.env.META_WHATSAPP_ACCESS_TOKEN?.trim();
     if (!token) throw new Error("Token Meta não configurado.");
     const res = await fetch(decoded, {
