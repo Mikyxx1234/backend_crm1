@@ -5,11 +5,18 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { createRole, listRoles } from "@/services/roles";
 
+const sidebarItemSchema = z.object({
+  key: z.string().min(1).max(100),
+  enabled: z.boolean(),
+  order: z.number().int().min(0).max(1000),
+});
+
 const createSchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(500).nullable().optional(),
   permissions: z.array(z.string()).default([]),
   inheritsFrom: z.string().min(1).nullable().optional(),
+  sidebarItems: z.array(sidebarItemSchema).max(100).nullable().optional(),
 });
 
 export async function GET() {
