@@ -25,7 +25,16 @@ type RouteContext = { params: Promise<{ id: string }> };
 
 // ── DTO ──────────────────────────────────────
 
-export type ReactionDto = { emoji: string; senderName: string };
+/**
+ * Entrada individual do JSON `Message.reactions`. Formato gravado pelo
+ * webhook Meta em `applyIncomingReaction` (lib/meta-webhook/handler.ts):
+ * um item por reator (WhatsApp permite 1 reação por pessoa em canais 1:1).
+ *
+ *   emoji: emoji cru (💚, 👍, …)
+ *   from:  wa_id / BSUID de quem reagiu (contato)
+ *   at:    ISO timestamp da reação mais recente
+ */
+export type ReactionDto = { emoji: string; from: string; at?: string };
 
 export type InboxMessageDto = {
   id: number | string;
