@@ -104,6 +104,13 @@ export async function GET(request: Request) {
       const stageId = searchParams.get("stageId") ?? undefined;
       const tagIdsRaw = searchParams.get("tagIds") ?? "";
       const tagIds = tagIdsRaw ? tagIdsRaw.split(",").filter(Boolean) : undefined;
+      const sourcesRaw = searchParams.get("sources") ?? "";
+      const sources = sourcesRaw
+        ? sourcesRaw.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+      const withoutSource =
+        searchParams.get("withoutSource") === "1" ||
+        searchParams.get("withoutSource") === "true";
       const sortByRaw = searchParams.get("sortBy") ?? undefined;
       const sortBy = sortByRaw && validSortBy.has(sortByRaw)
         ? (sortByRaw as "updatedAt" | "createdAt" | "unreadCount")
@@ -139,6 +146,8 @@ export async function GET(request: Request) {
         ownerId,
         stageId,
         tagIds,
+        sources,
+        withoutSource,
         sortBy,
         sortOrder,
         allowedChannelIds,

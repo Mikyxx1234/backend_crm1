@@ -43,6 +43,9 @@ export type DateRangeValue = {
   to?: string | null;
 };
 
+/** Sentinela usada no filtro de origem para "Sem origem" (espelha o dashboard). */
+export const SOURCE_NONE = "__none__";
+
 export type CustomFieldFilter = {
   /** Nome (slug) do CustomField — único por organizationId+entity. */
   name: string;
@@ -83,8 +86,10 @@ export type AdvancedDealFilters = {
   /** true = só leads sem contato. */
   withoutContact?: boolean;
 
-  /** Filtros por origem (Contact.source). */
+  /** Filtros por origem (Contact.source). Pode incluir `SOURCE_NONE`. */
   sources?: string[];
+  /** true = só leads sem origem (contato ausente ou source null/""). */
+  withoutSource?: boolean;
 
   /** Motivos de perda (Deal.lostReason) — match exato com a tabulação. */
   lostReasons?: string[];
@@ -316,6 +321,31 @@ function buildDealCustomFieldClause(
 }
 
 /**
+ * Condição de origem em cima do contato do deal, com suporte a
+ * "Sem origem" (contato com source null/"" ou deal sem contato).
+ */
+function buildDealSourceCondition(
+  sources?: string[],
+  withoutSource?: boolean,
+): Prisma.DealWhereInput | null {
+  const real = (sources ?? []).filter((s) => s && s !== SOURCE_NONE);
+  const wantNone = withoutSource === true || (sources ?? []).includes(SOURCE_NONE);
+  const or: Prisma.DealWhereInput[] = [];
+  if (real.length) or.push({ contact: { is: { source: { in: real } } } });
+  if (wantNone) {
+    or.push({
+      OR: [
+        { contactId: null },
+        { contact: { is: { source: null } } },
+        { contact: { is: { source: "" } } },
+      ],
+    });
+  }
+  if (or.length === 0) return null;
+  return or.length === 1 ? or[0] : { OR: or };
+}
+
+/**
  * Traduz `AdvancedDealFilters` para `Prisma.DealWhereInput`.
  * O retorno deve ser somado às outras condições via `AND` em `dealWhere`.
  */
@@ -384,9 +414,8 @@ export async function buildDealWhereFromFilters(
     conditions.push({ contactId: null });
   }
 
-  if (filters.sources && filters.sources.length > 0) {
-    conditions.push({ contact: { is: { source: { in: filters.sources } } } });
-  }
+  const sourceCond = buildDealSourceCondition(filters.sources, filters.withoutSource);
+  if (sourceCond) conditions.push(sourceCond);
 
   if (filters.lostReasons && filters.lostReasons.length > 0) {
     conditions.push({ lostReason: { in: filters.lostReasons } });
@@ -618,6 +647,8 @@ export function parseAdvancedDealFilters(input: unknown): AdvancedDealFilters {
 
   const sources = asStringArray(o.sources);
   if (sources) out.sources = sources;
+  const ws = asBool(o.withoutSource);
+  if (ws) out.withoutSource = ws;
 
   const lostReasons = asStringArray(o.lostReasons);
   if (lostReasons) out.lostReasons = lostReasons;

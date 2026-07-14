@@ -42,9 +42,27 @@ export async function GET(_req: Request, ctx: Ctx) {
       user: { id: string; name: string; avatarUrl: string | null } | null;
     };
 
+    // Eventos escopados ao contato do negócio (tags/campos do contato) são
+    // logados com `contactId` e SEM `dealId` — por isso não apareciam na
+    // timeline do negócio. Incluímos explicitamente esses tipos pro contato
+    // deste deal, sem puxar tudo (mensagens já vêm via dealId).
+    const contactId = existing.contactId ?? null;
+    const CONTACT_SCOPED_TYPES = [
+      "CONTACT_TAG_ADDED",
+      "CONTACT_TAG_REMOVED",
+      "CONTACT_FIELD_CHANGED",
+    ];
+
     let events: LegacyShape[] = (
       await prisma.activityEvent.findMany({
-        where: { dealId: existing.id },
+        where: contactId
+          ? {
+              OR: [
+                { dealId: existing.id },
+                { contactId, type: { in: CONTACT_SCOPED_TYPES } },
+              ],
+            }
+          : { dealId: existing.id },
         orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
         take: 200,
         include: {

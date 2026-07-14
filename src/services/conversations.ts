@@ -7,6 +7,7 @@ import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label"
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
+import { SOURCE_NONE } from "@/services/kanban-filters";
 
 /** Abas de categoria (filtro OR em "Todos" para membros com escopo limitado). */
 export const INBOX_CATEGORY_TABS = [
@@ -40,6 +41,10 @@ export type GetConversationsParams = {
   ownerId?: string;
   stageId?: string;
   tagIds?: string[];
+  /** Origens do contato (Contact.source). Pode incluir `SOURCE_NONE`. */
+  sources?: string[];
+  /** true = só conversas cujo contato não tem origem. */
+  withoutSource?: boolean;
   sortBy?: "updatedAt" | "createdAt" | "unreadCount";
   sortOrder?: "asc" | "desc";
   /**
@@ -77,17 +82,8 @@ const listSelect = {
           tag: { select: { id: true, name: true, color: true } },
         },
       },
-      deals: {
-        where: { status: "OPEN" },
-        select: {
-          id: true,
-          tags: {
-            select: {
-              tag: { select: { id: true, name: true, color: true } },
-            },
-          },
-        },
-      },
+      // `deals.tags` removido: o card/header usa só tags do contato.
+      // Tags do negócio vêm pelo detalhe do deal quando necessário.
     },
   },
 } satisfies Prisma.ConversationSelect;
@@ -169,6 +165,27 @@ async function lastMessagePreviewsBatch(
     });
   }
   return map;
+}
+
+function buildConversationSourceCondition(
+  sources?: string[],
+  withoutSource?: boolean,
+): Prisma.ConversationWhereInput | null {
+  const real = (sources ?? []).filter((s) => s && s !== SOURCE_NONE);
+  const wantNone = withoutSource === true || (sources ?? []).includes(SOURCE_NONE);
+  const or: Prisma.ConversationWhereInput[] = [];
+  if (real.length) or.push({ contact: { source: { in: real } } });
+  if (wantNone) {
+    or.push({
+      OR: [
+        { contactId: null },
+        { contact: { is: { source: null } } },
+        { contact: { is: { source: "" } } },
+      ],
+    });
+  }
+  if (or.length === 0) return null;
+  return or.length === 1 ? or[0] : { OR: or };
 }
 
 function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
@@ -267,6 +284,11 @@ export async function getConversations(
       contact: { tags: { some: { tagId: { in: params.tagIds } } } },
     });
   }
+  const sourceCond = buildConversationSourceCondition(
+    params.sources,
+    params.withoutSource,
+  );
+  if (sourceCond) conditions.push(sourceCond);
 
   const where: Prisma.ConversationWhereInput =
     conditions.length > 0 ? { AND: conditions } : {};
@@ -297,14 +319,15 @@ export async function getConversations(
   );
 
   const items: ConversationListItem[] = rows.map((row) => {
+    // `tags` do card/header da conversa = tags do CONTATO apenas.
+    // Antes mesclávamos tags do negócio aqui, o que fazia o header do
+    // chat exibir badge derivada de tag de deal (ex.: "ENTERPRISE") —
+    // pedido do operador: o header reflete a tag do contato, não do
+    // negócio. Tags do negócio continuam disponíveis na seção de deal
+    // do aside (via detalhe do deal), não neste array agregado.
     const tagMap = new Map<string, ConversationTag>();
     for (const t of row.contact?.tags ?? []) {
       if (t.tag) tagMap.set(t.tag.id, t.tag);
-    }
-    for (const deal of row.contact?.deals ?? []) {
-      for (const t of deal.tags ?? []) {
-        if (t.tag) tagMap.set(t.tag.id, t.tag);
-      }
     }
     return {
       ...row,
