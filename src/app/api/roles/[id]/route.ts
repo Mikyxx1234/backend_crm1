@@ -7,12 +7,20 @@ import { deleteRole, getRoleById, updateRole } from "@/services/roles";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
+const sidebarItemSchema = z.object({
+  key: z.string().min(1).max(100),
+  enabled: z.boolean(),
+  order: z.number().int().min(0).max(1000),
+});
+
 const updateSchema = z
   .object({
     name: z.string().min(1).max(120).optional(),
     description: z.string().max(500).nullable().optional(),
     permissions: z.array(z.string()).optional(),
     inheritsFrom: z.string().min(1).nullable().optional(),
+    // `null` ou array vazio remove o override (papel volta ao catalogo padrao).
+    sidebarItems: z.array(sidebarItemSchema).max(100).nullable().optional(),
   })
   .refine((obj) => Object.keys(obj).length > 0, {
     message: "Nenhum campo para atualizar.",

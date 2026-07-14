@@ -845,6 +845,12 @@ model Role {
   /// personalizado por diff contra o base. Null = sem origem (presets ou
   /// grupos legados). Integridade validada no service layer (mesma org).
   inheritsFrom   String?
+  /// Preferencia de sidebar do papel (JSON): { items: [{ key, enabled, order }] }.
+  /// Quando null, o papel nao override o menu e usa o catalogo padrao. A sidebar
+  /// efetiva do usuario e' a UNIAO dos sidebarItems de todos os roles atribuidos
+  /// (habilitado se qualquer role habilitou; ordem = primeira ocorrencia). Ver
+  /// getSidebarPreferences em services/user-preferences.ts.
+  sidebarItems   Json?
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 

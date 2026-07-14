@@ -104,58 +104,107 @@ export function normalizeSidebar(
   return { items };
 }
 
-/** Le a preferencia bruta de sidebar salva (ou null se nunca salvou). */
-async function readRawSidebar(
+/**
+ * Le todos os `sidebarItems` dos Roles atribuidos ao usuario. A sidebar
+ * efetiva do usuario e' derivada aqui — a decisao (14/jul/26) foi mover
+ * essa preferencia de UserPreference (per-user) para Role (per-papel),
+ * gerenciada pelo admin em /settings/permissions. Ver AGENT.md.
+ *
+ * Retorna array de "layers" (uma por role com sidebarItems nao-null),
+ * cada layer preservando a ordem original salva. `mergeSidebarLayers`
+ * faz a UNIAO (aditivo). Se nenhum role tem sidebarItems configurado,
+ * retorna array vazio -> cai no default do catalogo.
+ */
+async function readRoleSidebarLayers(
   userId: string,
-): Promise<SidebarItemPreference[] | null> {
-  const pref = await prisma.userPreference.findUnique({
+): Promise<SidebarItemPreference[][]> {
+  const assignments = await prisma.userRoleAssignment.findMany({
     where: { userId },
-    select: { sidebar: true },
+    select: {
+      role: { select: { id: true, sidebarItems: true, createdAt: true } },
+    },
+    // Ordem estavel = primeiro role atribuido tem prioridade de ordem quando
+    // aparece uma key nova; mais roles apenas adicionam itens ao final.
+    orderBy: { role: { createdAt: "asc" } },
   });
-  const sidebar = pref?.sidebar as { items?: unknown } | null | undefined;
-  if (!sidebar || !Array.isArray(sidebar.items)) return null;
-  return sidebar.items as SidebarItemPreference[];
+
+  const layers: SidebarItemPreference[][] = [];
+  for (const a of assignments) {
+    const raw = a.role?.sidebarItems as { items?: unknown } | unknown[] | null | undefined;
+    if (!raw) continue;
+    // O admin salva no shape { items: [...] } (mesmo do UserPreference antigo)
+    // mas aceitamos array cru para tolerar edicoes manuais no banco.
+    const items = Array.isArray(raw)
+      ? raw
+      : Array.isArray((raw as { items?: unknown }).items)
+        ? (raw as { items: unknown[] }).items
+        : null;
+    if (!items) continue;
+    layers.push(items as SidebarItemPreference[]);
+  }
+  return layers;
+}
+
+/**
+ * UNIAO das preferencias de multiplos roles: um item aparece habilitado
+ * se QUALQUER role o habilitou (padrao aditivo, alinhado com scope de
+ * canais). Ordem = primeira ocorrencia entre os layers (roles mais antigos
+ * ditam a ordem; layers posteriores apenas anexam novos itens).
+ */
+function mergeSidebarLayers(
+  layers: SidebarItemPreference[][],
+): SidebarItemPreference[] {
+  if (layers.length === 0) return [];
+  const seenOrder: string[] = [];
+  const enabledAny = new Map<string, boolean>();
+  for (const layer of layers) {
+    const sorted = [...layer]
+      .filter((it) => it && typeof it.key === "string")
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    for (const it of sorted) {
+      if (!seenOrder.includes(it.key)) seenOrder.push(it.key);
+      // OR aditivo: uma vez habilitado em qualquer role, permanece habilitado.
+      enabledAny.set(it.key, (enabledAny.get(it.key) ?? false) || !!it.enabled);
+    }
+  }
+  return seenOrder.map((key, idx) => ({
+    key,
+    enabled: enabledAny.get(key) ?? true,
+    order: idx + 1,
+  }));
 }
 
 /**
  * Retorna a preferencia de sidebar do usuario, ja normalizada contra o
- * catalogo atual. Se o usuario nunca salvou, devolve o padrao.
+ * catalogo atual. Fonte: uniao dos `sidebarItems` de todos os roles do
+ * usuario. Se nenhum role tem override, devolve o padrao do catalogo.
  */
 export async function getSidebarPreferences(
   userId: string,
   availableKeys: Set<string> = computeAvailableKeys(),
 ): Promise<SidebarPreferences> {
-  const raw = await readRawSidebar(userId);
-  return normalizeSidebar(raw ?? [], availableKeys);
+  const layers = await readRoleSidebarLayers(userId);
+  const merged = mergeSidebarLayers(layers);
+  return normalizeSidebar(merged, availableKeys);
 }
 
 /**
- * Salva (upsert) a preferencia de sidebar do usuario. O input e normalizado
- * antes de persistir; retorna a versao final normalizada.
+ * Salva `sidebarItems` num Role especifico. Chamado pelo endpoint de admin
+ * (/api/roles/[id]) — o usuario comum nao pode mais editar a propria sidebar.
+ * Normaliza contra o catalogo antes de persistir e retorna a versao final.
  */
-export async function saveSidebarPreferences(
-  userId: string,
+export async function saveRoleSidebarItems(
+  roleId: string,
   inputItems: SidebarItemPreference[],
   availableKeys: Set<string> = computeAvailableKeys(),
 ): Promise<SidebarPreferences> {
   const normalized = normalizeSidebar(inputItems, availableKeys);
   const sidebarJson = normalized as unknown as Prisma.InputJsonValue;
-
-  await prisma.userPreference.upsert({
-    where: { userId },
-    update: { sidebar: sidebarJson },
-    create: { userId, sidebar: sidebarJson },
+  await prisma.role.update({
+    where: { id: roleId },
+    data: { sidebarItems: sidebarJson },
   });
-
   return normalized;
-}
-
-/** Restaura o padrao (catalogo, todos habilitados). Persiste e retorna. */
-export async function resetSidebarPreferences(
-  userId: string,
-  availableKeys: Set<string> = computeAvailableKeys(),
-): Promise<SidebarPreferences> {
-  return saveSidebarPreferences(userId, [], availableKeys);
 }
 
 // ── Dashboard (layout dos blocos de analise) ───────────────────────────

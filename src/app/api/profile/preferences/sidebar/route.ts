@@ -1,78 +1,26 @@
 /**
- * PATCH /api/profile/preferences/sidebar
- * Body: { items: [{ key: string, enabled: boolean, order: number }] }
+ * PATCH /api/profile/preferences/sidebar — DEPRECATED (14/jul/26).
  *
- * Salva a personalizacao da sidebar do usuario autenticado. O `userId` vem
- * SEMPRE da sessao (nunca do body). O service normaliza contra o catalogo +
- * `availableKeys` (gating por permission + widgets ativos): descarta keys
- * invalidas/sem permissao/sem widget, forca itens `locked`, anexa itens novos
- * e reescreve a ordem. Retorna a versao final normalizada + `availableKeys`.
+ * A personalizacao da sidebar deixou de ser per-user e virou config de
+ * Papel (Role), editavel apenas por admin em /settings/permissions. Ver
+ * `AGENT.md` (entry "Sidebar por Papel") e `services/user-preferences.ts`
+ * (`saveRoleSidebarItems` / `getSidebarPreferences`).
+ *
+ * A rota continua existindo apenas para responder um erro claro caso
+ * algum cliente antigo (ex.: mobile app cached, worker) tente escrever
+ * — evita 404 silencioso. Ela retorna 410 Gone com uma mensagem
+ * amigavel; o frontend v2 nao chama mais.
  */
 
 import { NextResponse } from "next/server";
-import { z } from "zod";
 
-import { withOrgContext } from "@/lib/auth-helpers";
-import { can, loadAuthzContext } from "@/lib/authz";
-import { getActiveWidgetSlugs } from "@/services/organization-widgets";
-import {
-  computeAvailableKeys,
-  saveSidebarPreferences,
-} from "@/services/user-preferences";
-
-const bodySchema = z.object({
-  items: z
-    .array(
-      z.object({
-        key: z.string().min(1).max(100),
-        enabled: z.boolean(),
-        order: z.number().int().min(0).max(1000),
-      }),
-    )
-    .max(100),
-});
-
-export async function PATCH(request: Request) {
-  return withOrgContext(async (session) => {
-    let json: unknown;
-    try {
-      json = await request.json();
-    } catch {
-      return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
-    }
-
-    const parsed = bodySchema.safeParse(json);
-    if (!parsed.success) {
-      return NextResponse.json(
-        { message: "Dados inválidos.", issues: parsed.error.flatten() },
-        { status: 400 },
-      );
-    }
-
-    try {
-      const ctx = await loadAuthzContext({
-        userId: session.user.id,
-        organizationId: session.user.organizationId,
-        isSuperAdmin: session.user.isSuperAdmin,
-      });
-      const activeSlugs = await getActiveWidgetSlugs();
-      const availableKeys = computeAvailableKeys(
-        (key) => can(ctx, key),
-        (slug) => activeSlugs.has(slug),
-      );
-
-      const sidebar = await saveSidebarPreferences(
-        session.user.id,
-        parsed.data.items,
-        availableKeys,
-      );
-      return NextResponse.json({ sidebar, availableKeys: [...availableKeys] });
-    } catch (e) {
-      console.error("[PATCH /api/profile/preferences/sidebar]", e);
-      return NextResponse.json(
-        { message: "Erro ao salvar preferências." },
-        { status: 500 },
-      );
-    }
-  });
+export function PATCH() {
+  return NextResponse.json(
+    {
+      message:
+        "A personalização da sidebar agora é configurada por Papel em /settings/permissions. Peça ao admin da organização para ajustar.",
+      code: "SIDEBAR_MOVED_TO_ROLE",
+    },
+    { status: 410 },
+  );
 }
