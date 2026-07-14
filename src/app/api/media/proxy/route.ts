@@ -1,17 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
-
-const META_DOMAINS = ["lookaside.fbsbx.com", "scontent.whatsapp.net", "graph.facebook.com"];
-
-function isMetaUrl(url: string): boolean {
-  try {
-    const host = new URL(url).hostname;
-    return META_DOMAINS.some((d) => host.endsWith(d));
-  } catch {
-    return false;
-  }
-}
+import { isAllowedMetaMediaUrl } from "@/lib/meta-media-url";
 
 export async function GET(request: Request) {
   const session = await auth();
@@ -21,7 +11,7 @@ export async function GET(request: Request) {
 
   const { searchParams } = new URL(request.url);
   const mediaUrl = searchParams.get("url");
-  if (!mediaUrl || !isMetaUrl(mediaUrl)) {
+  if (!mediaUrl || !isAllowedMetaMediaUrl(mediaUrl)) {
     return NextResponse.json({ message: "URL inválida." }, { status: 400 });
   }
 

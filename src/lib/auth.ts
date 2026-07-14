@@ -94,12 +94,22 @@ const nextAuth = NextAuth({
           throw new DatabaseUnavailable();
         }
 
+        // Hash fixo pré-computado (custo bcrypt igual ao real, cost=10).
+        // Usado quando o usuário não existe / é AI / não tem senha,
+        // pra manter o tempo de resposta constante e evitar enumeração
+        // por timing attack. O hash é de uma senha aleatória descartada.
+        const DUMMY_HASH =
+          "$2a$10$CwTycUXWue0Thq9StjUM0uJ8n8m6q9Zp5hkoqC0k8Xj9v7oQZk3G";
+
         if (!user) {
+          // Executa compare dummy pra igualar timing com fluxo real.
+          await compare(credentials.password as string, DUMMY_HASH);
           await recordLoginAttempt({ email, outcome: "no_user" });
           return null;
         }
 
         if (user.type === "AI" || !user.hashedPassword) {
+          await compare(credentials.password as string, DUMMY_HASH);
           await recordLoginAttempt({
             email,
             userId: user.id,

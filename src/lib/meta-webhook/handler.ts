@@ -74,9 +74,13 @@ type ReferralInfo = {
 // padrão público no GitHub).
 const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN?.trim() || "";
 
-// Em produção exigimos signature válida no POST. Em dev/preview deixamos
-// passar com warning pra facilitar testes locais sem App Secret.
-const REQUIRE_SIGNATURE_IN_PROD = process.env.NODE_ENV === "production";
+// Exige assinatura valida sempre que NAO estamos em dev local. Antes
+// esta flag so exigia em `production`, o que deixava staging/preview
+// aceitando webhooks sem assinatura — um atacante podia forjar payload
+// "do Meta" e injetar mensagens/contatos/automations em qualquer
+// ambiente pre-prod exposto na internet.
+const REQUIRE_SIGNATURE =
+  process.env.NODE_ENV !== "development" || !!process.env.CI_STAGING;
 
 const recentlyProcessed = new Map<string, number>();
 const DEDUP_TTL = 30_000;
@@ -1557,10 +1561,24 @@ export async function handleMetaWebhookPost(
     );
   }
 
-  // Sem canal correspondente: aceita o evento (200) pra Meta nao retentar,
-  // mas nao processa nada. Assinatura ja foi verificada dentro do executor,
-  // entao precisamos ainda passar pelo rebuild.
-  return executePostBody(rebuilt, undefined);
+  // Sem canal correspondente ao phone_number_id do payload: nao ha
+  // como resolver a org, entao NAO tentamos validar assinatura contra
+  // segredos agregados de todas as orgs (isso permitiria a um atacante
+  // que obteve o appSecret de uma org forjar payloads "de outra org"
+  // usando um phone_number_id desconhecido). Aceitamos apenas se a
+  // assinatura casar com o CRM_META_APP_SECRET global (App do CRM) —
+  // caso legitimo de canal ainda nao onboarded / desprovisionado.
+  const sig = rebuilt.headers.get("x-hub-signature-256");
+  if (CRM_META_APP_SECRET && sig && verifyMetaWebhookSignature(bodyText, sig, CRM_META_APP_SECRET)) {
+    log.debug(
+      "Legacy POST sem org resolvida — assinatura casou com CRM_META_APP_SECRET; auditando sem processar.",
+    );
+    return NextResponse.json({ status: "ignored_unmapped_channel" });
+  }
+  log.warn(
+    "Legacy POST sem canal correspondente ao phone_number_id — recusando (nao processavel sem org).",
+  );
+  return NextResponse.json({ status: "ignored_unmapped_channel" }, { status: 200 });
 }
 
 function extractFirstPhoneNumberId(body: Record<string, unknown>): string | null {
@@ -1602,7 +1620,7 @@ async function executePostBody(
       );
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-  } else if (REQUIRE_SIGNATURE_IN_PROD) {
+  } else if (REQUIRE_SIGNATURE) {
     // Em produção, NUNCA aceitar webhook sem App Secret configurado —
     // qualquer um na internet pode forjar payload "do Meta" e injetar
     // mensagens fake, criar contatos, disparar automações etc.
