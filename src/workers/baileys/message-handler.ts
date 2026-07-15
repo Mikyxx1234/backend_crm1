@@ -9,6 +9,7 @@ import { generateFileName, saveFile } from "@/lib/storage/local";
 import { fireTrigger } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { nextContactNumber } from "@/services/contacts";
+import { withConversationNumberRetry } from "@/services/conversations";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -260,17 +261,20 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
     select: { assignedToId: true },
   });
 
-  return prisma.conversation.create({
-    data: withOrgFromCtx({
-      contactId,
-      channel: "whatsapp",
-      channelId,
-      waJid: rawJid,
-      status: "OPEN" as const,
-      ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+  return withConversationNumberRetry((number) =>
+    prisma.conversation.create({
+      data: withOrgFromCtx({
+        number,
+        contactId,
+        channel: "whatsapp",
+        channelId,
+        waJid: rawJid,
+        status: "OPEN" as const,
+        ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+      }),
+      select: { id: true, status: true, channelId: true, waJid: true },
     }),
-    select: { id: true, status: true, channelId: true, waJid: true },
-  });
+  );
 }
 
 type ParsedMsg = {

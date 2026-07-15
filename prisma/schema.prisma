@@ -2310,6 +2310,11 @@ model Conversation {
   id                   String             @id @default(cuid())
   organizationId       String
   organization         Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// ID amigavel sequencial POR ORGANIZACAO (comeca em 1 em cada org).
+  /// Usado como "ticket number" nas UIs (ex.: #1234) — mesmo padrao de
+  /// Contact.number / Deal.number. Atribuido em `createConversation`
+  /// via `nextConversationNumber()` com retry P2002 em race.
+  number               Int
   /// ID externo (ex.: Meta thread id) — unicidade por organização.
   externalId           String?
   channel              String
@@ -2380,6 +2385,7 @@ model Conversation {
   updatedAt DateTime @updatedAt
 
   @@unique([organizationId, externalId])
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, status])
   @@index([organizationId, status, updatedAt])

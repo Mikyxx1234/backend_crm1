@@ -141,6 +141,23 @@ export async function ensureAllDealsHaveConversations(
   // quando o mesmo contato tem múltiplos deals.
   const handledContact = new Set<string>();
 
+  // Cache local do proximo `number` de Conversation por org. Popula lazily
+  // com `max(number)+1` na primeira vez que vemos a org e incrementa em
+  // memoria depois — evita 1 query por conversa criada.
+  const nextConvNumberByOrg = new Map<string, number>();
+  async function nextConvNumber(organizationId: string): Promise<number> {
+    if (!nextConvNumberByOrg.has(organizationId)) {
+      const agg = await prisma.conversation.aggregate({
+        _max: { number: true },
+        where: { organizationId },
+      });
+      nextConvNumberByOrg.set(organizationId, agg._max.number ?? 0);
+    }
+    const next = (nextConvNumberByOrg.get(organizationId) ?? 0) + 1;
+    nextConvNumberByOrg.set(organizationId, next);
+    return next;
+  }
+
   for (const deal of deals) {
     if (!deal.contactId || !deal.contact) {
       dealsSkippedNoContact++;
@@ -155,6 +172,7 @@ export async function ensureAllDealsHaveConversations(
       const created = await prisma.conversation.create({
         data: {
           organizationId: deal.organizationId,
+          number: await nextConvNumber(deal.organizationId),
           externalId: `${ENSURE_PREFIX}${deal.contactId}`,
           channel: "whatsapp",
           status: "OPEN",

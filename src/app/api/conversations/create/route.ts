@@ -12,6 +12,11 @@ import {
 } from "@/services/channels";
 import { logEvent } from "@/services/activity-log";
 import { resolveDefaultWhatsAppChannel } from "@/services/whatsapp-conversation";
+import { withConversationNumberRetry } from "@/services/conversations";
+import { fireTrigger } from "@/services/automation-triggers";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("conversations.create");
 
 function str(cfg: Record<string, unknown>, key: string): string | undefined {
   const v = cfg[key];
@@ -103,21 +108,24 @@ export async function POST(request: Request) {
             conversation = existing;
           }
         } else {
-          conversation = await prisma.conversation.create({
-            data: withOrgFromCtx({
-              channel: "whatsapp",
-              status: "OPEN" as const,
-              inboxName: channelName,
-              contactId: contact.id,
-              ...(effectiveChannelId ? { channelId: effectiveChannelId } : {}),
-              ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+          conversation = await withConversationNumberRetry((number) =>
+            prisma.conversation.create({
+              data: withOrgFromCtx({
+                number,
+                channel: "whatsapp",
+                status: "OPEN" as const,
+                inboxName: channelName,
+                contactId: contact.id,
+                ...(effectiveChannelId ? { channelId: effectiveChannelId } : {}),
+                ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+              }),
+              select: {
+                id: true, externalId: true, channel: true,
+                status: true, inboxName: true, channelId: true,
+                createdAt: true, updatedAt: true,
+              },
             }),
-            select: {
-              id: true, externalId: true, channel: true,
-              status: true, inboxName: true, channelId: true,
-              createdAt: true, updatedAt: true,
-            },
-          });
+          );
           void logEvent({
             type: "CONVERSATION_CREATED",
             entityType: "CONVERSATION",
@@ -132,6 +140,13 @@ export async function POST(request: Request) {
               source: "ui",
             },
           });
+          // Ver AGENT.md "ID de conversa + logs + gatilho": tipo ja existia
+          // registrado, mas o fireTrigger nunca era chamado. Fire-and-forget
+          // pra nao bloquear a resposta HTTP.
+          fireTrigger("conversation_created", {
+            contactId: contact.id,
+            data: { channel: "whatsapp", inboxName: channelName, source: "ui" },
+          }).catch((err) => log.warn("Falha no gatilho conversation_created:", err));
         }
 
         return NextResponse.json({
@@ -199,16 +214,19 @@ export async function POST(request: Request) {
           data: { status: "OPEN", inboxName: channel.name, channelId: channel.id, updatedAt: new Date() },
         });
       } else {
-        conversation = await prisma.conversation.create({
-          data: withOrgFromCtx({
-            channel: "whatsapp",
-            status: "OPEN" as const,
-            inboxName: channel.name,
-            channelId: channel.id,
-            contactId: contact.id,
-            ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+        conversation = await withConversationNumberRetry((number) =>
+          prisma.conversation.create({
+            data: withOrgFromCtx({
+              number,
+              channel: "whatsapp",
+              status: "OPEN" as const,
+              inboxName: channel.name,
+              channelId: channel.id,
+              contactId: contact.id,
+              ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+            }),
           }),
-        });
+        );
         void logEvent({
           type: "CONVERSATION_CREATED",
           entityType: "CONVERSATION",
@@ -218,6 +236,10 @@ export async function POST(request: Request) {
           contactId: contact.id,
           meta: { channel: "whatsapp", inboxName: channel.name, source: "ui" },
         });
+        fireTrigger("conversation_created", {
+          contactId: contact.id,
+          data: { channel: "whatsapp", inboxName: channel.name, source: "ui" },
+        }).catch((err) => log.warn("Falha no gatilho conversation_created:", err));
       }
 
       const senderName = session.user.name ?? session.user.email ?? "Agente";

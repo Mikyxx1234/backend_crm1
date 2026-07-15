@@ -6,6 +6,7 @@ import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { nextContactNumber } from "@/services/contacts";
+import { withConversationNumberRetry } from "@/services/conversations";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -692,16 +693,19 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     select: { assignedToId: true },
   });
 
-  return prisma.conversation.create({
-    data: withOrgFromCtx({
-      contactId,
-      channel: "whatsapp",
-      channelId: targetChannel?.id,
-      status: "OPEN" as const,
-      ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+  return withConversationNumberRetry((number) =>
+    prisma.conversation.create({
+      data: withOrgFromCtx({
+        number,
+        contactId,
+        channel: "whatsapp",
+        channelId: targetChannel?.id,
+        status: "OPEN" as const,
+        ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+      }),
+      select: { id: true, status: true, channelId: true, organizationId: true },
     }),
-    select: { id: true, status: true, channelId: true, organizationId: true },
-  });
+  );
 }
 
 // ── Extract message content ──────────────────────
