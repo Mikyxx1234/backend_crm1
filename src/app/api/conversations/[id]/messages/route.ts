@@ -142,6 +142,20 @@ export async function GET(request: Request, context: RouteContext) {
       pinnedMessageId = convFull?.pinnedMessageId ?? null;
     } catch { /* column may not exist */ }
 
+    // `pinnedMessageId` no banco é o id INTERNO (cuid); o frontend
+    // identifica bolhas por `externalId ?? id` (vide `InboxMessageDto.id`
+    // abaixo). Resolve pra esse mesmo formato ANTES de expor, senão o
+    // banner nunca casa com nenhuma bolha renderizada (mensagem
+    // "fixada" que nunca aparece marcada, e um novo PUT recebe 404 ao
+    // tentar reencontrar pelo id interno que o front nunca viu).
+    if (pinnedMessageId) {
+      const pinnedRow = await prisma.message.findUnique({
+        where: { id: pinnedMessageId },
+        select: { id: true, externalId: true },
+      });
+      pinnedMessageId = pinnedRow ? pinnedRow.externalId ?? pinnedRow.id : null;
+    }
+
     const lastInMsg = await prisma.message.findFirst({
       where: { conversationId: conv.id, direction: "in" },
       orderBy: { createdAt: "desc" },
