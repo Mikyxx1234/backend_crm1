@@ -132,40 +132,37 @@ export async function GET(request: Request, context: RouteContext) {
     }
 
     let pinnedNoteId: string | null = null;
-    let pinnedMessageId: string | null = null;
+    // Fixadas da conversa (banner estilo WhatsApp) — várias mensagens,
+    // resolvidas para o id de bolha (`externalId ?? id`) que o frontend usa.
+    let pinnedMessageIds: string[] = [];
     try {
       const convFull = await prisma.conversation.findUnique({
         where: { id: conv.id },
-        select: { pinnedNoteId: true, pinnedMessageId: true, pinnedMessageExpiresAt: true },
+        select: { pinnedNoteId: true },
       });
       pinnedNoteId = convFull?.pinnedNoteId ?? null;
-      pinnedMessageId = convFull?.pinnedMessageId ?? null;
 
-      // Prazo vencido (24h/7d/30d, estilo WhatsApp) — desafixa sozinho,
-      // sem depender de cron dedicado: primeira leitura após o prazo já
-      // limpa a coluna e o banner some no mesmo request.
-      if (pinnedMessageId && convFull?.pinnedMessageExpiresAt && convFull.pinnedMessageExpiresAt < new Date()) {
-        await prisma.conversation.update({
-          where: { id: conv.id },
-          data: { pinnedMessageId: null, pinnedMessageExpiresAt: null },
-        });
-        pinnedMessageId = null;
-      }
-    } catch { /* column may not exist */ }
-
-    // `pinnedMessageId` no banco é o id INTERNO (cuid); o frontend
-    // identifica bolhas por `externalId ?? id` (vide `InboxMessageDto.id`
-    // abaixo). Resolve pra esse mesmo formato ANTES de expor, senão o
-    // banner nunca casa com nenhuma bolha renderizada (mensagem
-    // "fixada" que nunca aparece marcada, e um novo PUT recebe 404 ao
-    // tentar reencontrar pelo id interno que o front nunca viu).
-    if (pinnedMessageId) {
-      const pinnedRow = await prisma.message.findUnique({
-        where: { id: pinnedMessageId },
-        select: { id: true, externalId: true },
+      const pins = await prisma.pinnedMessage.findMany({
+        where: { conversationId: conv.id },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          expiresAt: true,
+          message: { select: { id: true, externalId: true } },
+        },
       });
-      pinnedMessageId = pinnedRow ? pinnedRow.externalId ?? pinnedRow.id : null;
-    }
+
+      // Prazo vencido (24h/7d/30d) — desafixa sozinho na 1ª leitura pós-prazo,
+      // sem cron dedicado. Remove as vencidas e mantém as válidas.
+      const now = new Date();
+      const expiredIds = pins.filter((p) => p.expiresAt && p.expiresAt < now).map((p) => p.id);
+      if (expiredIds.length > 0) {
+        await prisma.pinnedMessage.deleteMany({ where: { id: { in: expiredIds } } });
+      }
+      pinnedMessageIds = pins
+        .filter((p) => !(p.expiresAt && p.expiresAt < now))
+        .map((p) => p.message.externalId ?? p.message.id);
+    } catch { /* tabela pode não existir ainda em ambientes antigos */ }
 
     const lastInMsg = await prisma.message.findFirst({
       where: { conversationId: conv.id, direction: "in" },
@@ -322,7 +319,7 @@ export async function GET(request: Request, context: RouteContext) {
     return NextResponse.json({
       messages,
       pinnedNoteId,
-      pinnedMessageId,
+      pinnedMessageIds,
       channelProvider: conv.channelRef?.provider ?? null,
       channel: currentChannel,
       channels: channelsMap,

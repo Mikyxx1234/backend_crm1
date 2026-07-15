@@ -75,6 +75,7 @@ model Organization {
   baileysAuthKeys          BaileysAuthKey[]
   quickReplies             QuickReply[]
   favoriteMessages         FavoriteMessage[]
+  pinnedMessages           PinnedMessage[]
   messageTemplates         MessageTemplate[]
   whatsappTemplateConfigs  WhatsAppTemplateConfig[]
   whatsappFlowDefinitions  WhatsappFlowDefinition[]
@@ -2356,6 +2357,7 @@ model Conversation {
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
 
   messages               Message[]
+  pinnedMessages         PinnedMessage[]
   whatsappCallEvents     WhatsappCallEvent[]
   scheduledWhatsappCalls ScheduledWhatsappCall[]
   scheduledMessages      ScheduledMessage[]
@@ -2474,6 +2476,7 @@ model Message {
   createdAt        DateTime                @default(now())
 
   favoritedBy FavoriteMessage[]
+  pinnedIn    PinnedMessage[]
 
   @@index([organizationId])
   @@index([organizationId, createdAt])
@@ -2511,6 +2514,30 @@ model FavoriteMessage {
   @@index([organizationId])
   @@index([messageId])
   @@map("favorite_messages")
+}
+
+/// Mensagens fixadas no topo da conversa (banner estilo WhatsApp).
+/// Diferente de `FavoriteMessage` (marcador PESSOAL por agente): a
+/// fixação é compartilhada por toda a conversa. WhatsApp limita a 3
+/// fixadas simultâneas — o mesmo teto é aplicado na rota de pin.
+/// `expiresAt` null = fixado sem prazo; quando vencido, a leitura de
+/// GET /messages remove a linha sozinha (sem cron dedicado).
+model PinnedMessage {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  messageId      String
+  message        Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  expiresAt      DateTime?
+  createdAt      DateTime     @default(now())
+
+  @@unique([conversationId, messageId])
+  @@index([organizationId])
+  @@index([conversationId, createdAt])
+  @@index([messageId])
+  @@map("pinned_messages")
 }
 
 enum MessageAuthorType {

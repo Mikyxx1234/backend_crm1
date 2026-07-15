@@ -3,23 +3,39 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 /** Prazos aceitos pelo picker (estilo WhatsApp: 24h / 7 dias / 30 dias). */
 const DURATION_HOURS = new Set([24, 24 * 7, 24 * 30]);
 
+/** Teto de fixadas simultâneas por conversa — igual ao WhatsApp. */
+const MAX_PINS = 3;
+
+/**
+ * Resolve o `messageId` recebido do frontend (que pode ser o `externalId`
+ * / wamid usado como chave de bolha, ou o `id` interno cuid) para o `id`
+ * INTERNO persistido em `PinnedMessage.messageId`.
+ */
+async function resolveInternalId(conversationId: string, ref: string): Promise<string | null> {
+  const msg = await prisma.message.findFirst({
+    where: { conversationId, OR: [{ id: ref }, { externalId: ref }] },
+    select: { id: true },
+  });
+  return msg?.id ?? null;
+}
+
 /**
  * PUT /api/conversations/:id/pin-message
  *
- * Banner de mensagem fixada no topo da conversa (estilo WhatsApp).
- * Body: `{ messageId: string | null, durationHours?: number }`.
- * `messageId: null` desafixa. `durationHours` ausente = sem prazo
- * (fixado até desafixar manualmente); valores aceitos: 24, 168, 720.
+ * FIXA uma mensagem no topo da conversa (banner estilo WhatsApp). Ao
+ * contrário do slot único antigo, agora várias mensagens podem ficar
+ * fixadas ao mesmo tempo (teto de {@link MAX_PINS}). Fixar a mesma
+ * mensagem duas vezes é idempotente (renova só o prazo).
  *
- * Diferente de `pin-note` (exclusivo pra notas internas, aba "Notas"):
- * aqui QUALQUER mensagem da conversa pode ser fixada. Slot único —
- * fixar uma nova substitui a anterior automaticamente.
+ * Body: `{ messageId: string, durationHours?: number }`.
+ * `durationHours` ausente = sem prazo; valores aceitos: 24, 168, 720.
  */
 export async function PUT(req: Request, ctx: Ctx) {
   return withOrgContext(async (session) => {
@@ -30,46 +46,79 @@ export async function PUT(req: Request, ctx: Ctx) {
     const body = await req.json().catch(() => ({}));
     const ref: string | null =
       typeof body?.messageId === "string" ? body.messageId : null;
+    if (!ref) {
+      return NextResponse.json(
+        { message: "messageId obrigatório." },
+        { status: 400 },
+      );
+    }
     const durationHours: number | null =
       typeof body?.durationHours === "number" && DURATION_HOURS.has(body.durationHours)
         ? body.durationHours
         : null;
 
-    // Persistimos SEMPRE o id INTERNO (cuid), não o `externalId` (wamid)
-    // que o frontend usa como chave de bolha (`InboxMessageDto.id =
-    // externalId ?? id`, vide GET /messages). Sem resolver aqui, o
-    // `findFirst` batia em zero linhas pra qualquer mensagem recebida
-    // (que sempre tem `externalId`) e a rota devolvia 404.
-    let internalId: string | null = null;
-    if (ref) {
-      const msg = await prisma.message.findFirst({
-        where: {
-          conversationId: id,
-          OR: [{ id: ref }, { externalId: ref }],
-        },
-        select: { id: true },
-      });
-      if (!msg) {
-        return NextResponse.json(
-          { message: "Mensagem não encontrada nesta conversa." },
-          { status: 404 },
-        );
-      }
-      internalId = msg.id;
+    const internalId = await resolveInternalId(id, ref);
+    if (!internalId) {
+      return NextResponse.json(
+        { message: "Mensagem não encontrada nesta conversa." },
+        { status: 404 },
+      );
     }
 
-    const updated = await prisma.conversation.update({
-      where: { id },
-      data: {
-        pinnedMessageId: internalId,
-        pinnedMessageExpiresAt:
-          internalId && durationHours
-            ? new Date(Date.now() + durationHours * 60 * 60 * 1000)
-            : null,
-      },
-      select: { id: true, pinnedMessageId: true, pinnedMessageExpiresAt: true },
-    });
+    const expiresAt = durationHours
+      ? new Date(Date.now() + durationHours * 60 * 60 * 1000)
+      : null;
 
-    return NextResponse.json(updated);
+    // Já fixada? Só renova o prazo (idempotente) — não conta contra o teto.
+    const existing = await prisma.pinnedMessage.findUnique({
+      where: { conversationId_messageId: { conversationId: id, messageId: internalId } },
+      select: { id: true },
+    });
+    if (existing) {
+      await prisma.pinnedMessage.update({ where: { id: existing.id }, data: { expiresAt } });
+    } else {
+      const count = await prisma.pinnedMessage.count({ where: { conversationId: id } });
+      if (count >= MAX_PINS) {
+        return NextResponse.json(
+          { message: `Limite de ${MAX_PINS} mensagens fixadas atingido. Desafixe uma antes.` },
+          { status: 409 },
+        );
+      }
+      await prisma.pinnedMessage.create({
+        data: withOrgFromCtx({ conversationId: id, messageId: internalId, expiresAt }),
+      });
+    }
+
+    return NextResponse.json({ ok: true });
+  });
+}
+
+/**
+ * DELETE /api/conversations/:id/pin-message
+ *
+ * DESAFIXA uma mensagem específica. Body: `{ messageId: string }`.
+ * (Sem `messageId` seria ambíguo com múltiplas fixadas — obrigatório.)
+ */
+export async function DELETE(req: Request, ctx: Ctx) {
+  return withOrgContext(async (session) => {
+    const { id } = await ctx.params;
+    const denied = await requireConversationAccess(session, id);
+    if (denied) return denied;
+
+    const body = await req.json().catch(() => ({}));
+    const ref: string | null =
+      typeof body?.messageId === "string" ? body.messageId : null;
+    if (!ref) {
+      return NextResponse.json({ message: "messageId obrigatório." }, { status: 400 });
+    }
+
+    const internalId = await resolveInternalId(id, ref);
+    if (internalId) {
+      await prisma.pinnedMessage.deleteMany({
+        where: { conversationId: id, messageId: internalId },
+      });
+    }
+
+    return NextResponse.json({ ok: true });
   });
 }
