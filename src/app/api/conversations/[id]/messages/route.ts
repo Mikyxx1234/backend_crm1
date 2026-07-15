@@ -81,6 +81,10 @@ export type InboxMessageDto = {
    * (o frontend trata como "herda a conexão anterior", sem marcador).
    */
   channelId?: string | null;
+  /** Mensagem favoritada pelo agente LOGADO (marcador pessoal — não é
+   *  compartilhado entre agentes). Alimenta a estrela preenchida no
+   *  menu contextual e no bubble. */
+  favoritedByMe?: boolean;
 };
 
 /** Resumo de uma conexão (Channel) para exibir o canal na UI do inbox/contato. */
@@ -128,12 +132,14 @@ export async function GET(request: Request, context: RouteContext) {
     }
 
     let pinnedNoteId: string | null = null;
+    let pinnedMessageId: string | null = null;
     try {
       const convFull = await prisma.conversation.findUnique({
         where: { id: conv.id },
-        select: { pinnedNoteId: true },
+        select: { pinnedNoteId: true, pinnedMessageId: true },
       });
       pinnedNoteId = convFull?.pinnedNoteId ?? null;
+      pinnedMessageId = convFull?.pinnedMessageId ?? null;
     } catch { /* column may not exist */ }
 
     const lastInMsg = await prisma.message.findFirst({
@@ -193,6 +199,21 @@ export async function GET(request: Request, context: RouteContext) {
       ),
     );
 
+    // Favoritos do agente LOGADO nesta página de mensagens — uma query
+    // agregada (IN) em vez de N+1. Escopo por userId: cada agente só vê
+    // as próprias marcações.
+    const favoritedIds = new Set<string>();
+    try {
+      const favRows = await prisma.favoriteMessage.findMany({
+        where: {
+          userId: (authResult.user as { id: string }).id,
+          messageId: { in: rows.map((r) => r.id) },
+        },
+        select: { messageId: true },
+      });
+      for (const f of favRows) favoritedIds.add(f.messageId);
+    } catch { /* tabela pode nao existir ainda em ambientes antigos */ }
+
     const senderAvatarMap = new Map<string, string | null>();
     if (outSenderNames.length > 0) {
       // Match cross-org seria leak (avatar de agente de outra org com mesmo
@@ -232,6 +253,7 @@ export async function GET(request: Request, context: RouteContext) {
       sendError: r.sendError ?? undefined,
       status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
       channelId: r.channelId ?? null,
+      favoritedByMe: favoritedIds.has(r.id) || undefined,
     }));
 
     // Mapa de conexões referenciadas (canais das mensagens + canal atual da
@@ -275,6 +297,7 @@ export async function GET(request: Request, context: RouteContext) {
     return NextResponse.json({
       messages,
       pinnedNoteId,
+      pinnedMessageId,
       channelProvider: conv.channelRef?.provider ?? null,
       channel: currentChannel,
       channels: channelsMap,

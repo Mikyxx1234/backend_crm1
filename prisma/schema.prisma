@@ -74,6 +74,7 @@ model Organization {
   channels                 Channel[]
   baileysAuthKeys          BaileysAuthKey[]
   quickReplies             QuickReply[]
+  favoriteMessages         FavoriteMessage[]
   messageTemplates         MessageTemplate[]
   whatsappTemplateConfigs  WhatsAppTemplateConfig[]
   whatsappFlowDefinitions  WhatsappFlowDefinition[]
@@ -526,6 +527,7 @@ model User {
   isErased                       Boolean                   @default(false)
   agentPermission                AgentPermission?
   createdQuickReplies            QuickReply[]     @relation("QuickReplyCreatedBy")
+  favoriteMessages               FavoriteMessage[]
 
   @@index([type])
   @@index([organizationId])
@@ -2319,6 +2321,12 @@ model Conversation {
   hasAgentReply        Boolean            @default(false)
   hasError             Boolean            @default(false)
   pinnedNoteId         String?
+  /// Mensagem fixada no topo da conversa (banner estilo WhatsApp).
+  /// Diferente de `pinnedNoteId` (exclusivo para notas internas na aba
+  /// "Notas") — este campo aceita QUALQUER mensagem (in/out/nota) e é
+  /// exibido no topo da timeline de "Conversa". Um único slot por
+  /// conversa (fixar outra substitui a anterior — igual WhatsApp).
+  pinnedMessageId      String?
   /// Timestamp da saudação disparada pelo agente IA na atribuição
   /// ATUAL. Null quando o agente IA ainda não cumprimentou nesta
   /// atribuição (ou quando a conversa acabou de ser reatribuída).
@@ -2460,6 +2468,8 @@ model Message {
   channelRef       Channel?                @relation(fields: [channelId], references: [id], onDelete: SetNull)
   createdAt        DateTime                @default(now())
 
+  favoritedBy FavoriteMessage[]
+
   @@index([organizationId])
   @@index([organizationId, createdAt])
   @@index([conversationId, createdAt])
@@ -2476,6 +2486,26 @@ model Message {
   // — index dedicado evita scan em alta cardinalidade de mensagens.
   @@index([templateConfigId])
   @@map("messages")
+}
+
+/// Mensagem favoritada por um agente (marcador pessoal, tipo "salvos" do
+/// WhatsApp). Escopo por usuário — cada agente tem sua própria lista,
+/// visível apenas pra ele. `@@unique([userId, messageId])` faz o toggle
+/// favoritar/desfavoritar ser um upsert/delete idempotente.
+model FavoriteMessage {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messageId      String
+  message        Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+
+  @@unique([userId, messageId])
+  @@index([organizationId])
+  @@index([messageId])
+  @@map("favorite_messages")
 }
 
 enum MessageAuthorType {
