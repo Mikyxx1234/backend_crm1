@@ -61,8 +61,15 @@ export async function POST(request: Request) {
           if (viewDenied) return viewDenied;
         }
 
+        // Modelo de ticket: so reusa conversa nao-RESOLVED (a ultima em
+        // aberto). Se todas do contato ja foram encerradas, cria nova
+        // #N+1. Ver AGENT.md "ID de conversa + ticket".
         const existing = await prisma.conversation.findFirst({
-          where: { contactId: contact.id, channel: "whatsapp" },
+          where: {
+            contactId: contact.id,
+            channel: "whatsapp",
+            status: { not: "RESOLVED" },
+          },
           select: {
             id: true, externalId: true, channel: true,
             status: true, inboxName: true, channelId: true,
@@ -202,8 +209,15 @@ export async function POST(request: Request) {
         );
       }
 
+      // Modelo de ticket: so reusa se houver conversa ativa (nao-RESOLVED).
+      // O update abaixo nao promove status pra OPEN (nao ha volta pos-RESOLVED)
+      // — apenas reconcilia canal/inbox quando o operador troca de conta.
       const existing = await prisma.conversation.findFirst({
-        where: { contactId: contact.id, channel: "whatsapp" },
+        where: {
+          contactId: contact.id,
+          channel: "whatsapp",
+          status: { not: "RESOLVED" },
+        },
         select: { id: true, externalId: true, waJid: true },
       });
 
@@ -211,7 +225,7 @@ export async function POST(request: Request) {
       if (existing) {
         conversation = await prisma.conversation.update({
           where: { id: existing.id },
-          data: { status: "OPEN", inboxName: channel.name, channelId: channel.id, updatedAt: new Date() },
+          data: { inboxName: channel.name, channelId: channel.id, updatedAt: new Date() },
         });
       } else {
         conversation = await withConversationNumberRetry((number) =>

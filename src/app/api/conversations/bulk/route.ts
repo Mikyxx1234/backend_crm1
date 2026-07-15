@@ -81,21 +81,17 @@ export async function POST(request: Request) {
         return NextResponse.json({ updated: result.count });
       }
       case "reopen": {
-        const toChange = await prisma.conversation.findMany({
-          where: scopedWhere(ids, { status: "RESOLVED" }),
-          select: { id: true },
-        });
-        const result = await prisma.conversation.updateMany({
-          where: scopedWhere(ids, { status: "RESOLVED" }),
-          data: { status: "OPEN" },
-        });
-        void logBulkStatus(
-          toChange.map((c) => c.id),
-          "RESOLVED",
-          "OPEN",
-          "CONVERSATION_REOPENED",
+        // Modelo de ticket (15/jul/26): "reopen" nao promove RESOLVED->OPEN;
+        // cada reabertura vira ticket novo (`#N+1`). Nao expomos bulk aqui —
+        // o operador deve reabrir 1 a 1 pelo kebab da conversa, pra ver o
+        // novo `#N` e navegar. Ver AGENT.md "ID de conversa + ticket".
+        return NextResponse.json(
+          {
+            message:
+              "Reabertura em massa não é suportada no modo ticket. Reabra individualmente pelo kebab da conversa.",
+          },
+          { status: 400 },
         );
-        return NextResponse.json({ updated: result.count });
       }
       default:
         return NextResponse.json({ message: `Ação desconhecida: ${action}` }, { status: 400 });

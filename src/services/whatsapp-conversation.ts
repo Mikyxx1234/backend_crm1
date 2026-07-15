@@ -100,9 +100,17 @@ export async function ensureWhatsAppConversationForContact(
   const defaultChannel = await resolveDefaultWhatsAppChannel();
   if (!defaultChannel) return { status: "skipped_no_channel" };
 
-  // Reuso: 1 conversa WA por contato (mesmo padrão do webhook Meta e Baileys).
+  // Modelo de ticket: reusa apenas conversa nao-RESOLVED. Quando a ultima
+  // esta encerrada, o proximo envio gera nova conversa com #N+1 — mantendo
+  // as mensagens antigas encapsuladas no ticket anterior. Decisao aprovada
+  // pelo operador (ver AGENT.md "ID de conversa + logs + gatilho" e
+  // pergunta "estrategia = ticket puro").
   const existing = await prisma.conversation.findFirst({
-    where: { contactId: contact.id, channel: "whatsapp" },
+    where: {
+      contactId: contact.id,
+      channel: "whatsapp",
+      status: { not: "RESOLVED" },
+    },
     select: { id: true, channelId: true, inboxName: true },
   });
 
