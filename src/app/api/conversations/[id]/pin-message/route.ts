@@ -6,11 +6,16 @@ import { prisma } from "@/lib/prisma";
 
 type Ctx = { params: Promise<{ id: string }> };
 
+/** Prazos aceitos pelo picker (estilo WhatsApp: 24h / 7 dias / 30 dias). */
+const DURATION_HOURS = new Set([24, 24 * 7, 24 * 30]);
+
 /**
  * PUT /api/conversations/:id/pin-message
  *
  * Banner de mensagem fixada no topo da conversa (estilo WhatsApp).
- * Body: `{ messageId: string | null }`. `null` desafixa.
+ * Body: `{ messageId: string | null, durationHours?: number }`.
+ * `messageId: null` desafixa. `durationHours` ausente = sem prazo
+ * (fixado até desafixar manualmente); valores aceitos: 24, 168, 720.
  *
  * Diferente de `pin-note` (exclusivo pra notas internas, aba "Notas"):
  * aqui QUALQUER mensagem da conversa pode ser fixada. Slot único —
@@ -25,6 +30,10 @@ export async function PUT(req: Request, ctx: Ctx) {
     const body = await req.json().catch(() => ({}));
     const ref: string | null =
       typeof body?.messageId === "string" ? body.messageId : null;
+    const durationHours: number | null =
+      typeof body?.durationHours === "number" && DURATION_HOURS.has(body.durationHours)
+        ? body.durationHours
+        : null;
 
     // Persistimos SEMPRE o id INTERNO (cuid), não o `externalId` (wamid)
     // que o frontend usa como chave de bolha (`InboxMessageDto.id =
@@ -51,8 +60,14 @@ export async function PUT(req: Request, ctx: Ctx) {
 
     const updated = await prisma.conversation.update({
       where: { id },
-      data: { pinnedMessageId: internalId },
-      select: { id: true, pinnedMessageId: true },
+      data: {
+        pinnedMessageId: internalId,
+        pinnedMessageExpiresAt:
+          internalId && durationHours
+            ? new Date(Date.now() + durationHours * 60 * 60 * 1000)
+            : null,
+      },
+      select: { id: true, pinnedMessageId: true, pinnedMessageExpiresAt: true },
     });
 
     return NextResponse.json(updated);

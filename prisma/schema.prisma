@@ -2327,6 +2327,11 @@ model Conversation {
   /// exibido no topo da timeline de "Conversa". Um único slot por
   /// conversa (fixar outra substitui a anterior — igual WhatsApp).
   pinnedMessageId      String?
+  /// Expiração do fixar (estilo WhatsApp: 24h / 7 dias / 30 dias).
+  /// Null = fixado sem prazo (compat com fixadas antes desta coluna
+  /// existir). Checado no GET /messages — quando vencido, o banner some
+  /// e o campo é limpo automaticamente, sem precisar de cron dedicado.
+  pinnedMessageExpiresAt DateTime?
   /// Timestamp da saudação disparada pelo agente IA na atribuição
   /// ATUAL. Null quando o agente IA ainda não cumprimentou nesta
   /// atribuição (ou quando a conversa acabou de ser reatribuída).

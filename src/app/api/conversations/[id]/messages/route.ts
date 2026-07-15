@@ -136,10 +136,21 @@ export async function GET(request: Request, context: RouteContext) {
     try {
       const convFull = await prisma.conversation.findUnique({
         where: { id: conv.id },
-        select: { pinnedNoteId: true, pinnedMessageId: true },
+        select: { pinnedNoteId: true, pinnedMessageId: true, pinnedMessageExpiresAt: true },
       });
       pinnedNoteId = convFull?.pinnedNoteId ?? null;
       pinnedMessageId = convFull?.pinnedMessageId ?? null;
+
+      // Prazo vencido (24h/7d/30d, estilo WhatsApp) — desafixa sozinho,
+      // sem depender de cron dedicado: primeira leitura após o prazo já
+      // limpa a coluna e o banner some no mesmo request.
+      if (pinnedMessageId && convFull?.pinnedMessageExpiresAt && convFull.pinnedMessageExpiresAt < new Date()) {
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: { pinnedMessageId: null, pinnedMessageExpiresAt: null },
+        });
+        pinnedMessageId = null;
+      }
     } catch { /* column may not exist */ }
 
     // `pinnedMessageId` no banco é o id INTERNO (cuid); o frontend
