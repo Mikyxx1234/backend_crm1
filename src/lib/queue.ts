@@ -27,6 +27,7 @@ export const IMPORT_ETL_QUEUE_NAME = "import-etl" as const;
 /** Nomes de job da fila `import-etl`. */
 export const IMPORT_ETL_JOB_NAMES = {
   contactImport: "contact-import",
+  dealImport: "deal-import",
 } as const;
 export type ImportEtlJobName =
   (typeof IMPORT_ETL_JOB_NAMES)[keyof typeof IMPORT_ETL_JOB_NAMES];
@@ -179,6 +180,13 @@ export type ContactImportPayload = {
   /** Tag opcional a aplicar em todos os contatos importados. */
   tagName?: string;
 };
+
+/**
+ * Payload do import de NEGÓCIOS (job `deal-import` da fila `import-etl`).
+ * Mesma forma do ContactImportPayload — reutilizado para não duplicar o
+ * shape (arquivo no storage/base64 + flags de parsing/upsert + tag opcional).
+ */
+export type DealImportPayload = ContactImportPayload;
 
 const redisUrl = process.env.REDIS_URL;
 

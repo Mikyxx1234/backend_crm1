@@ -14,6 +14,7 @@ import {
 import { withSystemContext } from "@/lib/webhook-context";
 
 import { processContactImport } from "@/jobs/import/contact-import.job";
+import { processDealsImport } from "@/jobs/import/deals-import.job";
 import {
   markOperationFailed,
   truncateErrorMessage,
@@ -95,6 +96,9 @@ async function dispatch(job: Job<ContactImportPayload>): Promise<void> {
     case IMPORT_ETL_JOB_NAMES.contactImport:
       await processContactImport(job.data, job);
       return;
+    case IMPORT_ETL_JOB_NAMES.dealImport:
+      await processDealsImport(job.data, job);
+      return;
     default: {
       const { operationId, organizationId } = job.data;
       await markOperationFailed(
@@ -108,7 +112,10 @@ async function dispatch(job: Job<ContactImportPayload>): Promise<void> {
 }
 
 export function startEtlWorker() {
-  const concurrency = envInt("IMPORT_ETL_CONCURRENCY", 2);
+  // Default 1 (era 2): com o Postgres compartilhado entre tenants, manter o
+  // ETL de import serializado por processo reduz a pressão simultânea. Ajuste
+  // via IMPORT_ETL_CONCURRENCY se o worker tiver pool/DB dedicados.
+  const concurrency = envInt("IMPORT_ETL_CONCURRENCY", 1);
   const connection = duplicateBullConnection();
   getBullConnection();
 
