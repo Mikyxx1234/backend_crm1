@@ -33,6 +33,7 @@
     "test:coverage": "vitest run --coverage",
     "test:isolation": "tsx scripts/test-tenant-isolation.ts",
     "billing:sync": "tsx scripts/billing-sync.ts",
+    "backfill:deal-tags": "tsx scripts/backfill-deal-tags.ts",
     "worker:automation": "tsx src/workers/automation-worker.ts",
     "worker:baileys": "tsx src/workers/baileys/index.ts",
     "postinstall": "prisma generate"
