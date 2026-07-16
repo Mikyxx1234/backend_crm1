@@ -23,6 +23,223 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
   return undefined;
 }
 
+function readString(obj: Record<string, unknown>, key: string): string | undefined {
+  const v = obj[key];
+  return typeof v === "string" ? v : undefined;
+}
+
+/** Comparação frouxa (trim + case-insensitive) usada nas condições de campo. */
+function looseEquals(a: unknown, b: unknown): boolean {
+  const sa = String(a ?? "").trim().toLowerCase();
+  const sb = String(b ?? "").trim().toLowerCase();
+  return sa === sb;
+}
+
+/** Chaves nativas de contato/negócio aceitas pela condição "campo". */
+const NATIVE_CONTACT_FIELDS = new Set([
+  "name",
+  "email",
+  "phone",
+  "source",
+  "lifecycleStage",
+  "assignedToId",
+]);
+const NATIVE_DEAL_FIELDS = new Set(["title", "value", "status", "stageId"]);
+
+/**
+ * Avalia as condições extras salvas em `triggerConfig.conditions` (Tag /
+ * Campo / Canal) com semântica **E** (todas precisam bater). Configuradas
+ * no drawer de automação do pipeline ("Para todos os leads com").
+ *
+ * Fail-closed: se uma condição depende de dados que não conseguimos
+ * resolver (ex.: sem contato) ela NÃO passa — o operador filtrou de
+ * propósito, então na dúvida não dispara.
+ *
+ * Carrega dados sob demanda (tags/campos/canais) e só o necessário pras
+ * condições presentes, com cache local à chamada. Nunca lança.
+ */
+export async function evaluateTriggerConditions(
+  triggerConfig: unknown,
+  context: { contactId?: string; dealId?: string; data?: unknown },
+): Promise<boolean> {
+  const cfg = asRecord(triggerConfig);
+  const rawConditions = cfg ? cfg.conditions : undefined;
+  if (!Array.isArray(rawConditions) || rawConditions.length === 0) return true;
+
+  try {
+    const data = asRecord(context.data) ?? {};
+
+    // Resolve contactId/dealId (o negócio pode não trazer o contato no payload).
+    let contactId = context.contactId;
+    let dealId = context.dealId;
+    if (!contactId && dealId) {
+      const deal = await prisma.deal.findUnique({
+        where: { id: dealId },
+        select: { contactId: true },
+      });
+      contactId = deal?.contactId ?? undefined;
+    }
+
+    // ── Loaders preguiçosos (cache por chamada) ──────────────────────
+    let tagsCache: { ids: Set<string>; names: Set<string> } | null = null;
+    const loadTags = async () => {
+      if (tagsCache) return tagsCache;
+      const ids = new Set<string>();
+      const names = new Set<string>();
+      if (contactId) {
+        const rows = await prisma.tagOnContact.findMany({
+          where: { contactId },
+          select: { tagId: true, tag: { select: { name: true } } },
+        });
+        for (const r of rows) {
+          ids.add(r.tagId);
+          if (r.tag?.name) names.add(r.tag.name.toLowerCase());
+        }
+      }
+      if (dealId) {
+        const rows = await prisma.tagOnDeal.findMany({
+          where: { dealId },
+          select: { tagId: true, tag: { select: { name: true } } },
+        });
+        for (const r of rows) {
+          ids.add(r.tagId);
+          if (r.tag?.name) names.add(r.tag.name.toLowerCase());
+        }
+      }
+      tagsCache = { ids, names };
+      return tagsCache;
+    };
+
+    let contactRecord: Record<string, unknown> | null | undefined;
+    const loadContact = async () => {
+      if (contactRecord !== undefined) return contactRecord;
+      contactRecord = contactId
+        ? ((await prisma.contact.findUnique({ where: { id: contactId } })) as unknown as Record<
+            string,
+            unknown
+          > | null)
+        : null;
+      return contactRecord;
+    };
+
+    let dealRecord: Record<string, unknown> | null | undefined;
+    const loadDeal = async () => {
+      if (dealRecord !== undefined) return dealRecord;
+      dealRecord = dealId
+        ? ((await prisma.deal.findUnique({ where: { id: dealId } })) as unknown as Record<
+            string,
+            unknown
+          > | null)
+        : null;
+      return dealRecord;
+    };
+
+    const contactCustomCache = new Map<string, string | null>();
+    const loadContactCustom = async (fieldId: string): Promise<string | null> => {
+      if (!contactId) return null;
+      if (contactCustomCache.has(fieldId)) return contactCustomCache.get(fieldId) ?? null;
+      const row = await prisma.contactCustomFieldValue.findUnique({
+        where: { contactId_customFieldId: { contactId, customFieldId: fieldId } },
+        select: { value: true },
+      });
+      const val = row?.value ?? null;
+      contactCustomCache.set(fieldId, val);
+      return val;
+    };
+    const dealCustomCache = new Map<string, string | null>();
+    const loadDealCustom = async (fieldId: string): Promise<string | null> => {
+      if (!dealId) return null;
+      if (dealCustomCache.has(fieldId)) return dealCustomCache.get(fieldId) ?? null;
+      const row = await prisma.dealCustomFieldValue.findUnique({
+        where: { dealId_customFieldId: { dealId, customFieldId: fieldId } },
+        select: { value: true },
+      });
+      const val = row?.value ?? null;
+      dealCustomCache.set(fieldId, val);
+      return val;
+    };
+
+    let channelIdsCache: Set<string> | null = null;
+    const loadChannelIds = async () => {
+      if (channelIdsCache) return channelIdsCache;
+      const set = new Set<string>();
+      if (contactId) {
+        const rows = await prisma.conversation.findMany({
+          where: { contactId },
+          select: { channelId: true },
+        });
+        for (const r of rows) if (r.channelId) set.add(r.channelId);
+      }
+      channelIdsCache = set;
+      return channelIdsCache;
+    };
+
+    // ── Avaliação (AND) ──────────────────────────────────────────────
+    for (const raw of rawConditions) {
+      const c = asRecord(raw);
+      if (!c) return false;
+      const type = readString(c, "type");
+
+      if (type === "tag") {
+        const wanted = (readString(c, "tagName") ?? readString(c, "tagId") ?? "").trim();
+        if (!wanted) continue; // condição vazia é ignorada (não filtra)
+        const { ids, names } = await loadTags();
+        if (!ids.has(wanted) && !names.has(wanted.toLowerCase())) return false;
+        continue;
+      }
+
+      if (type === "field") {
+        const fieldId = (readString(c, "fieldId") ?? "").trim();
+        const value = readString(c, "value") ?? "";
+        if (!fieldId) continue;
+        const entity = readString(c, "entity") === "deal" ? "deal" : "contact";
+
+        let actual: unknown = undefined;
+        if (entity === "contact") {
+          if (NATIVE_CONTACT_FIELDS.has(fieldId)) {
+            const rec = await loadContact();
+            actual = rec ? rec[fieldId] : undefined;
+          } else {
+            actual = await loadContactCustom(fieldId);
+          }
+        } else {
+          if (NATIVE_DEAL_FIELDS.has(fieldId)) {
+            const rec = await loadDeal();
+            actual = rec ? rec[fieldId] : undefined;
+          } else {
+            actual = await loadDealCustom(fieldId);
+          }
+        }
+        if (!looseEquals(actual, value)) return false;
+        continue;
+      }
+
+      if (type === "channel") {
+        const channelId = (readString(c, "channelId") ?? "").trim();
+        if (!channelId) continue;
+        // Payload já traz o canal (gatilhos de conversa/mensagem)?
+        const dataChannel = readString(data, "channelId") ?? readString(data, "channel");
+        if (dataChannel && dataChannel === channelId) continue;
+        const ids = await loadChannelIds();
+        if (!ids.has(channelId)) return false;
+        continue;
+      }
+
+      // Tipo desconhecido: ignora (não filtra) pra ser tolerante a versões.
+    }
+
+    return true;
+  } catch (err) {
+    console.error(
+      "[evaluateTriggerConditions] erro ao avaliar condições:",
+      err instanceof Error ? err.message : err,
+    );
+    // Fail-closed: erro ao avaliar → não dispara (não queremos rodar
+    // automação ignorando um filtro que o operador definiu).
+    return false;
+  }
+}
+
 async function enrichContext(event: string, context: AutomationJobContext): Promise<AutomationJobContext> {
   const data = asRecord(context.data) ?? {};
 
@@ -155,6 +372,16 @@ export async function fireTrigger(
       });
 
       if (passes) {
+        // Condições extras (Tag/Campo/Canal) do drawer de pipeline —
+        // semântica E, avaliadas contra os dados do contato/negócio.
+        const condOk = await evaluateTriggerConditions(automation.triggerConfig, {
+          contactId: enriched.contactId,
+          dealId: enriched.dealId,
+          data: enriched.data,
+        });
+        if (!condOk) {
+          continue;
+        }
         await enqueueAutomation(automation.id, { ...enriched, event });
         console.info(`[fireTrigger] "${automation.name}" disparada (${event})`);
       }
