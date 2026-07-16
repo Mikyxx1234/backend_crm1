@@ -137,6 +137,27 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // Profundidade das filas BullMQ (waiting/active/delayed/failed) — usado
+  // para dimensionar concurrency de workers e detectar back-pressure.
+  // Populado sob demanda via `updateQueueDepth()` chamado por scraping ou
+  // por um ticker leve (ver call-site opcional em src/lib/queue.ts).
+  const bullmqQueueDepth = new Gauge({
+    name: "crm_bullmq_queue_depth",
+    help: "Jobs na fila BullMQ por estado (snapshot no scrape).",
+    labelNames: ["queue", "state"] as const,
+    registers: [registry],
+  });
+
+  // Pool de conexoes Postgres (Prisma adapter-pg). Populado por
+  // `updateDbPool()`. Se o pool nao estiver acessivel, permanece zerado
+  // (nao explode).
+  const dbPool = new Gauge({
+    name: "crm_db_pool_connections",
+    help: "Conexoes do pool pg (total/idle/waiting).",
+    labelNames: ["state"] as const,
+    registers: [registry],
+  });
+
   // Cache (PR 5.1) — hits/misses por namespace (channel, ai_agent, org).
   // Usado pra decidir se o TTL atual e bom ou se hot-keys merecem
   // pre-warming.
@@ -157,11 +178,11 @@ function buildMetrics(registry: Registry): AppMetrics {
   return {
     http: { requests: httpRequests, duration: httpDuration },
     sse: { subscribers: sseSubscribers, messages: sseMessages },
-    bullmq: { jobs: bullmqJobs, duration: bullmqDuration },
+    bullmq: { jobs: bullmqJobs, duration: bullmqDuration, queueDepth: bullmqQueueDepth },
     meta: { calls: metaApi, duration: metaApiDuration },
     messages: { inbound: inboundMessages, outbound: outboundMessages },
     ai: { tokens: aiTokens },
-    db: { queries: dbQueries },
+    db: { queries: dbQueries, pool: dbPool },
     errors,
     cacheHits,
     cacheMisses,
@@ -180,6 +201,7 @@ export type AppMetrics = {
   bullmq: {
     jobs: Counter<"queue" | "status">;
     duration: Histogram<"queue" | "status">;
+    queueDepth: Gauge<"queue" | "state">;
   };
   meta: {
     calls: Counter<"endpoint" | "status" | "organization">;
@@ -194,6 +216,7 @@ export type AppMetrics = {
   };
   db: {
     queries: Histogram<"model" | "action">;
+    pool: Gauge<"state">;
   };
   errors: Counter<"scope" | "kind">;
   cacheHits: Counter<"key">;
@@ -215,13 +238,36 @@ export const metrics: AppMetrics = ensureRegistry().metrics;
 /**
  * Renderiza o snapshot atual no formato Prometheus exposition (text/plain).
  * Usado pelo endpoint `/api/metrics`.
+ *
+ * Antes de serializar, coleta snapshots de gauges "puxados" (queue depth
+ * BullMQ e pool pg) — assim o valor exposto reflete o instante do scrape.
+ * Falhas silenciosas (Redis fora, adapter sem pool) mantem gauge zerado.
  */
 export async function renderMetrics(): Promise<{
   body: string;
   contentType: string;
 }> {
+  await Promise.allSettled([snapshotQueueDepth(), snapshotDbPool()]);
   const body = await registry.metrics();
   return { body, contentType: registry.contentType };
+}
+
+async function snapshotQueueDepth(): Promise<void> {
+  try {
+    const mod = await import("@/lib/queue-metrics");
+    await mod.collectQueueDepth();
+  } catch {
+    // modulo opcional / redis indisponivel — ok.
+  }
+}
+
+async function snapshotDbPool(): Promise<void> {
+  try {
+    const mod = await import("@/lib/db-pool-metrics");
+    await mod.collectDbPool();
+  } catch {
+    // pool nao exposto — ok.
+  }
 }
 
 /**
