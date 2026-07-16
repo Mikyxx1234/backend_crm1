@@ -5,7 +5,7 @@ import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import {
   assertLostReasonAllowed,
   assignDealOwner,
@@ -243,12 +243,15 @@ export async function POST(request: Request) {
         // e sincroniza status/closedAt — mesma semântica do single.
         const deals = await prisma.deal.findMany({
           where: { id: { in: dealIds }, status: { not: "WON" } },
-          select: { id: true, status: true },
+          select: { id: true, status: true, stageId: true },
         });
         for (const deal of deals) {
-          await markDealWon(deal.id);
+          const updated = await markDealWon(deal.id);
           createDealEvent(deal.id, uid, "STATUS_CHANGED", { from: deal.status, to: "WON" }).catch(() => {});
           fireTrigger("deal_won", { dealId: deal.id, data: { fromStatus: deal.status } }).catch(() => {});
+          // markDealWon move pro estágio terminal Ganho — dispara também
+          // "mudança de fase" pra automações "quando entra na fase X".
+          notifyDealStageChanged(deal.id, deal.stageId, updated.stageId).catch(() => {});
           affected++;
         }
       }
@@ -282,12 +285,15 @@ export async function POST(request: Request) {
 
         const deals = await prisma.deal.findMany({
           where: { id: { in: dealIds }, status: { not: "LOST" } },
-          select: { id: true, status: true },
+          select: { id: true, status: true, stageId: true },
         });
         for (const deal of deals) {
-          await markDealLost(deal.id, lostReason);
+          const updated = await markDealLost(deal.id, lostReason);
           createDealEvent(deal.id, uid, "STATUS_CHANGED", { from: deal.status, to: "LOST", lostReason }).catch(() => {});
           fireTrigger("deal_lost", { dealId: deal.id, data: { fromStatus: deal.status, lostReason } }).catch(() => {});
+          // markDealLost move pro estágio terminal Perdido — dispara também
+          // "mudança de fase" pra automações "quando entra na fase X".
+          notifyDealStageChanged(deal.id, deal.stageId, updated.stageId).catch(() => {});
           affected++;
         }
       }

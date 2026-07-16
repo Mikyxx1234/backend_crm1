@@ -64,13 +64,33 @@ export async function POST(request: Request) {
 
     switch (action) {
       case "resolve": {
+        // Bulk NAO pergunta tabulacao. Se a conversa esta num departamento
+        // que exige tabulacao ao encerrar, pulamos e devolvemos a lista
+        // pra UI avisar "encerre individualmente" (o modal individual
+        // colheu a tabulacao). Isso preserva o contrato de dados
+        // (Conversation.tabulationId nunca nulo pra dept que exige).
+        const skippedRows = await prisma.conversation.findMany({
+          where: scopedWhere(ids, {
+            status: { not: "RESOLVED" },
+            department: { is: { requireTabulationOnClose: true } },
+          }),
+          select: { id: true },
+        });
+        const skippedIds = skippedRows.map((c) => c.id);
+        const skippedSet = new Set(skippedIds);
+        const effectiveIds = ids.filter((i) => !skippedSet.has(i));
+
+        if (effectiveIds.length === 0) {
+          return NextResponse.json({ updated: 0, skipped: skippedIds });
+        }
+
         const toChange = await prisma.conversation.findMany({
-          where: scopedWhere(ids, { status: { not: "RESOLVED" } }),
+          where: scopedWhere(effectiveIds, { status: { not: "RESOLVED" } }),
           select: { id: true },
         });
         const result = await prisma.conversation.updateMany({
-          where: scopedWhere(ids, { status: { not: "RESOLVED" } }),
-          data: { status: "RESOLVED" },
+          where: scopedWhere(effectiveIds, { status: { not: "RESOLVED" } }),
+          data: { status: "RESOLVED", closedAt: new Date() },
         });
         void logBulkStatus(
           toChange.map((c) => c.id),
@@ -78,7 +98,7 @@ export async function POST(request: Request) {
           "RESOLVED",
           "CONVERSATION_CLOSED",
         );
-        return NextResponse.json({ updated: result.count });
+        return NextResponse.json({ updated: result.count, skipped: skippedIds });
       }
       case "reopen": {
         // Modelo de ticket (15/jul/26): "reopen" nao promove RESOLVED->OPEN;

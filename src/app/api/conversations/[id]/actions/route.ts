@@ -14,6 +14,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
+import { assertLeafInDepartment, getAncestors } from "@/services/tabulations";
 
 async function logDealEventsForConversationContact(
   conversationId: string,
@@ -310,7 +311,57 @@ export async function POST(request: Request, context: RouteContext) {
         );
       }
 
-      const updated = await updateConversationStatusInDb(id, dbStatus);
+      // Tabulacao ao encerrar. Somente aplicavel quando esta indo pra
+      // RESOLVED e a conversa tem departamento vinculado. Se o
+      // departamento exigir e o body nao trouxer id valido (folha na
+      // arvore do dept) -> 400 (defesa; UI ja bloqueia o botao).
+      let tabulationId: string | null = null;
+      let tabulationAncestors: string[] = [];
+      let tabulationDepartmentId: string | null = null;
+      if (dbStatus === "RESOLVED") {
+        const dept = await prisma.conversation.findUnique({
+          where: { id },
+          select: {
+            departmentId: true,
+            department: { select: { id: true, requireTabulationOnClose: true } },
+          },
+        });
+        const rawTab = typeof b.tabulationId === "string" ? b.tabulationId.trim() : "";
+        const requires = !!dept?.department?.requireTabulationOnClose;
+        if (requires && !rawTab) {
+          return NextResponse.json(
+            {
+              message: "Este departamento exige uma tabulacao ao encerrar.",
+              code: "TABULATION_REQUIRED",
+            },
+            { status: 400 },
+          );
+        }
+        if (rawTab) {
+          if (!dept?.departmentId) {
+            return NextResponse.json(
+              { message: "Conversa sem departamento — nao aceita tabulacao." },
+              { status: 400 },
+            );
+          }
+          try {
+            await assertLeafInDepartment(rawTab, dept.departmentId);
+          } catch (e) {
+            const code = (e as { code?: string }).code ?? "TABULATION_INVALID";
+            return NextResponse.json(
+              { message: (e as Error).message, code },
+              { status: 400 },
+            );
+          }
+          tabulationId = rawTab;
+          tabulationDepartmentId = dept.departmentId;
+          tabulationAncestors = await getAncestors(rawTab);
+        }
+      }
+
+      const updated = await updateConversationStatusInDb(id, dbStatus, {
+        tabulationId,
+      });
 
       if (conv.status !== updated.status) {
         const uid = (session.user as { id: string }).id;
@@ -345,7 +396,48 @@ export async function POST(request: Request, context: RouteContext) {
           field: "status",
           oldValue: conv.status,
           newValue: updated.status,
-          meta: { action },
+          meta: { action, ...(tabulationId ? { tabulationId } : {}) },
+        });
+      }
+
+      // Trigger de automacao conversation_tabulated (soh quando o
+      // encerramento gravou tabulacao). Roda depois de logs, fire-and-forget.
+      if (dbStatus === "RESOLVED" && tabulationId) {
+        void logEvent({
+          type: "CONVERSATION_TABULATED",
+          entityType: "CONVERSATION",
+          entityId: id,
+          entityLabel: updated.externalId ?? null,
+          conversationId: id,
+          contactId: conv.contact?.id ?? null,
+          meta: {
+            tabulationId,
+            ancestorIds: tabulationAncestors,
+            departmentId: tabulationDepartmentId,
+          },
+        });
+        // Resolve dealId (primeiro deal aberto do contato) para automacoes
+        // que dependem de contexto de negocio (mover card, mudar funil).
+        let dealId: string | undefined;
+        if (conv.contact?.id) {
+          const deal = await prisma.deal.findFirst({
+            where: { contactId: conv.contact.id, status: "OPEN" },
+            orderBy: { createdAt: "desc" },
+            select: { id: true },
+          });
+          dealId = deal?.id;
+        }
+        fireTrigger("conversation_tabulated", {
+          contactId: conv.contact?.id ?? undefined,
+          dealId,
+          data: {
+            tabulationId,
+            ancestorIds: tabulationAncestors,
+            departmentId: tabulationDepartmentId,
+            conversationId: id,
+          },
+        }).catch(() => {
+          /* fire-and-forget */
         });
       }
 
@@ -354,6 +446,7 @@ export async function POST(request: Request, context: RouteContext) {
           id: updated.id,
           status: updated.status,
           externalId: updated.externalId,
+          tabulationId: updated.tabulationId,
         },
       });
     } catch (e: unknown) {

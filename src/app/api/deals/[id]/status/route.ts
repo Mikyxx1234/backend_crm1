@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { getOrgSettingBool } from "@/lib/org-settings";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDealEvent, getDealById, markDealLost, markDealWon, reopenDeal } from "@/services/deals";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -49,10 +49,18 @@ export async function PUT(request: Request, context: RouteContext) {
       const uid = (session.user as { id: string }).id;
       const fromStatus = existing.status;
 
+      // Ganho/Perdido/Reabrir podem MOVER a etapa (estágio terminal
+      // Ganho/Perdido, ou volta pro operacional ao reabrir). Disparamos
+      // "mudança de fase" também por aqui pra que automações "quando entra
+      // na fase X" rodem mesmo quando o usuário usa o botão de status em
+      // vez de arrastar no kanban. `fromStageId` vem do estado anterior.
+      const fromStageId = existing.stageId;
+
       if (b.status === "WON") {
         const deal = await markDealWon(dealId);
         createDealEvent(dealId, uid, "STATUS_CHANGED", { from: fromStatus, to: "WON" }).catch(() => {});
         fireTrigger("deal_won", { dealId, contactId: existing.contactId ?? undefined, data: { fromStatus } }).catch(() => {});
+        notifyDealStageChanged(dealId, fromStageId, deal.stageId, { contactId: existing.contactId ?? undefined }).catch(() => {});
         return NextResponse.json(deal);
       }
       if (b.status === "LOST") {
@@ -67,10 +75,12 @@ export async function PUT(request: Request, context: RouteContext) {
         const deal = await markDealLost(dealId, reason);
         createDealEvent(dealId, uid, "STATUS_CHANGED", { from: fromStatus, to: "LOST", lostReason: reason }).catch(() => {});
         fireTrigger("deal_lost", { dealId, contactId: existing.contactId ?? undefined, data: { fromStatus, lostReason: reason } }).catch(() => {});
+        notifyDealStageChanged(dealId, fromStageId, deal.stageId, { contactId: existing.contactId ?? undefined }).catch(() => {});
         return NextResponse.json(deal);
       }
       const deal = await reopenDeal(dealId);
       createDealEvent(dealId, uid, "STATUS_CHANGED", { from: fromStatus, to: "OPEN" }).catch(() => {});
+      notifyDealStageChanged(dealId, fromStageId, deal.stageId, { contactId: existing.contactId ?? undefined }).catch(() => {});
       return NextResponse.json(deal);
     } catch (err: unknown) {
       if (err instanceof Error && err.message === "INVALID_LOST_REASON") {

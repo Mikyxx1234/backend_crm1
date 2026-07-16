@@ -121,7 +121,7 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
 
 export async function fireTrigger(
   event: string,
-  context: { contactId?: string; dealId?: string; data?: unknown }
+  context: { contactId?: string; dealId?: string; data?: unknown; depth?: number }
 ): Promise<void> {
   let automations;
   try {
@@ -141,6 +141,9 @@ export async function fireTrigger(
     dealId: context.dealId,
     event,
     data: context.data,
+    // Propaga a profundidade de encadeamento pro job enfileirado, pra que
+    // um efeito colateral (ex.: passo "mover etapa") herde depth+1.
+    depth: context.depth ?? 0,
   };
 
   for (const automation of automations) {
@@ -158,5 +161,60 @@ export async function fireTrigger(
     } catch (err) {
       console.error(`[fireTrigger] Erro "${automation.name}":`, err instanceof Error ? err.message : err);
     }
+  }
+}
+
+/**
+ * Teto de encadeamento de `stage_changed` disparado por efeito de
+ * automação (passo "mover etapa", update_field stageId, tool da IA).
+ * Protege contra loop A→B→A: a automação A move pro estágio X, o gatilho
+ * de B roda e move de volta, e assim por diante. Acima do teto, paramos de
+ * re-disparar (a movimentação em si ainda acontece; só não encadeia mais).
+ */
+const MAX_STAGE_CHAIN_DEPTH = 5;
+
+/**
+ * Ponto ÚNICO para notificar mudança de etapa de um negócio ao motor de
+ * automações. Usado por TODOS os caminhos que alteram `deal.stageId` fora
+ * do kanban/rota (executor de automação, tool da IA, etc.), pra que o
+ * gatilho "mudança de fase" fique confiável independente de como a etapa
+ * mudou. Idempotente em relação a no-op (from === to) e resiliente
+ * (nunca lança — é fire-and-forget).
+ *
+ * `depth` é a profundidade de encadeamento do disparo (0 = ação direta do
+ * usuário/IA; >0 = efeito de outra automação). Acima de MAX_STAGE_CHAIN_DEPTH
+ * o disparo é suprimido pra cortar loops.
+ */
+export async function notifyDealStageChanged(
+  dealId: string,
+  fromStageId: string | null | undefined,
+  toStageId: string | null | undefined,
+  opts?: { contactId?: string | null; depth?: number },
+): Promise<void> {
+  try {
+    if (!dealId || !toStageId) return;
+    // Sem mudança real de etapa: não dispara (reordenar na mesma coluna,
+    // patch redundante, etc.).
+    if (fromStageId && fromStageId === toStageId) return;
+
+    const depth = opts?.depth ?? 0;
+    if (depth > MAX_STAGE_CHAIN_DEPTH) {
+      console.warn(
+        `[notifyDealStageChanged] encadeamento acima do teto (${depth}) — disparo suprimido p/ evitar loop (deal=${dealId})`,
+      );
+      return;
+    }
+
+    await fireTrigger("stage_changed", {
+      dealId,
+      contactId: opts?.contactId ?? undefined,
+      data: { fromStageId: fromStageId ?? undefined, toStageId },
+      depth,
+    });
+  } catch (err) {
+    console.error(
+      "[notifyDealStageChanged] falha ao disparar stage_changed:",
+      err instanceof Error ? err.message : err,
+    );
   }
 }

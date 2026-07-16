@@ -21,6 +21,7 @@ export const AUTOMATION_TRIGGER_TYPES = [
   "message_sent",
   "call_received",
   "call_made",
+  "conversation_tabulated",
 ] as const;
 
 export type AutomationTriggerType = (typeof AUTOMATION_TRIGGER_TYPES)[number];
@@ -93,9 +94,13 @@ export function evaluateTrigger(
 
   switch (triggerType) {
     case "stage_changed": {
-      const toStageId = readString(cfg, "toStageId");
+      // `stageId` é aceito como ALIAS de `toStageId`: algumas telas
+      // (funil/pipeline) salvam a etapa-alvo em `stageId`. Sem esse alias,
+      // a automação "quando entra na fase X" configurada por essas telas
+      // não casava (o matcher só olhava `toStageId`).
+      const toStageId = readString(cfg, "toStageId") ?? readString(cfg, "stageId");
       const fromStageId = readString(cfg, "fromStageId");
-      const dataTo = readString(data, "toStageId");
+      const dataTo = readString(data, "toStageId") ?? readString(data, "stageId");
       const dataFrom = readString(data, "fromStageId");
       if (toStageId && dataTo && dataTo !== toStageId) return false;
       if (fromStageId && dataFrom && dataFrom !== fromStageId) return false;
@@ -237,6 +242,30 @@ export function evaluateTrigger(
       // POST /api/automations/:id/run, que so enfileira automacoes
       // ativas com triggerType="manual".
       return true;
+    }
+    case "conversation_tabulated": {
+      // Filtro por departamento (opcional): so casa se o encerramento
+      // aconteceu no dept configurado. Sem departmentId => any dept.
+      const cfgDept = readString(cfg, "departmentId");
+      const dataDept = readString(data, "departmentId");
+      if (cfgDept && dataDept && cfgDept !== dataDept) return false;
+      if (cfgDept && !dataDept) return false;
+
+      // Filtro por tabulacao: casa se `config.tabulationId` for a
+      // propria tabulacao escolhida OU um ancestral dela. Assim o
+      // operador consegue mirar a categoria pai (ex.: "NÃO É ALUNO")
+      // e valer pra todas as folhas descendentes.
+      const cfgTab = readString(cfg, "tabulationId");
+      if (!cfgTab) return true;
+      const dataTab = readString(data, "tabulationId");
+      const dataAncestors = Array.isArray(data.ancestorIds)
+        ? (data.ancestorIds as unknown[]).filter(
+            (v): v is string => typeof v === "string",
+          )
+        : [];
+      if (cfgTab === dataTab) return true;
+      if (dataAncestors.includes(cfgTab)) return true;
+      return false;
     }
     default:
       return true;
