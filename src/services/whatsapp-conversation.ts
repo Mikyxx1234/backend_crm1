@@ -24,6 +24,11 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { logEvent } from "@/services/activity-log";
+import { withConversationNumberRetry } from "@/services/conversations";
+import { fireTrigger } from "@/services/automation-triggers";
+import { getLogger } from "@/lib/logger";
+
+const log = getLogger("whatsapp-conversation");
 
 export type DefaultWhatsAppChannel = {
   id: string;
@@ -95,9 +100,17 @@ export async function ensureWhatsAppConversationForContact(
   const defaultChannel = await resolveDefaultWhatsAppChannel();
   if (!defaultChannel) return { status: "skipped_no_channel" };
 
-  // Reuso: 1 conversa WA por contato (mesmo padrão do webhook Meta e Baileys).
+  // Modelo de ticket: reusa apenas conversa nao-RESOLVED. Quando a ultima
+  // esta encerrada, o proximo envio gera nova conversa com #N+1 — mantendo
+  // as mensagens antigas encapsuladas no ticket anterior. Decisao aprovada
+  // pelo operador (ver AGENT.md "ID de conversa + logs + gatilho" e
+  // pergunta "estrategia = ticket puro").
   const existing = await prisma.conversation.findFirst({
-    where: { contactId: contact.id, channel: "whatsapp" },
+    where: {
+      contactId: contact.id,
+      channel: "whatsapp",
+      status: { not: "RESOLVED" },
+    },
     select: { id: true, channelId: true, inboxName: true },
   });
 
@@ -134,17 +147,20 @@ export async function ensureWhatsAppConversationForContact(
     };
   }
 
-  const created = await prisma.conversation.create({
-    data: withOrgFromCtx({
-      channel: "whatsapp",
-      status: "OPEN" as const,
-      inboxName: defaultChannel.name,
-      channelId: defaultChannel.id,
-      contactId: contact.id,
-      ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+  const created = await withConversationNumberRetry((number) =>
+    prisma.conversation.create({
+      data: withOrgFromCtx({
+        number,
+        channel: "whatsapp",
+        status: "OPEN" as const,
+        inboxName: defaultChannel.name,
+        channelId: defaultChannel.id,
+        contactId: contact.id,
+        ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+      }),
+      select: { id: true, channelId: true },
     }),
-    select: { id: true, channelId: true },
-  });
+  );
 
   void logEvent({
     type: "CONVERSATION_CREATED",
@@ -159,6 +175,14 @@ export async function ensureWhatsAppConversationForContact(
       source: "auto_ensure",
     },
   });
+
+  // Gatilho de automacao (fire-and-forget). O tipo `conversation_created`
+  // ja existe registrado; ate hoje o fireTrigger nao era chamado — so o
+  // logEvent. Ver AGENT.md "ID de conversa + logs + gatilho".
+  fireTrigger("conversation_created", {
+    contactId: contact.id,
+    data: { channel: "whatsapp", inboxName: defaultChannel.name, source: "auto_ensure" },
+  }).catch((err) => log.warn("Falha no gatilho conversation_created:", err));
 
   return {
     status: "created",

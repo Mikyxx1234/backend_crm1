@@ -8,7 +8,10 @@ import {
   assignConversationAssignedTo,
   getConversationById,
   updateConversationStatusInDb,
+  withConversationNumberRetry,
 } from "@/services/conversations";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
 
@@ -156,6 +159,137 @@ export async function POST(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
       }
 
+      // Modelo de ticket (aprovado 15/jul/26): action="reopen" NAO promove
+      // a conversa antiga de RESOLVED->OPEN. Ao inves disso, cria uma
+      // NOVA conversa vinculada ao mesmo contato/canal, com #N+1, e
+      // retorna o novo id para o frontend redirecionar. Assim cada ciclo
+      // vira um "ticket" independente com timeline propria. Ver
+      // AGENT.md "ID de conversa + ticket".
+      if (action === "reopen") {
+        if (conv.status !== "RESOLVED") {
+          return NextResponse.json(
+            { message: "Só é possível reabrir conversas encerradas." },
+            { status: 400 },
+          );
+        }
+        if (!conv.contact?.id) {
+          return NextResponse.json(
+            { message: "Conversa sem contato vinculado — não é possível abrir novo ticket." },
+            { status: 400 },
+          );
+        }
+
+        // Snapshot dos campos relevantes da conversa origem — nao carrega
+        // no `getConversationById` por padrao, entao lê agora.
+        const src = await prisma.conversation.findUnique({
+          where: { id },
+          select: {
+            channel: true,
+            channelId: true,
+            inboxName: true,
+            assignedToId: true,
+            contactId: true,
+          },
+        });
+        if (!src?.contactId) {
+          return NextResponse.json(
+            { message: "Conversa origem inconsistente." },
+            { status: 500 },
+          );
+        }
+
+        const created = await withConversationNumberRetry((number) =>
+          prisma.conversation.create({
+            data: withOrgFromCtx({
+              number,
+              channel: src.channel,
+              status: "OPEN" as const,
+              inboxName: src.inboxName ?? null,
+              contactId: src.contactId!,
+              ...(src.channelId ? { channelId: src.channelId } : {}),
+              ...(src.assignedToId ? { assignedToId: src.assignedToId } : {}),
+            }),
+            select: {
+              id: true,
+              number: true,
+              status: true,
+              externalId: true,
+              channel: true,
+              channelId: true,
+              inboxName: true,
+              contactId: true,
+              assignedToId: true,
+              createdAt: true,
+              updatedAt: true,
+            },
+          }),
+        );
+
+        const uid = (session.user as { id: string }).id;
+
+        // Log de rastreabilidade: conversa origem ganha um evento REOPENED
+        // apontando pro novo ticket; a nova ganha CREATED (padrao).
+        void logEvent({
+          type: "CONVERSATION_REOPENED",
+          entityType: "CONVERSATION",
+          entityId: id,
+          entityLabel: conv.externalId ?? null,
+          conversationId: id,
+          contactId: conv.contact.id,
+          field: "status",
+          oldValue: "RESOLVED",
+          newValue: "OPEN",
+          meta: { action, newConversationId: created.id, newNumber: created.number },
+        });
+        void logEvent({
+          type: "CONVERSATION_CREATED",
+          entityType: "CONVERSATION",
+          entityId: created.id,
+          entityLabel: null,
+          conversationId: created.id,
+          contactId: conv.contact.id,
+          meta: {
+            channel: created.channel,
+            inboxName: created.inboxName,
+            source: "reopen",
+            previousConversationId: id,
+          },
+        });
+        await logDealEventsForConversationContact(id, uid, "CONVERSATION_REOPENED", {
+          action,
+          newConversationId: created.id,
+          newNumber: created.number,
+        });
+
+        // Dispara automacao — cada ticket ativa "boas-vindas"/SLA de novo.
+        fireTrigger("conversation_created", {
+          contactId: conv.contact.id,
+          data: {
+            channel: created.channel,
+            inboxName: created.inboxName,
+            source: "reopen",
+            previousConversationId: id,
+          },
+        }).catch(() => {
+          /* fire-and-forget */
+        });
+
+        return NextResponse.json({
+          conversation: {
+            id: created.id,
+            number: created.number,
+            status: created.status,
+            externalId: created.externalId,
+            channel: created.channel,
+            channelId: created.channelId,
+            inboxName: created.inboxName,
+            createdAt: created.createdAt,
+            updatedAt: created.updatedAt,
+          },
+          previousConversationId: id,
+        });
+      }
+
       const rawStatus = typeof b.status === "string" ? b.status : undefined;
       const dbStatus = actionToDbStatus(action, rawStatus);
 
@@ -163,6 +297,16 @@ export async function POST(request: Request, context: RouteContext) {
         return NextResponse.json(
           { message: "status inválido (OPEN, RESOLVED, PENDING, SNOOZED)." },
           { status: 400 }
+        );
+      }
+
+      // Modelo de ticket: RESOLVED e' terminal. Nao permite `toggle_status`
+      // promover para OPEN/PENDING/SNOOZED — o unico caminho pos-encerramento
+      // e' via `action=reopen` (que cria ticket novo). Ver bloco acima.
+      if (conv.status === "RESOLVED" && dbStatus !== "RESOLVED") {
+        return NextResponse.json(
+          { message: "Conversa encerrada — use `reopen` para abrir novo ticket." },
+          { status: 400 },
         );
       }
 
