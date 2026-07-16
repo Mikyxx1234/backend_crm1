@@ -28,6 +28,7 @@ import {
   propagateOwnerToContactAndChat,
 } from "@/services/deals";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
+import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
 import { logEvent } from "@/services/activity-log";
@@ -435,6 +436,12 @@ type RuntimeContext = {
   // string no banco).
   contactCustomFields: Record<string, string>;
   dealCustomFields: Record<string, string>;
+  /**
+   * Profundidade de encadeamento herdada do job (anti-loop). Passos que
+   * disparam gatilhos como efeito (mover etapa) propagam `depth+1` via
+   * `notifyDealStageChanged`. Ver `AutomationJobContext.depth`.
+   */
+  depth: number;
 };
 
 /**
@@ -686,6 +693,7 @@ async function resolveRuntimeContext(
     dealTagNames,
     contactCustomFields: customFieldsSnapshot.contactCustomFields,
     dealCustomFields: customFieldsSnapshot.dealCustomFields,
+    depth: typeof ctx.depth === "number" ? ctx.depth : 0,
   };
 }
 
@@ -836,7 +844,7 @@ async function executeStep(
       });
       const currentDeal = await prisma.deal.findUnique({
         where: { id: targetDealId },
-        select: { status: true },
+        select: { status: true, stageId: true, contactId: true },
       });
       const statusPatch = targetStage?.isWon
         ? currentDeal?.status === "WON"
@@ -850,6 +858,15 @@ async function executeStep(
             ? {}
             : { status: "OPEN" as const, closedAt: null, lostReason: null };
       await prisma.deal.update({ where: { id: targetDealId }, data: { stageId, ...statusPatch } });
+      // Dispara "mudança de fase" (encadeado, com guarda anti-loop) pra que
+      // automações "quando entra na fase X" também rodem quando OUTRA
+      // automação move o negócio. Antes esse caminho não disparava nada.
+      if (currentDeal?.stageId && currentDeal.stageId !== stageId) {
+        void notifyDealStageChanged(targetDealId, currentDeal.stageId, stageId, {
+          contactId: rt.contactId ?? currentDeal.contactId ?? undefined,
+          depth: (rt.depth ?? 0) + 1,
+        });
+      }
       return {};
     }
 
@@ -1115,7 +1132,26 @@ async function executeStep(
         } else if (field === "status" && typeof value === "string" && isDealStatus(value)) data.status = value;
         else if (field === "stageId" && typeof value === "string") data.stageId = value;
         if (Object.keys(data).length > 0) {
+          // Se o update for de etapa, captura a etapa anterior ANTES pra
+          // disparar "mudança de fase" depois (mesmo caminho do move_stage).
+          const isStageMove = field === "stageId" && typeof value === "string";
+          let prevStageId: string | null = null;
+          let moveContactId: string | null = null;
+          if (isStageMove) {
+            const cur = await prisma.deal.findUnique({
+              where: { id: targetDealId },
+              select: { stageId: true, contactId: true },
+            });
+            prevStageId = cur?.stageId ?? null;
+            moveContactId = cur?.contactId ?? null;
+          }
           await prisma.deal.update({ where: { id: targetDealId }, data });
+          if (isStageMove && prevStageId && prevStageId !== value) {
+            void notifyDealStageChanged(targetDealId, prevStageId, value as string, {
+              contactId: rt.contactId ?? moveContactId ?? undefined,
+              depth: (rt.depth ?? 0) + 1,
+            });
+          }
         } else {
           const customField = await prisma.customField.findFirst({
             where: { entity: "deal", name: field },
@@ -2878,6 +2914,9 @@ export async function continueFromStep(
     dealTagNames: tagSnapshot.dealTagNames,
     contactCustomFields: customFieldsSnapshot.contactCustomFields,
     dealCustomFields: customFieldsSnapshot.dealCustomFields,
+    // Continuação após wait/question: mantém profundidade base (0). O
+    // encadeamento relevante ocorre no fluxo principal (executeStep).
+    depth: 0,
   };
 
   let contConvIdForMeta: string | undefined;

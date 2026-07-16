@@ -23,6 +23,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { createActivity } from "@/services/activities";
+import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
 import { addTagToContact } from "@/services/tags";
 import type { ActivityType, Prisma } from "@prisma/client";
@@ -139,6 +140,14 @@ function moveStageTool(ctx: RunContext) {
         if (!target)
           return fail(`Estágio "${stageName}" não existe no pipeline deste deal.`);
         await updateDeal(deal.id, { stageId: target.id });
+        // Dispara "mudança de fase" quando a IA move o negócio — antes esse
+        // caminho só registrava AI_AGENT_ACTION e não acionava automações.
+        if (deal.stageId !== target.id) {
+          void notifyDealStageChanged(deal.id, deal.stageId, target.id, {
+            contactId: ctx.contactId ?? undefined,
+            depth: 0,
+          });
+        }
         createDealEvent(deal.id, ctx.agentUserId, "AI_AGENT_ACTION", {
           action: "moved_stage",
           agentId: ctx.agentId ?? null,
