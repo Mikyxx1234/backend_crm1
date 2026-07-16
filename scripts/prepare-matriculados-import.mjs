@@ -67,7 +67,11 @@ const out = [];
 for (const r of rows) {
   const email = emailNorm(r["Email"]);
   const vars = phoneVariants(r["Fone celular"]);
-  const personKey = email || vars[0] || onlyDigits(r["RG"]);
+  const phoneDigits = toE164BR(r["Fone celular"]).replace(/^\+/, "");
+  // Chave de pessoa = TELEFONE (1 pessoa = 1 telefone). Fallback e-mail/RG só
+  // p/ as pouquíssimas linhas sem telefone. Garante telefone único na saída
+  // → external_id = telefone não colide (diferente do RG, cheio de lixo).
+  const personKey = vars[0] || email || onlyDigits(r["RG"]);
   if (!personKey) continue;
   if (seen.has(personKey)) { dupFile++; continue; }
   seen.add(personKey);
@@ -76,9 +80,9 @@ for (const r of rows) {
   kept++;
   out.push({
     title: String(r["Nome"] ?? "").trim(),
-    external_id: onlyDigits(r["RG"]) || "",
+    external_id: phoneDigits || email || onlyDigits(r["RG"]) || "",
     contact_name: String(r["Nome"] ?? "").trim(),
-    contact_phone: toE164BR(r["Fone celular"]).replace(/^\+/, ""),
+    contact_phone: phoneDigits,
     contact_email: email,
     email: email,
     email_academico: emailNorm(r["Email acadêmico"]),
@@ -97,6 +101,6 @@ const headers = ["title","external_id","contact_name","contact_phone","contact_e
 const esc = (v) => { const s = v == null ? "" : String(v); return /[;"\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
 const lines = [headers.join(";"), ...out.map((row) => headers.map((h) => esc(row[h])).join(";"))];
 const stamp = new Date().toISOString().slice(0, 10);
-const outPath = `C:/Users/EDUIT/Downloads/matriculados-novos-para-importar-${stamp}.csv`;
+const outPath = `C:/Users/EDUIT/Downloads/matriculados-novos-telefone-${stamp}.csv`;
 writeFileSync(outPath, "\ufeff" + lines.join("\r\n"), "utf8");
 console.log(`\nCSV salvo: ${outPath}`);
