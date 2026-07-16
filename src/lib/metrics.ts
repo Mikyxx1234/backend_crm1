@@ -279,3 +279,56 @@ export function safeLabel(v: unknown, fallback = "unknown"): string {
   if (typeof v === "string") return v.length > 0 ? v : fallback;
   return String(v);
 }
+
+/**
+ * Reduz um pathname concreto ao TEMPLATE da rota, trocando segmentos que
+ * parecem id (numérico, cuid, uuid) por `:id`. Sem isso, cada request com
+ * id diferente viraria uma série nova em `crm_http_requests_total` e
+ * explodiria a cardinalidade do Prometheus (o comentário do topo do arquivo
+ * exige `route` = template, não path concreto).
+ */
+const ID_SEGMENT =
+  /^(?:\d+|c[a-z0-9]{20,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+export function templatizeRoute(path: string): string {
+  if (!path) return "unknown";
+  const clean = path.split("?")[0];
+  const out = clean
+    .split("/")
+    .map((seg) => (ID_SEGMENT.test(seg) ? ":id" : seg))
+    .join("/");
+  return out || "/";
+}
+
+/**
+ * Emite as métricas HTTP (contador + histograma de latência) para uma request
+ * concluída. Chamado pelos wrappers de entrada (`withOrgContext`,
+ * `withApiAuthContext`) que já calculam método/path/status/duração.
+ *
+ * `route` é templatizado (cardinalidade controlada). NÃO quebramos por
+ * organização aqui — o relatório agrega por `env` (label injetada pelo scrape
+ * do Prometheus), e quebrar por org multiplicaria as séries sem necessidade.
+ * A label `organization` fica fixa em "all" só para satisfazer o schema.
+ *
+ * Totalmente resiliente: qualquer erro na emissão é engolido — métrica nunca
+ * pode derrubar um handler.
+ */
+export function observeHttpRequest(args: {
+  method: string;
+  path: string;
+  status: number;
+  durationMs: number;
+}): void {
+  try {
+    const route = templatizeRoute(args.path);
+    const method = (args.method || "GET").toUpperCase();
+    const status = String(args.status || 0);
+    metrics.http.requests.inc({ route, method, status, organization: "all" });
+    metrics.http.duration.observe(
+      { route, method, status },
+      Math.max(0, args.durationMs) / 1000,
+    );
+  } catch {
+    // métricas nunca devem quebrar o request
+  }
+}

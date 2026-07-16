@@ -1,6 +1,22 @@
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import { metaErrorReason } from "@/lib/meta-whatsapp/error-catalog";
+import { metrics, templatizeRoute } from "@/lib/metrics";
+
+/**
+ * Emite métricas Prometheus de uma chamada à Graph API (contador + latência).
+ * `endpoint` é templatizado (ids viram :id) pra controlar cardinalidade.
+ * Resiliente: nunca lança. Alimenta o gráfico "Meta /min" do /admin/monitoring.
+ */
+function recordMetaCall(path: string, status: string, t0: number): void {
+  try {
+    const endpoint = templatizeRoute(path.startsWith("/") ? path : `/${path}`);
+    metrics.meta.calls.inc({ endpoint, status, organization: "all" });
+    metrics.meta.duration.observe({ endpoint, status }, Math.max(0, Date.now() - t0) / 1000);
+  } catch {
+    // métrica nunca derruba o envio
+  }
+}
 
 const GRAPH_VERSION = "v21.0";
 
@@ -243,6 +259,7 @@ export class MetaWhatsAppClient {
       headers.set("Content-Type", "application/json");
     }
 
+    const t0 = Date.now();
     let res: Response;
     try {
       res = await fetch(url, {
@@ -252,6 +269,7 @@ export class MetaWhatsAppClient {
         signal: init.signal ?? AbortSignal.timeout(GRAPH_TIMEOUT_MS),
       });
     } catch (err) {
+      recordMetaCall(path, "error", t0);
       // AbortSignal.timeout dispara TimeoutError; AbortController, AbortError.
       if (
         err instanceof Error &&
@@ -264,6 +282,7 @@ export class MetaWhatsAppClient {
       }
       throw err;
     }
+    recordMetaCall(path, String(res.status), t0);
     const text = await res.text();
     let data: unknown;
     try { data = JSON.parse(text); } catch { data = text; }
