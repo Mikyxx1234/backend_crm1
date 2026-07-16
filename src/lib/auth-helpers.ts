@@ -7,6 +7,7 @@ import {
   readApiAccessHeaders,
   resolveResponseStatus,
 } from "@/lib/api-access-audit";
+import { observeHttpRequest } from "@/lib/metrics";
 import { auth } from "./auth";
 import {
   loadAuthzContext,
@@ -262,6 +263,7 @@ export async function withOrgContext<T>(
     const out = (await runWithContext(ctx, () => handler(r.session))) as T;
     const durationMs = Date.now() - t0;
     const status = resolveResponseStatus(out);
+    observeHttpRequest({ method, path, status, durationMs });
     void logApiAccessCompleted({
       method,
       path,
@@ -273,6 +275,7 @@ export async function withOrgContext<T>(
     return out;
   } catch (err) {
     const durationMs = Date.now() - t0;
+    observeHttpRequest({ method, path, status: 500, durationMs });
     void logApiAccessCompleted({
       method,
       path,

@@ -7,6 +7,7 @@ import { withSystemContext } from "@/lib/webhook-context";
 import { phoneMatchVariants } from "@/lib/phone";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { nextContactNumber } from "@/services/contacts";
+import { withConversationNumberRetry } from "@/services/conversations";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -75,9 +76,13 @@ type ReferralInfo = {
 // padrão público no GitHub).
 const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN?.trim() || "";
 
-// Em produção exigimos signature válida no POST. Em dev/preview deixamos
-// passar com warning pra facilitar testes locais sem App Secret.
-const REQUIRE_SIGNATURE_IN_PROD = process.env.NODE_ENV === "production";
+// Exige assinatura valida sempre que NAO estamos em dev local. Antes
+// esta flag so exigia em `production`, o que deixava staging/preview
+// aceitando webhooks sem assinatura — um atacante podia forjar payload
+// "do Meta" e injetar mensagens/contatos/automations em qualquer
+// ambiente pre-prod exposto na internet.
+const REQUIRE_SIGNATURE =
+  process.env.NODE_ENV !== "development" || !!process.env.CI_STAGING;
 
 const recentlyProcessed = new Map<string, number>();
 const DEDUP_TTL = 30_000;
@@ -376,6 +381,81 @@ async function getChannelSourceName(phoneNumberId?: string): Promise<string> {
   return appName || channel.name || "WhatsApp";
 }
 
+// ── Reply & Reaction helpers ─────────────────────────────────────
+//
+// Estas duas funções sustentam o UX estilo WhatsApp de citação e
+// reações no CRM. Elas rodam DENTRO de withSystemContext(orgId), então
+// a Prisma extension já escopa por organização automaticamente.
+
+type ReactionEntry = {
+  emoji: string;
+  from: string;      // wa_id / bsuid do reator
+  at: string;        // ISO timestamp
+};
+
+/**
+ * Aplica uma reação inbound ao Message alvo (identificado pelo wamid).
+ * `emoji === null` remove a reação daquele contato. Idempotente: reagir
+ * de novo com o mesmo emoji substitui o timestamp.
+ */
+async function applyIncomingReaction(params: {
+  targetWaMessageId: string;
+  emoji: string | null;
+  fromWaId: string;
+  at: Date;
+}): Promise<void> {
+  const { targetWaMessageId, emoji, fromWaId, at } = params;
+  if (!targetWaMessageId || !fromWaId) return;
+
+  const target = await prisma.message.findFirst({
+    where: { externalId: targetWaMessageId },
+    select: { id: true, reactions: true },
+  });
+  if (!target) {
+    log.debug(
+      `Reação recebida para wamid desconhecido (${targetWaMessageId}) — ignorando.`,
+    );
+    return;
+  }
+
+  const current: ReactionEntry[] = Array.isArray(target.reactions)
+    ? (target.reactions as unknown as ReactionEntry[]).filter(
+        (r) => r && typeof r === "object" && typeof r.emoji === "string" && typeof r.from === "string",
+      )
+    : [];
+
+  // Cliente sempre tem no máximo 1 reação por mensagem (regra do WhatsApp).
+  // Removemos qualquer entrada anterior desse `from` antes de adicionar.
+  const withoutFrom = current.filter((r) => r.from !== fromWaId);
+  const next = emoji
+    ? [...withoutFrom, { emoji, from: fromWaId, at: at.toISOString() }]
+    : withoutFrom;
+
+  await prisma.message.update({
+    where: { id: target.id },
+    data: { reactions: next as unknown as object[] },
+  });
+}
+
+/**
+ * Resolve o alvo de uma citação. Retorna { messageId, preview } quando
+ * a Meta mandou `context.id` e encontramos o Message correspondente no
+ * CRM. `preview` é um snapshot curto (~120 chars) do conteúdo, servido
+ * como fallback para desenhar a citação sem precisar de novo JOIN no
+ * frontend.
+ */
+async function resolveReplyContext(
+  waMessageId: string,
+): Promise<{ messageId: string; preview: string } | null> {
+  const target = await prisma.message.findFirst({
+    where: { externalId: waMessageId },
+    select: { id: true, content: true },
+  });
+  if (!target) return null;
+  const preview = (target.content ?? "").trim().slice(0, 120);
+  return { messageId: target.id, preview };
+}
+
 async function resolveWebhookContact(
   waIdRaw: string | undefined,
   bsuidRaw: string | undefined,
@@ -599,24 +679,29 @@ async function resolveWebhookContact(
 async function findOrCreateConversation(contactId: string, phoneNumberId?: string) {
   const targetChannel = await findChannelByPhoneNumberId(phoneNumberId);
 
+  // Modelo de ticket: contatos com conversa RESOLVED geram NOVA conversa
+  // na proxima mensagem inbound (nao reabre). Ver AGENT.md.
   const existing = await prisma.conversation.findFirst({
-    where: { contactId, channel: "whatsapp" },
+    where: {
+      contactId,
+      channel: "whatsapp",
+      status: { not: "RESOLVED" },
+    },
     // PR 1.3: incluímos organizationId para que callers (download de
     // mídia inbound) possam roteá-lo no storage tenant-scoped.
     select: { id: true, status: true, channelId: true, organizationId: true },
   });
 
   if (existing) {
-    const updates: Record<string, unknown> = {};
-    if (existing.status !== "OPEN") updates.status = "OPEN";
+    // Reusa a conversa aberta. So reconcilia canal (para o inbox mostrar
+    // que a mensagem entrou pela conta X). Nao promove status pra OPEN
+    // porque agora a conversa ja e' non-RESOLVED por construcao.
     if (targetChannel && existing.channelId !== targetChannel.id) {
-      updates.channelId = targetChannel.id;
+      await prisma.conversation.update({
+        where: { id: existing.id },
+        data: { channelId: targetChannel.id },
+      });
     }
-    if (Object.keys(updates).length > 0) {
-      await prisma.conversation.update({ where: { id: existing.id }, data: updates });
-    }
-    // Retorna o channelId já reconciliado com o canal que recebeu (targetChannel),
-    // para o caller carimbar a mensagem inbound na conexão correta.
     return { ...existing, channelId: targetChannel?.id ?? existing.channelId };
   }
 
@@ -625,16 +710,19 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     select: { assignedToId: true },
   });
 
-  return prisma.conversation.create({
-    data: withOrgFromCtx({
-      contactId,
-      channel: "whatsapp",
-      channelId: targetChannel?.id,
-      status: "OPEN" as const,
-      ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+  return withConversationNumberRetry((number) =>
+    prisma.conversation.create({
+      data: withOrgFromCtx({
+        number,
+        contactId,
+        channel: "whatsapp",
+        channelId: targetChannel?.id,
+        status: "OPEN" as const,
+        ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+      }),
+      select: { id: true, status: true, channelId: true, organizationId: true },
     }),
-    select: { id: true, status: true, channelId: true, organizationId: true },
-  });
+  );
 }
 
 // ── Extract message content ──────────────────────
@@ -647,6 +735,23 @@ type ParsedMessage = {
   mediaUrl: string | null;
   mediaId: string | null;
   mimeType: string | null;
+  /**
+   * Quando o cliente responde uma mensagem específica no WhatsApp, o payload
+   * traz `context.id` = wamid da mensagem citada. Usamos para popular
+   * `Message.replyToId`/`replyToPreview` e desenhar a citação na bolha.
+   */
+  replyToWaMessageId: string | null;
+  /**
+   * Preenchido apenas quando `type === "reaction"`: o cliente reagiu (ou
+   * removeu reação) numa mensagem enviada por nós. `emoji === null` sinaliza
+   * remoção. `targetWaMessageId` é o wamid da mensagem reagida.
+   *
+   * Quando presente, o fluxo NÃO cria uma Message nova — apenas atualiza o
+   * JSON `reactions` do Message alvo. Se o alvo não existir localmente
+   * (raro; typicamente uma reação numa mensagem que ainda não foi
+   * sincronizada), o evento é ignorado silenciosamente.
+   */
+  reactionTarget: { targetWaMessageId: string; emoji: string | null } | null;
   /** ID do botão/lista (interactive) — usado p.ex. para opt-in de chamada. */
   interactiveButtonId: string | null;
   interactiveButtonTitle: string | null;
@@ -931,7 +1036,38 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
       break;
     }
     case "reaction": {
-      return null;
+      // Reação do cliente numa mensagem nossa. Payload da Meta:
+      //   { type: "reaction", reaction: { message_id, emoji } }
+      // `emoji` vazio = cliente removeu a reação (WhatsApp permite).
+      const r = obj(message.reaction);
+      const targetWaMessageId = str(r.message_id);
+      if (!targetWaMessageId) return null;
+      const rawEmoji = str(r.emoji);
+      // Cai para bloco de retorno abaixo com reactionTarget preenchido.
+      // Marcamos o text para o log de debug; ele não é persistido.
+      text = rawEmoji ? `Reagiu com ${rawEmoji}` : "Removeu reação";
+      return {
+        waMessageId: id,
+        timestamp,
+        type,
+        text,
+        mediaUrl: null,
+        mediaId: null,
+        mimeType: null,
+        replyToWaMessageId: null,
+        reactionTarget: {
+          targetWaMessageId,
+          emoji: rawEmoji || null,
+        },
+        interactiveButtonId: null,
+        interactiveButtonTitle: null,
+        interactiveKind: null,
+        callPermissionType: null,
+        referral: null,
+        flowPayload: null,
+        flowMetaName: null,
+        flowToken: null,
+      };
     }
     case "interactive": {
       const inter = obj(message.interactive);
@@ -974,6 +1110,13 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
 
   const referral = parseReferral(message);
 
+  // Contexto de resposta: quando o cliente responde uma mensagem específica,
+  // a Meta envia `context.id` = wamid da mensagem citada. Ignoramos o resto
+  // do contexto (from, forwarded, referred_product) por enquanto — só
+  // usamos o id para linkar via replyToId no Message local.
+  const context = obj(message.context);
+  const replyToWaMessageId = str(context.id) || null;
+
   return {
     waMessageId: id,
     timestamp,
@@ -982,6 +1125,8 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
     mediaUrl,
     mediaId,
     mimeType,
+    replyToWaMessageId,
+    reactionTarget: null,
     interactiveButtonId,
     interactiveButtonTitle,
     interactiveKind,
@@ -1569,10 +1714,24 @@ export async function handleMetaWebhookPost(
     );
   }
 
-  // Sem canal correspondente: aceita o evento (200) pra Meta nao retentar,
-  // mas nao processa nada. Assinatura ja foi verificada dentro do executor,
-  // entao precisamos ainda passar pelo rebuild.
-  return executePostBody(rebuilt, undefined);
+  // Sem canal correspondente ao phone_number_id do payload: nao ha
+  // como resolver a org, entao NAO tentamos validar assinatura contra
+  // segredos agregados de todas as orgs (isso permitiria a um atacante
+  // que obteve o appSecret de uma org forjar payloads "de outra org"
+  // usando um phone_number_id desconhecido). Aceitamos apenas se a
+  // assinatura casar com o CRM_META_APP_SECRET global (App do CRM) —
+  // caso legitimo de canal ainda nao onboarded / desprovisionado.
+  const sig = rebuilt.headers.get("x-hub-signature-256");
+  if (CRM_META_APP_SECRET && sig && verifyMetaWebhookSignature(bodyText, sig, CRM_META_APP_SECRET)) {
+    log.debug(
+      "Legacy POST sem org resolvida — assinatura casou com CRM_META_APP_SECRET; auditando sem processar.",
+    );
+    return NextResponse.json({ status: "ignored_unmapped_channel" });
+  }
+  log.warn(
+    "Legacy POST sem canal correspondente ao phone_number_id — recusando (nao processavel sem org).",
+  );
+  return NextResponse.json({ status: "ignored_unmapped_channel" }, { status: 200 });
 }
 
 function extractFirstPhoneNumberId(body: Record<string, unknown>): string | null {
@@ -1614,7 +1773,7 @@ async function executePostBody(
       );
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
-  } else if (REQUIRE_SIGNATURE_IN_PROD) {
+  } else if (REQUIRE_SIGNATURE) {
     // Em produção, NUNCA aceitar webhook sem App Secret configurado —
     // qualquer um na internet pode forjar payload "do Meta" e injetar
     // mensagens fake, criar contatos, disparar automações etc.
@@ -1746,6 +1905,27 @@ async function executePostBody(
 
         if (isDuplicate(parsed.waMessageId)) {
           log.debug(`Mensagem duplicada ignorada: ${parsed.waMessageId}`);
+          continue;
+        }
+
+        // Reação inbound: atualiza JSON `reactions` do Message alvo em
+        // vez de criar uma Message nova. O alvo é identificado pelo wamid
+        // (externalId). Se não existir localmente (raro), apenas ignora.
+        if (parsed.reactionTarget) {
+          try {
+            await applyIncomingReaction({
+              targetWaMessageId: parsed.reactionTarget.targetWaMessageId,
+              emoji: parsed.reactionTarget.emoji,
+              fromWaId: from || fromUserId || "",
+              at: parsed.timestamp,
+            });
+          } catch (err) {
+            log.warn(
+              `Falha ao aplicar reação (wamid=${parsed.reactionTarget.targetWaMessageId}): ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
           continue;
         }
 
@@ -1923,6 +2103,14 @@ async function executePostBody(
                   ? "interactive"
                   : "text";
 
+          // Resolve o alvo da citação (reply) ANTES da transação — evita
+          // manter a tx aberta pra query custosa e permite fallback silencioso
+          // quando o alvo não existe no CRM (ex.: cliente respondeu uma
+          // mensagem enviada por outro canal ou anterior à integração).
+          const replyLink = parsed.replyToWaMessageId
+            ? await resolveReplyContext(parsed.replyToWaMessageId)
+            : null;
+
           const msgCreated = await prisma.$transaction(async (tx) => {
               const existing = await tx.message.findFirst({
               where: { externalId: parsed.waMessageId },
@@ -1941,6 +2129,12 @@ async function executePostBody(
                 senderName: isSystemMessage ? "WhatsApp" : (profileName || contact.name),
                 mediaUrl,
                 createdAt: parsed.timestamp,
+                ...(replyLink
+                  ? {
+                      replyToId: replyLink.messageId,
+                      replyToPreview: replyLink.preview,
+                    }
+                  : {}),
               }),
             });
           });

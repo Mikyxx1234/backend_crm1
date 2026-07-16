@@ -25,7 +25,16 @@ type RouteContext = { params: Promise<{ id: string }> };
 
 // ── DTO ──────────────────────────────────────
 
-export type ReactionDto = { emoji: string; senderName: string };
+/**
+ * Entrada individual do JSON `Message.reactions`. Formato gravado pelo
+ * webhook Meta em `applyIncomingReaction` (lib/meta-webhook/handler.ts):
+ * um item por reator (WhatsApp permite 1 reação por pessoa em canais 1:1).
+ *
+ *   emoji: emoji cru (💚, 👍, …)
+ *   from:  wa_id / BSUID de quem reagiu (contato)
+ *   at:    ISO timestamp da reação mais recente
+ */
+export type ReactionDto = { emoji: string; from: string; at?: string };
 
 export type InboxMessageDto = {
   id: number | string;
@@ -72,6 +81,10 @@ export type InboxMessageDto = {
    * (o frontend trata como "herda a conexão anterior", sem marcador).
    */
   channelId?: string | null;
+  /** Mensagem favoritada pelo agente LOGADO (marcador pessoal — não é
+   *  compartilhado entre agentes). Alimenta a estrela preenchida no
+   *  menu contextual e no bubble. */
+  favoritedByMe?: boolean;
 };
 
 /** Resumo de uma conexão (Channel) para exibir o canal na UI do inbox/contato. */
@@ -119,13 +132,37 @@ export async function GET(request: Request, context: RouteContext) {
     }
 
     let pinnedNoteId: string | null = null;
+    // Fixadas da conversa (banner estilo WhatsApp) — várias mensagens,
+    // resolvidas para o id de bolha (`externalId ?? id`) que o frontend usa.
+    let pinnedMessageIds: string[] = [];
     try {
       const convFull = await prisma.conversation.findUnique({
         where: { id: conv.id },
         select: { pinnedNoteId: true },
       });
       pinnedNoteId = convFull?.pinnedNoteId ?? null;
-    } catch { /* column may not exist */ }
+
+      const pins = await prisma.pinnedMessage.findMany({
+        where: { conversationId: conv.id },
+        orderBy: { createdAt: "asc" },
+        select: {
+          id: true,
+          expiresAt: true,
+          message: { select: { id: true, externalId: true } },
+        },
+      });
+
+      // Prazo vencido (24h/7d/30d) — desafixa sozinho na 1ª leitura pós-prazo,
+      // sem cron dedicado. Remove as vencidas e mantém as válidas.
+      const now = new Date();
+      const expiredIds = pins.filter((p) => p.expiresAt && p.expiresAt < now).map((p) => p.id);
+      if (expiredIds.length > 0) {
+        await prisma.pinnedMessage.deleteMany({ where: { id: { in: expiredIds } } });
+      }
+      pinnedMessageIds = pins
+        .filter((p) => !(p.expiresAt && p.expiresAt < now))
+        .map((p) => p.message.externalId ?? p.message.id);
+    } catch { /* tabela pode não existir ainda em ambientes antigos */ }
 
     const lastInMsg = await prisma.message.findFirst({
       where: { conversationId: conv.id, direction: "in" },
@@ -184,6 +221,21 @@ export async function GET(request: Request, context: RouteContext) {
       ),
     );
 
+    // Favoritos do agente LOGADO nesta página de mensagens — uma query
+    // agregada (IN) em vez de N+1. Escopo por userId: cada agente só vê
+    // as próprias marcações.
+    const favoritedIds = new Set<string>();
+    try {
+      const favRows = await prisma.favoriteMessage.findMany({
+        where: {
+          userId: (authResult.user as { id: string }).id,
+          messageId: { in: rows.map((r) => r.id) },
+        },
+        select: { messageId: true },
+      });
+      for (const f of favRows) favoritedIds.add(f.messageId);
+    } catch { /* tabela pode nao existir ainda em ambientes antigos */ }
+
     const senderAvatarMap = new Map<string, string | null>();
     if (outSenderNames.length > 0) {
       // Match cross-org seria leak (avatar de agente de outra org com mesmo
@@ -223,6 +275,7 @@ export async function GET(request: Request, context: RouteContext) {
       sendError: r.sendError ?? undefined,
       status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
       channelId: r.channelId ?? null,
+      favoritedByMe: favoritedIds.has(r.id) || undefined,
     }));
 
     // Mapa de conexões referenciadas (canais das mensagens + canal atual da
@@ -266,6 +319,7 @@ export async function GET(request: Request, context: RouteContext) {
     return NextResponse.json({
       messages,
       pinnedNoteId,
+      pinnedMessageIds,
       channelProvider: conv.channelRef?.provider ?? null,
       channel: currentChannel,
       channels: channelsMap,

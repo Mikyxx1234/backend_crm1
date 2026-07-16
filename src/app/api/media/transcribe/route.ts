@@ -3,6 +3,7 @@ import path from "path";
 
 import { auth } from "@/lib/auth";
 import { convertToMp3, guessInputExt } from "@/lib/audio-convert";
+import { isAllowedMetaMediaUrl } from "@/lib/meta-media-url";
 
 /**
  * Transcrição de áudio — Groq Whisper como provedor PRIMÁRIO.
@@ -42,17 +43,6 @@ import { convertToMp3, guessInputExt } from "@/lib/audio-convert";
  *   5) Retorna `{ text, model, provider }` ou erro amigável.
  */
 
-const META_DOMAINS = ["lookaside.fbsbx.com", "scontent.whatsapp.net", "graph.facebook.com"];
-
-function isMetaUrl(url: string): boolean {
-  try {
-    const host = new URL(url).hostname;
-    return META_DOMAINS.some((d) => host.endsWith(d));
-  } catch {
-    return false;
-  }
-}
-
 async function fetchAudioBuffer(
   rawUrl: string,
   request: Request,
@@ -63,7 +53,7 @@ async function fetchAudioBuffer(
   // resolvidos via fetch HTTP com cookies de sessão pra que o
   // middleware/gateway aplique auth + checagem de tenant. NÃO ler do
   // FS direto — bypassaria a validação multi-tenant.
-  if (isMetaUrl(decoded)) {
+  if (isAllowedMetaMediaUrl(decoded)) {
     const token = process.env.META_WHATSAPP_ACCESS_TOKEN?.trim();
     if (!token) throw new Error("Token Meta não configurado.");
     const res = await fetch(decoded, {

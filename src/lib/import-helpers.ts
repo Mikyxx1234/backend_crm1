@@ -1,5 +1,44 @@
 import { parseCsv, type CsvDelimiter, detectDelimiter } from "@/lib/csv-parse";
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrThrow } from "@/lib/request-context";
+
+/**
+ * Lookups case-insensitive por e-mail/nome que USAM os índices funcionais
+ * `lower(email)` / `lower(name)` (ver prisma/manual/20260716_import_perf_indexes.sql).
+ *
+ * Por que raw: o Prisma `mode: "insensitive"` gera `ILIKE`, que NÃO aproveita
+ * um btree em `lower(col)`. Comparando `lower(col) = lower($1)` explicitamente,
+ * o planner passa a usar o índice funcional — decisivo nos lookups por linha
+ * do import (60k+), que antes viravam varredura sequencial na tabela
+ * compartilhada entre tenants.
+ *
+ * Escopo multi-tenant: filtra `organizationId` explícito (raw não passa pela
+ * extension do Prisma). Roda dentro de RequestContext (rota) ou
+ * withSystemContext (worker), ambos populando `getOrgIdOrThrow()`.
+ */
+export async function findContactIdByEmailCI(email: string): Promise<string | null> {
+  const trimmed = email.trim();
+  if (!trimmed) return null;
+  const orgId = getOrgIdOrThrow();
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM contacts
+    WHERE "organizationId" = ${orgId} AND lower(email) = lower(${trimmed})
+    ORDER BY "createdAt" DESC
+    LIMIT 1
+  `;
+  return rows[0]?.id ?? null;
+}
+
+export async function findUserIdByEmailCI(email: string): Promise<string | null> {
+  const trimmed = email.trim();
+  if (!trimmed) return null;
+  const rows = await prisma.$queryRaw<{ id: string }[]>`
+    SELECT id FROM users
+    WHERE lower(email) = lower(${trimmed})
+    LIMIT 1
+  `;
+  return rows[0]?.id ?? null;
+}
 
 /**
  * Lê o conteúdo de um arquivo enviado via multipart e devolve headers + rows.

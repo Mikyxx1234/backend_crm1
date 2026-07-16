@@ -182,31 +182,11 @@ export type ContactImportPayload = {
 };
 
 /**
- * Payload do job `deal-import` (fila `import-etl`). Mesma convenção do
- * contact-import: o arquivo (headers já canônicos, remapeados pelo wizard do
- * frontend) fica no bucket `imports` + embutido em base64 no BulkOperation.
- * O worker processa em LOTE (createMany) para suportar bases grandes.
+ * Payload do import de NEGÓCIOS (job `deal-import` da fila `import-etl`).
+ * Mesma forma do ContactImportPayload — reutilizado para não duplicar o
+ * shape (arquivo no storage/base64 + flags de parsing/upsert + tag opcional).
  */
-export type DealImportPayload = {
-  operationId: string;
-  organizationId: string;
-  initiatedByUserId: string | null;
-  fileName: string;
-  originalName: string;
-  delimiter?: "," | ";" | "\t";
-  /**
-   * Modo de importação:
-   *   - "create": só cria negócios novos; existentes (mesmo external_id) são ignorados.
-   *   - "update": só atualiza existentes; linhas sem correspondência são ignoradas.
-   *   - "upsert": cria ou atualiza (comportamento legado).
-   */
-  importMode: "create" | "update" | "upsert";
-  /** Tag opcional aplicada a todos os negócios importados. */
-  tagName?: string;
-};
-
-/** União dos payloads aceitos pela fila `import-etl`. */
-export type ImportEtlPayload = ContactImportPayload | DealImportPayload;
+export type DealImportPayload = ContactImportPayload;
 
 const redisUrl = process.env.REDIS_URL;
 
@@ -218,7 +198,7 @@ const globalForQueue = globalThis as unknown as {
   campaignDispatchQueue?: Queue<CampaignDispatchPayload>;
   campaignSendQueue?: Queue<CampaignSendPayload>;
   leadsBulkQueue?: Queue<LeadsBulkPayload>;
-  importEtlQueue?: Queue<ImportEtlPayload>;
+  importEtlQueue?: Queue<ContactImportPayload>;
 };
 
 function getQueueRedis(): IORedis | null {
@@ -446,11 +426,11 @@ export async function enqueueLeadsBulk<P extends LeadsBulkPayload>(
 
 // ── Import ETL queue ─────────────────────────────────────
 
-function getImportEtlQueue(): Queue<ImportEtlPayload> | null {
+function getImportEtlQueue(): Queue<ContactImportPayload> | null {
   const redis = getQueueRedis();
   if (!redis) return null;
   if (!globalForQueue.importEtlQueue) {
-    globalForQueue.importEtlQueue = new Queue<ImportEtlPayload>(
+    globalForQueue.importEtlQueue = new Queue<ContactImportPayload>(
       IMPORT_ETL_QUEUE_NAME,
       { connection: redis },
     );
@@ -470,7 +450,7 @@ function getImportEtlQueue(): Queue<ImportEtlPayload> | null {
  */
 export async function enqueueImportEtl(
   jobName: ImportEtlJobName,
-  payload: ImportEtlPayload,
+  payload: ContactImportPayload,
   overrides?: JobsOptions,
 ) {
   const queue = getImportEtlQueue();

@@ -1,4 +1,4 @@
-import type { Prisma } from "@prisma/client";
+import { Prisma } from "@prisma/client";
 
 import { invalidateAuthzForOrg } from "@/lib/authz";
 import { sanitizePermissions } from "@/lib/authz/permissions";
@@ -8,6 +8,10 @@ import {
 } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import {
+  normalizeSidebar,
+  type SidebarItemPreference,
+} from "@/services/user-preferences";
 
 const roleListSelect = {
   id: true,
@@ -17,6 +21,7 @@ const roleListSelect = {
   isSystem: true,
   permissions: true,
   inheritsFrom: true,
+  sidebarItems: true,
   _count: { select: { assignments: true } },
 } satisfies Prisma.RoleSelect;
 
@@ -33,6 +38,16 @@ const roleDetailSelect = {
   },
 } satisfies Prisma.RoleSelect;
 
+function extractSidebarItems(raw: unknown): SidebarItemPreference[] | null {
+  if (!raw) return null;
+  const items = Array.isArray(raw)
+    ? raw
+    : Array.isArray((raw as { items?: unknown }).items)
+      ? (raw as { items: SidebarItemPreference[] }).items
+      : null;
+  return items as SidebarItemPreference[] | null;
+}
+
 function mapRoleList(
   row: Prisma.RoleGetPayload<{ select: typeof roleListSelect }>,
 ) {
@@ -44,6 +59,8 @@ function mapRoleList(
     isSystem: row.isSystem,
     permissions: row.permissions,
     inheritsFrom: row.inheritsFrom,
+    // `null` = papel usa o catalogo padrao (sem override).
+    sidebarItems: extractSidebarItems(row.sidebarItems),
     _count: {
       assignments: row._count.assignments,
       groups: 0,
@@ -119,6 +136,7 @@ export async function createRole(input: {
   description?: string | null;
   permissions: string[];
   inheritsFrom?: string | null;
+  sidebarItems?: SidebarItemPreference[] | null;
 }) {
   const orgId = getOrgIdOrThrow();
   const name = input.name.trim();
@@ -126,6 +144,20 @@ export async function createRole(input: {
 
   const permissions = sanitizePermissions(input.permissions);
   const inheritsFrom = await resolveInheritsFrom(orgId, input.inheritsFrom);
+
+  // sidebarItems: undefined => nao salva override (usa catalogo padrao).
+  // null explicito ou array vazio => tambem trata como "sem override"
+  // (semantica igual ao delete). Array com items => normaliza + salva.
+  let sidebarJson: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined;
+  if (input.sidebarItems === undefined) {
+    sidebarJson = undefined;
+  } else if (input.sidebarItems === null || input.sidebarItems.length === 0) {
+    sidebarJson = Prisma.JsonNull;
+  } else {
+    const normalized = normalizeSidebar(input.sidebarItems);
+    sidebarJson = normalized as unknown as Prisma.InputJsonValue;
+  }
+
   const role = await prisma.role.create({
     data: {
       organizationId: orgId,
@@ -135,6 +167,7 @@ export async function createRole(input: {
       inheritsFrom: inheritsFrom ?? null,
       isSystem: false,
       systemPreset: null,
+      ...(sidebarJson !== undefined ? { sidebarItems: sidebarJson } : {}),
     },
     select: roleDetailSelect,
   });
@@ -148,6 +181,7 @@ export async function updateRole(
     description?: string | null;
     permissions?: string[];
     inheritsFrom?: string | null;
+    sidebarItems?: SidebarItemPreference[] | null;
   },
 ) {
   const orgId = getOrgIdOrThrow();
@@ -187,6 +221,18 @@ export async function updateRole(
       throw new Error("O role precisa ter ao menos uma permissão.");
     }
     data.permissions = permissions;
+  }
+
+  // sidebarItems editavel em qualquer papel (inclusive presets do sistema)
+  // — as permissoes de conteudo dele sao imutaveis, mas o "menu lateral"
+  // dos usuarios daquele papel e' operacional. null/vazio == remove override.
+  if (input.sidebarItems !== undefined) {
+    if (input.sidebarItems === null || input.sidebarItems.length === 0) {
+      data.sidebarItems = Prisma.JsonNull;
+    } else {
+      const normalized = normalizeSidebar(input.sidebarItems);
+      data.sidebarItems = normalized as unknown as Prisma.InputJsonValue;
+    }
   }
 
   const role = await prisma.role.update({

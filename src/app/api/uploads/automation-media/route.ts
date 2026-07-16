@@ -1,19 +1,33 @@
 import { NextResponse } from "next/server";
-import path from "path";
 
 import { auth } from "@/lib/auth";
+import {
+  extForMime,
+  sniffAudioMime,
+  sniffDocMime,
+  sniffImageMime,
+  sniffVideoMime,
+  type SniffedMime,
+} from "@/lib/file-sniff";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 
 const MAX_FILE_SIZE = 16 * 1024 * 1024;
-const ALLOWED_PREFIXES = [
-  "image/",
-  "video/",
-  "audio/",
-  "application/pdf",
-  "application/msword",
-  "application/vnd.openxmlformats-officedocument",
-  "application/octet-stream",
-];
+
+// Defesa em profundidade: em vez de aceitar o Content-Type do cliente
+// (facilmente falsificável), inspeciona os magic bytes do arquivo.
+// SVG, HTML, docs Office e binários arbitrários caem em `null` e são
+// rejeitados aqui — o storage já serve o MIME derivado da extensão
+// (ver storage/local.ts `mimeFromFilename`) então também eliminamos
+// qualquer discrepância entre `Content-Type` armazenado e o real.
+function sniffMime(buf: Buffer): SniffedMime | null {
+  return (
+    sniffImageMime(buf) ??
+    sniffVideoMime(buf) ??
+    sniffAudioMime(buf) ??
+    sniffDocMime(buf) ??
+    null
+  );
+}
 
 export async function POST(request: Request) {
   try {
@@ -23,8 +37,6 @@ export async function POST(request: Request) {
     }
     const orgId = (session.user as { organizationId?: string | null }).organizationId ?? null;
     if (!orgId) {
-      // Super-admin sem org assumida ainda. Mídia de automação tem que
-      // ficar em algum tenant — exigimos org definida.
       return NextResponse.json(
         { message: "Selecione uma organização antes de subir mídia." },
         { status: 400 },
@@ -57,21 +69,23 @@ export async function POST(request: Request) {
       );
     }
 
-    const mime = file.type || "application/octet-stream";
-    if (!ALLOWED_PREFIXES.some((p) => mime.startsWith(p))) {
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const sniffed = sniffMime(buffer);
+    if (!sniffed) {
       return NextResponse.json(
-        { message: `Tipo de arquivo não permitido: ${mime}` },
+        {
+          message:
+            "Tipo de arquivo não permitido. Aceito: imagem (JPG/PNG/WEBP/GIF), vídeo (MP4/WEBM/MOV), áudio (MP3/M4A/OGG/WEBM/WAV) ou PDF.",
+        },
         { status: 415 },
       );
     }
 
+    const mime = sniffed;
+    const ext = extForMime(sniffed);
     const origName = (file as { name?: string }).name ?? "file";
-    const ext = (path.extname(origName) || mimeToExt(mime)).replace(/^\./, "");
     const safeName = generateFileName({ prefix: "auto", ext });
 
-    const buffer = Buffer.from(await file.arrayBuffer());
-
-    // PR 1.3: storage tenant-scoped (antes: `public/uploads/<file>` shared).
     const saved = await saveFile({
       orgId,
       bucket: "automation-media",
@@ -86,18 +100,4 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
-}
-
-function mimeToExt(mime: string): string {
-  if (mime.startsWith("image/jpeg")) return ".jpg";
-  if (mime.startsWith("image/png")) return ".png";
-  if (mime.startsWith("image/webp")) return ".webp";
-  if (mime.startsWith("image/gif")) return ".gif";
-  if (mime.startsWith("video/mp4")) return ".mp4";
-  if (mime.startsWith("video/webm")) return ".webm";
-  if (mime.startsWith("audio/ogg")) return ".ogg";
-  if (mime.startsWith("audio/mpeg")) return ".mp3";
-  if (mime.startsWith("audio/mp4")) return ".m4a";
-  if (mime.startsWith("application/pdf")) return ".pdf";
-  return ".bin";
 }

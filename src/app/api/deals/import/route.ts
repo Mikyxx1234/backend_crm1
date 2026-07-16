@@ -2,15 +2,10 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
-import {
-  resolveImportModeFlags,
-  validateDealImportHeaders,
-  type DealImportMode,
-} from "@/lib/deal-import-core";
-import { assertImportPermission } from "@/lib/import-guard";
+import { assertImportPermission, assertNoActiveImport } from "@/lib/import-guard";
+import { validateDealImportHeaders } from "@/lib/deal-import-core";
 import {
   readDelimiterFlag,
-  readImportModeFlag,
   readTagFlag,
   readUpdateExistingFlag,
   readUploadedTable,
@@ -21,19 +16,20 @@ import { enterRequestContext } from "@/lib/request-context";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 
 /**
- * Importação de NEGÓCIOS (deals) — fluxo ASSÍNCRONO (ETL worker).
+ * Importação de NEGÓCIOS — fluxo ASSÍNCRONO (etl-worker), T3/M1.
  *
- * Antes esta rota processava o arquivo inteiro de forma síncrona dentro do
- * request HTTP — com bases grandes (10k+ linhas) e DB remoto isso estourava o
- * timeout do proxy (~30s). Agora, igual à importação de contatos:
+ * Antes esta rota processava o arquivo inteiro de forma SÍNCRONA dentro do
+ * request HTTP, ocupando um worker Node da API (compartilhado com os demais
+ * tenants) por vários minutos em cargas grandes. Agora, igual ao import de
+ * contatos:
  *   1. valida permissão + parseia para validar cabeçalho e contar linhas;
- *   2. salva o arquivo no bucket `imports` do storage compartilhado + embute
- *      o conteúdo em base64 no BulkOperation (worker lê do próprio banco);
- *   3. cria um `BulkOperation` DEAL_IMPORT PENDING (fonte da verdade do progresso);
- *   4. enfileira o job `deal-import` e responde 202 { operationId };
- *   5. o etl-worker processa em LOTE (createMany), suportando bases grandes.
+ *   2. salva o arquivo no bucket `imports` do storage compartilhado;
+ *   3. cria um `BulkOperation` PENDING (fonte da verdade do progresso);
+ *   4. enfileira o job `deal-import` na fila `import-etl` e responde 202;
+ *   5. o etl-worker (processo/pool separado) processa em chunks.
  *
- * O frontend acompanha via GET /api/bulk-operations/[id] (barra de progresso).
+ * O frontend acompanha via GET /api/bulk-operations/[id] (o ImportPanel já
+ * trata 202 { operationId } genericamente para os dois endpoints).
  */
 export async function POST(request: Request) {
   try {
@@ -71,6 +67,10 @@ export async function POST(request: Request) {
     const organizationId = session.user.organizationId;
     const userId = session.user.id;
 
+    // M6 — 1 import ativo por org por vez.
+    const activeDenied = await assertNoActiveImport();
+    if (activeDenied) return activeDenied;
+
     const formData = await request.formData();
     const file = formData.get("file");
 
@@ -85,25 +85,15 @@ export async function POST(request: Request) {
     const updateExisting = readUpdateExistingFlag(formData);
     const tagName = readTagFlag(formData);
 
-    // Modo efetivo: quando o cliente não envia `importMode`, deriva do flag
-    // legado `updateExisting` (updateExisting=true → upsert; false → só criar).
-    const rawMode = readImportModeFlag(formData);
-    const importMode: DealImportMode = rawMode ?? (updateExisting ? "upsert" : "create");
-    const { allowCreate } = resolveImportModeFlags(importMode, updateExisting);
-
-    // Parseia uma vez para validar o cabeçalho e contar linhas (total do
-    // BulkOperation). O worker re-parseia o arquivo salvo.
+    // Parseia uma vez para validar cabeçalho e contar as linhas (total do
+    // BulkOperation). O worker re-parseia o arquivo salvo no storage.
     const { headers, rows } = await readUploadedTable(file, delimiter);
-
-    const headerError = validateDealImportHeaders(headers, allowCreate);
+    const headerError = validateDealImportHeaders(headers);
     if (headerError) {
       return NextResponse.json({ message: headerError }, { status: 400 });
     }
     if (rows.length === 0) {
-      return NextResponse.json(
-        { message: "Arquivo sem linhas de dados." },
-        { status: 400 },
-      );
+      return NextResponse.json({ message: "Arquivo sem linhas de dados." }, { status: 400 });
     }
 
     const ext = file.name.toLowerCase().endsWith(".xlsx")
@@ -125,7 +115,7 @@ export async function POST(request: Request) {
         payload: {
           fileName,
           originalName: file.name,
-          importMode,
+          updateExisting,
           fileContentB64: buffer.toString("base64"),
           ...(delimiter ? { delimiter } : {}),
           ...(tagName ? { tagName } : {}),
@@ -142,7 +132,7 @@ export async function POST(request: Request) {
       fileName,
       originalName: file.name,
       delimiter,
-      importMode,
+      updateExisting,
       tagName,
     });
 
@@ -169,11 +159,7 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json(
-      {
-        message: "Importação enfileirada.",
-        operationId: operation.id,
-        total: rows.length,
-      },
+      { message: "Importação enfileirada.", operationId: operation.id, total: rows.length },
       { status: 202 },
     );
   } catch (e) {

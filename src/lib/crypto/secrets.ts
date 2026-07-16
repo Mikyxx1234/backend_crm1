@@ -27,21 +27,38 @@ const PREFIX_V1 = "enc:v1:";
 let cachedKey: Buffer | null = null;
 
 /**
- * Carrega a chave de encriptacao da env `KEYRING_SECRET`.
+ * Carrega a chave de encriptacao. Aceita `KEYRING_SECRET` (canonico) ou
+ * `ENCRYPTION_KEY` (alias documentado historicamente em `.env.example`)
+ * — o .env.example antigo divergia do nome usado no codigo, o que abria
+ * a possibilidade de rodar em producao sem chave e gravar plaintext.
+ *
  * Espera 32 bytes em base64 padrao (44 chars).
  *
- * Em desenvolvimento, se a env nao estiver setada, retorna `null` para que
- * o app continue funcionando em plaintext (back-compat). Em producao,
- * `KEYRING_SECRET` e obrigatoria — NAO setar e crash deliberado.
+ * Politica fail-closed: fora de dev local, a chave e OBRIGATORIA. Se
+ * ausente, o processo aborta em vez de silenciosamente cair em
+ * plaintext. Em dev local (`NODE_ENV=development`, sem CI/STAGING), a
+ * ausencia da chave apenas emite warning para nao travar setup inicial.
  */
 function getKey(): Buffer | null {
   if (cachedKey) return cachedKey;
 
-  const raw = process.env.KEYRING_SECRET?.trim();
+  const raw =
+    process.env.KEYRING_SECRET?.trim() || process.env.ENCRYPTION_KEY?.trim();
+  const source = process.env.KEYRING_SECRET?.trim()
+    ? "KEYRING_SECRET"
+    : "ENCRYPTION_KEY";
+
+  const nodeEnv = process.env.NODE_ENV;
+  const isRealEnv =
+    nodeEnv === "production" ||
+    nodeEnv === "staging" ||
+    !!process.env.CI ||
+    !!process.env.CI_STAGING;
+
   if (!raw) {
-    if (process.env.NODE_ENV === "production") {
+    if (isRealEnv || nodeEnv !== "development") {
       throw new Error(
-        "KEYRING_SECRET nao configurado em producao. Gere com `openssl rand -base64 32` e injete no secrets manager.",
+        "KEYRING_SECRET (ou ENCRYPTION_KEY) nao configurado. Gere com `openssl rand -base64 32` e injete no secrets manager.",
       );
     }
     return null;
@@ -51,12 +68,12 @@ function getKey(): Buffer | null {
   try {
     buf = Buffer.from(raw, "base64");
   } catch {
-    throw new Error("KEYRING_SECRET nao e base64 valido.");
+    throw new Error(`${source} nao e base64 valido.`);
   }
 
   if (buf.length !== KEY_LENGTH_BYTES) {
     throw new Error(
-      `KEYRING_SECRET tem ${buf.length} bytes apos decodificar; esperado ${KEY_LENGTH_BYTES}. Use \`openssl rand -base64 ${KEY_LENGTH_BYTES}\`.`,
+      `${source} tem ${buf.length} bytes apos decodificar; esperado ${KEY_LENGTH_BYTES}. Use \`openssl rand -base64 ${KEY_LENGTH_BYTES}\`.`,
     );
   }
 

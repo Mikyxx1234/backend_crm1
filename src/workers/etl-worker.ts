@@ -10,13 +10,11 @@ import {
   IMPORT_ETL_JOB_NAMES,
   IMPORT_ETL_QUEUE_NAME,
   type ContactImportPayload,
-  type DealImportPayload,
-  type ImportEtlPayload,
 } from "@/lib/queue";
 import { withSystemContext } from "@/lib/webhook-context";
 
 import { processContactImport } from "@/jobs/import/contact-import.job";
-import { processDealImport } from "@/jobs/import/deal-import.job";
+import { processDealsImport } from "@/jobs/import/deals-import.job";
 import {
   markOperationFailed,
   truncateErrorMessage,
@@ -44,7 +42,7 @@ function envInt(name: string, defaultValue: number): number {
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : defaultValue;
 }
 
-async function router(job: Job<ImportEtlPayload>): Promise<void> {
+async function router(job: Job<ContactImportPayload>): Promise<void> {
   const { operationId, organizationId } = job.data;
   const jobCtx = log.child({
     operationId,
@@ -93,13 +91,13 @@ async function router(job: Job<ImportEtlPayload>): Promise<void> {
   await withSystemContext(organizationId, () => dispatch(job));
 }
 
-async function dispatch(job: Job<ImportEtlPayload>): Promise<void> {
+async function dispatch(job: Job<ContactImportPayload>): Promise<void> {
   switch (job.name) {
     case IMPORT_ETL_JOB_NAMES.contactImport:
-      await processContactImport(job.data as ContactImportPayload, job as Job<ContactImportPayload>);
+      await processContactImport(job.data, job);
       return;
     case IMPORT_ETL_JOB_NAMES.dealImport:
-      await processDealImport(job.data as DealImportPayload, job as Job<DealImportPayload>);
+      await processDealsImport(job.data, job);
       return;
     default: {
       const { operationId, organizationId } = job.data;
@@ -114,11 +112,14 @@ async function dispatch(job: Job<ImportEtlPayload>): Promise<void> {
 }
 
 export function startEtlWorker() {
-  const concurrency = envInt("IMPORT_ETL_CONCURRENCY", 2);
+  // Default 1 (era 2): com o Postgres compartilhado entre tenants, manter o
+  // ETL de import serializado por processo reduz a pressão simultânea. Ajuste
+  // via IMPORT_ETL_CONCURRENCY se o worker tiver pool/DB dedicados.
+  const concurrency = envInt("IMPORT_ETL_CONCURRENCY", 1);
   const connection = duplicateBullConnection();
   getBullConnection();
 
-  const worker = new Worker<ImportEtlPayload>(
+  const worker = new Worker<ContactImportPayload>(
     IMPORT_ETL_QUEUE_NAME,
     router,
     { connection, concurrency },
