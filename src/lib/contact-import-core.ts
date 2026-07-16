@@ -7,7 +7,11 @@
  * `withSystemContext(organizationId)`.
  */
 
-import { attachTagToContact } from "@/lib/import-helpers";
+import {
+  attachTagToContact,
+  findContactIdByEmailCI,
+  findUserIdByEmailCI,
+} from "@/lib/import-helpers";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import {
@@ -205,12 +209,8 @@ async function resolveAssignedToId(
     row.owner_email?.trim() ||
     row.owneremail?.trim();
   if (!emailRaw) return undefined;
-  const email = emailRaw.toLowerCase();
-  const u = await prisma.user.findFirst({
-    where: { email: { equals: email, mode: "insensitive" } },
-    select: { id: true },
-  });
-  return u?.id;
+  // Usa lower(email) via índice funcional (idx_users_lower_email).
+  return (await findUserIdByEmailCI(emailRaw)) ?? undefined;
 }
 
 type UpsertTarget =
@@ -268,15 +268,9 @@ async function resolveContactUpsert(
 
   const email = row.email?.trim();
   if (email) {
-    const orgId = getOrgIdOrThrow();
-    const c = await prisma.contact.findFirst({
-      where: {
-        organizationId: orgId,
-        email: { equals: email, mode: "insensitive" },
-      },
-      select: { id: true },
-    });
-    if (c) return { ok: true, target: { mode: "update", id: c.id } };
+    // Usa lower(email) via índice funcional (idx_contacts_org_lower_email).
+    const foundId = await findContactIdByEmailCI(email);
+    if (foundId) return { ok: true, target: { mode: "update", id: foundId } };
   }
 
   const phone = row.phone?.trim();
