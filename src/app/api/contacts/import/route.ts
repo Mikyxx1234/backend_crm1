@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
-import { assertImportPermission } from "@/lib/import-guard";
+import { assertImportPermission, assertNoActiveImport } from "@/lib/import-guard";
 import {
   readDelimiterFlag,
   readTagFlag,
@@ -52,6 +52,11 @@ export async function POST(request: Request) {
     }
     const organizationId = session.user.organizationId;
     const userId = session.user.id;
+
+    // M6 — 1 import ativo por org por vez (evita cargas concorrentes que
+    // multiplicam a pressão no Postgres compartilhado).
+    const activeDenied = await assertNoActiveImport();
+    if (activeDenied) return activeDenied;
 
     const formData = await request.formData();
     const file = formData.get("file");

@@ -28,6 +28,22 @@ const log = getLogger("worker.etl.contact-import");
 const CHUNK_SIZE = 50;
 
 /**
+ * M7 — pausa (ms) entre chunks para aliviar o Postgres compartilhado durante
+ * cargas em massa. Opt-in via `IMPORT_CHUNK_SLEEP_MS` (default 0 = sem pausa,
+ * preserva throughput histórico). Recomendado 50-100ms em prod multi-tenant.
+ */
+function chunkSleepMs(): number {
+  const raw = process.env.IMPORT_CHUNK_SLEEP_MS;
+  if (!raw) return 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
  * Handler do job `contact-import` da fila `import-etl`.
  *
  * Roda dentro de `withSystemContext(organizationId)` (configurado pelo
@@ -198,6 +214,8 @@ export async function processContactImport(
 
     if (chunkProcessed >= CHUNK_SIZE) {
       await flush();
+      const pause = chunkSleepMs();
+      if (pause > 0) await sleep(pause);
     }
   }
 
