@@ -110,6 +110,7 @@ model Organization {
   roleAssignments          UserRoleAssignment[]
   groups                   Group[]
   groupMembers             GroupMember[]
+  departmentMembers        DepartmentMember[]
   organizationSettings     OrganizationSetting[]
   savedFilters             SavedFilter[]
   organizationWidgets      OrganizationWidget[]
@@ -518,6 +519,7 @@ model User {
   dataRequests                   DataRequest[]
   roleAssignments                UserRoleAssignment[]
   groupMemberships               GroupMember[]
+  departmentMemberships          DepartmentMember[]
   savedFilters                   SavedFilter[]             @relation("UserSavedFilters")
   emailAccounts                  EmailAccount[]
   sipExtensions                  SipExtension[]
@@ -2824,9 +2826,31 @@ model Department {
 
   conversations    Conversation[]
   tabulations      Tabulation[]
+  members          DepartmentMember[]
 
   @@index([organizationId])
   @@map("departments")
+}
+
+/// Associacao N:N entre usuarios e departamentos (composicao do time).
+/// Vinculo puramente organizacional — NAO concede acesso ao inbox
+/// (isso continua em `AgentPermission.allowedDepartmentIds`). Serve de
+/// base para visibilidade de tarefas por departamento e afins.
+model DepartmentMember {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  departmentId   String
+  department     Department   @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+
+  @@unique([departmentId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@index([departmentId])
+  @@map("department_members")
 }
 
 // ──────────────────────────────────────────────

@@ -24,7 +24,12 @@ export async function GET() {
       const departments = await prisma.department.findMany({
         where: { organizationId: session.user.organizationId! },
         include: {
-          _count: { select: { conversations: { where: { status: "OPEN" } } } },
+          _count: {
+            select: {
+              conversations: { where: { status: "OPEN" } },
+              members: true,
+            },
+          },
         },
         orderBy: { name: "asc" },
       });
