@@ -20,9 +20,10 @@ export async function GET() {
     if (role !== "ADMIN" && role !== "MANAGER") {
       return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
+    const orgId = session.user.organizationId!;
     try {
       const departments = await prisma.department.findMany({
-        where: { organizationId: session.user.organizationId! },
+        where: { organizationId: orgId },
         include: {
           _count: {
             select: {
@@ -35,8 +36,23 @@ export async function GET() {
       });
       return NextResponse.json(departments);
     } catch {
-      // Table doesn't exist yet (migration pending) — return empty list.
-      return NextResponse.json([]);
+      // A contagem de `members` depende da tabela `department_members`
+      // (migração add_department_members). Se ela ainda não existe neste
+      // ambiente, NÃO escondemos todos os departamentos — reconsultamos
+      // sem o _count.members (só conversas), pra a tela continuar viva.
+      try {
+        const departments = await prisma.department.findMany({
+          where: { organizationId: orgId },
+          include: {
+            _count: { select: { conversations: { where: { status: "OPEN" } } } },
+          },
+          orderBy: { name: "asc" },
+        });
+        return NextResponse.json(departments);
+      } catch {
+        // Nem a tabela de departamentos existe ainda — lista vazia.
+        return NextResponse.json([]);
+      }
     }
   });
 }
