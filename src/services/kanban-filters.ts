@@ -361,6 +361,15 @@ export async function buildDealWhereFromFilters(
       { contact: { name: { contains: search, mode: "insensitive" } } },
       { contact: { email: { contains: search, mode: "insensitive" } } },
       { contact: { phone: { contains: search } } },
+      // Busca em QUALQUER valor de campo personalizado (RGM, CPF, matrícula,
+      // etc.) — tanto do negócio quanto do contato vinculado. Espelha o que a
+      // lista de contatos já faz (services/contacts.ts).
+      { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
+      {
+        contact: {
+          customFields: { some: { value: { contains: search, mode: "insensitive" } } },
+        },
+      },
     ];
 
     // Casa busca por telefone independente da formatação salva no banco.

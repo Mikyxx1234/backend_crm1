@@ -197,6 +197,15 @@ export async function getDeals(params: GetDealsParams = {}) {
         { title: { contains: search, mode: "insensitive" } },
         { contact: { name: { contains: search, mode: "insensitive" } } },
         { contact: { email: { contains: search, mode: "insensitive" } } },
+        { contact: { phone: { contains: search } } },
+        // Qualquer valor de campo personalizado (RGM, CPF, matrícula, ...),
+        // do negócio ou do contato vinculado.
+        { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
+        {
+          contact: {
+            customFields: { some: { value: { contains: search, mode: "insensitive" } } },
+          },
+        },
       ],
     });
   }
