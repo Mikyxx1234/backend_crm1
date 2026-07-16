@@ -3984,6 +3984,8 @@ enum BulkOperationType {
   DEAL_BULK_DELETE
   /// Importação de contatos via arquivo (CSV/XLSX) processada pelo etl-worker.
   CONTACT_IMPORT
+  /// Importação de negócios via arquivo (CSV/XLSX) processada pelo etl-worker.
+  DEAL_IMPORT
 }
 
 enum BulkOperationStatus {
