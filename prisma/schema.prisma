@@ -2256,8 +2256,13 @@ model Activity {
   contact   Contact? @relation(fields: [contactId], references: [id])
   dealId    String?
   deal      Deal?    @relation(fields: [dealId], references: [id])
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
+  // Responsável: usuário específico OU um departamento (tarefa
+  // compartilhada — todos os membros do depto veem/concluem). Pelo menos
+  // um dos dois costuma estar preenchido; ambos podem coexistir.
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2265,6 +2270,7 @@ model Activity {
   @@index([organizationId])
   @@index([organizationId, scheduledAt])
   @@index([organizationId, userId])
+  @@index([organizationId, departmentId])
   @@index([organizationId, completed, scheduledAt])
   @@index([contactId])
   @@index([dealId])
@@ -2827,6 +2833,7 @@ model Department {
   conversations    Conversation[]
   tabulations      Tabulation[]
   members          DepartmentMember[]
+  activities       Activity[]
 
   @@index([organizationId])
   @@map("departments")

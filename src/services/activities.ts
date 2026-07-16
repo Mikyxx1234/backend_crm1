@@ -2,6 +2,7 @@ import type { ActivityType, Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getRequestContext } from "@/lib/request-context";
 
 const ACTIVITY_TYPES: ActivityType[] = [
   "CALL",
@@ -21,14 +22,21 @@ export type GetActivitiesParams = {
   dealId?: string;
   contactId?: string;
   userId?: string;
+  departmentId?: string;
   type?: ActivityType;
   completed?: boolean;
   page?: number;
   perPage?: number;
+  /**
+   * Filtro extra de visibilidade (por departamento/dono), combinado via
+   * AND com os demais. Vem de `getTaskVisibility()`.
+   */
+  viewerWhere?: Prisma.ActivityWhereInput;
 };
 
 const listInclude = {
   user: { select: { id: true, name: true, email: true, avatarUrl: true } },
+  department: { select: { id: true, name: true, color: true, icon: true } },
   contact: { select: { id: true, name: true, email: true } },
   deal: { select: { id: true, title: true, stageId: true } },
 } satisfies Prisma.ActivityInclude;
@@ -50,8 +58,12 @@ export async function getActivities(params: GetActivitiesParams = {}) {
   if (params.dealId) where.dealId = params.dealId;
   if (params.contactId) where.contactId = params.contactId;
   if (params.userId) where.userId = params.userId;
+  if (params.departmentId) where.departmentId = params.departmentId;
   if (params.type) where.type = params.type;
   if (params.completed !== undefined) where.completed = params.completed;
+  if (params.viewerWhere && Object.keys(params.viewerWhere).length > 0) {
+    where.AND = [params.viewerWhere];
+  }
 
   const [items, total] = await Promise.all([
     prisma.activity.findMany({
@@ -76,12 +88,40 @@ export type CreateActivityInput = {
   completedAt?: Date | string | null;
   contactId?: string | null;
   dealId?: string | null;
-  userId: string;
+  /** Responsável usuário (opcional se atribuída a departamento). */
+  userId?: string | null;
+  /** Responsável departamento (tarefa compartilhada). */
+  departmentId?: string | null;
 };
+
+/**
+ * Garante que o departamento pertence à org atual. `Department` NÃO é um
+ * model auto-escopado pela extension, então filtramos por organizationId
+ * explicitamente (evita atribuir tarefa a departamento de outra org).
+ */
+async function assertDepartmentInOrg(departmentId: string): Promise<boolean> {
+  const orgId = getRequestContext()?.organizationId ?? undefined;
+  const dept = await prisma.department.findFirst({
+    where: { id: departmentId, ...(orgId ? { organizationId: orgId } : {}) },
+    select: { id: true },
+  });
+  return !!dept;
+}
 
 export async function createActivity(data: CreateActivityInput) {
   const title = data.title.trim();
   if (!title) throw new Error("INVALID_TITLE");
+
+  const departmentId = data.departmentId ?? null;
+  if (departmentId && !(await assertDepartmentInOrg(departmentId))) {
+    throw new Error("INVALID_DEPARTMENT");
+  }
+
+  // Pelo menos um responsável: se nada informado, cai como não-atribuída
+  // (permitido — ex.: tarefa de departamento sem depto ainda seria raro).
+  if (!departmentId && (data.userId === null || data.userId === undefined)) {
+    throw new Error("MISSING_ASSIGNEE");
+  }
 
   return prisma.activity.create({
     data: withOrgFromCtx({
@@ -93,7 +133,8 @@ export async function createActivity(data: CreateActivityInput) {
       completedAt: data.completedAt === undefined ? undefined : data.completedAt,
       contactId: data.contactId === undefined ? undefined : data.contactId,
       dealId: data.dealId === undefined ? undefined : data.dealId,
-      userId: data.userId,
+      userId: data.userId ?? null,
+      departmentId,
     }),
     include: listInclude,
   });
@@ -108,6 +149,10 @@ export type UpdateActivityInput = {
   completedAt?: Date | string | null;
   contactId?: string | null;
   dealId?: string | null;
+  /** Reatribuir para outro usuário (ou null p/ liberar). */
+  userId?: string | null;
+  /** Reatribuir para um departamento (ou null p/ remover). */
+  departmentId?: string | null;
 };
 
 export async function updateActivity(id: string, data: UpdateActivityInput) {
@@ -129,6 +174,19 @@ export async function updateActivity(id: string, data: UpdateActivityInput) {
   }
   if (data.dealId !== undefined) {
     payload.deal = data.dealId === null ? { disconnect: true } : { connect: { id: data.dealId } };
+  }
+  if (data.userId !== undefined) {
+    payload.user =
+      data.userId === null ? { disconnect: true } : { connect: { id: data.userId } };
+  }
+  if (data.departmentId !== undefined) {
+    if (data.departmentId !== null && !(await assertDepartmentInOrg(data.departmentId))) {
+      throw new Error("INVALID_DEPARTMENT");
+    }
+    payload.department =
+      data.departmentId === null
+        ? { disconnect: true }
+        : { connect: { id: data.departmentId } };
   }
 
   if (Object.keys(payload).length === 0) {
