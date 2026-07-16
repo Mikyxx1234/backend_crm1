@@ -69,6 +69,9 @@ const listSelect = {
   updatedAt: true,
   createdAt: true,
   assignedToId: true,
+  departmentId: true,
+  department: { select: { id: true, name: true, requireTabulationOnClose: true } },
+  tabulationId: true,
   assignedTo: {
     select: { id: true, name: true, email: true, avatarUrl: true },
   },
@@ -524,7 +527,11 @@ export async function getConversationLite(id: string) {
   });
 }
 
-export async function updateConversationStatusInDb(id: string, status: ConversationStatus) {
+export async function updateConversationStatusInDb(
+  id: string,
+  status: ConversationStatus,
+  extra?: { tabulationId?: string | null },
+) {
   // closedAt: preencher quando encerra, limpar quando reabre. Fica em sync
   // com o status pra UI/relatorios sem consultar historico de eventos.
   // Outros valores (PENDING/SNOOZED) nao mexem em closedAt.
@@ -535,9 +542,18 @@ export async function updateConversationStatusInDb(id: string, status: Conversat
         ? { closedAt: null }
         : {};
 
+  // Reabrir (OPEN) limpa a tabulacao — coerente com "novo ciclo". O
+  // caller pode passar `tabulationId` explicito no encerramento, ou omitir.
+  const tabulationPatch: { tabulationId: string | null } | Record<string, never> =
+    status === "OPEN"
+      ? { tabulationId: null }
+      : extra && "tabulationId" in extra
+        ? { tabulationId: extra.tabulationId ?? null }
+        : {};
+
   return prisma.conversation.update({
     where: { id },
-    data: { status, ...closedAtPatch },
+    data: { status, ...closedAtPatch, ...tabulationPatch },
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 }

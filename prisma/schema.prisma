@@ -140,6 +140,7 @@ model Organization {
   callEvents               CallEvent[]
   callProviderConfigs      CallProviderConfig[]
   departments              Department[]
+  tabulations              Tabulation[]
   agentPermissions         AgentPermission[]
   quickReplyGroups         QuickReplyGroup[]
 
@@ -2381,6 +2382,14 @@ model Conversation {
 
   closedAt DateTime?
 
+  /// Tabulacao final escolhida ao encerrar (folha da arvore por departamento).
+  /// Setada por POST /conversations/:id/actions com action=resolve quando o
+  /// departamento tem `requireTabulationOnClose=true`. Dispara o trigger de
+  /// automacao `conversation_tabulated`. Null enquanto OPEN ou quando o
+  /// departamento nao exige tabulacao.
+  tabulationId String?
+  tabulation   Tabulation? @relation(fields: [tabulationId], references: [id], onDelete: SetNull)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -2397,6 +2406,7 @@ model Conversation {
   @@index([hasError])
   @@index([lastMessageDirection, hasAgentReply])
   @@index([whatsappCallConsentStatus])
+  @@index([organizationId, tabulationId])
   @@map("conversations")
 }
 
@@ -2804,13 +2814,62 @@ model Department {
   color          String       @default("#6366f1")
   icon           String       @default("🏢")
   businessHoursId String?
+  /// Se true, o encerramento de conversas deste departamento exige
+  /// escolha de uma folha da arvore de `Tabulation` (validado no
+  /// backend e no modal do frontend). Default false = comportamento
+  /// atual (encerrar sem tabular).
+  requireTabulationOnClose Boolean @default(false)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   conversations    Conversation[]
+  tabulations      Tabulation[]
 
   @@index([organizationId])
   @@map("departments")
+}
+
+// ──────────────────────────────────────────────
+// Tabulations (arvore por departamento)
+// ──────────────────────────────────────────────
+
+/// Tabulacao hierarquica (arvore) por departamento. O agente escolhe uma
+/// FOLHA ao encerrar a conversa; a folha (e seus ancestrais) alimenta o
+/// trigger `conversation_tabulated`, permitindo a org montar automacoes
+/// que reagem a "porque essa conversa foi encerrada" (ex.: mover card,
+/// distribuir para outro agente, mudar de funil, disparar mensagem).
+///
+/// Escopo:
+///   - organizationId (multi-tenant)
+///   - departmentId  (arvore por departamento; nao ha herança entre depts)
+///   - parentId?     (null = raiz)
+///
+/// Regras aplicadas no serviço:
+///   - `parent.departmentId === this.departmentId` (arvore homogenea)
+///   - remocao em cascade das filhas; `Conversation.tabulationId` SET NULL
+///     (histórico preservado sem quebrar FK).
+model Tabulation {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  departmentId   String
+  department     Department   @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  parentId       String?
+  parent         Tabulation?  @relation("TabulationHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+  children       Tabulation[] @relation("TabulationHierarchy")
+  name           String
+  color          String?
+  position       Int          @default(0)
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  conversations  Conversation[]
+
+  @@index([organizationId])
+  @@index([organizationId, departmentId])
+  @@index([organizationId, departmentId, parentId])
+  @@map("tabulations")
 }
 
 // ──────────────────────────────────────────────

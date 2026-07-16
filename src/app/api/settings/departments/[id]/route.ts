@@ -11,6 +11,7 @@ const UpdateSchema = z.object({
     .regex(/^#[0-9a-fA-F]{6}$/)
     .optional(),
   icon: z.string().min(1).max(40).optional(),
+  requireTabulationOnClose: z.boolean().optional(),
 });
 
 export async function PUT(
