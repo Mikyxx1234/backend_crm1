@@ -9,7 +9,6 @@ import { generateFileName, saveFile } from "@/lib/storage/local";
 import { fireTrigger } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { nextContactNumber } from "@/services/contacts";
-import { withConversationNumberRetry } from "@/services/conversations";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -240,22 +239,14 @@ async function syncContactAvatar(
 // `message_received` + filtro `dealStatus`).
 
 async function findOrCreateConversation(contactId: string, channelId: string, rawJid: string) {
-  // Modelo de ticket: nova mensagem em contato com ultima RESOLVED cria
-  // conversa nova (com #N+1). Ver AGENT.md "ID de conversa + ticket".
   const existing = await prisma.conversation.findFirst({
-    where: {
-      contactId,
-      channel: "whatsapp",
-      status: { not: "RESOLVED" },
-    },
+    where: { contactId, channel: "whatsapp" },
     select: { id: true, status: true, channelId: true, waJid: true },
   });
 
   if (existing) {
-    // Reusa conversa ativa (nao-RESOLVED por construcao); so reconcilia
-    // metadados de canal/jid. Nao promove pra OPEN aqui — o modelo de
-    // ticket ja garante que existing esta em OPEN/PENDING/SNOOZED.
     const updates: Record<string, unknown> = {};
+    if (existing.status !== "OPEN") updates.status = "OPEN";
     if (existing.channelId !== channelId) updates.channelId = channelId;
     if (existing.waJid !== rawJid) updates.waJid = rawJid;
     if (Object.keys(updates).length > 0) {
@@ -269,20 +260,17 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
     select: { assignedToId: true },
   });
 
-  return withConversationNumberRetry((number) =>
-    prisma.conversation.create({
-      data: withOrgFromCtx({
-        number,
-        contactId,
-        channel: "whatsapp",
-        channelId,
-        waJid: rawJid,
-        status: "OPEN" as const,
-        ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
-      }),
-      select: { id: true, status: true, channelId: true, waJid: true },
+  return prisma.conversation.create({
+    data: withOrgFromCtx({
+      contactId,
+      channel: "whatsapp",
+      channelId,
+      waJid: rawJid,
+      status: "OPEN" as const,
+      ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
     }),
-  );
+    select: { id: true, status: true, channelId: true, waJid: true },
+  });
 }
 
 type ParsedMsg = {

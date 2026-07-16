@@ -132,11 +132,6 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   // Worker (leads-worker + jobs/leads/*) usa prismaBase e ja escopa
   // manualmente — esses callsites nao mudam.
   "BulkOperation",
-  // Favoritos de mensagem por agente (marcador pessoal, tipo "salvos" do
-  // WhatsApp). organizationId NOT NULL — mesma razao do BulkOperation
-  // acima: sem entrar aqui, create() falha (nao injeta) e findMany()
-  // leakaria favoritos de outra org.
-  "FavoriteMessage",
 ]);
 
 type AnyArgs = Record<string, unknown>;

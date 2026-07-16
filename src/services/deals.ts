@@ -257,10 +257,8 @@ const detailInclude = {
       conversations: {
         orderBy: { updatedAt: "desc" as const },
         select: {
-          id: true, number: true, externalId: true, channel: true,
-          status: true, inboxName: true, closedAt: true,
-          createdAt: true, updatedAt: true,
-          assignedTo: { select: { id: true, name: true } },
+          id: true, externalId: true, channel: true,
+          status: true, inboxName: true, createdAt: true, updatedAt: true,
         },
       },
       tags: {

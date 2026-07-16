@@ -56,7 +56,6 @@ export type GetConversationsParams = {
 
 const listSelect = {
   id: true,
-  number: true,
   externalId: true,
   channel: true,
   status: true,
@@ -65,7 +64,6 @@ const listSelect = {
   hasError: true,
   lastInboundAt: true,
   lastMessageDirection: true,
-  closedAt: true,
   updatedAt: true,
   createdAt: true,
   assignedToId: true,
@@ -525,78 +523,9 @@ export async function getConversationLite(id: string) {
 }
 
 export async function updateConversationStatusInDb(id: string, status: ConversationStatus) {
-  // closedAt: preencher quando encerra, limpar quando reabre. Fica em sync
-  // com o status pra UI/relatorios sem consultar historico de eventos.
-  // Outros valores (PENDING/SNOOZED) nao mexem em closedAt.
-  const closedAtPatch: { closedAt: Date | null } | Record<string, never> =
-    status === "RESOLVED"
-      ? { closedAt: new Date() }
-      : status === "OPEN"
-        ? { closedAt: null }
-        : {};
-
   return prisma.conversation.update({
     where: { id },
-    data: { status, ...closedAtPatch },
+    data: { status },
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
-}
-
-/**
- * Retorna o proximo `number` sequencial de Conversation na org do
- * contexto atual. Mesmo padrao de `nextContactNumber()` — a Prisma
- * extension escopa o `_max` por org via AsyncLocalStorage. Combinar
- * com retry P2002 na criacao para lidar com corrida entre workers/webhooks.
- */
-export async function nextConversationNumber(): Promise<number> {
-  const r = await prisma.conversation.aggregate({ _max: { number: true } });
-  return (r._max.number ?? 0) + 1;
-}
-
-const CONVERSATION_NUMBER_MAX_RETRIES = 5;
-
-/**
- * Detecta P2002 no unique (organizationId, number). Outros P2002
- * (externalId, etc) NAO devem ser retentados aqui — deixamos borbulhar
- * para o caller tratar.
- */
-function isConversationNumberUniqueViolation(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as { code?: string; meta?: { target?: string[] | string } };
-  if (e.code !== "P2002") return false;
-  const target = e.meta?.target;
-  if (Array.isArray(target)) return target.includes("number");
-  if (typeof target === "string") return target.includes("number");
-  return false;
-}
-
-/**
- * Executa `run(number)` com retry ate 5 vezes se der P2002 no unique
- * (organizationId, number). Uso pra centralizar a logica de numero
- * sequencial de Conversation em todos os pontos de criacao — mesma
- * ideia do loop em `createContact` (services/contacts.ts). O caller
- * mantem o tipo retornado (generic T), sem gymnastics de Prisma types.
- */
-export async function withConversationNumberRetry<T>(
-  run: (number: number) => Promise<T>,
-): Promise<T> {
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < CONVERSATION_NUMBER_MAX_RETRIES; attempt++) {
-    const number = await nextConversationNumber();
-    try {
-      return await run(number);
-    } catch (err) {
-      if (isConversationNumberUniqueViolation(err)) {
-        lastErr = err;
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw (
-    lastErr ??
-    new Error(
-      `withConversationNumberRetry: max ${CONVERSATION_NUMBER_MAX_RETRIES} retries exceeded`,
-    )
-  );
 }

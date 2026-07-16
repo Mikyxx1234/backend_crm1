@@ -12,17 +12,10 @@
  *
  * @see docs/storage-tenancy.md
  */
-import { open, stat } from "fs/promises";
-
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
-import {
-  mimeFromFilename,
-  parseStoragePath,
-  readStoredFile,
-  resolveStoragePath,
-} from "@/lib/storage/local";
+import { parseStoragePath, readStoredFile } from "@/lib/storage/local";
 
 type RouteContext = { params: Promise<{ path: string[] }> };
 
@@ -162,74 +155,6 @@ export async function GET(request: Request, context: RouteContext) {
   if (!isSuperAdmin && sessionOrgId !== parsed.orgId) {
     // 404 (e não 403) pra não confirmar existência.
     return NextResponse.json({ message: "Arquivo não encontrado." }, { status: 404 });
-  }
-
-  // 16/jul/26 — Suporte a HTTP Range. Sem isso, `<video controls>` do
-  // HTML5 nao inicia a reproducao (Safari/iOS falham sempre; Chrome
-  // tolera arquivos pequenos e trava em vídeos maiores). Estrategia:
-  //  1. `stat()` pra descobrir tamanho antes de ler o disco.
-  //  2. Se o request trouxer `Range: bytes=start-end`, responde 206
-  //     com apenas o slice via `fs.open().read()` — evita carregar
-  //     video de 50MB inteiro na RAM.
-  //  3. Sem Range, mantem o comportamento antigo (200 + full body),
-  //     preservando imagem/audio/doc.
-  // A validacao de auth ja foi feita acima; aqui e' so I/O + headers.
-  let fileStat;
-  try {
-    const abs = resolveStoragePath(parsed.orgId, parsed.bucket, parsed.fileName);
-    fileStat = await stat(abs);
-  } catch {
-    fileStat = null;
-  }
-
-  if (fileStat?.isFile()) {
-    const total = fileStat.size;
-    const mimeType = mimeFromFilename(parsed.fileName);
-    const rangeHeader = request.headers.get("range");
-
-    if (rangeHeader) {
-      // Formato aceito: `bytes=<start>-<end?>`. Multi-range (RFC 7233)
-      // nao e' usado por <video>/<audio> — nao suportamos pra simplificar.
-      const m = /^bytes=(\d+)-(\d*)$/.exec(rangeHeader.trim());
-      if (m) {
-        const start = Number(m[1]);
-        const end = m[2] ? Math.min(Number(m[2]), total - 1) : total - 1;
-
-        if (Number.isNaN(start) || Number.isNaN(end) || start > end || start >= total) {
-          return new Response(null, {
-            status: 416,
-            headers: {
-              "Content-Range": `bytes */${total}`,
-              "Accept-Ranges": "bytes",
-            },
-          });
-        }
-
-        const chunkSize = end - start + 1;
-        const buffer = Buffer.alloc(chunkSize);
-        const abs = resolveStoragePath(parsed.orgId, parsed.bucket, parsed.fileName);
-        const fh = await open(abs, "r");
-        try {
-          await fh.read(buffer, 0, chunkSize, start);
-        } finally {
-          await fh.close();
-        }
-
-        return new Response(new Uint8Array(buffer), {
-          status: 206,
-          headers: {
-            "Content-Type": mimeType,
-            "Content-Length": String(chunkSize),
-            "Content-Range": `bytes ${start}-${end}/${total}`,
-            "Accept-Ranges": "bytes",
-            "Cache-Control": "private, max-age=300",
-            "X-Storage-Tenant": parsed.orgId,
-          },
-        });
-      }
-      // Range malformado: cai no fluxo full-body abaixo (comportamento
-      // permissivo — alguns clients mandam ranges esquisitos).
-    }
   }
 
   const file = await readStoredFile(parsed.orgId, parsed.bucket, parsed.fileName);

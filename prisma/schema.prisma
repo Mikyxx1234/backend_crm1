@@ -74,8 +74,6 @@ model Organization {
   channels                 Channel[]
   baileysAuthKeys          BaileysAuthKey[]
   quickReplies             QuickReply[]
-  favoriteMessages         FavoriteMessage[]
-  pinnedMessages           PinnedMessage[]
   messageTemplates         MessageTemplate[]
   whatsappTemplateConfigs  WhatsAppTemplateConfig[]
   whatsappFlowDefinitions  WhatsappFlowDefinition[]
@@ -528,7 +526,6 @@ model User {
   isErased                       Boolean                   @default(false)
   agentPermission                AgentPermission?
   createdQuickReplies            QuickReply[]     @relation("QuickReplyCreatedBy")
-  favoriteMessages               FavoriteMessage[]
 
   @@index([type])
   @@index([organizationId])
@@ -2310,11 +2307,6 @@ model Conversation {
   id                   String             @id @default(cuid())
   organizationId       String
   organization         Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  /// ID amigavel sequencial POR ORGANIZACAO (comeca em 1 em cada org).
-  /// Usado como "ticket number" nas UIs (ex.: #1234) — mesmo padrao de
-  /// Contact.number / Deal.number. Atribuido em `createConversation`
-  /// via `nextConversationNumber()` com retry P2002 em race.
-  number               Int
   /// ID externo (ex.: Meta thread id) — unicidade por organização.
   externalId           String?
   channel              String
@@ -2327,17 +2319,6 @@ model Conversation {
   hasAgentReply        Boolean            @default(false)
   hasError             Boolean            @default(false)
   pinnedNoteId         String?
-  /// Mensagem fixada no topo da conversa (banner estilo WhatsApp).
-  /// Diferente de `pinnedNoteId` (exclusivo para notas internas na aba
-  /// "Notas") — este campo aceita QUALQUER mensagem (in/out/nota) e é
-  /// exibido no topo da timeline de "Conversa". Um único slot por
-  /// conversa (fixar outra substitui a anterior — igual WhatsApp).
-  pinnedMessageId      String?
-  /// Expiração do fixar (estilo WhatsApp: 24h / 7 dias / 30 dias).
-  /// Null = fixado sem prazo (compat com fixadas antes desta coluna
-  /// existir). Checado no GET /messages — quando vencido, o banner some
-  /// e o campo é limpo automaticamente, sem precisar de cron dedicado.
-  pinnedMessageExpiresAt DateTime?
   /// Timestamp da saudação disparada pelo agente IA na atribuição
   /// ATUAL. Null quando o agente IA ainda não cumprimentou nesta
   /// atribuição (ou quando a conversa acabou de ser reatribuída).
@@ -2362,7 +2343,6 @@ model Conversation {
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
 
   messages               Message[]
-  pinnedMessages         PinnedMessage[]
   whatsappCallEvents     WhatsappCallEvent[]
   scheduledWhatsappCalls ScheduledWhatsappCall[]
   scheduledMessages      ScheduledMessage[]
@@ -2385,7 +2365,6 @@ model Conversation {
   updatedAt DateTime @updatedAt
 
   @@unique([organizationId, externalId])
-  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, status])
   @@index([organizationId, status, updatedAt])
@@ -2481,9 +2460,6 @@ model Message {
   channelRef       Channel?                @relation(fields: [channelId], references: [id], onDelete: SetNull)
   createdAt        DateTime                @default(now())
 
-  favoritedBy FavoriteMessage[]
-  pinnedIn    PinnedMessage[]
-
   @@index([organizationId])
   @@index([organizationId, createdAt])
   @@index([conversationId, createdAt])
@@ -2500,50 +2476,6 @@ model Message {
   // — index dedicado evita scan em alta cardinalidade de mensagens.
   @@index([templateConfigId])
   @@map("messages")
-}
-
-/// Mensagem favoritada por um agente (marcador pessoal, tipo "salvos" do
-/// WhatsApp). Escopo por usuário — cada agente tem sua própria lista,
-/// visível apenas pra ele. `@@unique([userId, messageId])` faz o toggle
-/// favoritar/desfavoritar ser um upsert/delete idempotente.
-model FavoriteMessage {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  userId         String
-  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  messageId      String
-  message        Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  createdAt      DateTime     @default(now())
-
-  @@unique([userId, messageId])
-  @@index([organizationId])
-  @@index([messageId])
-  @@map("favorite_messages")
-}
-
-/// Mensagens fixadas no topo da conversa (banner estilo WhatsApp).
-/// Diferente de `FavoriteMessage` (marcador PESSOAL por agente): a
-/// fixação é compartilhada por toda a conversa. WhatsApp limita a 3
-/// fixadas simultâneas — o mesmo teto é aplicado na rota de pin.
-/// `expiresAt` null = fixado sem prazo; quando vencido, a leitura de
-/// GET /messages remove a linha sozinha (sem cron dedicado).
-model PinnedMessage {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  conversationId String
-  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  messageId      String
-  message        Message      @relation(fields: [messageId], references: [id], onDelete: Cascade)
-  expiresAt      DateTime?
-  createdAt      DateTime     @default(now())
-
-  @@unique([conversationId, messageId])
-  @@index([organizationId])
-  @@index([conversationId, createdAt])
-  @@index([messageId])
-  @@map("pinned_messages")
 }
 
 enum MessageAuthorType {
