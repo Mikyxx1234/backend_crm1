@@ -56,6 +56,8 @@ export type GetContactsParams = {
   lifecycleStage?: LifecycleStage;
   tagIds?: string[];
   companyId?: string;
+  /** Filtra contatos sem responsável atribuído (assignedToId = null). */
+  unassigned?: boolean;
   /** Filtros por campos customizados do contato (AND entre itens). */
   customFieldFilters?: ContactCustomFieldFilter[];
   /**
@@ -176,6 +178,10 @@ export async function getContacts(params: GetContactsParams = {}) {
     where.tags = {
       some: { tagId: { in: params.tagIds } },
     };
+  }
+
+  if (params.unassigned) {
+    where.assignedToId = null;
   }
 
   const exactFilters: Prisma.ContactWhereInput[] = [];
@@ -322,6 +328,33 @@ export async function getContacts(params: GetContactsParams = {}) {
     perPage,
     totalPages: Math.ceil(total / perPage) || 1,
   };
+}
+
+export type ContactStats = {
+  total: number;
+  unassigned: number;
+  byStage: Record<LifecycleStage, number>;
+};
+
+/**
+ * Contagens agregadas por segmento para os stat cards do diretório.
+ * Escopo por organização é aplicado automaticamente pela extensão do Prisma.
+ */
+export async function getContactStats(): Promise<ContactStats> {
+  const [total, unassigned, byStageRaw] = await Promise.all([
+    prisma.contact.count(),
+    prisma.contact.count({ where: { assignedToId: null } }),
+    prisma.contact.groupBy({ by: ["lifecycleStage"], _count: { _all: true } }),
+  ]);
+
+  const byStage = Object.fromEntries(
+    LIFECYCLE_STAGES.map((stage) => [stage, 0]),
+  ) as Record<LifecycleStage, number>;
+  for (const row of byStageRaw) {
+    byStage[row.lifecycleStage] = row._count._all;
+  }
+
+  return { total, unassigned, byStage };
 }
 
 export type CreateContactInput = {

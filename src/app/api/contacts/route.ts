@@ -27,6 +27,7 @@ export async function GET(request: Request) {
     const lifecycleStage =
       lifecycleStageRaw && isValidLifecycleStage(lifecycleStageRaw) ? lifecycleStageRaw : undefined;
     const companyId = searchParams.get("companyId") ?? undefined;
+    const unassigned = searchParams.get("unassigned") === "1";
     const tagIdsParam = searchParams.get("tagIds");
     const tagIds = tagIdsParam
       ? tagIdsParam.split(",").map((id) => id.trim()).filter(Boolean)
@@ -82,6 +83,7 @@ export async function GET(request: Request) {
       lifecycleStage,
       tagIds,
       companyId,
+      unassigned,
       customFieldFilters: customFieldFilters.length > 0 ? customFieldFilters : undefined,
       emailExact,
       phoneExact,
