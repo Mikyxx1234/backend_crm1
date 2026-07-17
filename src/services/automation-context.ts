@@ -171,6 +171,20 @@ export async function getContactActiveContexts(contactId: string) {
   });
 }
 
+/**
+ * Histórico de execuções ENCERRADAS (COMPLETED/TIMED_OUT) do contato —
+ * alimenta a seção "Histórico" do card de automações no inbox/deal.
+ * Ordena da mais recente pra mais antiga.
+ */
+export async function getContactAutomationHistory(contactId: string, limit = 20) {
+  return prisma.automationContext.findMany({
+    where: { contactId, status: { in: ["COMPLETED", "TIMED_OUT"] } },
+    include: { automation: { select: { id: true, name: true } } },
+    orderBy: { updatedAt: "desc" },
+    take: limit,
+  });
+}
+
 export async function processIncomingMessage(contactId: string, messageContent: string) {
   const activeContexts = await getContactActiveContexts(contactId);
 
