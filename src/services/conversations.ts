@@ -313,16 +313,52 @@ export async function getConversations(
   const sortOrder = params.sortOrder ?? "desc";
   const orderBy: Prisma.ConversationOrderByWithRelationInput = { [sortBy]: sortOrder };
 
-  const [rows, total] = await Promise.all([
-    prisma.conversation.findMany({
-      where,
-      skip,
-      take: perPage,
-      orderBy,
-      select: listSelect,
-    }),
-    prisma.conversation.count({ where }),
-  ]);
+  // Colapso por CONTATO+CANAL (1 card por numero — modelo de ticket).
+  // Reabrir uma conversa encerrada gera um NOVO id (ticket B); o ticket A
+  // (RESOLVED) nao pode aparecer como um segundo card do mesmo numero. Como
+  // os filtros dinamicos (tab/visibilidade/tags/sources/busca) sao objetos
+  // Prisma complexos, evitamos traduzir tudo pra SQL cru: buscamos os IDs
+  // que casam com o `where` NA ORDEM pedida (payload minimo) e colapsamos
+  // em memoria pegando o REPRESENTANTE = primeiro da ordem por grupo. Com
+  // `orderBy` = updatedAt desc (default), o primeiro e' o ticket ativo/mais
+  // recente (os RESOLVED antigos ficam congelados, pois qualquer nova msg
+  // reabre como ticket novo). Historico dos tickets antigos segue acessivel
+  // na timeline continua do chat. Paginamos a lista colapsada e hidratamos
+  // so a pagina com o `listSelect` completo. Ver frontend use-conversations.
+  const keyRows = await prisma.conversation.findMany({
+    where,
+    orderBy,
+    select: { id: true, contactId: true, channel: true },
+  });
+
+  // Quando a listagem e' de UM contato especifico (ex.: abas de ticket do
+  // painel de negocio), NAO colapsa — o caller quer todos os tickets.
+  const collapse = !params.contactId;
+  const seenGroups = new Set<string>();
+  const repIds: string[] = [];
+  for (const r of keyRows) {
+    const groupKey =
+      collapse && r.contactId
+        ? `c:${r.contactId}::${r.channel ?? ""}`
+        : `id:${r.id}`;
+    if (seenGroups.has(groupKey)) continue;
+    seenGroups.add(groupKey);
+    repIds.push(r.id);
+  }
+
+  const total = repIds.length;
+  const pageIds = repIds.slice(skip, skip + perPage);
+
+  const hydrated = await prisma.conversation.findMany({
+    where: { id: { in: pageIds } },
+    select: listSelect,
+  });
+  // Reordena para preservar a ordem paginada de `pageIds` (o `in` nao
+  // garante ordem). Evita cards "pulando" de posicao entre paginas.
+  const byIdRow = new Map(hydrated.map((r) => [r.id, r]));
+  const rows = pageIds
+    .map((id) => byIdRow.get(id))
+    .filter((r): r is (typeof hydrated)[number] => r !== undefined);
 
   const convIds = rows.map((r) => r.id);
   const [previewMap, lastInboundMap] = await Promise.all([
