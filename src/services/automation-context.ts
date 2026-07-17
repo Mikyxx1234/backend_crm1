@@ -129,6 +129,29 @@ export async function pauseContext(contextId: string) {
   return row;
 }
 
+/**
+ * Interrompe manualmente um fluxo (robô) — acionado pelo operador via
+ * inbox/deal ("Interromper robô"). Só age em contextos vivos
+ * (RUNNING/PAUSED); marca como COMPLETED, limpa step/cronômetro e
+ * publica `automation_state` pra sumir da lista de robôs ativos.
+ * Retorna null se o contexto não existir ou já não estiver vivo.
+ */
+export async function cancelContext(contextId: string) {
+  const ctx = await prisma.automationContext.findUnique({
+    where: { id: contextId },
+    select: { id: true, status: true },
+  });
+  if (!ctx || (ctx.status !== "RUNNING" && ctx.status !== "PAUSED")) {
+    return null;
+  }
+  const row = await prisma.automationContext.update({
+    where: { id: contextId },
+    data: { status: "COMPLETED", currentStepId: null, timeoutAt: null },
+  });
+  publishAutomationState(row);
+  return row;
+}
+
 export async function timeoutContext(contextId: string) {
   const row = await prisma.automationContext.update({
     where: { id: contextId },
