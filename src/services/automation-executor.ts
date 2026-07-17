@@ -38,8 +38,42 @@ import {
   getActiveContext,
   interpolateVariables,
 } from "@/services/automation-context";
+import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 
 const log = getLogger("automation");
+
+/**
+ * Resolve a conversa WhatsApp de DESTINO para um envio de automação (robô).
+ *
+ * Modelo de ticket (decisão do operador 17/jul/26): quando o robô envia uma
+ * mensagem e a última conversa do contato está ENCERRADA (RESOLVED), a
+ * conversa é REABERTA como um NOVO ticket (#N+1) — assim o card nunca fica
+ * "resolvido com robô ativo". `ensureWhatsAppConversationForContact` já faz
+ * isso: reusa a conversa não-RESOLVED ou cria um ticket novo (com tratamento
+ * de corrida e disparo de `conversation_created`).
+ *
+ * Retorna `{ id } | null` de propósito, para manter compatível o uso
+ * downstream (`conv?.id`, `conv.id`, `if (conv)`) dos sites de envio.
+ * Fallback best-effort (sem canal/telefone): usa a conversa mais recente,
+ * preservando o comportamento antigo.
+ */
+async function resolveAutomationSendConv(
+  contactId: string | null | undefined,
+): Promise<{ id: string } | null> {
+  if (!contactId) return null;
+  try {
+    const ensured = await ensureWhatsAppConversationForContact(contactId);
+    if ("conversationId" in ensured) return { id: ensured.conversationId };
+  } catch (err) {
+    log.warn(`resolveAutomationSendConv: ensure falhou p/ contato ${contactId}:`, err);
+  }
+  const conv = await prisma.conversation.findFirst({
+    where: { contactId, channel: "whatsapp" },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+  return conv ? { id: conv.id } : null;
+}
 
 /**
  * Resolve o cliente Meta WhatsApp correto para uma automação multi-tenant.
@@ -1263,10 +1297,7 @@ async function executeStep(
 
       let conversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         conversationId = conv?.id;
         if (!conv) log.warn(`Nenhuma conversa WhatsApp encontrada para o contato ${rt.contactId}`);
       }
@@ -1472,10 +1503,7 @@ async function executeStep(
 
       let preTplConversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         preTplConversationId = conv?.id;
       }
       const tplMetaClient = await resolveAutomationMetaClient({
@@ -1528,10 +1556,7 @@ async function executeStep(
 
       let tplConversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         tplConversationId = conv?.id;
       }
 
@@ -1601,10 +1626,7 @@ async function executeStep(
 
       let preMediaConversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         preMediaConversationId = conv?.id;
       }
       const mediaMetaClient = await resolveAutomationMetaClient({
@@ -1687,10 +1709,7 @@ async function executeStep(
       const mediaExternalId = sendResult.messages?.[0]?.id ?? null;
 
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         if (conv) {
           await prisma.message.create({
             data: withOrgFromCtx({
@@ -1745,10 +1764,7 @@ async function executeStep(
 
       let conversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         conversationId = conv?.id;
       }
 
@@ -2025,10 +2041,7 @@ async function executeStep(
           const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
           const interpolated = interpolateContextVariables(content, rt, vars);
 
-          const conv = await prisma.conversation.findFirst({
-            where: { contactId: rt.contactId, channel: "whatsapp" },
-            select: { id: true },
-          });
+          const conv = await resolveAutomationSendConv(rt.contactId);
           const questionMetaClient = await resolveAutomationMetaClient({
             automationId: rt.automationId,
             conversationId: conv?.id,
