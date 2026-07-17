@@ -186,6 +186,15 @@ export async function GET(request: Request, context: RouteContext) {
     const url = new URL(request.url);
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 50));
     const before = url.searchParams.get("before");
+    const includeHistory = url.searchParams.get("history") === "1" && !before;
+
+    const MSG_SELECT = {
+      id: true, externalId: true, content: true, createdAt: true,
+      direction: true, messageType: true, isPrivate: true, senderName: true,
+      authorType: true,
+      mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
+      sendStatus: true, sendError: true, channelId: true,
+    } as const;
 
     const rows = await prisma.message.findMany({
       where: {
@@ -194,16 +203,42 @@ export async function GET(request: Request, context: RouteContext) {
       },
       orderBy: { createdAt: "desc" },
       take: limit,
-      select: {
-        id: true, externalId: true, content: true, createdAt: true,
-        direction: true, messageType: true, isPrivate: true, senderName: true,
-        authorType: true,
-        mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
-        sendStatus: true, sendError: true, channelId: true,
-      },
+      select: MSG_SELECT,
     });
 
     rows.reverse();
+
+    // Tickets anteriores do mesmo contato+canal (history=1, sem paginação).
+    // Cada ticket RESOLVED recebe um separador visual antes das suas mensagens.
+    type HistoryTicket = {
+      id: string;
+      number: number;
+      closedAt: Date | null;
+      rows: (typeof rows)[number][];
+    };
+    const historyTickets: HistoryTicket[] = [];
+    if (includeHistory && conv.contactId && conv.channel) {
+      const prevConvs = await prisma.conversation.findMany({
+        where: {
+          contactId: conv.contactId,
+          channel: conv.channel,
+          status: "RESOLVED",
+          id: { not: conv.id },
+        },
+        orderBy: { createdAt: "asc" },
+        select: { id: true, number: true, closedAt: true },
+        take: 15,
+      });
+      for (const pc of prevConvs) {
+        const pRows = await prisma.message.findMany({
+          where: { conversationId: pc.id },
+          orderBy: { createdAt: "asc" },
+          take: 100,
+          select: MSG_SELECT,
+        });
+        historyTickets.push({ id: pc.id, number: pc.number, closedAt: pc.closedAt, rows: pRows });
+      }
+    }
 
     // Resolve foto de perfil dos agentes que assinaram cada mensagem
     // outbound. Sem FK `Message.senderId` no schema atual, a única
@@ -316,8 +351,62 @@ export async function GET(request: Request, context: RouteContext) {
     // verdade é o backend; client usa só pra UX (desabilitar input + aviso).
     const canReply = await canDoChannelAction(accessUser, "send", conv.channelId);
 
+    // Monta a linha do tempo completa: tickets anteriores (com separadores)
+    // + mensagens do ticket atual.
+    let finalMessages: InboxMessageDto[] = messages;
+    if (historyTickets.length > 0) {
+      const mapRows = (rr: typeof rows): InboxMessageDto[] =>
+        rr.map((r) => ({
+          id: r.externalId ?? r.id,
+          content: r.content,
+          createdAt: r.createdAt.toISOString(),
+          direction: r.direction as InboxMessageDto["direction"],
+          messageType: r.messageType,
+          isPrivate: r.isPrivate || undefined,
+          senderName: r.senderName,
+          authorType: r.authorType as "human" | "bot" | "system",
+          mediaUrl: r.mediaUrl,
+          replyToId: r.replyToId,
+          replyToPreview: r.replyToPreview,
+          reactions: Array.isArray(r.reactions) ? (r.reactions as ReactionDto[]) : [],
+          sendStatus: r.sendStatus,
+          sendError: r.sendError ?? undefined,
+          status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
+          channelId: r.channelId ?? null,
+        }));
+
+      const historical: InboxMessageDto[] = [];
+      for (const ticket of historyTickets) {
+        // Separador: um item "system" especial com os metadados do ticket.
+        historical.push({
+          id: `__ticket_sep_${ticket.id}`,
+          content: JSON.stringify({
+            number: ticket.number,
+            closedAt: ticket.closedAt?.toISOString() ?? null,
+          }),
+          createdAt: null,
+          direction: "system",
+          messageType: "ticket-separator",
+        });
+        historical.push(...mapRows(ticket.rows));
+      }
+      // Separador do ticket atual (só se houver histórico).
+      historical.push({
+        id: `__ticket_sep_${conv.id}`,
+        content: JSON.stringify({
+          number: conv.number,
+          closedAt: null,
+          isCurrent: true,
+        }),
+        createdAt: null,
+        direction: "system",
+        messageType: "ticket-separator",
+      });
+      finalMessages = [...historical, ...messages];
+    }
+
     return NextResponse.json({
-      messages,
+      messages: finalMessages,
       pinnedNoteId,
       pinnedMessageIds,
       channelProvider: conv.channelRef?.provider ?? null,

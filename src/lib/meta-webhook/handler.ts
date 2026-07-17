@@ -7,7 +7,10 @@ import { withSystemContext } from "@/lib/webhook-context";
 import { phoneMatchVariants } from "@/lib/phone";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { nextContactNumber } from "@/services/contacts";
-import { withConversationNumberRetry } from "@/services/conversations";
+import {
+  isActiveConversationUniqueViolation,
+  withConversationNumberRetry,
+} from "@/services/conversations";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -681,16 +684,21 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
 
   // Modelo de ticket: contatos com conversa RESOLVED geram NOVA conversa
   // na proxima mensagem inbound (nao reabre). Ver AGENT.md.
-  const existing = await prisma.conversation.findFirst({
-    where: {
-      contactId,
-      channel: "whatsapp",
-      status: { not: "RESOLVED" },
-    },
-    // PR 1.3: incluímos organizationId para que callers (download de
-    // mídia inbound) possam roteá-lo no storage tenant-scoped.
-    select: { id: true, status: true, channelId: true, organizationId: true },
-  });
+  const convSelect = {
+    id: true,
+    status: true,
+    channelId: true,
+    organizationId: true,
+  } as const;
+  const findActive = () =>
+    prisma.conversation.findFirst({
+      where: { contactId, channel: "whatsapp", status: { not: "RESOLVED" } },
+      // PR 1.3: incluímos organizationId para que callers (download de
+      // mídia inbound) possam roteá-lo no storage tenant-scoped.
+      select: convSelect,
+    });
+
+  const existing = await findActive();
 
   if (existing) {
     // Reusa a conversa aberta. So reconcilia canal (para o inbox mostrar
@@ -710,19 +718,30 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     select: { assignedToId: true },
   });
 
-  return withConversationNumberRetry((number) =>
-    prisma.conversation.create({
-      data: withOrgFromCtx({
-        number,
-        contactId,
-        channel: "whatsapp",
-        channelId: targetChannel?.id,
-        status: "OPEN" as const,
-        ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+  try {
+    return await withConversationNumberRetry((number) =>
+      prisma.conversation.create({
+        data: withOrgFromCtx({
+          number,
+          contactId,
+          channel: "whatsapp",
+          channelId: targetChannel?.id,
+          status: "OPEN" as const,
+          ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+        }),
+        select: convSelect,
       }),
-      select: { id: true, status: true, channelId: true, organizationId: true },
-    }),
-  );
+    );
+  } catch (err) {
+    // Corrida: dois webhooks/mensagens simultaneos do mesmo numero. O
+    // indice unico parcial rejeita o 2o create com P2002 — reusa o
+    // ticket vencedor em vez de duplicar.
+    if (isActiveConversationUniqueViolation(err)) {
+      const won = await findActive();
+      if (won) return { ...won, channelId: targetChannel?.id ?? won.channelId };
+    }
+    throw err;
+  }
 }
 
 // ── Extract message content ──────────────────────

@@ -24,7 +24,10 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { logEvent } from "@/services/activity-log";
-import { withConversationNumberRetry } from "@/services/conversations";
+import {
+  isActiveConversationUniqueViolation,
+  withConversationNumberRetry,
+} from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { getLogger } from "@/lib/logger";
 
@@ -147,20 +150,40 @@ export async function ensureWhatsAppConversationForContact(
     };
   }
 
-  const created = await withConversationNumberRetry((number) =>
-    prisma.conversation.create({
-      data: withOrgFromCtx({
-        number,
-        channel: "whatsapp",
-        status: "OPEN" as const,
-        inboxName: defaultChannel.name,
-        channelId: defaultChannel.id,
-        contactId: contact.id,
-        ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+  let created: { id: string; channelId: string | null };
+  try {
+    created = await withConversationNumberRetry((number) =>
+      prisma.conversation.create({
+        data: withOrgFromCtx({
+          number,
+          channel: "whatsapp",
+          status: "OPEN" as const,
+          inboxName: defaultChannel.name,
+          channelId: defaultChannel.id,
+          contactId: contact.id,
+          ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+        }),
+        select: { id: true, channelId: true },
       }),
-      select: { id: true, channelId: true },
-    }),
-  );
+    );
+  } catch (err) {
+    // Corrida com inbound/outro caller: reusa o ticket ativo vencedor
+    // (indice unico parcial). Ver `isActiveConversationUniqueViolation`.
+    if (isActiveConversationUniqueViolation(err)) {
+      const won = await prisma.conversation.findFirst({
+        where: { contactId: contact.id, channel: "whatsapp", status: { not: "RESOLVED" } },
+        select: { id: true, channelId: true },
+      });
+      if (won) {
+        return {
+          status: "already_ok",
+          conversationId: won.id,
+          channelId: won.channelId,
+        };
+      }
+    }
+    throw err;
+  }
 
   void logEvent({
     type: "CONVERSATION_CREATED",

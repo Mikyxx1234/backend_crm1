@@ -519,7 +519,8 @@ export async function getConversationLite(id: string) {
     where: { id },
     select: {
       id: true, externalId: true, contactId: true, status: true,
-      channelId: true, waJid: true, organizationId: true,
+      channel: true, channelId: true, waJid: true, organizationId: true,
+      number: true,
       channelRef: {
         select: { id: true, provider: true, config: true, name: true, phoneNumber: true, type: true },
       },
@@ -567,6 +568,26 @@ export async function updateConversationStatusInDb(
 export async function nextConversationNumber(): Promise<number> {
   const r = await prisma.conversation.aggregate({ _max: { number: true } });
   return (r._max.number ?? 0) + 1;
+}
+
+/**
+ * Detecta P2002 do indice unico PARCIAL que garante no maximo UMA conversa
+ * ativa (status != RESOLVED) por (organizationId, contactId, channel).
+ * Criado na migration `conversations_active_contact_channel`. Usado pelos
+ * pontos de criacao (baileys/meta/whatsapp-conversation) para tratar a
+ * corrida de mensagens simultaneas do mesmo numero: em vez de criar um 2o
+ * ticket, o caller relê e reusa o ticket vencedor.
+ */
+export function isActiveConversationUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: string; meta?: { target?: string[] | string } };
+  if (e.code !== "P2002") return false;
+  const target = e.meta?.target;
+  const hit = (s: string) =>
+    s.includes("active_contact_channel") || s.includes("contactId");
+  if (Array.isArray(target)) return target.some(hit);
+  if (typeof target === "string") return hit(target);
+  return false;
 }
 
 const CONVERSATION_NUMBER_MAX_RETRIES = 5;
