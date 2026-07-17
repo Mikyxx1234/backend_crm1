@@ -1296,7 +1296,9 @@ async function processStatusUpdate(status: Record<string, unknown>) {
       // tratava failed como prioridade 0 e descartava esse callback,
       // deixando a UI eternamente com ✓ mesmo após a falha real.
       const statusPriority: Record<string, number> = { sent: 1, delivered: 2, read: 3 };
-      const currentPriority = statusPriority[msg.sendStatus] ?? 0;
+      // Normaliza caso (outros caminhos podem gravar SENT/DELIVERED/READ).
+      const currentPriority =
+        statusPriority[(msg.sendStatus ?? "").toLowerCase()] ?? 0;
       const newPriority = statusPriority[s] ?? 0;
 
       const isFailure = s === "failed";

@@ -141,10 +141,13 @@ export class BaileysSession {
     });
 
     sock.ev.on("messages.update", (updates) => {
+      // Mesmo motivo do messages.upsert: callback fora do ALS → precisa
+      // withSystemContext, senão prisma scoped joga e o ACK (incl. read)
+      // nunca grava — ticks azuis nunca aparecem ao vivo.
       for (const u of updates) {
         const status = u.update?.status;
-        if (status !== undefined && status !== null) {
-          void this.handleMessageStatusUpdate(u.key.id!, status as number);
+        if (status !== undefined && status !== null && u.key?.id) {
+          void this.handleMessageStatusUpdate(u.key.id, status as number);
         }
       }
     });
@@ -155,29 +158,44 @@ export class BaileysSession {
     const s = statusMap[baileysStatus];
     if (!s) return;
 
+    const orgId = this.organizationId;
+    if (!orgId) {
+      console.warn(
+        `[baileys:${this.channelId}] status ${s} sem organizationId cacheado — descartando`,
+      );
+      return;
+    }
+
     try {
-      const msg = await prisma.message.findFirst({
-        where: { externalId: wamid },
-        select: { id: true, sendStatus: true, conversationId: true, organizationId: true },
-      });
-      if (!msg) return;
+      await withSystemContext(orgId, async () => {
+        const msg = await prisma.message.findFirst({
+          where: { externalId: wamid },
+          select: { id: true, sendStatus: true, conversationId: true },
+        });
+        if (!msg) return;
 
-      const priority: Record<string, number> = { failed: 0, sent: 1, delivered: 2, read: 3 };
-      if ((priority[s] ?? 0) <= (priority[msg.sendStatus] ?? -1)) return;
+        const priority: Record<string, number> = {
+          failed: 0,
+          sent: 1,
+          delivered: 2,
+          read: 3,
+        };
+        // sendStatus pode vir em MAIÚSCULAS de outros caminhos — normaliza.
+        const current = (msg.sendStatus ?? "").toLowerCase();
+        if ((priority[s] ?? 0) <= (priority[current] ?? -1)) return;
 
-      await prisma.message.update({
-        where: { id: msg.id },
-        data: { sendStatus: s },
-      });
+        await prisma.message.update({
+          where: { id: msg.id },
+          data: { sendStatus: s },
+        });
 
-      try {
         sseBus.publish("message_status", {
-          organizationId: msg.organizationId,
+          organizationId: orgId,
           conversationId: msg.conversationId,
           messageId: msg.id,
           status: s,
         });
-      } catch {}
+      });
     } catch (err) {
       console.warn(`[baileys:${this.channelId}] Erro ao atualizar status:`, err);
     }
