@@ -1,7 +1,18 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
-import { createCompany, getCompanies } from "@/services/companies";
+import {
+  createCompany,
+  getCompanies,
+  type CompanySegment,
+} from "@/services/companies";
+
+const SEGMENTS = new Set<CompanySegment>([
+  "todos",
+  "com-contatos",
+  "sem-email",
+  "sem-telefone",
+]);
 
 function parseIntParam(v: string | null, fallback: number) {
   if (v === null || v === "") return fallback;
@@ -19,8 +30,13 @@ export async function GET(request: Request) {
     const search = searchParams.get("search") ?? undefined;
     const page = parseIntParam(searchParams.get("page"), 1);
     const perPage = parseIntParam(searchParams.get("perPage"), 20);
+    const segmentRaw = searchParams.get("segment") ?? undefined;
+    const segment =
+      segmentRaw && SEGMENTS.has(segmentRaw as CompanySegment)
+        ? (segmentRaw as CompanySegment)
+        : undefined;
 
-    const result = await getCompanies({ search, page, perPage });
+    const result = await getCompanies({ search, page, perPage, segment });
     return NextResponse.json(result);
     });
   } catch (e) {

@@ -11,27 +11,49 @@ const assignedToSelect = {
   role: true,
 } satisfies Prisma.UserSelect;
 
+export type CompanySegment = "todos" | "com-contatos" | "sem-email" | "sem-telefone";
+
 export type GetCompaniesParams = {
   search?: string;
   page?: number;
   perPage?: number;
+  /** Segmento dos stat cards do diretório. */
+  segment?: CompanySegment;
 };
+
+function buildCompanyWhere(params: {
+  search?: string;
+  segment?: CompanySegment;
+}): Prisma.CompanyWhereInput {
+  const search = params.search?.trim();
+  const and: Prisma.CompanyWhereInput[] = [];
+
+  if (search) {
+    and.push({
+      OR: [
+        { name: { contains: search, mode: "insensitive" } },
+        { domain: { contains: search, mode: "insensitive" } },
+        { industry: { contains: search, mode: "insensitive" } },
+      ],
+    });
+  }
+
+  if (params.segment === "com-contatos") {
+    and.push({ contacts: { some: {} } });
+  } else if (params.segment === "sem-email") {
+    and.push({ OR: [{ domain: null }, { domain: "" }] });
+  } else if (params.segment === "sem-telefone") {
+    and.push({ OR: [{ phone: null }, { phone: "" }] });
+  }
+
+  return and.length === 0 ? {} : and.length === 1 ? and[0]! : { AND: and };
+}
 
 export async function getCompanies(params: GetCompaniesParams = {}) {
   const page = Math.max(1, params.page ?? 1);
   const perPage = Math.min(100, Math.max(1, params.perPage ?? 20));
   const skip = (page - 1) * perPage;
-  const search = params.search?.trim();
-
-  const where: Prisma.CompanyWhereInput = search
-    ? {
-        OR: [
-          { name: { contains: search, mode: "insensitive" } },
-          { domain: { contains: search, mode: "insensitive" } },
-          { industry: { contains: search, mode: "insensitive" } },
-        ],
-      }
-    : {};
+  const where = buildCompanyWhere(params);
 
   const [items, total] = await Promise.all([
     prisma.company.findMany({
@@ -53,6 +75,25 @@ export async function getCompanies(params: GetCompaniesParams = {}) {
     perPage,
     totalPages: Math.ceil(total / perPage) || 1,
   };
+}
+
+export type CompanyStats = {
+  total: number;
+  withContacts: number;
+  withoutEmail: number;
+  withoutPhone: number;
+};
+
+/** Contagens agregadas para os stat cards do diretório de empresas. */
+export async function getCompanyStats(): Promise<CompanyStats> {
+  const [total, withContacts, withoutEmail, withoutPhone] = await Promise.all([
+    prisma.company.count(),
+    prisma.company.count({ where: { contacts: { some: {} } } }),
+    prisma.company.count({ where: { OR: [{ domain: null }, { domain: "" }] } }),
+    prisma.company.count({ where: { OR: [{ phone: null }, { phone: "" }] } }),
+  ]);
+
+  return { total, withContacts, withoutEmail, withoutPhone };
 }
 
 export type CreateCompanyInput = {
