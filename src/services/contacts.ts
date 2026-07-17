@@ -73,6 +73,12 @@ export type GetContactsParams = {
    * vs `(11) 9...`. Para n8n: passe só dígitos no query param.
    */
   phoneExact?: string;
+  /** Intervalo de criação (createdAt). */
+  createdFrom?: Date;
+  createdTo?: Date;
+  /** Intervalo de última modificação (updatedAt). */
+  updatedFrom?: Date;
+  updatedTo?: Date;
   page?: number;
   perPage?: number;
   sortBy?: "name" | "email" | "createdAt" | "updatedAt" | "leadScore" | "lifecycleStage";
@@ -183,6 +189,16 @@ export async function getContacts(params: GetContactsParams = {}) {
   if (params.unassigned) {
     where.assignedToId = null;
   }
+
+  const createdAt: Prisma.DateTimeFilter = {};
+  if (params.createdFrom) createdAt.gte = params.createdFrom;
+  if (params.createdTo) createdAt.lte = params.createdTo;
+  if (createdAt.gte || createdAt.lte) where.createdAt = createdAt;
+
+  const updatedAt: Prisma.DateTimeFilter = {};
+  if (params.updatedFrom) updatedAt.gte = params.updatedFrom;
+  if (params.updatedTo) updatedAt.lte = params.updatedTo;
+  if (updatedAt.gte || updatedAt.lte) where.updatedAt = updatedAt;
 
   const exactFilters: Prisma.ContactWhereInput[] = [];
 
