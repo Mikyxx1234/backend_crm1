@@ -88,6 +88,7 @@ model Organization {
   campaigns                Campaign[]
   campaignRecipients       CampaignRecipient[]
   lossReasons              LossReason[]
+  pipelineLossReasons      PipelineLossReason[]
   apiTokens                ApiToken[]
   mobileLayoutConfigs      MobileLayoutConfig[]
   userDashboardLayouts     UserDashboardLayout[]
@@ -1376,10 +1377,14 @@ model Pipeline {
   organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name              String
   isDefault         Boolean            @default(false)
+  /// Se true, marcar negócio como perdido neste funil exige motivo.
+  lossReasonRequired Boolean           @default(false)
   stages            Stage[]
   distributionRules DistributionRule[]
   /// Canais cujo inbound roteia para este funil (Channel.defaultPipelineId).
   channels          Channel[]
+  /// Motivos de perda vinculados a este funil (ordem = position).
+  pipelineLossReasons PipelineLossReason[]
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
 
@@ -3398,10 +3403,32 @@ model LossReason {
   position       Int          @default(0)
   isActive       Boolean      @default(true)
   createdAt      DateTime     @default(now())
+  /// Vínculos reutilizáveis com funis (M2M via PipelineLossReason).
+  pipelineLinks  PipelineLossReason[]
 
   @@index([organizationId])
   @@index([organizationId, isActive, position])
   @@map("loss_reasons")
+}
+
+/// Motivo de perda ↔ funil (catálogo reutilizável, ordem por funil).
+model PipelineLossReason {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  pipelineId     String
+  pipeline       Pipeline     @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  lossReasonId   String
+  lossReason     LossReason   @relation(fields: [lossReasonId], references: [id], onDelete: Cascade)
+  /// Ordem de exibição dos motivos neste funil.
+  position       Int          @default(0)
+  createdAt      DateTime     @default(now())
+
+  @@unique([pipelineId, lossReasonId])
+  @@index([organizationId])
+  @@index([pipelineId, position])
+  @@index([lossReasonId])
+  @@map("pipeline_loss_reasons")
 }
 
 // ──────────────────────────────────────────────

@@ -32,6 +32,7 @@ import {
  */
 export async function assertLostReasonAllowed(
   reason: string | null | undefined,
+  pipelineId?: string | null,
 ): Promise<void> {
   const trimmed = reason?.trim();
   if (!trimmed) return;
@@ -48,12 +49,10 @@ export async function assertLostReasonAllowed(
     );
     return;
   }
-  if (allowOther) return;
-  const match = await prisma.lossReason.findFirst({
-    where: { label: trimmed, isActive: true },
-    select: { id: true },
-  });
-  if (!match) throw new Error("INVALID_LOST_REASON");
+  const { assertLostReasonAllowedForPipeline } = await import(
+    "@/services/loss-reasons"
+  );
+  await assertLostReasonAllowedForPipeline(pipelineId, trimmed, allowOther);
 }
 
 export function isValidDealStatus(v: string): v is DealStatus {
@@ -628,9 +627,17 @@ export async function moveDeal(
     throw new Error("INVALID_POSITION");
   }
 
+  const dealPeek = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { id: true, pipelineId: true },
+  });
+  if (!dealPeek) throw new Error("NOT_FOUND");
+
   // Valida o motivo ANTES de abrir a transação (evita rollback se o destino
   // for o estágio Perdido e o motivo livre tiver sido bloqueado pela setting).
-  if (options?.lostReason) await assertLostReasonAllowed(options.lostReason);
+  if (options?.lostReason) {
+    await assertLostReasonAllowed(options.lostReason, dealPeek.pipelineId);
+  }
 
   let becameWon = false;
   let becameLost = false;
@@ -644,6 +651,16 @@ export async function moveDeal(
     const dealStage = await tx.stage.findUnique({ where: { id: deal.stageId } });
     if (!dealStage || dealStage.pipelineId !== targetStage.pipelineId) {
       throw new Error("CROSS_PIPELINE");
+    }
+
+    if (targetStage.isLost) {
+      const pipe = await tx.pipeline.findUnique({
+        where: { id: deal.pipelineId },
+        select: { lossReasonRequired: true },
+      });
+      if (pipe?.lossReasonRequired && !options?.lostReason?.trim()) {
+        throw new Error("LOST_REASON_REQUIRED");
+      }
     }
 
     const oldStageId = deal.stageId;
@@ -773,12 +790,23 @@ export async function markDealWon(id: string) {
 }
 
 export async function markDealLost(id: string, lostReason?: string | null) {
-  // Obrigatoriedade do motivo é decidida na rota (org setting
-  // `deals.loss_reason_required`); aqui aceitamos vazio → null.
   const reason = lostReason?.trim() || null;
 
-  // Gate "Permitir outro motivo" — quando desligado, motivo livre é rejeitado.
-  await assertLostReasonAllowed(reason);
+  const dealPeek = await prisma.deal.findUnique({
+    where: { id },
+    select: { pipelineId: true, stageId: true },
+  });
+  if (!dealPeek) throw new Error("NOT_FOUND");
+
+  const pipe = await prisma.pipeline.findUnique({
+    where: { id: dealPeek.pipelineId },
+    select: { lossReasonRequired: true },
+  });
+  if (pipe?.lossReasonRequired && !reason) {
+    throw new Error("LOST_REASON_REQUIRED");
+  }
+
+  await assertLostReasonAllowed(reason, dealPeek.pipelineId);
 
   const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });

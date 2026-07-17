@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
-import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
 import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
@@ -259,16 +258,34 @@ export async function POST(request: Request) {
       if (action === "mark_lost") {
         const lostReason = typeof body.lostReason === "string" ? body.lostReason.trim() : "";
 
-        const required = await getOrgSettingBool("deals.loss_reason_required", false);
-        if (required && !lostReason) {
-          return NextResponse.json({ message: "Motivo da perda é obrigatório." }, { status: 400 });
+        const deals = await prisma.deal.findMany({
+          where: { id: { in: dealIds }, status: { not: "LOST" } },
+          select: { id: true, status: true, stageId: true, pipelineId: true },
+        });
+
+        // Obrigatoriedade por funil — se qualquer deal estiver em funil
+        // com lossReasonRequired, exige motivo.
+        if (!lostReason && deals.length > 0) {
+          const pipeIds = [...new Set(deals.map((d) => d.pipelineId))];
+          const requiredPipes = await prisma.pipeline.findMany({
+            where: { id: { in: pipeIds }, lossReasonRequired: true },
+            select: { id: true },
+          });
+          if (requiredPipes.length > 0) {
+            return NextResponse.json(
+              { message: "Motivo da perda é obrigatório neste funil." },
+              { status: 400 },
+            );
+          }
         }
 
-        // Gate "Permitir outro" — falha o bulk inteiro antes de iniciar o
-        // loop, evitando estado parcial (N deals marcados, restante rejeitado).
+        // Gate "Permitir outro" — valida contra o catálogo/vínculo do funil
+        // de cada deal (falha o bulk inteiro antes do loop).
         if (lostReason) {
           try {
-            await assertLostReasonAllowed(lostReason);
+            for (const d of deals) {
+              await assertLostReasonAllowed(lostReason, d.pipelineId);
+            }
           } catch (err) {
             if (err instanceof Error && err.message === "INVALID_LOST_REASON") {
               return NextResponse.json(
@@ -282,11 +299,6 @@ export async function POST(request: Request) {
             throw err;
           }
         }
-
-        const deals = await prisma.deal.findMany({
-          where: { id: { in: dealIds }, status: { not: "LOST" } },
-          select: { id: true, status: true, stageId: true },
-        });
         for (const deal of deals) {
           const updated = await markDealLost(deal.id, lostReason);
           createDealEvent(deal.id, uid, "STATUS_CHANGED", { from: deal.status, to: "LOST", lostReason }).catch(() => {});
