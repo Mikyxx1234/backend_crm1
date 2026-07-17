@@ -1,9 +1,12 @@
 import type { AutomationStep } from "@/lib/automation-workflow";
 
 const NONE = "__none__";
-const START_X = 200;
+// Espelha frontend: 1ª coluna começa após o nó do gatilho (x=32, ~280px).
+const TRIGGER_X = 32;
+const TRIGGER_W = 280;
 // Espelha frontend: folga fixa entre colunas somada à largura real do nó.
 const COL_GAP = 140;
+const START_X = TRIGGER_X + TRIGGER_W + COL_GAP; // = 452
 // 27/mai/26 — Alinhado com `NODE_Y` do canvas no frontend (=300) e com
 // o `START_Y` espelhado em `frontend_crm1/src/lib/automation-layout.ts`.
 const START_Y = 300;
