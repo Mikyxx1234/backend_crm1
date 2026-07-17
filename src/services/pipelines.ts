@@ -74,10 +74,19 @@ export async function getPipelines(options?: { allowedPipelineIds?: string[] | n
     ? { id: { in: allowed } }
     : undefined;
 
+  // Select explícito — NÃO usar include sem select no Pipeline.
+  // Colunas novas no schema (ex.: lossReasonAllowOther) sem migrate deploy
+  // derrubavam o GET /api/pipelines inteiro e o front ficava sem funis.
   const pipelines = await prisma.pipeline.findMany({
     where,
     orderBy: { createdAt: "asc" },
-    include: {
+    select: {
+      id: true,
+      name: true,
+      isDefault: true,
+      createdAt: true,
+      updatedAt: true,
+      organizationId: true,
       stages: {
         orderBy: { position: "asc" },
         select: stageWithCountSelect,
@@ -139,8 +148,17 @@ export async function createPipeline(data: { name: string }) {
         create: buildDefaultStageCreates(organizationId),
       },
     },
-    include: {
-      stages: { orderBy: { position: "asc" } },
+    select: {
+      id: true,
+      name: true,
+      isDefault: true,
+      createdAt: true,
+      updatedAt: true,
+      organizationId: true,
+      stages: {
+        orderBy: { position: "asc" },
+        select: stageWithCountSelect,
+      },
     },
   });
 }
