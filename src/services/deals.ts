@@ -1,5 +1,6 @@
 import { Prisma, type DealRole, type DealStatus } from "@prisma/client";
 
+import { defaultDealTitleForContact } from "@/lib/display-name";
 import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -381,12 +382,18 @@ function isPrismaUniqueViolation(err: unknown): boolean {
 }
 
 export async function createDeal(data: CreateDealInput) {
-  // Nome opcional: negócios criados sem título ganham nome automático
-  // "Negócio - #<number>" (o `number` sequencial por org, mesmo id
-  // exibido no card/header). Assim o operador pode criar um negócio
-  // rápido sem digitar nome. O fallback é resolvido dentro do loop
-  // porque depende do `number` alocado.
-  const rawTitle = data.title?.trim() ?? "";
+  // Título opcional. Prioridade:
+  //  1. título informado
+  //  2. "Negócio {Nome do Contato}" quando há contactId
+  //  3. "Negócio - #<number>" (fallback numérico, resolvido no loop)
+  let rawTitle = data.title?.trim() ?? "";
+  if (!rawTitle && data.contactId) {
+    const contact = await prisma.contact.findFirst({
+      where: { id: data.contactId },
+      select: { name: true },
+    });
+    rawTitle = defaultDealTitleForContact(contact?.name) ?? "";
+  }
 
   const maxPos = await prisma.deal.aggregate({
     where: { stageId: data.stageId },

@@ -30,6 +30,7 @@
  * a algum deal) e scripts de backfill manual.
  */
 
+import { defaultDealTitleForContact } from "@/lib/display-name";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -211,7 +212,7 @@ export async function ensureOpenDealForContact(
       deal = await prisma.deal.create({
         data: withOrgFromCtx({
           number,
-          title: `Negócio - ${contactName}`,
+          title: defaultDealTitleForContact(contactName) ?? `Negócio - #${number}`,
           contactId,
           stageId: incomingStage.id,
           status: "OPEN" as const,

@@ -8,6 +8,7 @@ import {
 } from "@prisma/client";
 
 import { normalizeConditionConfig } from "@/lib/automation-condition";
+import { defaultDealTitleForContact } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 import {
   metaWhatsApp,
@@ -2173,9 +2174,15 @@ async function executeStep(
       if (!rt.contactId) throw new Error("create_deal: contactId ausente");
       const stageId = readString(cfg, "stageId");
       if (!stageId) throw new Error("create_deal: stageId obrigatório");
-      // Título opcional: sem nome configurado, o deal é batizado como
-      // "Negócio - #<number>" (resolvido dentro do loop, depende do number).
-      const rawTitle = readString(cfg, "title")?.trim() ?? "";
+      // Título opcional: sem config → "Negócio {contato}"; senão "Negócio - #n".
+      let rawTitle = readString(cfg, "title")?.trim() ?? "";
+      if (!rawTitle && rt.contactId) {
+        const contact = await prisma.contact.findFirst({
+          where: { id: rt.contactId },
+          select: { name: true },
+        });
+        rawTitle = defaultDealTitleForContact(contact?.name) ?? "";
+      }
       const rawValue = readNumber(cfg, "value");
       const stage = await prisma.stage.findUnique({
         where: { id: stageId },

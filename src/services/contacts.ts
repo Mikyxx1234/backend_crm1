@@ -1,5 +1,6 @@
 import type { LifecycleStage, Prisma } from "@prisma/client";
 
+import { sanitizeContactName } from "@/lib/display-name";
 import { resolveHighlight, type ResolvedHighlight } from "@/lib/highlight";
 import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
@@ -937,7 +938,8 @@ export async function createContact(data: CreateContactInput) {
         data: withOrgFromCtx({
           ...(data.id ? { id: data.id } : {}),
           number,
-          name: data.name,
+          // Contato nunca deve herdar prefixo de negócio ("Negócio Marcelo…").
+          name: sanitizeContactName(data.name) || data.name,
           externalId: data.externalId === undefined ? undefined : data.externalId,
           email: data.email ?? undefined,
           phone: normalizedPhone ?? undefined,
@@ -1000,7 +1002,9 @@ export async function updateContact(id: string, data: UpdateContactInput) {
     },
   });
 
-  if (data.name !== undefined) updateData.name = data.name;
+  if (data.name !== undefined) {
+    updateData.name = sanitizeContactName(data.name) || data.name;
+  }
   if (data.email !== undefined) updateData.email = data.email;
   if (data.phone !== undefined) {
     updateData.phone = normalizeContactPhoneInput(data.phone) ?? null;

@@ -26,6 +26,45 @@ export function isRealName(s: string | null | undefined): boolean {
   return HAS_LETTER.test(t) && !/^neg[oó]cio/i.test(t);
 }
 
+/**
+ * Extrai o nome da pessoa a partir de um título de negócio
+ * ("Negócio Marcelo Pinheiro" / "Negócio - Marcelo" → "Marcelo Pinheiro").
+ * Retorna null para placeholders ("Negócio - #12") ou quando não há prefixo.
+ */
+export function personNameFromDealTitle(
+  title: string | null | undefined,
+): string | null {
+  if (!title) return null;
+  const t = title.trim();
+  if (!t) return null;
+  const m = t.match(/^neg[oó]cio(?:\s*[-–]\s*|\s+)(.+)$/i);
+  if (!m) return null;
+  const rest = m[1].trim();
+  if (!rest || /^#?\d+$/.test(rest)) return null;
+  return rest;
+}
+
+/**
+ * Garante que o nome do CONTATO não carregue o prefixo "Negócio".
+ * Contato = "Marcelo Pinheiro"; Negócio = "Negócio Marcelo Pinheiro".
+ */
+export function sanitizeContactName(
+  name: string | null | undefined,
+): string {
+  const t = (name ?? "").trim();
+  if (!t) return t;
+  return personNameFromDealTitle(t) ?? t;
+}
+
+/** Título padrão do negócio a partir do nome do contato. */
+export function defaultDealTitleForContact(
+  contactName: string | null | undefined,
+): string | null {
+  const person = sanitizeContactName(contactName);
+  if (!person || !isRealName(person)) return null;
+  return `Negócio ${person}`;
+}
+
 /** `true` se o nome é um placeholder (telefone ou "Lead ...") — não usável. */
 export function isPlaceholderName(s: string | null | undefined): boolean {
   if (!s) return true;
