@@ -260,13 +260,18 @@ export async function POST(request: Request) {
 
         const deals = await prisma.deal.findMany({
           where: { id: { in: dealIds }, status: { not: "LOST" } },
-          select: { id: true, status: true, stageId: true, pipelineId: true },
+          select: {
+            id: true,
+            status: true,
+            stageId: true,
+            stage: { select: { pipelineId: true } },
+          },
         });
 
         // Obrigatoriedade por funil — se qualquer deal estiver em funil
         // com lossReasonRequired, exige motivo.
         if (!lostReason && deals.length > 0) {
-          const pipeIds = [...new Set(deals.map((d) => d.pipelineId))];
+          const pipeIds = [...new Set(deals.map((d) => d.stage.pipelineId))];
           const requiredPipes = await prisma.pipeline.findMany({
             where: { id: { in: pipeIds }, lossReasonRequired: true },
             select: { id: true },
@@ -284,7 +289,7 @@ export async function POST(request: Request) {
         if (lostReason) {
           try {
             for (const d of deals) {
-              await assertLostReasonAllowed(lostReason, d.pipelineId);
+              await assertLostReasonAllowed(lostReason, d.stage.pipelineId);
             }
           } catch (err) {
             if (err instanceof Error && err.message === "INVALID_LOST_REASON") {
