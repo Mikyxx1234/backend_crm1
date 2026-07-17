@@ -327,6 +327,7 @@ type CrmContact = {
   name: string;
   phone: string | null;
   whatsappBsuid: string | null;
+  whatsappUsername: string | null;
 };
 
 type ContactRow = {
@@ -334,6 +335,7 @@ type ContactRow = {
   name: string;
   phone: string | null;
   whatsappBsuid: string | null;
+  whatsappUsername: string | null;
 };
 
 /**
@@ -464,22 +466,24 @@ async function resolveWebhookContact(
   bsuidRaw: string | undefined,
   profileName: string | null,
   phoneNumberId?: string,
+  opts?: { username?: string | null },
 ): Promise<CrmContact>;
 async function resolveWebhookContact(
   waIdRaw: string | undefined,
   bsuidRaw: string | undefined,
   profileName: string | null,
   phoneNumberId: string | undefined,
-  opts: { createIfMissing: false },
+  opts: { createIfMissing: false; username?: string | null },
 ): Promise<CrmContact | null>;
 async function resolveWebhookContact(
   waIdRaw: string | undefined,
   bsuidRaw: string | undefined,
   profileName: string | null,
   phoneNumberId?: string,
-  opts: { createIfMissing?: boolean } = {},
+  opts: { createIfMissing?: boolean; username?: string | null } = {},
 ): Promise<CrmContact | null> {
   const createIfMissing = opts.createIfMissing !== false;
+  const username = opts.username?.trim().replace(/^@/, "") || undefined;
   const bsuid = bsuidRaw?.trim() || undefined;
   let phone: string | null = null;
   if (waIdRaw) {
@@ -497,7 +501,7 @@ async function resolveWebhookContact(
   if (bsuid) {
     byBs = await prisma.contact.findFirst({
       where: { whatsappBsuid: bsuid },
-      select: { id: true, name: true, phone: true, whatsappBsuid: true },
+      select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
     });
   }
 
@@ -508,7 +512,7 @@ async function resolveWebhookContact(
     const variants = phoneMatchVariants(phone);
     byPh = await prisma.contact.findFirst({
       where: variants.length > 0 ? { phone: { in: variants } } : { phone },
-      select: { id: true, name: true, phone: true, whatsappBsuid: true },
+      select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
     });
   }
 
@@ -540,7 +544,7 @@ async function resolveWebhookContact(
       const variantSet = new Set(phoneMatchVariants(phone));
       const candidates = await prisma.contact.findMany({
         where: { phone: { endsWith: last8 } },
-        select: { id: true, name: true, phone: true, whatsappBsuid: true },
+        select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
       });
       const byFuzzy = candidates.find((c) =>
         phoneMatchVariants(c.phone).some((v) => variantSet.has(v)),
@@ -574,7 +578,12 @@ async function resolveWebhookContact(
   // feito aqui (migration separada, fora deste escopo).
 
   if (contactRow) {
-    const updates: { name?: string; phone?: string | null; whatsappBsuid?: string } = {};
+    const updates: {
+      name?: string;
+      phone?: string | null;
+      whatsappBsuid?: string;
+      whatsappUsername?: string;
+    } = {};
     if (profileName && contactRow.name.startsWith("Lead +")) {
       updates.name = profileName;
     }
@@ -583,6 +592,11 @@ async function resolveWebhookContact(
     }
     if (bsuid && !contactRow.whatsappBsuid) {
       updates.whatsappBsuid = bsuid;
+    }
+    // Backfill do @ do WhatsApp: grava sempre que o payload trouxer o
+    // username e o valor mudou (o cliente pode ter adotado/trocado).
+    if (username && contactRow.whatsappUsername !== username) {
+      updates.whatsappUsername = username;
     }
     if (Object.keys(updates).length > 0) {
       prisma.contact
@@ -615,6 +629,7 @@ async function resolveWebhookContact(
       name: contactRow.name,
       phone: contactRow.phone ?? null,
       whatsappBsuid: contactRow.whatsappBsuid ?? null,
+      whatsappUsername: contactRow.whatsappUsername ?? null,
     };
   }
 
@@ -637,10 +652,11 @@ async function resolveWebhookContact(
       name,
       ...(phone ? { phone } : {}),
       ...(bsuid ? { whatsappBsuid: bsuid } : {}),
+      ...(username ? { whatsappUsername: username } : {}),
       lifecycleStage: "LEAD" as const,
       source: sourceName,
     }),
-    select: { id: true, name: true, phone: true, whatsappBsuid: true },
+    select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
   });
 
   // Dispara automações com trigger "contact_created" (fire-and-forget,
@@ -670,6 +686,7 @@ async function resolveWebhookContact(
     name: created.name,
     phone: created.phone ?? null,
     whatsappBsuid: created.whatsappBsuid ?? null,
+    whatsappUsername: created.whatsappUsername ?? null,
   };
 }
 
@@ -1890,14 +1907,20 @@ async function executePostBody(
       }
 
       const contactMap = new Map<string, string>();
+      // @ do WhatsApp: `contacts[].profile.username` (só presente quando o
+      // usuário adotou username). Chaveamos por wa_id e user_id igual ao nome.
+      const usernameMap = new Map<string, string>();
       for (const c of contacts) {
         const co = obj(c);
         const waId = str(co.wa_id);
         const userId = str(co.user_id);
         const profile = obj(co.profile);
         const name = str(profile.name) || str(profile.username);
+        const username = str(profile.username);
         if (waId && name) contactMap.set(waId, name);
         if (userId && name) contactMap.set(userId, name);
+        if (waId && username) usernameMap.set(waId, username);
+        if (userId && username) usernameMap.set(userId, username);
       }
 
       for (const msg of messages) {
@@ -1953,6 +1976,10 @@ async function executePostBody(
             (from && contactMap.get(from)) ||
             (fromUserId && contactMap.get(fromUserId)) ||
             null;
+          const profileUsername =
+            (from && usernameMap.get(from)) ||
+            (fromUserId && usernameMap.get(fromUserId)) ||
+            null;
 
           // Tratamento especial para mensagens de sistema "user_changed_number":
           // o payload vem com o NOVO wa_id/BSUID, e se o contato antigo não
@@ -1976,6 +2003,7 @@ async function executePostBody(
                   name: true,
                   phone: true,
                   whatsappBsuid: true,
+                  whatsappUsername: true,
                 },
               });
               if (byOld) {
@@ -1984,6 +2012,7 @@ async function executePostBody(
                   name: byOld.name,
                   phone: byOld.phone ?? null,
                   whatsappBsuid: byOld.whatsappBsuid ?? null,
+                  whatsappUsername: byOld.whatsappUsername ?? null,
                 };
                 log.info(
                   `Troca de número: contato antigo ${byOld.id} localizado pelo oldPhone ${normalizedOld} → novo ${sysEvent.newPhone ?? "?"}`,
@@ -1997,7 +2026,7 @@ async function executePostBody(
                 fromUserId || undefined,
                 profileName,
                 phoneNumberId || undefined,
-                { createIfMissing: false },
+                { createIfMissing: false, username: profileUsername },
               );
             }
             if (!contact) {
@@ -2014,6 +2043,7 @@ async function executePostBody(
               fromUserId || undefined,
               profileName,
               phoneNumberId || undefined,
+              { username: profileUsername },
             );
           }
           // Evita warning de variável unused quando o fluxo principal

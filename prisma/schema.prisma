@@ -1078,6 +1078,9 @@ model Contact {
   /// Meta WhatsApp business-scoped user ID (BSUID), ex. US.xxx — ver doc Meta / usernames.
   /// Unicidade por org (WABAs diferentes têm espaços de BSUID independentes).
   whatsappBsuid          String?        @map("whatsapp_bsuid")
+  /// @ (username) do WhatsApp — vem em `contacts[].profile.username` no webhook Meta.
+  /// Só existe quando o usuário adotou username; ausente para a maioria dos contatos.
+  whatsappUsername       String?        @map("whatsapp_username")
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)

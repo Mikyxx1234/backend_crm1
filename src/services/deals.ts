@@ -258,6 +258,7 @@ const detailInclude = {
   contact: {
     select: {
       id: true, number: true, name: true, email: true, phone: true, avatarUrl: true,
+      whatsappUsername: true,
       // `source` (nativo de Contact) usado pelo deal detail (frontend
       // mostra/edita inline no cabecalho fixo da sidebar via
       // InlineNativeEditor). Antes o painel tentava ler `Deal.source` que
