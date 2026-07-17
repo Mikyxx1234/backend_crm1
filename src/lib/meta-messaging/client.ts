@@ -22,14 +22,37 @@ const GRAPH_TIMEOUT_MS = 20_000;
 
 type SendResult = { message_id?: string; recipient_id?: string };
 
+/**
+ * Modo do cliente:
+ *   - "messenger" -> POST graph.facebook.com/v21.0/{pageId}/messages
+ *   - "instagram" -> POST graph.instagram.com/v21.0/me/messages (IG Direct Login)
+ */
+export type MessagingMode = "messenger" | "instagram";
+
 export class MetaMessagingClient {
   constructor(
-    private readonly pageAccessToken: string,
-    private readonly pageId: string,
+    private readonly accessToken: string,
+    /** pageId (messenger) ou instagramUserId (instagram). */
+    private readonly senderId: string,
+    private readonly mode: MessagingMode = "messenger",
   ) {}
 
   get configured(): boolean {
-    return Boolean(this.pageAccessToken?.trim() && this.pageId?.trim());
+    return Boolean(this.accessToken?.trim() && this.senderId?.trim());
+  }
+
+  private baseUrl(): string {
+    return this.mode === "instagram"
+      ? `https://graph.instagram.com/${GRAPH_VERSION}`
+      : `https://graph.facebook.com/${GRAPH_VERSION}`;
+  }
+
+  private endpointPath(): string {
+    // IG Direct: /me/messages (o proprio token identifica a conta)
+    // Messenger: /{pageId}/messages
+    return this.mode === "instagram"
+      ? "me/messages"
+      : `${this.senderId}/messages`;
   }
 
   static buildGraphUrl(path: string): string {
@@ -38,13 +61,13 @@ export class MetaMessagingClient {
   }
 
   private async graphPost<T>(path: string, body: unknown): Promise<T> {
-    const url = MetaMessagingClient.buildGraphUrl(path);
+    const url = `${this.baseUrl()}/${path.startsWith("/") ? path.slice(1) : path}`;
     let res: Response;
     try {
       res = await fetch(url, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${this.pageAccessToken}`,
+          Authorization: `Bearer ${this.accessToken}`,
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
@@ -99,7 +122,7 @@ export class MetaMessagingClient {
       messaging_type: opts?.messagingType ?? "RESPONSE",
     };
     if (opts?.tag) body.tag = opts.tag;
-    return this.graphPost<SendResult>(`${this.pageId}/messages`, body);
+    return this.graphPost<SendResult>(this.endpointPath(), body);
   }
 
   /**
@@ -119,7 +142,7 @@ export class MetaMessagingClient {
       messaging_type: opts?.messagingType ?? "RESPONSE",
     };
     if (opts?.tag) body.tag = opts.tag;
-    return this.graphPost<SendResult>(`${this.pageId}/messages`, body);
+    return this.graphPost<SendResult>(this.endpointPath(), body);
   }
 }
 
@@ -128,13 +151,22 @@ export class MetaMessagingClient {
  * provisionamento em `channels-messaging-provision.ts`). Decripta o
  * `accessToken` (Page Access Token) transparentemente.
  */
+/**
+ * Constroi o client a partir do `Channel.config`. Detecta o modo pelo
+ * campo `platform`:
+ *   - "instagram" + instagramUserId  -> IG Direct (graph.instagram.com/me/messages)
+ *   - "messenger" + pageId (ou config sem platform) -> Messenger
+ */
 export function messagingClientFromConfig(
   config: Record<string, unknown> | null | undefined,
 ): MetaMessagingClient {
-  if (!config) return new MetaMessagingClient("", "");
+  if (!config) return new MetaMessagingClient("", "", "messenger");
 
   const rawToken = typeof config.accessToken === "string" ? config.accessToken.trim() : "";
   const pageId = typeof config.pageId === "string" ? config.pageId.trim() : "";
+  const instagramUserId =
+    typeof config.instagramUserId === "string" ? config.instagramUserId.trim() : "";
+  const platform = typeof config.platform === "string" ? config.platform.trim() : "";
 
   let token = rawToken;
   if (rawToken && isEncryptedSecret(rawToken)) {
@@ -149,5 +181,10 @@ export function messagingClientFromConfig(
     }
   }
 
-  return new MetaMessagingClient(token, pageId);
+  // IG Direct: platform === "instagram" e existe instagramUserId (nao pageId)
+  if (platform === "instagram" && instagramUserId && !pageId) {
+    return new MetaMessagingClient(token, instagramUserId, "instagram");
+  }
+  // Fallback / Messenger / IG-via-FB legacy
+  return new MetaMessagingClient(token, pageId || instagramUserId, "messenger");
 }

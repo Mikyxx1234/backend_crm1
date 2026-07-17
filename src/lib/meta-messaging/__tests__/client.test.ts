@@ -82,4 +82,38 @@ describe("messagingClientFromConfig", () => {
     expect(messagingClientFromConfig(null).configured).toBe(false);
     expect(messagingClientFromConfig({}).configured).toBe(false);
   });
+
+  it("Instagram Direct: usa graph.instagram.com/me/messages", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ message_id: "mid_ig" }), { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const c = messagingClientFromConfig({
+      platform: "instagram",
+      instagramUserId: "17841400000000000",
+      accessToken: "IGAA...",
+    });
+    await c.sendText("IGSID_1", "oi");
+    const [url] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(
+      "https://graph.instagram.com/v21.0/me/messages",
+    );
+  });
+
+  it("Messenger: usa graph.facebook.com/{pageId}/messages", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ message_id: "mid_fb" }), { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const c = messagingClientFromConfig({
+      platform: "messenger",
+      pageId: "PAGE_99",
+      accessToken: "EAA...",
+    });
+    await c.sendText("PSID_9", "oi");
+    const [url] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(
+      "https://graph.facebook.com/v21.0/PAGE_99/messages",
+    );
+  });
 });

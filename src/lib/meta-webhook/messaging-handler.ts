@@ -157,7 +157,9 @@ type ChannelHit = {
   channelId: string;
   organizationId: string;
   channelType: "FACEBOOK" | "INSTAGRAM";
-  pageId: string;
+  provider: "META_CLOUD_API" | "META_INSTAGRAM_LOGIN";
+  /** Messenger: pageId. Instagram direct: instagramUserId. */
+  senderRef: string;
   accessToken: string;
 };
 
@@ -165,36 +167,57 @@ async function findChannelByEntryId(
   entryId: string,
   platform: Platform,
 ): Promise<ChannelHit | null> {
-  const path = platform === "instagram" ? "instagramAccountId" : "pageId";
-  const channel = await prismaBase.channel.findFirst({
-    where: {
-      type: platform === "instagram" ? "INSTAGRAM" : "FACEBOOK",
-      provider: "META_CLOUD_API",
-      config: { path: [path], equals: entryId },
-    },
-    select: {
-      id: true,
-      organizationId: true,
-      type: true,
-      config: true,
-    },
-  });
-  if (!channel) return null;
+  // Instagram tem 2 fluxos possiveis:
+  // - META_INSTAGRAM_LOGIN: entry.id = instagramUserId (config.instagramUserId)
+  // - META_CLOUD_API (via Facebook Page, legado): entry.id = instagramAccountId
+  // Messenger: entry.id = pageId (config.pageId) sob META_CLOUD_API.
+  const candidates = platform === "instagram"
+    ? [
+        { provider: "META_INSTAGRAM_LOGIN" as const, path: "instagramUserId" },
+        { provider: "META_CLOUD_API" as const, path: "instagramAccountId" },
+      ]
+    : [{ provider: "META_CLOUD_API" as const, path: "pageId" }];
 
-  const cfg = (channel.config ?? {}) as Record<string, unknown>;
-  const pageId = typeof cfg.pageId === "string" ? cfg.pageId : "";
-  const tokenRaw = typeof cfg.accessToken === "string" ? cfg.accessToken : "";
-  const token = tokenRaw && isEncryptedSecret(tokenRaw)
-    ? safeDecrypt(tokenRaw)
-    : tokenRaw;
+  for (const c of candidates) {
+    const channel = await prismaBase.channel.findFirst({
+      where: {
+        type: platform === "instagram" ? "INSTAGRAM" : "FACEBOOK",
+        provider: c.provider,
+        config: { path: [c.path], equals: entryId },
+      },
+      select: {
+        id: true,
+        organizationId: true,
+        type: true,
+        provider: true,
+        config: true,
+      },
+    });
+    if (!channel) continue;
 
-  return {
-    channelId: channel.id,
-    organizationId: channel.organizationId,
-    channelType: channel.type as "FACEBOOK" | "INSTAGRAM",
-    pageId,
-    accessToken: token,
-  };
+    const cfg = (channel.config ?? {}) as Record<string, unknown>;
+    const tokenRaw = typeof cfg.accessToken === "string" ? cfg.accessToken : "";
+    const token = tokenRaw && isEncryptedSecret(tokenRaw)
+      ? safeDecrypt(tokenRaw)
+      : tokenRaw;
+
+    const senderRef =
+      c.provider === "META_INSTAGRAM_LOGIN"
+        ? String(cfg.instagramUserId ?? "")
+        : platform === "instagram"
+          ? String(cfg.instagramAccountId ?? "")
+          : String(cfg.pageId ?? "");
+
+    return {
+      channelId: channel.id,
+      organizationId: channel.organizationId,
+      channelType: channel.type as "FACEBOOK" | "INSTAGRAM",
+      provider: channel.provider as "META_CLOUD_API" | "META_INSTAGRAM_LOGIN",
+      senderRef,
+      accessToken: token,
+    };
+  }
+  return null;
 }
 
 function safeDecrypt(v: string): string {
@@ -354,14 +377,20 @@ async function fetchProfileName(
 ): Promise<string | null> {
   if (!hit.accessToken) return null;
   try {
-    // Messenger: /{psid}?fields=name; Instagram: /{igsid}?fields=name
-    const url = new URL(`${GRAPH_BASE}/${userId}`);
-    url.searchParams.set("fields", "name");
+    // Messenger: graph.facebook.com/{psid}?fields=name (Page token)
+    // IG Direct: graph.instagram.com/v21.0/{igsid}?fields=name,username
+    const base =
+      hit.provider === "META_INSTAGRAM_LOGIN"
+        ? `https://graph.instagram.com/${GRAPH_API_VERSION}`
+        : GRAPH_BASE;
+    const fields = hit.provider === "META_INSTAGRAM_LOGIN" ? "name,username" : "name";
+    const url = new URL(`${base}/${userId}`);
+    url.searchParams.set("fields", fields);
     url.searchParams.set("access_token", hit.accessToken);
     const res = await fetch(url.toString(), { cache: "no-store" });
     if (!res.ok) return null;
-    const data = (await res.json()) as { name?: string };
-    return data.name?.trim() || null;
+    const data = (await res.json()) as { name?: string; username?: string };
+    return data.name?.trim() || data.username?.trim() || null;
   } catch {
     return null;
   }

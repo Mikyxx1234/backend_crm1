@@ -20,6 +20,7 @@ import {
 const SENSITIVE_FIELDS: Record<ChannelProvider, ReadonlyArray<string>> = {
   META_CLOUD_API: ["accessToken", "appSecret", "verifyToken"],
   BAILEYS_MD: [],
+  META_INSTAGRAM_LOGIN: ["accessToken"],
 };
 
 /** Recupera os campos sensiveis configurados para um provider. */

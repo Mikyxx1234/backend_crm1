@@ -2772,6 +2772,7 @@ enum ChannelType {
 enum ChannelProvider {
   META_CLOUD_API
   BAILEYS_MD
+  META_INSTAGRAM_LOGIN
 }
 
 enum ChannelStatus {
