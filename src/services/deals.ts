@@ -148,6 +148,8 @@ export type GetDealsParams = {
    * (mesmo vazio) → restringe deals aos estágios desses funis.
    */
   allowedPipelineIds?: string[] | null;
+  /** Mesma engine do POST /board — filtros avançados (tags, datas, custom…). */
+  advancedFilters?: AdvancedDealFilters;
 };
 
 const listInclude = {
@@ -232,6 +234,11 @@ export async function getDeals(params: GetDealsParams = {}) {
     conditions.push({
       contact: phoneOr.length === 1 ? phoneOr[0] : { OR: phoneOr },
     });
+  }
+
+  if (params.advancedFilters && Object.keys(params.advancedFilters).length > 0) {
+    const advConditions = await buildDealWhereFromFilters(params.advancedFilters);
+    for (const c of advConditions) conditions.push(c);
   }
 
   const where: Prisma.DealWhereInput =
