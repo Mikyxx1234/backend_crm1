@@ -1,7 +1,6 @@
 import type { WAMessage, WASocket } from "@whiskeysockets/baileys";
 import { downloadMediaMessage, getContentType } from "@whiskeysockets/baileys";
 import crypto from "crypto";
-import IORedis from "ioredis";
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -17,29 +16,11 @@ import { processIncomingMessage as processSalesbotMessage } from "@/services/aut
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { getLogger } from "@/lib/logger";
+import { sseBus } from "@/lib/sse-bus";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { isLidJid, resolveJid } from "./lid-resolver";
 
 const log = getLogger("baileys-msg");
-
-const SSE_REDIS_CHANNEL = "crm:sse:events";
-
-let redisPub: IORedis | null = null;
-function getRedisPublisher(): IORedis | null {
-  const url = process.env.REDIS_URL?.trim();
-  if (!url) return null;
-  if (!redisPub) {
-    redisPub = new IORedis(url, { maxRetriesPerRequest: null });
-  }
-  return redisPub;
-}
-
-function publishSse(event: string, data: unknown) {
-  const redis = getRedisPublisher();
-  if (!redis) return;
-  redis.publish(SSE_REDIS_CHANNEL, JSON.stringify({ event, data })).catch((e) => {
-    log.debug("Falha ao publicar SSE:", e);
-  });
-}
 
 function normalizePhone(raw: string): string {
   const digits = raw.replace(/\D/g, "");
@@ -224,7 +205,8 @@ async function syncContactAvatar(
 
     // Notifica a UI: lista de conversas, header, deal panel — tudo
     // que renderiza ChatAvatar pra esse contato deve refetchar.
-    publishSse("contact_updated", {
+    sseBus.publish("contact_updated", {
+      organizationId: contact.organizationId,
       contactId: contact.id,
       avatarUrl: newUrl,
     });
@@ -585,7 +567,8 @@ export async function handleBaileysMessage(
       (err) => log.warn("Falha ao cancelar agendamentos pendentes:", err),
     );
 
-    publishSse("new_message", {
+    sseBus.publish("new_message", {
+      organizationId: getOrgIdOrNull(),
       conversationId: conversation.id,
       contactId: contact.id,
       direction: "in",
