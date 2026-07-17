@@ -122,6 +122,21 @@ export async function POST(request: Request, context: RouteContext) {
           if (err.message === "INVALID_POSITION") {
             return NextResponse.json({ message: "position inválido." }, { status: 400 });
           }
+          if (err.message === "LOST_REASON_REQUIRED") {
+            return NextResponse.json(
+              { message: "Motivo da perda é obrigatório neste funil." },
+              { status: 400 },
+            );
+          }
+          if (err.message === "INVALID_LOST_REASON") {
+            return NextResponse.json(
+              {
+                message:
+                  "Motivo da perda inválido. Selecione um dos motivos cadastrados em Configurações → Motivos de perda.",
+              },
+              { status: 400 },
+            );
+          }
         }
         throw err;
       }

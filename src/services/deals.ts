@@ -627,16 +627,18 @@ export async function moveDeal(
     throw new Error("INVALID_POSITION");
   }
 
+  // Deal não tem pipelineId direto — o funil vem do estágio atual.
   const dealPeek = await prisma.deal.findUnique({
     where: { id: dealId },
-    select: { id: true, pipelineId: true },
+    select: { id: true, stage: { select: { pipelineId: true } } },
   });
   if (!dealPeek) throw new Error("NOT_FOUND");
+  const pipelineId = dealPeek.stage.pipelineId;
 
   // Valida o motivo ANTES de abrir a transação (evita rollback se o destino
   // for o estágio Perdido e o motivo livre tiver sido bloqueado pela setting).
   if (options?.lostReason) {
-    await assertLostReasonAllowed(options.lostReason, dealPeek.pipelineId);
+    await assertLostReasonAllowed(options.lostReason, pipelineId);
   }
 
   let becameWon = false;
@@ -655,7 +657,7 @@ export async function moveDeal(
 
     if (targetStage.isLost) {
       const pipe = await tx.pipeline.findUnique({
-        where: { id: deal.pipelineId },
+        where: { id: targetStage.pipelineId },
         select: { lossReasonRequired: true },
       });
       if (pipe?.lossReasonRequired && !options?.lostReason?.trim()) {
@@ -794,19 +796,20 @@ export async function markDealLost(id: string, lostReason?: string | null) {
 
   const dealPeek = await prisma.deal.findUnique({
     where: { id },
-    select: { pipelineId: true, stageId: true },
+    select: { stageId: true, stage: { select: { pipelineId: true } } },
   });
   if (!dealPeek) throw new Error("NOT_FOUND");
+  const pipelineId = dealPeek.stage.pipelineId;
 
   const pipe = await prisma.pipeline.findUnique({
-    where: { id: dealPeek.pipelineId },
+    where: { id: pipelineId },
     select: { lossReasonRequired: true },
   });
   if (pipe?.lossReasonRequired && !reason) {
     throw new Error("LOST_REASON_REQUIRED");
   }
 
-  await assertLostReasonAllowed(reason, dealPeek.pipelineId);
+  await assertLostReasonAllowed(reason, pipelineId);
 
   const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
