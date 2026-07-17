@@ -2,11 +2,12 @@ import type { AutomationStep } from "@/lib/automation-workflow";
 
 const NONE = "__none__";
 const START_X = 200;
-const GAP_X = 300;
+// Espelha frontend: nós com edição inline expandem ~340–420px.
+const GAP_X = 480;
 // 27/mai/26 — Alinhado com `NODE_Y` do canvas no frontend (=300) e com
 // o `START_Y` espelhado em `frontend_crm1/src/lib/automation-layout.ts`.
 const START_Y = 300;
-const GAP_Y = 220;
+const GAP_Y = 280;
 
 function isRealTarget(target: unknown, stepIds: Set<string>): target is string {
   return typeof target === "string" && target !== "" && target !== NONE && stepIds.has(target);
