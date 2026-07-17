@@ -15,6 +15,10 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaWhatsApp, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { withRateLimit } from "@/lib/rate-limit";
 import { sendWhatsAppText, isBaileysChannel } from "@/lib/send-whatsapp";
+import {
+  platformFromConversationChannel,
+  sendMessengerOrInstagramText,
+} from "@/lib/send-meta-messaging";
 import { sseBus } from "@/lib/sse-bus";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -654,6 +658,112 @@ export async function POST(request: Request, context: RouteContext) {
           senderName,
         } satisfies InboxMessageDto,
       }, { status: 201 });
+    }
+
+    // ── Send via Facebook Messenger / Instagram Direct ──
+    // Branch antes do fluxo WhatsApp: canais IG/FB tem identificadores
+    // (PSID/IGSID) e endpoints distintos e nao passam pelo getContactWhatsAppTargets.
+    const messagingPlatform = platformFromConversationChannel(conv.channel);
+    if (messagingPlatform) {
+      const savedMsg = await prisma.message.create({
+        data: withOrgFromCtx({
+          conversationId: conv.id,
+          channelId: outboundChannelId ?? undefined,
+          content,
+          direction: "out",
+          messageType: "text",
+          senderName,
+          replyToId: replyParentInternalId,
+          replyToPreview,
+        }),
+      });
+
+      const sendRes = await sendMessengerOrInstagramText({
+        conversationId: conv.id,
+        contactId: conv.contactId,
+        channelRef: outboundChannelRef
+          ? { id: outboundChannelRef.id, config: outboundChannelRef.config }
+          : null,
+        content,
+        messageId: savedMsg.id,
+        platform: messagingPlatform,
+      });
+
+      const channelLabel =
+        messagingPlatform === "instagram" ? "Instagram" : "Messenger";
+
+      try {
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: {
+            lastMessageDirection: "out",
+            hasAgentReply: true,
+            ...(sendRes.failed ? { hasError: true } : { hasError: false }),
+          },
+        });
+      } catch { /* colunas opcionais */ }
+
+      fireTrigger("message_sent", {
+        contactId: conv.contactId,
+        data: { channel: channelLabel, content },
+      }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+
+      if (!sendRes.failed) {
+        void logEvent({
+          type: "MESSAGE_SENT",
+          entityType: "MESSAGE",
+          entityId: savedMsg.id,
+          entityLabel: senderName ?? "Mensagem enviada",
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          meta: {
+            preview: content.slice(0, 200),
+            channel: channelLabel,
+            via: "meta_messaging",
+            externalId: sendRes.externalId,
+          },
+        });
+      }
+
+      try {
+        sseBus.publish("new_message", {
+          organizationId: conv.organizationId,
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          direction: "out",
+          content,
+          timestamp: savedMsg.createdAt,
+        });
+      } catch { /* best-effort */ }
+
+      cancelPendingForConversation(conv.id, "agent_reply", authResult.user.id).catch(
+        (err) =>
+          console.warn(
+            "[scheduled-messages] falha ao cancelar apos envio manual:",
+            err,
+          ),
+      );
+
+      return NextResponse.json(
+        {
+          message: {
+            id: sendRes.externalId ?? savedMsg.id,
+            content,
+            createdAt: savedMsg.createdAt.toISOString(),
+            direction: "out",
+            messageType: "text",
+            senderName,
+            replyToId: replyParentInternalId,
+            replyToPreview,
+            status: sendRes.error ? "FAILED" : "SENT",
+            channelId: outboundChannelId ?? null,
+          } satisfies InboxMessageDto,
+          conversationId: conv.id,
+          ...(reopenedConversationId ? { reopenedConversationId } : {}),
+          ...(sendRes.error ? { metaError: sendRes.error } : {}),
+        },
+        { status: 201 },
+      );
     }
 
     // ── Send via WhatsApp (Meta Cloud API or Baileys) ──

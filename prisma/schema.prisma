@@ -1081,6 +1081,14 @@ model Contact {
   /// @ (username) do WhatsApp — vem em `contacts[].profile.username` no webhook Meta.
   /// Só existe quando o usuário adotou username; ausente para a maioria dos contatos.
   whatsappUsername       String?        @map("whatsapp_username")
+  /// PSID (Page-Scoped ID) do Facebook Messenger. Único por Página do Facebook,
+  /// portanto único por organização (uma org pode ter várias Páginas, mas o
+  /// mesmo usuário terá PSIDs distintos por Página — na prática mapeamos
+  /// contato = PSID+Página, mas a unicidade por org é suficiente pra evitar
+  /// duplicatas nos fluxos mais comuns).
+  messengerPsid          String?        @map("messenger_psid")
+  /// IGSID (Instagram-Scoped ID) da Instagram Messaging API — análogo ao PSID.
+  instagramIgsid         String?        @map("instagram_igsid")
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -1112,6 +1120,8 @@ model Contact {
   @@unique([organizationId, number])
   @@unique([organizationId, externalId])
   @@unique([organizationId, whatsappBsuid])
+  @@unique([organizationId, messengerPsid])
+  @@unique([organizationId, instagramIgsid])
   @@index([organizationId])
   @@index([organizationId, number])
   @@index([organizationId, email])
