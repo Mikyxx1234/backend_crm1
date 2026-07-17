@@ -1199,6 +1199,9 @@ model Company {
   size           String?
   phone          String?
   address        String?
+  cep            String?
+  city           String?
+  state          String?
   notes          String?
 
   /// Auto-relação: grupo econômico (matriz) -> filiais/CNPJs.
@@ -1215,6 +1218,8 @@ model Company {
   @@index([organizationId])
   @@index([organizationId, name])
   @@index([organizationId, parentId])
+  @@index([organizationId, state])
+  @@index([organizationId, city])
   @@map("companies")
 }
 

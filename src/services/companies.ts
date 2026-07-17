@@ -13,17 +13,36 @@ const assignedToSelect = {
 
 export type CompanySegment = "todos" | "com-contatos" | "sem-email" | "sem-telefone";
 
+export type CompanySortField = "name" | "createdAt" | "updatedAt";
+export type SortOrder = "asc" | "desc";
+
 export type GetCompaniesParams = {
   search?: string;
   page?: number;
   perPage?: number;
   /** Segmento dos stat cards do diretório. */
   segment?: CompanySegment;
+  /** Filtro por localização. */
+  city?: string;
+  state?: string;
+  /** Filtro por setor/indústria. */
+  industry?: string;
+  /** Intervalo de criação (YYYY-MM-DD). */
+  createdFrom?: string;
+  createdTo?: string;
+  /** Ordenação. */
+  sortBy?: CompanySortField;
+  sortOrder?: SortOrder;
 };
 
 function buildCompanyWhere(params: {
   search?: string;
   segment?: CompanySegment;
+  city?: string;
+  state?: string;
+  industry?: string;
+  createdFrom?: string;
+  createdTo?: string;
 }): Prisma.CompanyWhereInput {
   const search = params.search?.trim();
   const and: Prisma.CompanyWhereInput[] = [];
@@ -34,9 +53,27 @@ function buildCompanyWhere(params: {
         { name: { contains: search, mode: "insensitive" } },
         { domain: { contains: search, mode: "insensitive" } },
         { industry: { contains: search, mode: "insensitive" } },
+        { city: { contains: search, mode: "insensitive" } },
+        { state: { contains: search, mode: "insensitive" } },
+        { cep: { contains: search, mode: "insensitive" } },
+        { address: { contains: search, mode: "insensitive" } },
+        { size: { contains: search, mode: "insensitive" } },
+        { phone: { contains: search, mode: "insensitive" } },
       ],
     });
   }
+
+  const city = params.city?.trim();
+  if (city) and.push({ city: { equals: city, mode: "insensitive" } });
+
+  const state = params.state?.trim();
+  if (state) and.push({ state: { equals: state, mode: "insensitive" } });
+
+  const industry = params.industry?.trim();
+  if (industry) and.push({ industry: { equals: industry, mode: "insensitive" } });
+
+  const createdRange = buildDateRange(params.createdFrom, params.createdTo);
+  if (createdRange) and.push({ createdAt: createdRange });
 
   if (params.segment === "com-contatos") {
     and.push({ contacts: { some: {} } });
@@ -49,18 +86,43 @@ function buildCompanyWhere(params: {
   return and.length === 0 ? {} : and.length === 1 ? and[0]! : { AND: and };
 }
 
+/** Converte YYYY-MM-DD (from/to) em filtro de intervalo com fim inclusivo. */
+function buildDateRange(
+  from?: string,
+  to?: string,
+): Prisma.DateTimeFilter | undefined {
+  const range: Prisma.DateTimeFilter = {};
+  if (from) {
+    const d = new Date(`${from}T00:00:00.000Z`);
+    if (!Number.isNaN(d.getTime())) range.gte = d;
+  }
+  if (to) {
+    const d = new Date(`${to}T00:00:00.000Z`);
+    if (!Number.isNaN(d.getTime())) {
+      d.setUTCDate(d.getUTCDate() + 1);
+      range.lt = d;
+    }
+  }
+  return range.gte || range.lt ? range : undefined;
+}
+
+const COMPANY_SORT_FIELDS = new Set<CompanySortField>(["name", "createdAt", "updatedAt"]);
+
 export async function getCompanies(params: GetCompaniesParams = {}) {
   const page = Math.max(1, params.page ?? 1);
   const perPage = Math.min(100, Math.max(1, params.perPage ?? 20));
   const skip = (page - 1) * perPage;
   const where = buildCompanyWhere(params);
 
+  const sortBy = params.sortBy && COMPANY_SORT_FIELDS.has(params.sortBy) ? params.sortBy : "name";
+  const sortOrder: SortOrder = params.sortOrder === "desc" ? "desc" : "asc";
+
   const [items, total] = await Promise.all([
     prisma.company.findMany({
       where,
       skip,
       take: perPage,
-      orderBy: { name: "asc" },
+      orderBy: { [sortBy]: sortOrder },
       include: {
         _count: { select: { contacts: true } },
       },
@@ -96,6 +158,42 @@ export async function getCompanyStats(): Promise<CompanyStats> {
   return { total, withContacts, withoutEmail, withoutPhone };
 }
 
+export type CompanyFacets = {
+  states: string[];
+  cities: string[];
+  industries: string[];
+};
+
+/** Valores distintos (estado, cidade, setor) para os selects do filtro. */
+export async function getCompanyFacets(): Promise<CompanyFacets> {
+  const [states, cities, industries] = await Promise.all([
+    prisma.company.findMany({
+      where: { state: { not: null } },
+      select: { state: true },
+      distinct: ["state"],
+      orderBy: { state: "asc" },
+    }),
+    prisma.company.findMany({
+      where: { city: { not: null } },
+      select: { city: true },
+      distinct: ["city"],
+      orderBy: { city: "asc" },
+    }),
+    prisma.company.findMany({
+      where: { industry: { not: null } },
+      select: { industry: true },
+      distinct: ["industry"],
+      orderBy: { industry: "asc" },
+    }),
+  ]);
+
+  return {
+    states: states.map((s) => s.state!).filter((v) => v.trim() !== ""),
+    cities: cities.map((c) => c.city!).filter((v) => v.trim() !== ""),
+    industries: industries.map((i) => i.industry!).filter((v) => v.trim() !== ""),
+  };
+}
+
 export type CreateCompanyInput = {
   name: string;
   domain?: string | null;
@@ -103,6 +201,9 @@ export type CreateCompanyInput = {
   size?: string | null;
   phone?: string | null;
   address?: string | null;
+  cep?: string | null;
+  city?: string | null;
+  state?: string | null;
   notes?: string | null;
 };
 
@@ -132,6 +233,9 @@ export async function createCompany(data: CreateCompanyInput) {
       size: data.size ?? undefined,
       phone: data.phone ?? undefined,
       address: data.address ?? undefined,
+      cep: data.cep ?? undefined,
+      city: data.city ?? undefined,
+      state: data.state ?? undefined,
       notes: data.notes ?? undefined,
     }),
     include: {
@@ -149,6 +253,9 @@ export async function updateCompany(id: string, data: UpdateCompanyInput) {
   if (data.size !== undefined) updateData.size = data.size;
   if (data.phone !== undefined) updateData.phone = data.phone;
   if (data.address !== undefined) updateData.address = data.address;
+  if (data.cep !== undefined) updateData.cep = data.cep;
+  if (data.city !== undefined) updateData.city = data.city;
+  if (data.state !== undefined) updateData.state = data.state;
   if (data.notes !== undefined) updateData.notes = data.notes;
 
   return prisma.company.update({
