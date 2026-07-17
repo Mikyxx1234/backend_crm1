@@ -40,6 +40,8 @@ export type GetConversationsParams = {
   perPage?: number;
   visibilityWhere?: Prisma.ConversationWhereInput;
   ownerId?: string;
+  /** true = só conversas sem responsável (`assignedToId` null). */
+  withoutOwner?: boolean;
   stageId?: string;
   tagIds?: string[];
   /** Origens do contato (Contact.source). Pode incluir `SOURCE_NONE`. */
@@ -275,7 +277,9 @@ export async function getConversations(
     conditions.push({ channelId: { in: params.allowedChannelIds } });
   }
 
-  if (params.ownerId) {
+  if (params.withoutOwner) {
+    conditions.push({ assignedToId: null });
+  } else if (params.ownerId) {
     conditions.push({
       OR: [
         { assignedToId: params.ownerId },
