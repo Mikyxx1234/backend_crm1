@@ -83,6 +83,12 @@ export async function PUT(request: Request, context: RouteContext) {
       notifyDealStageChanged(dealId, fromStageId, deal.stageId, { contactId: existing.contactId ?? undefined }).catch(() => {});
       return NextResponse.json(deal);
     } catch (err: unknown) {
+      if (err instanceof Error && err.message === "LOST_REASON_REQUIRED") {
+        return NextResponse.json(
+          { message: "Motivo da perda é obrigatório neste funil." },
+          { status: 400 },
+        );
+      }
       if (err instanceof Error && err.message === "INVALID_LOST_REASON") {
         return NextResponse.json(
           {
