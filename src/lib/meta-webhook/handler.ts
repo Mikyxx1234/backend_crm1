@@ -1285,28 +1285,41 @@ async function processStatusUpdate(status: Record<string, unknown>) {
   try {
     const msg = await prisma.message.findFirst({
       where: { externalId: wamid },
-      select: { id: true, sendStatus: true, conversationId: true },
+      select: {
+        id: true,
+        sendStatus: true,
+        conversationId: true,
+        organizationId: true,
+        externalId: true,
+      },
     });
-    if (msg) {
-      // Progressão normal: pending(0) → sent(1) → delivered(2) → read(3).
-      // "failed" NÃO entra nessa escala — é um estado terminal que
-      // SEMPRE deve sobrepor, porque a Meta pode mandar `sent` no ACK
-      // inicial e minutos depois `failed` (cliente bloqueou, janela de
-      // 24h expirou na entrega, número inválido, etc). Antes o código
-      // tratava failed como prioridade 0 e descartava esse callback,
-      // deixando a UI eternamente com ✓ mesmo após a falha real.
-      const statusPriority: Record<string, number> = { sent: 1, delivered: 2, read: 3 };
-      // Normaliza caso (outros caminhos podem gravar SENT/DELIVERED/READ).
-      const currentPriority =
-        statusPriority[(msg.sendStatus ?? "").toLowerCase()] ?? 0;
-      const newPriority = statusPriority[s] ?? 0;
+    if (!msg) {
+      // Status chegou antes do externalId ser gravado (race raro) ou
+      // wamid desconhecido — sem mensagem não há o que atualizar na UI.
+      log.info(`Status ${s} ignorado: mensagem externalId=${wamid} não encontrada`);
+      await updateCampaignRecipientStatus(wamid, s, status);
+      return;
+    }
 
-      const isFailure = s === "failed";
-      const shouldUpdate = isFailure
-        ? msg.sendStatus !== "failed"
-        : newPriority > currentPriority;
+    // Progressão normal: pending(0) → sent(1) → delivered(2) → read(3).
+    // "failed" NÃO entra nessa escala — é um estado terminal que
+    // SEMPRE deve sobrepor, porque a Meta pode mandar `sent` no ACK
+    // inicial e minutos depois `failed` (cliente bloqueou, janela de
+    // 24h expirou na entrega, número inválido, etc). Antes o código
+    // tratava failed como prioridade 0 e descartava esse callback,
+    // deixando a UI eternamente com ✓ mesmo após a falha real.
+    const statusPriority: Record<string, number> = { sent: 1, delivered: 2, read: 3 };
+    // Normaliza caso (outros caminhos podem gravar SENT/DELIVERED/READ).
+    const currentPriority =
+      statusPriority[(msg.sendStatus ?? "").toLowerCase()] ?? 0;
+    const newPriority = statusPriority[s] ?? 0;
 
-      if (shouldUpdate) {
+    const isFailure = s === "failed";
+    const shouldUpdate = isFailure
+      ? (msg.sendStatus ?? "").toLowerCase() !== "failed"
+      : newPriority > currentPriority;
+
+    if (shouldUpdate) {
         // Estrutura oficial do erro do webhook (Meta docs):
         //   errors[i] = { code, title, message, error_data: { details }, href }
         // Recomendação Meta: usar `code` como chave de lógica, `error_data.details`
@@ -1414,16 +1427,27 @@ async function processStatusUpdate(status: Record<string, unknown>) {
           })();
         }
 
+        // O GET /messages expõe id = externalId ?? id (id da bolha no
+        // front). Se publicarmos só o UUID interno, o update otimista
+        // nunca casa e os ticks só mudam no refetch/poll.
+        const bubbleId = msg.externalId ?? msg.id;
+        const orgId = getOrgIdOrNull() ?? msg.organizationId;
         try {
           sseBus.publish("message_status", {
-            organizationId: getOrgIdOrNull(),
+            organizationId: orgId,
             conversationId: msg.conversationId,
-            messageId: msg.id,
+            messageId: bubbleId,
+            internalId: msg.id,
             status: s,
             ...(isFailure && sendError ? { error: sendError } : {}),
           });
         } catch {}
-      }
+
+        if (s === "read") {
+          log.info(
+            `Mensagem lida wamid=${wamid} conversationId=${msg.conversationId} bubbleId=${bubbleId}`,
+          );
+        }
     }
 
     await updateCampaignRecipientStatus(wamid, s, status);
