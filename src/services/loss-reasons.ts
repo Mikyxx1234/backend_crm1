@@ -52,7 +52,12 @@ export async function listPipelineLossReasons(pipelineId: string) {
 export async function getPipelineLossReasonMeta(pipelineId: string) {
   const pipeline = await prisma.pipeline.findUnique({
     where: { id: pipelineId },
-    select: { id: true, name: true, lossReasonRequired: true },
+    select: {
+      id: true,
+      name: true,
+      lossReasonRequired: true,
+      lossReasonAllowOther: true,
+    },
   });
   if (!pipeline) return null;
   const reasons = await listPipelineLossReasons(pipelineId);
@@ -149,6 +154,33 @@ export async function setPipelineLossReasonRequired(
     data: { lossReasonRequired: required },
     select: { id: true, lossReasonRequired: true },
   });
+}
+
+export async function setPipelineLossReasonAllowOther(
+  pipelineId: string,
+  allowOther: boolean,
+) {
+  return prisma.pipeline.update({
+    where: { id: pipelineId },
+    data: { lossReasonAllowOther: allowOther },
+    select: { id: true, lossReasonAllowOther: true },
+  });
+}
+
+/** Default true se funil inexistente / sem coluna (migração pendente). */
+export async function isPipelineLossReasonAllowOther(
+  pipelineId: string | null | undefined,
+): Promise<boolean> {
+  if (!pipelineId) return true;
+  try {
+    const p = await prisma.pipeline.findUnique({
+      where: { id: pipelineId },
+      select: { lossReasonAllowOther: true },
+    });
+    return p?.lossReasonAllowOther !== false;
+  } catch {
+    return true;
+  }
 }
 
 /**

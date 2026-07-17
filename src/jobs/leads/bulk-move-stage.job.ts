@@ -74,7 +74,7 @@ export async function processBulkMoveStage(
 
   await markOperationStarted(operationId, organizationId);
 
-  // Nota: a setting `deals.loss_reason_allow_other` é validada na rota que
+  // Nota: `pipelines.lossReasonAllowOther` (ou org fallback) é validada na rota que
   // enfileira (`POST /api/deals/bulk`) ANTES de criar a BulkOperation. Aqui
   // confiamos no payload já saneado, evitando ler org settings fora de
   // RequestContext. Se essa entry point ficar exposta a outros enqueuers no

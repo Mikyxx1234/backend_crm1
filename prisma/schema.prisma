@@ -1379,6 +1379,8 @@ model Pipeline {
   isDefault         Boolean            @default(false)
   /// Se true, marcar negócio como perdido neste funil exige motivo.
   lossReasonRequired Boolean           @default(false)
+  /// Se true, permite motivo livre (“Outro…”) neste funil.
+  lossReasonAllowOther Boolean         @default(true)
   stages            Stage[]
   distributionRules DistributionRule[]
   /// Canais cujo inbound roteia para este funil (Channel.defaultPipelineId).

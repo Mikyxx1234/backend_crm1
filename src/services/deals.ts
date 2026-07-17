@@ -14,21 +14,13 @@ import {
 } from "@/services/kanban-filters";
 
 /**
- * Valida o motivo da perda contra a setting `deals.loss_reason_allow_other`.
+ * Valida o motivo da perda no contexto do funil.
  *
- * - Quando `allow_other === true` (default): aceita qualquer string (inclusive
- *   um motivo livre digitado em "Outro…").
- * - Quando `allow_other === false`: rejeita motivos que não bateram exatamente
- *   com algum `LossReason.label` ativo cadastrado em
- *   `/settings/loss-reasons` para a org corrente.
+ * - Com `pipelineId`: usa `pipelines.lossReasonAllowOther`.
+ * - Sem funil: fallback na org setting `deals.loss_reason_allow_other`.
  *
- * Motivo vazio/null é cobertura de outra setting (`loss_reason_required`) e
- * portanto aceita aqui (no-op). Throws `Error("INVALID_LOST_REASON")` quando
- * inválido — handlers traduzem para HTTP 400.
- *
- * Defensivo: se falhar pra ler a setting (ex.: fora de RequestContext), cai
- * pro default permissivo (allow_other = true) e loga, em vez de bloquear
- * fluxos críticos.
+ * Motivo vazio/null é no-op (obrigatoriedade é outra checagem).
+ * Throws `Error("INVALID_LOST_REASON")` — handlers → HTTP 400.
  */
 export async function assertLostReasonAllowed(
   reason: string | null | undefined,
@@ -36,22 +28,29 @@ export async function assertLostReasonAllowed(
 ): Promise<void> {
   const trimmed = reason?.trim();
   if (!trimmed) return;
+
+  const {
+    assertLostReasonAllowedForPipeline,
+    isPipelineLossReasonAllowOther,
+  } = await import("@/services/loss-reasons");
+
   let allowOther = true;
   try {
-    allowOther = await getOrgSettingBool(
-      "deals.loss_reason_allow_other",
-      true,
-    );
+    if (pipelineId) {
+      allowOther = await isPipelineLossReasonAllowOther(pipelineId);
+    } else {
+      allowOther = await getOrgSettingBool(
+        "deals.loss_reason_allow_other",
+        true,
+      );
+    }
   } catch (e) {
     console.warn(
-      "[deals/assertLostReasonAllowed] Falha lendo setting; permitindo:",
+      "[deals/assertLostReasonAllowed] Falha lendo allowOther; permitindo:",
       (e as Error)?.message ?? e,
     );
     return;
   }
-  const { assertLostReasonAllowedForPipeline } = await import(
-    "@/services/loss-reasons"
-  );
   await assertLostReasonAllowedForPipeline(pipelineId, trimmed, allowOther);
 }
 

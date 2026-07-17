@@ -18,7 +18,6 @@ import {
   Smartphone,
   Sparkles,
   Tag,
-  ThumbsDown,
   Upload,
   Users,
   Zap,
@@ -190,15 +189,6 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
         href: "/settings/pipeline",
         allowedRoles: GESTAO,
         requiredPermission: "pipeline:view",
-      },
-      {
-        id: "loss-reasons",
-        label: "Motivos de perda",
-        description: "Razoes padrao ao marcar perdido",
-        icon: ThumbsDown,
-        href: "/settings/loss-reasons",
-        allowedRoles: GESTAO,
-        requiredPermission: "deal:edit",
       },
       {
         id: "distribution",

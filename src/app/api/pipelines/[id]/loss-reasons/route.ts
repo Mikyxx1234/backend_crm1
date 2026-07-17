@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import {
   getPipelineLossReasonMeta,
+  setPipelineLossReasonAllowOther,
   setPipelineLossReasonRequired,
   setPipelineLossReasons,
 } from "@/services/loss-reasons";
@@ -29,7 +30,8 @@ export async function GET(_req: Request, ctx: Ctx) {
  * Body:
  *  - { reasonIds: string[] } — substitui vínculos + ordem
  *  - { lossReasonRequired: boolean } — toggle obrigatoriedade
- *  - ambos no mesmo request ok
+ *  - { lossReasonAllowOther: boolean } — permite motivo personalizado
+ *  - combinações no mesmo request ok
  */
 export async function PUT(request: Request, ctx: Ctx) {
   return withOrgContext(async () => {
@@ -39,6 +41,10 @@ export async function PUT(request: Request, ctx: Ctx) {
 
       if (typeof body.lossReasonRequired === "boolean") {
         await setPipelineLossReasonRequired(id, body.lossReasonRequired);
+      }
+
+      if (typeof body.lossReasonAllowOther === "boolean") {
+        await setPipelineLossReasonAllowOther(id, body.lossReasonAllowOther);
       }
 
       if (Array.isArray(body.reasonIds)) {
