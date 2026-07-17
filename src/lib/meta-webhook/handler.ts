@@ -43,6 +43,7 @@ import { fireTrigger } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { maybeReplyAsAIAgent } from "@/services/ai/inbox-handler";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
+import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 
 // Marcador único de build — usado pra confirmar via `grep` no bundle se o
@@ -585,7 +586,13 @@ async function resolveWebhookContact(
       whatsappUsername?: string;
     } = {};
     if (profileName && contactRow.name.startsWith("Lead +")) {
-      updates.name = profileName;
+      updates.name = sanitizeContactName(profileName) || profileName;
+    } else {
+      // Contatos antigos com emoji no nome: limpa na próxima mensagem.
+      const cleaned = sanitizeContactName(contactRow.name);
+      if (cleaned && cleaned !== contactRow.name) {
+        updates.name = cleaned;
+      }
     }
     if (phone && !contactRow.phone) {
       updates.phone = phone;
@@ -641,7 +648,7 @@ async function resolveWebhookContact(
   }
 
   const name =
-    profileName ||
+    (profileName ? sanitizeContactName(profileName) || profileName : null) ||
     (phone ? `Lead ${phone}` : `Lead WhatsApp (${(bsuid ?? "").slice(0, 18)}…)`);
 
   const sourceName = await getChannelSourceName(phoneNumberId);

@@ -45,7 +45,20 @@ export function personNameFromDealTitle(
 }
 
 /**
- * Garante que o nome do CONTATO não carregue o prefixo "Negócio".
+ * Remove emojis/decoradores do nome (ex.: "🌻🌵 Jéssica" → "Jéssica").
+ * Preserva letras acentuadas. Usa Extended_Pictographic + ZWJ/VS16.
+ */
+export function stripNameDecorators(name: string): string {
+  return name
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .replace(/[\uFE0F\u200D]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/**
+ * Garante que o nome do CONTATO não carregue o prefixo "Negócio"
+ * nem emojis/decoradores.
  * Contato = "Marcelo Pinheiro"; Negócio = "Negócio Marcelo Pinheiro".
  */
 export function sanitizeContactName(
@@ -53,7 +66,8 @@ export function sanitizeContactName(
 ): string {
   const t = (name ?? "").trim();
   if (!t) return t;
-  return personNameFromDealTitle(t) ?? t;
+  const withoutDeal = personNameFromDealTitle(t) ?? t;
+  return stripNameDecorators(withoutDeal);
 }
 
 /** Título padrão do negócio a partir do nome do contato. */
