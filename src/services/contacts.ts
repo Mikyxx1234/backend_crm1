@@ -238,11 +238,15 @@ export async function getContacts(params: GetContactsParams = {}) {
         avatarUrl: true,
         leadScore: true,
         lifecycleStage: true,
+        source: true,
         createdAt: true,
+        updatedAt: true,
+        assignedTo: { select: { id: true, name: true, avatarUrl: true } },
         company: { select: { id: true, name: true, domain: true } },
         tags: {
           select: { tag: { select: { id: true, name: true, color: true } } },
         },
+        customFields: { select: { customFieldId: true, value: true } },
       },
     }),
     prisma.contact.count({ where }),
@@ -310,9 +314,14 @@ export async function getContacts(params: GetContactsParams = {}) {
       );
     }
 
+    const customFields = Object.fromEntries(
+      (c.customFields ?? []).map((v) => [v.customFieldId, v.value]),
+    ) as Record<string, string>;
+
     return {
       ...c,
       tags: c.tags.map((t) => t.tag),
+      customFields,
       totalValue,
       dealCount,
       avgTicket,
