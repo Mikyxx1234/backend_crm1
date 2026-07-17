@@ -983,7 +983,10 @@ export async function createContact(data: CreateContactInput) {
 }
 
 export async function updateContact(id: string, data: UpdateContactInput) {
-  const updateData: Prisma.ContactUpdateInput = {};
+  // Unchecked: FKs escalares (`companyId`/`assignedToId`). Relação
+  // `company: { connect }` + `organizationId` injetado pelo scope Prisma
+  // mistura checked/unchecked e o update estoura 500.
+  const updateData: Prisma.ContactUncheckedUpdateInput = {};
 
   // Snapshot anterior para diff (somente os campos que podem mudar).
   const prev = await prisma.contact.findUnique({
@@ -1014,12 +1017,10 @@ export async function updateContact(id: string, data: UpdateContactInput) {
   if (data.lifecycleStage !== undefined) updateData.lifecycleStage = data.lifecycleStage;
   if (data.source !== undefined) updateData.source = data.source;
   if (data.companyId !== undefined) {
-    updateData.company =
-      data.companyId === null ? { disconnect: true } : { connect: { id: data.companyId } };
+    updateData.companyId = data.companyId;
   }
   if (data.assignedToId !== undefined) {
-    updateData.assignedTo =
-      data.assignedToId === null ? { disconnect: true } : { connect: { id: data.assignedToId } };
+    updateData.assignedToId = data.assignedToId;
   }
   if (data.externalId !== undefined) {
     updateData.externalId = data.externalId;
