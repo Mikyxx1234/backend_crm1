@@ -10,6 +10,7 @@ import { sendWhatsAppText } from "@/lib/send-whatsapp";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
+import { createDealEvent, reopenDeal } from "@/services/deals";
 import { resolveFlowDefinitionForInbound } from "@/services/whatsapp-flow-definitions";
 
 const log = getLogger("whatsapp-flow-apply");
@@ -182,22 +183,56 @@ async function ensureDealForContact(
   const existing = await resolveOpenDealId(contactId);
   if (existing) return existing;
 
+  // WhatsApp Flow Response é uma submissão EXPLÍCITA de formulário — os
+  // campos preenchidos precisam de um deal de destino. Quando o contato só
+  // tem deals fechados (LOST/WON), REABRIMOS o mais recente em vez de criar
+  // um novo: criar um novo a cada reenvio de formulário acumulava deals
+  // duplicados para o mesmo contato/telefone. Só criamos um deal quando o
+  // contato NUNCA teve deal algum.
+  const latestClosed = await prisma.deal.findFirst({
+    where: { contactId },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true, status: true },
+  });
+
+  if (latestClosed) {
+    try {
+      await reopenDeal(latestClosed.id);
+      // Reabertura é um evento de sistema (sem userId) e NÃO dispara
+      // `deal_created` — evita re-executar automações de receptivo.
+      createDealEvent(latestClosed.id, null, "STATUS_CHANGED", {
+        from: latestClosed.status,
+        to: "OPEN",
+        source: "whatsapp-flow",
+        reason: "reaberto_por_submissao_de_formulario",
+      }).catch(() => {});
+      log.info("[whatsapp-flow] negócio reaberto para submissão de formulário", {
+        contactId,
+        dealId: latestClosed.id,
+        from: latestClosed.status,
+      });
+      return latestClosed.id;
+    } catch (err) {
+      log.error("[whatsapp-flow] falha ao reabrir negócio fechado", {
+        contactId,
+        dealId: latestClosed.id,
+        err: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  // Contato sem histórico de deals → cria o primeiro (roteia por canal,
+  // aloca `number` e dispara `deal_created` para as automações de receptivo).
   const contact = await prisma.contact.findUnique({
     where: { id: contactId },
     select: { name: true },
   });
-  // WhatsApp Flow Response é uma submissão EXPLÍCITA de formulário — os
-  // campos preenchidos precisam de um deal de destino, mesmo se o contato
-  // tiver apenas deals fechados (LOST/WON). Usa o modo legado pra evitar
-  // dados órfãos. Pra desligar reativação automática nesse fluxo, criar
-  // automação `message_received` filtrada por `dealStatus` em vez de
-  // depender do auto-create.
   const ensured = await ensureOpenDealForContact({
     contactId,
     contactName: contact?.name?.trim() || "Lead",
     logTag: "whatsapp-flow",
     channelId,
-    reopenLostContacts: true,
   });
   if (ensured.status === "skipped") return null;
   return ensured.dealId;
