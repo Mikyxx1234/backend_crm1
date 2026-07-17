@@ -5,6 +5,7 @@ import { userHasConversationAccess } from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { SOURCE_NONE } from "@/services/kanban-filters";
@@ -512,6 +513,66 @@ export async function assignConversationAssignedTo(
   });
 
   return { ok: true, conversation: updated };
+}
+
+/**
+ * Reabre uma conversa RESOLVED como NOVO ticket (regra "reabrir = novo id").
+ * Se ja existe um ticket ativo pro contato+canal (ex.: um inbound reabriu
+ * antes), reusa; caso contrario cria um novo, tratando a corrida do indice
+ * unico parcial. Herda canal/jid/inbox/responsavel da conversa origem.
+ */
+export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
+  id: string;
+  created: boolean;
+  contactId: string | null;
+  channel: string;
+}> {
+  const src = await prisma.conversation.findUnique({
+    where: { id: sourceId },
+    select: {
+      id: true, contactId: true, channel: true, channelId: true,
+      waJid: true, inboxName: true, assignedToId: true,
+    },
+  });
+  if (!src || !src.contactId) {
+    return { id: sourceId, created: false, contactId: src?.contactId ?? null, channel: src?.channel ?? "" };
+  }
+
+  const findActive = () =>
+    prisma.conversation.findFirst({
+      where: { contactId: src.contactId!, channel: src.channel, status: { not: "RESOLVED" } },
+      select: { id: true },
+    });
+
+  const existing = await findActive();
+  if (existing) {
+    return { id: existing.id, created: false, contactId: src.contactId, channel: src.channel };
+  }
+
+  try {
+    const created = await withConversationNumberRetry((number) =>
+      prisma.conversation.create({
+        data: withOrgFromCtx({
+          number,
+          contactId: src.contactId!,
+          channel: src.channel,
+          status: "OPEN" as const,
+          ...(src.channelId ? { channelId: src.channelId } : {}),
+          ...(src.waJid ? { waJid: src.waJid } : {}),
+          ...(src.inboxName ? { inboxName: src.inboxName } : {}),
+          ...(src.assignedToId ? { assignedToId: src.assignedToId } : {}),
+        }),
+        select: { id: true },
+      }),
+    );
+    return { id: created.id, created: true, contactId: src.contactId, channel: src.channel };
+  } catch (err) {
+    if (isActiveConversationUniqueViolation(err)) {
+      const won = await findActive();
+      if (won) return { id: won.id, created: false, contactId: src.contactId, channel: src.channel };
+    }
+    throw err;
+  }
 }
 
 export async function getConversationLite(id: string) {

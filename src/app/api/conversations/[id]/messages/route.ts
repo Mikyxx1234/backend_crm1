@@ -16,7 +16,7 @@ import { metaWhatsApp, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { withRateLimit } from "@/lib/rate-limit";
 import { sendWhatsAppText, isBaileysChannel } from "@/lib/send-whatsapp";
 import { sseBus } from "@/lib/sse-bus";
-import { getConversationLite } from "@/services/conversations";
+import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { logEvent } from "@/services/activity-log";
@@ -453,7 +453,7 @@ export async function POST(request: Request, context: RouteContext) {
     const denied = await requireConversationAccess({ user: accessUser }, id);
     if (denied) return denied;
 
-    const conv = await getConversationLite(id);
+    let conv = await getConversationLite(id);
     if (!conv) {
       return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
     }
@@ -476,6 +476,37 @@ export async function POST(request: Request, context: RouteContext) {
         ? b.messageType
         : "outgoing";
     const isPrivateNote = b.private === true || messageType === "note";
+
+    // Regra "reabrir = novo id": responder numa conversa ENCERRADA reabre
+    // como NOVO ticket. A mensagem entra no ticket novo; o id antigo fica
+    // como historico. Notas internas NAO reabrem (sao anotacoes do ticket).
+    let reopenedConversationId: string | null = null;
+    if (!isPrivateNote && conv.status === "RESOLVED" && conv.contactId) {
+      const reopened = await reopenResolvedAsNewTicket(conv.id);
+      if (reopened.id !== conv.id) {
+        const fresh = await getConversationLite(reopened.id);
+        if (fresh) {
+          reopenedConversationId = reopened.id;
+          const previousConversationId = conv.id;
+          if (reopened.created) {
+            void logEvent({
+              type: "CONVERSATION_CREATED",
+              entityType: "CONVERSATION",
+              entityId: fresh.id,
+              entityLabel: null,
+              conversationId: fresh.id,
+              contactId: fresh.contactId,
+              meta: { channel: fresh.channel, source: "reply_reopen", previousConversationId },
+            });
+            fireTrigger("conversation_created", {
+              contactId: fresh.contactId ?? undefined,
+              data: { channel: fresh.channel, source: "reply_reopen", previousConversationId },
+            }).catch(() => { /* fire-and-forget */ });
+          }
+          conv = fresh;
+        }
+      }
+    }
 
     // Override de canal vindo do composer (UI permite escolher por qual
     // WhatsApp enviar quando a org tem >1 conectado). Quando ausente ou
@@ -757,6 +788,8 @@ export async function POST(request: Request, context: RouteContext) {
         status: sendErrorMsg ? "FAILED" : "SENT",
         channelId: outboundChannelId ?? null,
       } satisfies InboxMessageDto,
+      conversationId: conv.id,
+      ...(reopenedConversationId ? { reopenedConversationId } : {}),
       ...(sendErrorMsg ? { metaError: sendErrorMsg } : {}),
     }, { status: 201 });
     });
