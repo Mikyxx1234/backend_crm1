@@ -120,13 +120,23 @@ async function lastInboundBatch(
 ): Promise<Map<string, Date>> {
   if (conversationIds.length === 0) return new Map();
   const orgId = getOrgIdOrThrow();
+  // Janela de 24h e' do CONTATO (regra da Meta), nao do ticket: um ticket
+  // recem-aberto (reopen/resposta pos-encerramento) nasce sem inbound, mas
+  // o cliente pode ter escrito minutos atras no ticket anterior. Agrega o
+  // ultimo inbound de QUALQUER conversa do mesmo contato+canal.
   const rows = await prisma.$queryRaw<{ conversationId: string; lastIn: Date }[]>`
-    SELECT "conversationId", MAX("createdAt") AS "lastIn"
-    FROM "messages"
-    WHERE "conversationId" = ANY(${conversationIds})
-      AND "direction" = 'in'
-      AND "organizationId" = ${orgId}
-    GROUP BY "conversationId"
+    SELECT c."id" AS "conversationId", MAX(m."createdAt") AS "lastIn"
+    FROM "conversations" c
+    JOIN "conversations" c2
+      ON c2."contactId" = c."contactId"
+     AND c2."channel" = c."channel"
+     AND c2."organizationId" = c."organizationId"
+    JOIN "messages" m
+      ON m."conversationId" = c2."id"
+     AND m."direction" = 'in'
+    WHERE c."id" = ANY(${conversationIds})
+      AND c."organizationId" = ${orgId}
+    GROUP BY c."id"
   `;
   const map = new Map<string, Date>();
   for (const r of rows) {

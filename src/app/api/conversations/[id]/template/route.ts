@@ -9,6 +9,7 @@ import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-tem
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
+import { reopenResolvedAsNewTicket } from "@/services/conversations";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 
 import type { InboxMessageDto } from "../messages/route";
@@ -85,20 +86,37 @@ export async function POST(request: Request, context: RouteContext) {
         ? b.bodyPreview.trim()
         : null;
 
-    const conv = await prisma.conversation.findUnique({
-      where: { id },
-      include: {
-        contact: { select: { phone: true, whatsappBsuid: true } },
-        // CRITICO: trazer config do canal para resolver o cliente Meta correto
-        // por canal/org. Antes usavamos o singleton global metaWhatsApp (env)
-        // que rotava TODO mundo pelo numero da primeira org configurada -> leak
-        // entre tenants (templates da DNA saiam pelo numero da Eduit).
-        channelRef: { select: { id: true, provider: true, config: true } },
-      },
-    });
+    const findConvFull = (convId: string) =>
+      prisma.conversation.findUnique({
+        where: { id: convId },
+        include: {
+          contact: { select: { phone: true, whatsappBsuid: true } },
+          // CRITICO: trazer config do canal para resolver o cliente Meta correto
+          // por canal/org. Antes usavamos o singleton global metaWhatsApp (env)
+          // que rotava TODO mundo pelo numero da primeira org configurada -> leak
+          // entre tenants (templates da DNA saiam pelo numero da Eduit).
+          channelRef: { select: { id: true, provider: true, config: true } },
+        },
+      });
+
+    let conv = await findConvFull(id);
 
     if (!conv) {
       return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
+    }
+
+    // Regra "reabrir = novo id": template em conversa ENCERRADA reabre como
+    // NOVO ticket (mesmo comportamento do POST /messages e /attachments).
+    let reopenedConversationId: string | null = null;
+    if (conv.status === "RESOLVED" && conv.contactId) {
+      const reopened = await reopenResolvedAsNewTicket(conv.id);
+      if (reopened.id !== conv.id) {
+        const fresh = await findConvFull(reopened.id);
+        if (fresh) {
+          reopenedConversationId = reopened.id;
+          conv = fresh;
+        }
+      }
     }
 
     const sendDenied = await requireChannelScope(session.user, "send", conv.channelId);
@@ -247,7 +265,11 @@ export async function POST(request: Request, context: RouteContext) {
       // best-effort
     }
 
-    return NextResponse.json({ message: dto }, { status: 201 });
+    return NextResponse.json({
+      message: dto,
+      conversationId: conv.id,
+      ...(reopenedConversationId ? { reopenedConversationId } : {}),
+    }, { status: 201 });
    } catch (e: unknown) {
     console.error(e);
     const msg = e instanceof Error ? e.message : "Erro ao enviar template.";

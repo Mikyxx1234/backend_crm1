@@ -164,8 +164,18 @@ export async function GET(request: Request, context: RouteContext) {
         .map((p) => p.message.externalId ?? p.message.id);
     } catch { /* tabela pode não existir ainda em ambientes antigos */ }
 
+    // Janela de 24h e' do CONTATO (regra da Meta), nao do ticket. Com o
+    // modelo de ticket, um ticket recem-criado (reopen/resposta) nasce sem
+    // mensagens inbound — calcular so pelo ticket marcava a sessao como
+    // fechada mesmo com o cliente ativo minutos antes no ticket anterior.
+    // Busca o ultimo inbound em QUALQUER conversa do contato no canal.
     const lastInMsg = await prisma.message.findFirst({
-      where: { conversationId: conv.id, direction: "in" },
+      where: {
+        direction: "in",
+        conversation: conv.contactId
+          ? { contactId: conv.contactId, channel: conv.channel }
+          : { id: conv.id },
+      },
       orderBy: { createdAt: "desc" },
       select: { createdAt: true },
     });
