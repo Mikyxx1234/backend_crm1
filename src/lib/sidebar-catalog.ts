@@ -62,14 +62,9 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
     locked: false,
     requiredPermission: "job_opening:view",
   },
-  {
-    key: "calls",
-    title: "Chamadas",
-    href: "/widgets/calls",
-    locked: false,
-    requiredPermission: "nav:calls",
-    requiredWidgetSlug: "calls_history",
-  },
+  // "Chamadas" foi movido do trilho para dentro de Logs (aba "Chamadas").
+  // O histórico segue acessível via /widgets/calls (gate `calls_history`),
+  // mas deixou de ser um item independente/customizável da sidebar.
 ] as const;
 
 export const SIDEBAR_KEYS: ReadonlySet<string> = new Set(
