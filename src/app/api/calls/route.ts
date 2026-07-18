@@ -36,6 +36,15 @@ export async function GET(request: Request) {
     const rawDirection = url.searchParams.get("direction")?.toUpperCase();
     const rawStatus    = url.searchParams.get("status")?.toUpperCase();
 
+    const VALID_SORT_FIELDS = new Set([
+      "startedAt",
+      "durationSeconds",
+      "status",
+      "direction",
+    ] as const);
+    const rawSortBy = url.searchParams.get("sortBy") ?? undefined;
+    const rawSortDir = url.searchParams.get("sortDir") ?? undefined;
+
     const filters = {
       extensionId: url.searchParams.get("extensionId") ?? undefined,
       direction:   (rawDirection && VALID_DIRECTIONS.has(rawDirection as CallDirection)
@@ -48,6 +57,12 @@ export async function GET(request: Request) {
       search:      url.searchParams.get("search")   ?? undefined,
       dateFrom:    url.searchParams.get("dateFrom") ?? undefined,
       dateTo:      url.searchParams.get("dateTo")   ?? undefined,
+      sortBy:      (rawSortBy && VALID_SORT_FIELDS.has(rawSortBy as "startedAt")
+        ? (rawSortBy as "startedAt" | "durationSeconds" | "status" | "direction")
+        : undefined),
+      sortDir:     (rawSortDir === "asc" || rawSortDir === "desc"
+        ? rawSortDir
+        : undefined),
       page:        Number(url.searchParams.get("page"))    || 1,
       perPage:     Number(url.searchParams.get("perPage")) || 20,
     };

@@ -62,6 +62,13 @@ export type ProcessWebhookResult =
   | { ok: false; reason: string }
   | { ok: true; callId: string; callEventId: string };
 
+export type CallsSortField =
+  | "startedAt"
+  | "durationSeconds"
+  | "status"
+  | "direction";
+export type CallsSortDir = "asc" | "desc";
+
 export type ListCallsFilters = {
   extensionId?: string;
   direction?: CallDirection;
@@ -73,9 +80,19 @@ export type ListCallsFilters = {
   dateFrom?: string;
   /** Data final (YYYY-MM-DD, inclusiva) sobre startedAt/createdAt. */
   dateTo?: string;
+  /** Coluna de ordenação. Default: startedAt desc. */
+  sortBy?: CallsSortField;
+  sortDir?: CallsSortDir;
   page?: number;
   perPage?: number;
 };
+
+const VALID_SORT_FIELDS: readonly CallsSortField[] = [
+  "startedAt",
+  "durationSeconds",
+  "status",
+  "direction",
+];
 
 export type UpdateCallInput = {
   status?: CallStatus;
@@ -628,10 +645,25 @@ export async function listCalls(filters: ListCallsFilters = {}) {
 
   if (and.length) where.AND = and;
 
+  // Ordenação — default startedAt desc (com fallback em createdAt).
+  const rawSortBy = filters.sortBy;
+  const sortBy: CallsSortField = VALID_SORT_FIELDS.includes(
+    rawSortBy as CallsSortField,
+  )
+    ? (rawSortBy as CallsSortField)
+    : "startedAt";
+  const sortDir: CallsSortDir = filters.sortDir === "asc" ? "asc" : "desc";
+  // Para "startedAt" ordenamos por createdAt também para garantir estabilidade
+  // quando startedAt é null (chamadas antigas/parciais).
+  const orderBy: Prisma.CallOrderByWithRelationInput[] =
+    sortBy === "startedAt"
+      ? [{ startedAt: sortDir }, { createdAt: sortDir }]
+      : [{ [sortBy]: sortDir } as Prisma.CallOrderByWithRelationInput, { createdAt: "desc" }];
+
   const [calls, total] = await Promise.all([
     prisma.call.findMany({
       where,
-      orderBy: { createdAt: "desc" },
+      orderBy,
       skip: (page - 1) * perPage,
       take: perPage,
       include: {
