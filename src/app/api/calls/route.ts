@@ -45,6 +45,9 @@ export async function GET(request: Request) {
       status:      (rawStatus && VALID_STATUSES.has(rawStatus as CallStatus)
         ? rawStatus as CallStatus
         : undefined),
+      search:      url.searchParams.get("search")   ?? undefined,
+      dateFrom:    url.searchParams.get("dateFrom") ?? undefined,
+      dateTo:      url.searchParams.get("dateTo")   ?? undefined,
       page:        Number(url.searchParams.get("page"))    || 1,
       perPage:     Number(url.searchParams.get("perPage")) || 20,
     };

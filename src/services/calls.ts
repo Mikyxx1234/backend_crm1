@@ -24,7 +24,7 @@ import type { CallDirection, CallStatus, Prisma } from "@prisma/client";
 
 import { withResolvedContext } from "@/lib/auth-helpers";
 import { getLogger } from "@/lib/logger";
-import { normalizePhone } from "@/lib/phone";
+import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
@@ -67,6 +67,12 @@ export type ListCallsFilters = {
   direction?: CallDirection;
   contactId?: string;
   status?: CallStatus;
+  /** Busca livre por nome do contato ou dígitos do telefone. */
+  search?: string;
+  /** Data inicial (YYYY-MM-DD, inclusiva) sobre startedAt/createdAt. */
+  dateFrom?: string;
+  /** Data final (YYYY-MM-DD, inclusiva) sobre startedAt/createdAt. */
+  dateTo?: string;
   page?: number;
   perPage?: number;
 };
@@ -582,12 +588,45 @@ export async function processWebhookEvent(
 export async function listCalls(filters: ListCallsFilters = {}) {
   const page = Math.max(1, filters.page ?? 1);
   const perPage = Math.min(100, Math.max(1, filters.perPage ?? 20));
-  const where: Record<string, unknown> = {};
+  const where: Prisma.CallWhereInput = {};
 
   if (filters.extensionId) where.extensionId = filters.extensionId;
   if (filters.direction) where.direction = filters.direction;
   if (filters.contactId) where.contactId = filters.contactId;
   if (filters.status) where.status = filters.status;
+
+  const and: Prisma.CallWhereInput[] = [];
+
+  // Período (inclusivo) sobre startedAt, com fallback em createdAt quando
+  // a chamada ainda não tem startedAt registrado.
+  const from = filters.dateFrom ? new Date(`${filters.dateFrom}T00:00:00`) : null;
+  const to = filters.dateTo ? new Date(`${filters.dateTo}T23:59:59.999`) : null;
+  if ((from && !Number.isNaN(from.getTime())) || (to && !Number.isNaN(to.getTime()))) {
+    const range: Prisma.DateTimeFilter = {};
+    if (from && !Number.isNaN(from.getTime())) range.gte = from;
+    if (to && !Number.isNaN(to.getTime())) range.lte = to;
+    and.push({
+      OR: [{ startedAt: range }, { startedAt: null, createdAt: range }],
+    });
+  }
+
+  // Busca livre: nome do contato vinculado OU dígitos nos números.
+  const search = filters.search?.trim();
+  if (search) {
+    const or: Prisma.CallWhereInput[] = [
+      { contact: { is: { name: { contains: search, mode: "insensitive" } } } },
+    ];
+    const digits = search.replace(/\D/g, "");
+    if (digits) {
+      or.push(
+        { fromNumber: { contains: digits } },
+        { toNumber: { contains: digits } },
+      );
+    }
+    and.push({ OR: or });
+  }
+
+  if (and.length) where.AND = and;
 
   const [calls, total] = await Promise.all([
     prisma.call.findMany({
@@ -602,6 +641,40 @@ export async function listCalls(filters: ListCallsFilters = {}) {
     }),
     prisma.call.count({ where }),
   ]);
+
+  // Fallback: chamadas sem contactId gravado — tenta resolver o contato
+  // pelo telefone normalizado (variantes com/sem 9º dígito) dentro da org.
+  const unresolved = calls.filter((c) => !c.contact);
+  if (unresolved.length) {
+    const variantsByCall = new Map<string, string[]>();
+    const allVariants = new Set<string>();
+    for (const c of unresolved) {
+      const phone = c.direction === "INBOUND" ? c.fromNumber : c.toNumber;
+      const variants = phoneMatchVariants(phone);
+      if (variants.length) {
+        variantsByCall.set(c.id, variants);
+        for (const v of variants) allVariants.add(v);
+      }
+    }
+    if (allVariants.size) {
+      const contacts = await prisma.contact.findMany({
+        where: { phone: { in: [...allVariants] } },
+        select: { id: true, name: true, phone: true },
+      });
+      const byPhone = new Map(contacts.map((ct) => [ct.phone, ct]));
+      for (const c of unresolved) {
+        const variants = variantsByCall.get(c.id);
+        if (!variants) continue;
+        for (const v of variants) {
+          const match = byPhone.get(v);
+          if (match) {
+            c.contact = match;
+            break;
+          }
+        }
+      }
+    }
+  }
 
   return { calls, total, page, perPage };
 }
