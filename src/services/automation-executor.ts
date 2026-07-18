@@ -630,6 +630,27 @@ async function loadConversationSnapshot(
   };
 }
 
+// Cache do check da coluna `messages.triggeredByName`. Em ambientes onde a
+// migração ainda não rodou, tentar gravar a coluna faria o insert dos steps
+// de envio quebrar (P2022). Só tagueamos o disparo manual quando a coluna
+// existe — degradação graciosa (mensagem ainda é enviada, apenas sem o selo
+// "Manual"/avatar do agente até a migração aplicar).
+let _msgTriggeredByNameColumn: boolean | null = null;
+async function messageSupportsTriggeredBy(): Promise<boolean> {
+  if (_msgTriggeredByNameColumn !== null) return _msgTriggeredByNameColumn;
+  try {
+    const rows = await prisma.$queryRaw<Array<{ exists: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'messages' AND column_name = 'triggeredByName'
+      ) AS "exists"`;
+    _msgTriggeredByNameColumn = Boolean(rows?.[0]?.exists);
+  } catch {
+    _msgTriggeredByNameColumn = false;
+  }
+  return _msgTriggeredByNameColumn;
+}
+
 async function resolveRuntimeContext(
   automationId: string,
   payload: AutomationJobPayload,
@@ -717,9 +738,14 @@ async function resolveRuntimeContext(
     dealId,
   );
 
-  const triggeredByName =
+  const rawTriggeredByName =
     typeof data.triggeredByName === "string" && data.triggeredByName.trim()
       ? data.triggeredByName.trim()
+      : null;
+  // Só propaga (e, portanto, grava nas mensagens) se a coluna existir.
+  const triggeredByName =
+    rawTriggeredByName && (await messageSupportsTriggeredBy())
+      ? rawTriggeredByName
       : null;
 
   return {

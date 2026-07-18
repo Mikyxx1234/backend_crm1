@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
@@ -123,6 +124,43 @@ function mapSendStatus(s: string | null | undefined): InboxMessageDto["status"] 
   }
 }
 
+const MSG_SELECT = {
+  id: true, externalId: true, content: true, createdAt: true,
+  direction: true, messageType: true, isPrivate: true, senderName: true,
+  authorType: true, triggeredByName: true,
+  mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
+  sendStatus: true, sendError: true, channelId: true,
+} satisfies Prisma.MessageSelect;
+
+type MsgRow = Prisma.MessageGetPayload<{ select: typeof MSG_SELECT }>;
+
+/**
+ * findMany de mensagens tolerante à ausência da coluna `triggeredByName`.
+ * Em ambientes onde a migração `..._add_message_triggered_by_name` ainda não
+ * rodou, selecionar a coluna faz o Prisma lançar P2022 e derruba TODO o GET
+ * de mensagens — a conversa aparece VAZIA. Aqui, nesse caso, refazemos a
+ * query sem o campo e devolvemos `triggeredByName: null`, mantendo o inbox
+ * funcional até a migração ser aplicada.
+ */
+async function findMessagesSafe(args: {
+  where: Prisma.MessageWhereInput;
+  orderBy: Prisma.MessageOrderByWithRelationInput;
+  take: number;
+}): Promise<MsgRow[]> {
+  try {
+    return await prisma.message.findMany({ ...args, select: MSG_SELECT });
+  } catch (e) {
+    const code = (e as { code?: string })?.code;
+    const message = e instanceof Error ? e.message : String(e);
+    if (code === "P2022" || /triggeredByName/i.test(message)) {
+      const { triggeredByName: _omit, ...safeSelect } = MSG_SELECT;
+      const rows = await prisma.message.findMany({ ...args, select: safeSelect });
+      return rows.map((r) => ({ ...r, triggeredByName: null })) as MsgRow[];
+    }
+    throw e;
+  }
+}
+
 // ── GET ──────────────────────────────────────
 
 export async function GET(request: Request, context: RouteContext) {
@@ -208,22 +246,13 @@ export async function GET(request: Request, context: RouteContext) {
     const before = url.searchParams.get("before");
     const includeHistory = url.searchParams.get("history") === "1" && !before;
 
-    const MSG_SELECT = {
-      id: true, externalId: true, content: true, createdAt: true,
-      direction: true, messageType: true, isPrivate: true, senderName: true,
-      authorType: true, triggeredByName: true,
-      mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
-      sendStatus: true, sendError: true, channelId: true,
-    } as const;
-
-    const rows = await prisma.message.findMany({
+    const rows = await findMessagesSafe({
       where: {
         conversationId: conv.id,
         ...(before ? { createdAt: { lt: new Date(before) } } : {}),
       },
       orderBy: { createdAt: "desc" },
       take: limit,
-      select: MSG_SELECT,
     });
 
     rows.reverse();
@@ -250,11 +279,10 @@ export async function GET(request: Request, context: RouteContext) {
         take: 15,
       });
       for (const pc of prevConvs) {
-        const pRows = await prisma.message.findMany({
+        const pRows = await findMessagesSafe({
           where: { conversationId: pc.id },
           orderBy: { createdAt: "asc" },
           take: 100,
-          select: MSG_SELECT,
         });
         historyTickets.push({ id: pc.id, number: pc.number, closedAt: pc.closedAt, rows: pRows });
       }
