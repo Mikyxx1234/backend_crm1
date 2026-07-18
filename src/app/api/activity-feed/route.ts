@@ -79,6 +79,15 @@ export async function GET(req: Request) {
     const dateTo = sp.get("dateTo");
     const q = sp.get("q")?.trim();
 
+    // Transição de fase — quando qualquer eixo (pipeline / from / to) é
+    // informado, força type = STAGE_CHANGED e filtra pelos ids no meta JSON.
+    const stagePipelineId = sp.get("stagePipelineId");
+    const stageFrom = parseCsv(sp.get("stageFrom"));
+    const stageTo = parseCsv(sp.get("stageTo"));
+    const hasStageTransition = Boolean(
+      stagePipelineId || stageFrom || stageTo,
+    );
+
     const where: Prisma.ActivityEventWhereInput = {};
 
     if (entityTypes) {
@@ -91,6 +100,12 @@ export async function GET(req: Request) {
       (where as Record<string, unknown>).actorType = { in: actorTypes };
     }
     if (types) where.type = { in: types };
+
+    // Se transição de fase foi solicitada, sobrescreve o filtro de tipo
+    // (STAGE_CHANGED é o único que carrega fromStageId/toStageId no meta).
+    if (hasStageTransition) {
+      where.type = "STAGE_CHANGED";
+    }
     if (actorUserId) where.actorUserId = actorUserId;
     if (entityId) where.entityId = entityId;
     if (dealId) where.dealId = dealId;
@@ -110,6 +125,40 @@ export async function GET(req: Request) {
         { actorSublabel: { contains: q, mode: "insensitive" } },
         { type: { contains: q, mode: "insensitive" } },
       ];
+    }
+
+    // Filtros de transição de fase — JSON path filter no meta.
+    // Estrutura gravada em STAGE_CHANGED (deals routes):
+    //   meta.fromStageId, meta.toStageId, meta.to.pipelineId, meta.pipelineId
+    if (hasStageTransition) {
+      const stageAnd: Prisma.ActivityEventWhereInput[] = [];
+      if (stageFrom) {
+        stageAnd.push({
+          OR: stageFrom.map((id) => ({
+            meta: { path: ["fromStageId"], equals: id },
+          })),
+        });
+      }
+      if (stageTo) {
+        stageAnd.push({
+          OR: stageTo.map((id) => ({
+            meta: { path: ["toStageId"], equals: id },
+          })),
+        });
+      }
+      if (stagePipelineId) {
+        stageAnd.push({
+          OR: [
+            { meta: { path: ["pipelineId"], equals: stagePipelineId } },
+            { meta: { path: ["to", "pipelineId"], equals: stagePipelineId } },
+          ],
+        });
+      }
+      where.AND = where.AND
+        ? Array.isArray(where.AND)
+          ? [...where.AND, ...stageAnd]
+          : [where.AND, ...stageAnd]
+        : stageAnd;
     }
 
     // Cursor composto: occurredAt desc, id desc (desempate estavel).
