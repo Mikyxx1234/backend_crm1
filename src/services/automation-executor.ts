@@ -2797,8 +2797,15 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
   }
 
   // Visibilidade no chat: quando o operador dispara MANUALMENTE pela conversa,
-  // postamos uma nota interna (não enviada ao cliente) confirmando a execução.
+  // postamos uma confirmação interna (não enviada ao cliente). Ela é gravada
+  // como `messageType: "automation_run"` (não mais "note") para o inbox
+  // renderizar como cartão de AUTOMAÇÃO com badge "Manual" + avatar do agente
+  // que acionou (colab), em vez de virar uma nota genérica.
   if (context.event === "manual" && rt.conversation?.id) {
+    const triggeredByName =
+      typeof contextData.triggeredByName === "string" && contextData.triggeredByName.trim()
+        ? contextData.triggeredByName.trim()
+        : null;
     const note =
       stepsFailed > 0
         ? `⚙️ Automação "${automation.name}" executada com ${stepsFailed} erro(s).`
@@ -2811,9 +2818,12 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
             conversationId,
             content: note,
             direction: "out",
-            messageType: "note",
+            messageType: "automation_run",
             isPrivate: true,
-            senderName: rt.automationName ?? "Automação", authorType: "bot",
+            // senderName carrega o AGENTE que disparou (para o avatar colab).
+            // O nome da automação permanece no `content`.
+            senderName: triggeredByName,
+            authorType: "bot",
           }),
         });
         await prisma.conversation
