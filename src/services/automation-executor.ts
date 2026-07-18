@@ -1855,6 +1855,7 @@ async function executeStep(
             messageType: "interactive",
             senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId,
+            sendStatus: "sent",
           }),
         });
         sseBus.publish("new_message", {

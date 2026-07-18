@@ -170,7 +170,7 @@ export class BaileysSession {
       await withSystemContext(orgId, async () => {
         const msg = await prisma.message.findFirst({
           where: { externalId: wamid },
-          select: { id: true, sendStatus: true, conversationId: true },
+          select: { id: true, externalId: true, sendStatus: true, conversationId: true },
         });
         if (!msg) return;
 
@@ -189,10 +189,14 @@ export class BaileysSession {
           data: { sendStatus: s },
         });
 
+        // O front usa `externalId ?? id` como id da bolha; publicar só o
+        // UUID interno faz o update otimista do tick (incl. read azul)
+        // nunca casar. Envia bubbleId + internalId, igual ao path Meta.
         sseBus.publish("message_status", {
           organizationId: orgId,
           conversationId: msg.conversationId,
-          messageId: msg.id,
+          messageId: msg.externalId ?? msg.id,
+          internalId: msg.id,
           status: s,
         });
       });
