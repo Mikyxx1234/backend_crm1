@@ -447,6 +447,11 @@ type RuntimeContext = {
       "AUTOMAÇÃO — <nome>" e o operador identifique qual regra
       disparou. `null`/undefined mantém fallback "Automação" no front. */
   automationName?: string | null;
+  /** Nome do agente que disparou a automação MANUALMENTE (via /run). Quando
+      presente, as mensagens enviadas pelos steps são tagueadas com
+      `triggeredByName` — o inbox exibe o selo "Manual" + avatar do agente
+      (colab) na própria mensagem enviada, sem card de status separado. */
+  triggeredByName?: string | null;
   contactId?: string;
   dealId?: string;
   event: string;
@@ -712,9 +717,15 @@ async function resolveRuntimeContext(
     dealId,
   );
 
+  const triggeredByName =
+    typeof data.triggeredByName === "string" && data.triggeredByName.trim()
+      ? data.triggeredByName.trim()
+      : null;
+
   return {
     automationId,
     automationName: automationName ?? null,
+    triggeredByName,
     contactId,
     dealId,
     event: ctx.event,
@@ -1382,7 +1393,7 @@ async function executeStep(
                 content,
                 direction: "out",
                 messageType: "text",
-                senderName: rt.automationName ?? "Automação", authorType: "bot",
+                senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
                 sendStatus: "failed",
                 sendError: formatMetaSendError(hardFailure).slice(0, 500),
               }),
@@ -1407,7 +1418,7 @@ async function executeStep(
             content: sentContent,
             direction: "out",
             messageType: msgType,
-            senderName: rt.automationName ?? "Automação", authorType: "bot",
+            senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId,
             ...(typeof outFlowToken === "string" && outFlowToken.trim()
               ? { flowToken: outFlowToken.trim() }
@@ -1585,7 +1596,7 @@ async function executeStep(
             content: tplContent,
             direction: "out",
             messageType: "template",
-            senderName: rt.automationName ?? "Automação", authorType: "bot",
+            senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId: tplExternalId,
             ...(typeof enrichTpl.flowToken === "string" && enrichTpl.flowToken.trim()
               ? { flowToken: enrichTpl.flowToken.trim() }
@@ -1718,7 +1729,7 @@ async function executeStep(
               content: displayContent,
               direction: "out",
               messageType: mediaType,
-              senderName: rt.automationName ?? "Automação", authorType: "bot",
+              senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
               externalId: mediaExternalId,
               mediaUrl,
             }),
@@ -1796,7 +1807,7 @@ async function executeStep(
                 content: displayContent,
                 direction: "out",
                 messageType: "interactive",
-                senderName: rt.automationName ?? "Automação", authorType: "bot",
+                senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
                 sendStatus: "failed",
                 sendError: errMsg.slice(0, 500),
               }),
@@ -1816,7 +1827,7 @@ async function executeStep(
             content: displayContent,
             direction: "out",
             messageType: "interactive",
-            senderName: rt.automationName ?? "Automação", authorType: "bot",
+            senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId,
           }),
         });
@@ -2058,7 +2069,7 @@ async function executeStep(
           const externalId = sendResult.messages?.[0]?.id ?? null;
           if (conv) {
             await prisma.message.create({
-              data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", externalId }),
+              data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId }),
             });
             sseBus.publish("new_message", { organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
           }
@@ -2796,51 +2807,12 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     }).catch(() => {});
   }
 
-  // Visibilidade no chat: quando o operador dispara MANUALMENTE pela conversa,
-  // postamos uma confirmação interna (não enviada ao cliente). Ela é gravada
-  // como `messageType: "automation_run"` (não mais "note") para o inbox
-  // renderizar como cartão de AUTOMAÇÃO com badge "Manual" + avatar do agente
-  // que acionou (colab), em vez de virar uma nota genérica.
-  if (context.event === "manual" && rt.conversation?.id) {
-    const triggeredByName =
-      typeof contextData.triggeredByName === "string" && contextData.triggeredByName.trim()
-        ? contextData.triggeredByName.trim()
-        : null;
-    const note =
-      stepsFailed > 0
-        ? `⚙️ Automação "${automation.name}" executada com ${stepsFailed} erro(s).`
-        : `⚙️ Automação "${automation.name}" executada.`;
-    void (async () => {
-      try {
-        const conversationId = rt.conversation!.id;
-        const saved = await prisma.message.create({
-          data: withOrgFromCtx({
-            conversationId,
-            content: note,
-            direction: "out",
-            messageType: "automation_run",
-            isPrivate: true,
-            // senderName carrega o AGENTE que disparou (para o avatar colab).
-            // O nome da automação permanece no `content`.
-            senderName: triggeredByName,
-            authorType: "bot",
-          }),
-        });
-        await prisma.conversation
-          .update({ where: { id: conversationId }, data: { updatedAt: new Date() } })
-          .catch(() => {});
-        sseBus.publish("new_message", {
-          organizationId: getOrgIdOrNull(),
-          conversationId,
-          direction: "out",
-          content: note,
-          timestamp: saved.createdAt,
-        });
-      } catch (e) {
-        log.warn(`[${traceId}] falha ao postar nota de automação manual: ${String(e)}`);
-      }
-    })();
-  }
+  // Disparo manual: NÃO postamos mais um card de status ("executada...") no
+  // chat. As próprias mensagens enviadas pelos steps já são tagueadas com
+  // `triggeredByName` (via withOrgFromCtx acima), então o inbox as exibe com
+  // o selo "Manual" + avatar do agente que acionou (colab) — reproduzindo a
+  // mensagem enviada, sem log redundante. Runs sem envio ao cliente ficam
+  // visíveis apenas no activity log (AUTOMATION_EXECUTED).
     },
   );
 }

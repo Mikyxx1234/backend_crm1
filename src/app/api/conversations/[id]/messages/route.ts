@@ -58,6 +58,12 @@ export type InboxMessageDto = {
    */
   authorType?: "human" | "bot" | "system";
   /**
+   * Nome do agente que disparou a automação MANUALMENTE. Quando presente
+   * (mensagem `out` de bot), o inbox exibe o selo "Manual" + o avatar do
+   * agente ao lado do robô (colab). NULL para envios automáticos/reativos.
+   */
+  triggeredByName?: string | null;
+  /**
    * URL da foto de perfil do agente que assinou a mensagem (resolvido
    * server-side via match de `senderName` com `User.name` no workspace).
    * Permite que o avatar exibido no balão out (chat-window) HERDE a
@@ -205,7 +211,7 @@ export async function GET(request: Request, context: RouteContext) {
     const MSG_SELECT = {
       id: true, externalId: true, content: true, createdAt: true,
       direction: true, messageType: true, isPrivate: true, senderName: true,
-      authorType: true,
+      authorType: true, triggeredByName: true,
       mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
       sendStatus: true, sendError: true, channelId: true,
     } as const;
@@ -312,6 +318,7 @@ export async function GET(request: Request, context: RouteContext) {
       isPrivate: r.isPrivate || undefined,
       senderName: r.senderName,
       authorType: r.authorType as "human" | "bot" | "system",
+      triggeredByName: r.triggeredByName ?? undefined,
       senderImageUrl:
         r.direction === "out" && r.senderName
           ? senderAvatarMap.get(r.senderName.trim().toLowerCase()) ?? null
@@ -379,6 +386,7 @@ export async function GET(request: Request, context: RouteContext) {
           isPrivate: r.isPrivate || undefined,
           senderName: r.senderName,
           authorType: r.authorType as "human" | "bot" | "system",
+          triggeredByName: r.triggeredByName ?? undefined,
           mediaUrl: r.mediaUrl,
           replyToId: r.replyToId,
           replyToPreview: r.replyToPreview,

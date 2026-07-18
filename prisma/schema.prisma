@@ -2436,6 +2436,12 @@ model Message {
   isPrivate        Boolean                 @default(false)
   externalId       String?
   senderName       String?
+  /// Nome do agente que disparou a automação MANUALMENTE (gatilho `manual`
+  /// via /api/automations/[id]/run). Preenchido nas mensagens enviadas pelos
+  /// steps quando o disparo foi manual — o inbox exibe o selo "Manual" + o
+  /// avatar (iniciais) do agente ao lado do robô (colab). NULL para envios
+  /// automáticos/reativos.
+  triggeredByName  String?
   /// Quando a mensagem foi gerada por um agente de IA (authorType=bot),
   /// aponta para o User virtual (type=AI). Permite filtrar trace/custo por agente.
   aiAgentUserId    String?
