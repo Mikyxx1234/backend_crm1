@@ -711,6 +711,68 @@ export async function listCalls(filters: ListCallsFilters = {}) {
   return { calls, total, page, perPage };
 }
 
+/**
+ * Estatísticas agregadas de chamadas para o mini-dash da aba `/logs?tab=chamadas`.
+ * Aplica os mesmos filtros de escopo (busca / período / extensão / contato)
+ * de `listCalls`, mas ignora `direction` e `status` — a ideia é justamente
+ * mostrar o breakdown desses eixos.
+ */
+export async function getCallsStats(
+  filters: Pick<
+    ListCallsFilters,
+    "search" | "dateFrom" | "dateTo" | "extensionId" | "contactId"
+  > = {},
+) {
+  const baseAnd: Prisma.CallWhereInput[] = [];
+
+  const from = filters.dateFrom ? new Date(`${filters.dateFrom}T00:00:00`) : null;
+  const to = filters.dateTo ? new Date(`${filters.dateTo}T23:59:59.999`) : null;
+  if ((from && !Number.isNaN(from.getTime())) || (to && !Number.isNaN(to.getTime()))) {
+    const range: Prisma.DateTimeFilter = {};
+    if (from && !Number.isNaN(from.getTime())) range.gte = from;
+    if (to && !Number.isNaN(to.getTime())) range.lte = to;
+    baseAnd.push({
+      OR: [{ startedAt: range }, { startedAt: null, createdAt: range }],
+    });
+  }
+
+  const search = filters.search?.trim();
+  if (search) {
+    const or: Prisma.CallWhereInput[] = [
+      { contact: { is: { name: { contains: search, mode: "insensitive" } } } },
+    ];
+    const digits = search.replace(/\D/g, "");
+    if (digits) {
+      or.push(
+        { fromNumber: { contains: digits } },
+        { toNumber: { contains: digits } },
+      );
+    }
+    baseAnd.push({ OR: or });
+  }
+
+  const buildWhere = (extra?: Prisma.CallWhereInput): Prisma.CallWhereInput => {
+    const w: Prisma.CallWhereInput = {};
+    if (filters.extensionId) w.extensionId = filters.extensionId;
+    if (filters.contactId) w.contactId = filters.contactId;
+    const AND = extra ? [...baseAnd, extra] : baseAnd;
+    if (AND.length) w.AND = AND;
+    return w;
+  };
+
+  const [total, inbound, outbound, answered, completed] = await Promise.all([
+    prisma.call.count({ where: buildWhere() }),
+    prisma.call.count({ where: buildWhere({ direction: "INBOUND" }) }),
+    prisma.call.count({ where: buildWhere({ direction: "OUTBOUND" }) }),
+    prisma.call.count({
+      where: buildWhere({ status: { in: ["ANSWERED", "COMPLETED"] } }),
+    }),
+    prisma.call.count({ where: buildWhere({ status: "COMPLETED" }) }),
+  ]);
+
+  return { total, inbound, outbound, answered, completed };
+}
+
 export async function getCall(id: string) {
   return prisma.call.findUnique({
     where: { id },
