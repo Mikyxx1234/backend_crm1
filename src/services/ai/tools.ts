@@ -112,17 +112,23 @@ function createDealTool(ctx: RunContext) {
 function moveStageTool(ctx: RunContext) {
   return tool({
     description:
-      "Move o deal atual para outro estágio do funil (identificado por nome do estágio). Use quando o lead avançar na jornada (ex: de 'Qualificação' para 'Proposta').",
+      "Move o deal atual para outro estágio (pode ser em outro funil). Use quando o lead avançar na jornada ou precisar migrar para outro pipeline (ex.: de 'Qualificação' para 'Proposta', ou de 'Vendas' → 'Pós-venda'). Informe `pipelineName` quando o estágio pertence a um funil diferente do atual.",
     inputSchema: z.object({
       stageName: z
         .string()
         .describe("Nome do estágio de destino (match case-insensitive, ex: 'Proposta')."),
+      pipelineName: z
+        .string()
+        .optional()
+        .describe(
+          "Nome do funil de destino quando diferente do atual (case-insensitive). Se omitido, procura o estágio primeiro no funil atual e, em seguida, entre todos os funis (falha se houver ambiguidade).",
+        ),
       reason: z
         .string()
         .optional()
         .describe("Motivo do movimento; vira nota anexada ao deal."),
     }),
-    execute: async ({ stageName, reason }) => {
+    execute: async ({ stageName, pipelineName, reason }) => {
       try {
         if (!ctx.dealId) return fail("Sem deal ativo para mover.");
         const deal = await prisma.deal.findUnique({
@@ -130,15 +136,64 @@ function moveStageTool(ctx: RunContext) {
           select: { id: true, stageId: true, stage: { select: { pipelineId: true } } },
         });
         if (!deal) return fail("Deal não encontrado.");
-        const target = await prisma.stage.findFirst({
-          where: {
-            pipelineId: deal.stage.pipelineId,
-            name: { equals: stageName, mode: "insensitive" },
-          },
-          select: { id: true, name: true },
-        });
-        if (!target)
-          return fail(`Estágio "${stageName}" não existe no pipeline deste deal.`);
+
+        // Resolução do estágio de destino:
+        // 1) Com `pipelineName` explícito: procura o funil por nome e o
+        //    estágio dentro dele.
+        // 2) Sem `pipelineName`: tenta primeiro o funil atual do deal e,
+        //    caso não encontre, faz busca global. Ambiguidade global
+        //    (mais de um funil com estágio de mesmo nome) falha pedindo
+        //    o funil explícito.
+        let target: { id: string; name: string; pipelineId: string } | null = null;
+        if (pipelineName?.trim()) {
+          const pipe = await prisma.pipeline.findFirst({
+            where: { name: { equals: pipelineName.trim(), mode: "insensitive" } },
+            select: { id: true, name: true },
+          });
+          if (!pipe) return fail(`Funil "${pipelineName}" não encontrado.`);
+          target = await prisma.stage.findFirst({
+            where: {
+              pipelineId: pipe.id,
+              name: { equals: stageName, mode: "insensitive" },
+            },
+            select: { id: true, name: true, pipelineId: true },
+          });
+          if (!target)
+            return fail(`Estágio "${stageName}" não existe no funil "${pipe.name}".`);
+        } else {
+          target = await prisma.stage.findFirst({
+            where: {
+              pipelineId: deal.stage.pipelineId,
+              name: { equals: stageName, mode: "insensitive" },
+            },
+            select: { id: true, name: true, pipelineId: true },
+          });
+          if (!target) {
+            const candidates = await prisma.stage.findMany({
+              where: { name: { equals: stageName, mode: "insensitive" } },
+              select: {
+                id: true,
+                name: true,
+                pipelineId: true,
+                pipeline: { select: { name: true } },
+              },
+              take: 5,
+            });
+            if (candidates.length === 0)
+              return fail(`Estágio "${stageName}" não existe em nenhum funil.`);
+            if (candidates.length > 1) {
+              const names = candidates.map((c) => `"${c.pipeline?.name ?? c.pipelineId}"`).join(", ");
+              return fail(
+                `Estágio "${stageName}" existe em vários funis (${names}). Informe pipelineName.`,
+              );
+            }
+            target = {
+              id: candidates[0].id,
+              name: candidates[0].name,
+              pipelineId: candidates[0].pipelineId,
+            };
+          }
+        }
         await updateDeal(deal.id, { stageId: target.id });
         // Dispara "mudança de fase" quando a IA move o negócio — antes esse
         // caminho só registrava AI_AGENT_ACTION e não acionava automações.

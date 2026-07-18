@@ -91,7 +91,15 @@ export async function POST(request: Request) {
           }
         }
 
-        const stage = await prisma.stage.findUnique({ where: { id: stageId }, select: { id: true, name: true } });
+        const stage = await prisma.stage.findUnique({
+          where: { id: stageId },
+          select: {
+            id: true,
+            name: true,
+            pipelineId: true,
+            pipeline: { select: { id: true, name: true } },
+          },
+        });
         if (!stage) return NextResponse.json({ message: "Etapa não encontrada." }, { status: 404 });
 
         // Modo async opt-in: explicito (body.async=true) ou implícito por
@@ -169,11 +177,24 @@ export async function POST(request: Request) {
 
         const deals = await prisma.deal.findMany({
           where: { id: { in: dealIds } },
-          select: { id: true, stageId: true, status: true, stage: { select: { name: true } } },
+          select: {
+            id: true,
+            stageId: true,
+            status: true,
+            stage: {
+              select: {
+                name: true,
+                pipelineId: true,
+                pipeline: { select: { id: true, name: true } },
+              },
+            },
+          },
         });
 
         for (const deal of deals) {
           if (deal.stageId !== stageId) {
+            const pipelineChanged =
+              deal.stage.pipelineId !== stage.pipelineId;
             // Estágios terminais (Ganho/Perdido) sincronizam Deal.status
             // — mesma regra do moveDeal single.
             const statusPatch = targetFlags?.isWon
@@ -190,12 +211,28 @@ export async function POST(request: Request) {
 
             await prisma.deal.update({ where: { id: deal.id }, data: { stageId, ...statusPatch } });
             createDealEvent(deal.id, uid, "STAGE_CHANGED", {
-              from: { id: deal.stageId, name: deal.stage.name },
-              to: { id: stage.id, name: stage.name },
+              from: {
+                id: deal.stageId,
+                name: deal.stage.name,
+                pipelineId: deal.stage.pipelineId,
+                pipelineName: deal.stage.pipeline?.name ?? null,
+              },
+              to: {
+                id: stage.id,
+                name: stage.name,
+                pipelineId: stage.pipelineId,
+                pipelineName: stage.pipeline?.name ?? null,
+              },
+              ...(pipelineChanged ? { pipelineChanged: true } : {}),
             }).catch(() => {});
             fireTrigger("stage_changed", {
               dealId: deal.id,
-              data: { fromStageId: deal.stageId, toStageId: stageId },
+              data: {
+                fromStageId: deal.stageId,
+                toStageId: stageId,
+                fromPipelineId: deal.stage.pipelineId,
+                toPipelineId: stage.pipelineId,
+              },
             }).catch(() => {});
             if ("status" in statusPatch && statusPatch.status && statusPatch.status !== deal.status) {
               createDealEvent(deal.id, uid, "STATUS_CHANGED", { from: deal.status, to: statusPatch.status }).catch(() => {});

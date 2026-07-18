@@ -62,27 +62,33 @@ const CACHE_TTL_SEC = 60;
 export type ScopeLevel = "NONE" | "SELF" | "TEAM" | "ALL";
 
 /**
- * Mapa de escopos vindos de GRUPOS: resource -> action -> maior nivel
- * concedido entre os grupos do user. Dirige a visibilidade (own/all) no
- * enforcement das rotas de dados. Aditivo ao RBAC de papeis.
+ * Grants de etapa/campo/extras resolvidos a partir dos PAPEIS do usuario
+ * (uniao entre papeis). Substituem o antigo modelo por Grupo. Aplicados no
+ * enforcement (resource-policy / visibility) atras da flag
+ * `rbac_granular_scope_v1`.
+ *
+ * Semantica:
+ *   - stageView/stageEdit: `null` = sem restricao (ve/edita todas as etapas).
+ *     Conjunto = allow-list (uniao entre papeis; mais permissivo vence).
+ *   - fieldDenyView/fieldDenyEdit: mascaramento por "entity.fieldKey".
+ *     Deny vence: campo negado por QUALQUER papel fica oculto/somente-leitura.
+ *   - sharedInbox/mediaAccess: OR entre papeis (default permissivo).
  */
-export type GroupScopeMap = Record<string, Record<string, ScopeLevel>>;
+export interface RoleGrantContext {
+  stageView: ReadonlySet<string> | null;
+  stageEdit: ReadonlySet<string> | null;
+  fieldDenyView: ReadonlySet<string>;
+  fieldDenyEdit: ReadonlySet<string>;
+  sharedInbox: boolean;
+  mediaAccess: boolean;
+}
 
-const LEVEL_RANK: Record<ScopeLevel, number> = {
-  NONE: 0,
-  SELF: 1,
-  TEAM: 2,
-  ALL: 3,
-};
-
-export interface AuthzContext {
+export interface AuthzContext extends RoleGrantContext {
   userId: string;
   organizationId: string | null;
   isSuperAdmin: boolean;
   isAdmin: boolean;
   permissions: ReadonlySet<string>;
-  /** Escopos vindos de grupos (resource -> action -> nivel). */
-  scopes: GroupScopeMap;
 }
 
 /**
@@ -92,8 +98,23 @@ interface CachedAuthzPayload {
   organizationId: string | null;
   isAdmin: boolean;
   permissions: string[];
-  scopes: GroupScopeMap;
+  stageView: string[] | null;
+  stageEdit: string[] | null;
+  fieldDenyView: string[];
+  fieldDenyEdit: string[];
+  sharedInbox: boolean;
+  mediaAccess: boolean;
 }
+
+/** Contexto de grants vazio/permissivo (super-admin, sem org, etc.). */
+const PERMISSIVE_GRANTS: RoleGrantContext = {
+  stageView: null,
+  stageEdit: null,
+  fieldDenyView: new Set(),
+  fieldDenyEdit: new Set(),
+  sharedInbox: true,
+  mediaAccess: true,
+};
 
 // ──────────────────────────────────────────────
 // Carregamento + cache
@@ -169,6 +190,12 @@ async function loadFromDb(
         select: {
           systemPreset: true,
           permissions: true,
+          sharedInbox: true,
+          mediaAccess: true,
+          stageGrants: { select: { stageId: true, canView: true, canEdit: true } },
+          fieldGrants: {
+            select: { entity: true, fieldKey: true, canView: true, canEdit: true },
+          },
         },
       },
     },
@@ -176,40 +203,46 @@ async function loadFromDb(
 
   const merged = new Set<string>();
   let isAdmin = false;
+
+  // Grants por papel (uniao). Ver `RoleGrantContext` para a semantica.
+  let sawAnyRole = false;
+  let anyRoleUnrestrictedStage = false;
+  const stageViewSet = new Set<string>();
+  const stageEditSet = new Set<string>();
+  const fieldDenyView = new Set<string>();
+  const fieldDenyEdit = new Set<string>();
+  let sharedInbox = false;
+  let mediaAccess = false;
+
   for (const a of assignments) {
+    sawAnyRole = true;
     if (a.role.systemPreset === "ADMIN") isAdmin = true;
     for (const p of a.role.permissions) {
       if (isValidPermissionKey(p)) merged.add(p);
     }
-  }
 
-  // Grupos (modelo Kommo) — aditivo aos papeis. Uma permissao com nivel
-  // >= SELF concede a key booleana (faz `can()` passar); o nivel fica no
-  // mapa `scopes` pra dirigir own/all no enforcement de visibilidade.
-  const groupMemberships = await prismaBase.groupMember.findMany({
-    where: { userId, organizationId },
-    select: {
-      group: {
-        select: {
-          permissions: { select: { resource: true, action: true, level: true } },
-        },
-      },
-    },
-  });
+    // Extras (OR — mais permissivo vence).
+    if (a.role.sharedInbox) sharedInbox = true;
+    if (a.role.mediaAccess) mediaAccess = true;
 
-  const scopes: GroupScopeMap = {};
-  for (const gm of groupMemberships) {
-    for (const p of gm.group.permissions) {
-      const level = p.level as ScopeLevel;
-      if (level === "NONE") continue;
-      const key = `${p.resource}:${p.action}`;
-      if (!isValidPermissionKey(key)) continue;
-      merged.add(key);
-      const byAction = (scopes[p.resource] ??= {});
-      const current = byAction[p.action];
-      if (!current || LEVEL_RANK[level] > LEVEL_RANK[current]) {
-        byAction[p.action] = level;
+    // Etapas: papel sem NENHUM grant = irrestrito (ve todas). Editar implica ver.
+    if (!a.role.stageGrants || a.role.stageGrants.length === 0) {
+      anyRoleUnrestrictedStage = true;
+    } else {
+      for (const g of a.role.stageGrants) {
+        if (g.canView || g.canEdit) stageViewSet.add(g.stageId);
+        if (g.canEdit) stageEditSet.add(g.stageId);
       }
+    }
+
+    // Campos: deny vence. canView=false oculta (e portanto tambem impede editar).
+    for (const g of a.role.fieldGrants ?? []) {
+      const key = `${g.entity}.${g.fieldKey}`;
+      if (!g.canView) {
+        fieldDenyView.add(key);
+        fieldDenyEdit.add(key);
+      }
+      if (!g.canEdit) fieldDenyEdit.add(key);
     }
   }
 
@@ -224,7 +257,13 @@ async function loadFromDb(
     organizationId,
     isAdmin: fallback.isAdmin,
     permissions: Array.from(fallback.permissions),
-    scopes,
+    stageView: anyRoleUnrestrictedStage ? null : Array.from(stageViewSet),
+    stageEdit: anyRoleUnrestrictedStage ? null : Array.from(stageEditSet),
+    fieldDenyView: Array.from(fieldDenyView),
+    fieldDenyEdit: Array.from(fieldDenyEdit),
+    // Sem papeis atribuidos → permissivo (fallback legado cuida das permissions).
+    sharedInbox: sawAnyRole ? sharedInbox : true,
+    mediaAccess: sawAnyRole ? mediaAccess : true,
   };
 }
 
@@ -251,7 +290,7 @@ export async function loadAuthzContext(input: {
       isSuperAdmin: true,
       isAdmin: true,
       permissions: new Set(),
-      scopes: {},
+      ...PERMISSIVE_GRANTS,
     };
   }
 
@@ -265,7 +304,7 @@ export async function loadAuthzContext(input: {
       isSuperAdmin: false,
       isAdmin: false,
       permissions: new Set(),
-      scopes: {},
+      ...PERMISSIVE_GRANTS,
     };
   }
 
@@ -282,40 +321,57 @@ export async function loadAuthzContext(input: {
     isSuperAdmin: false,
     isAdmin: payload.isAdmin,
     permissions: new Set(payload.permissions),
-    scopes: payload.scopes ?? {},
+    stageView: payload.stageView ? new Set(payload.stageView) : null,
+    stageEdit: payload.stageEdit ? new Set(payload.stageEdit) : null,
+    fieldDenyView: new Set(payload.fieldDenyView ?? []),
+    fieldDenyEdit: new Set(payload.fieldDenyEdit ?? []),
+    sharedInbox: payload.sharedInbox ?? true,
+    mediaAccess: payload.mediaAccess ?? true,
   };
 }
 
 // ──────────────────────────────────────────────
-// Escopos de grupo (own/all) — usado no enforcement de visibilidade
+// Grants por papel (etapa/campo/extras) — enforcement de visibilidade
 // ──────────────────────────────────────────────
 
-/** Nivel de escopo concedido por grupos para `resource:action` (default NONE). */
-export function groupScopeOf(
-  ctx: AuthzContext,
-  resource: string,
-  action: string,
-): ScopeLevel {
-  return ctx.scopes?.[resource]?.[action] ?? "NONE";
+/** Pode VER a etapa? `null` no contexto = sem restrição. ADMIN bypassa. */
+export function canViewStage(ctx: AuthzContext, stageId: string): boolean {
+  if (ctx.isSuperAdmin || ctx.isAdmin) return true;
+  if (ctx.stageView === null) return true;
+  return ctx.stageView.has(stageId);
 }
 
-/**
- * Visibilidade que os GRUPOS concedem para um recurso (dirigida pela action
- * "view"). Aditivo: retorna "all" se algum grupo dá ALL/TEAM no view, "own"
- * se o maior nivel de view é SELF, ou null se nenhum grupo opina (deixa o
- * RBAC de papel/legacy decidir). TEAM é tratado como "all" por ora (sem
- * estrutura de times — nivel reservado, não selecionável na UI).
- */
-export function groupResourceVisibility(
+/** Pode EDITAR/MOVER a etapa? `null` = sem restrição. ADMIN bypassa. */
+export function canEditStage(ctx: AuthzContext, stageId: string): boolean {
+  if (ctx.isSuperAdmin || ctx.isAdmin) return true;
+  if (ctx.stageEdit === null) return true;
+  return ctx.stageEdit.has(stageId);
+}
+
+/** IDs de etapas visíveis (para filtrar queries) ou `null` se irrestrito. */
+export function allowedStageViewIds(ctx: AuthzContext): string[] | null {
+  if (ctx.isSuperAdmin || ctx.isAdmin) return null;
+  return ctx.stageView === null ? null : Array.from(ctx.stageView);
+}
+
+/** Pode VER o campo? Deny vence. ADMIN bypassa. */
+export function canViewRoleField(
   ctx: AuthzContext,
-  resource: string,
-): "all" | "own" | null {
-  const byAction = ctx.scopes?.[resource];
-  if (!byAction) return null;
-  const viewLevel = byAction["view"];
-  if (!viewLevel || viewLevel === "NONE") return null;
-  if (viewLevel === "SELF") return "own";
-  return "all";
+  entity: string,
+  fieldKey: string,
+): boolean {
+  if (ctx.isSuperAdmin || ctx.isAdmin) return true;
+  return !ctx.fieldDenyView.has(`${entity}.${fieldKey}`);
+}
+
+/** Pode EDITAR o campo? Deny vence. ADMIN bypassa. */
+export function canEditRoleField(
+  ctx: AuthzContext,
+  entity: string,
+  fieldKey: string,
+): boolean {
+  if (ctx.isSuperAdmin || ctx.isAdmin) return true;
+  return !ctx.fieldDenyEdit.has(`${entity}.${fieldKey}`);
 }
 
 // ──────────────────────────────────────────────

@@ -109,8 +109,6 @@ model Organization {
   aiAgentMessages          AIAgentMessage[]
   roles                    Role[]
   roleAssignments          UserRoleAssignment[]
-  groups                   Group[]
-  groupMembers             GroupMember[]
   departmentMembers        DepartmentMember[]
   organizationSettings     OrganizationSetting[]
   savedFilters             SavedFilter[]
@@ -519,7 +517,6 @@ model User {
   loginAttempts                  LoginAttempt[]
   dataRequests                   DataRequest[]
   roleAssignments                UserRoleAssignment[]
-  groupMemberships               GroupMember[]
   departmentMemberships          DepartmentMember[]
   savedFilters                   SavedFilter[]             @relation("UserSavedFilters")
   emailAccounts                  EmailAccount[]
@@ -858,16 +855,60 @@ model Role {
   /// (habilitado se qualquer role habilitou; ordem = primeira ocorrencia). Ver
   /// getSidebarPreferences em services/user-preferences.ts.
   sidebarItems   Json?
+  /// Acessos extras do papel (antes viviam em Group). Aplicados atras da
+  /// flag `rbac_granular_scope_v1`; efetivo do user = uniao (OR) entre papeis.
+  sharedInbox    Boolean      @default(true)
+  mediaAccess    Boolean      @default(true)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   assignments UserRoleAssignment[]
+  stageGrants RoleStageGrant[]
+  fieldGrants RoleFieldGrant[]
 
   @@unique([organizationId, name])
   @@unique([organizationId, systemPreset])
   @@index([organizationId])
   @@index([inheritsFrom])
   @@map("roles")
+}
+
+/// Visibilidade por etapa do funil para um PAPEL (ver/editar deals do stage).
+/// Efetivo do user = uniao entre papeis (mais permissivo vence). Ausencia de
+/// QUALQUER linha para um papel = papel sem restricao de etapa (ve todas).
+model RoleStageGrant {
+  id             String  @id @default(cuid())
+  organizationId String
+  roleId         String
+  role           Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  stageId        String
+  canView        Boolean @default(true)
+  canEdit        Boolean @default(false)
+
+  @@unique([roleId, stageId])
+  @@index([organizationId])
+  @@index([roleId])
+  @@map("role_stage_grants")
+}
+
+/// Permissao por campo (Pro) de um PAPEL. `entity` = "deal"|"contact"|
+/// "company"|"product"; `fieldKey` = chave do campo. Semantica de mascaramento:
+/// campo negado por QUALQUER papel do user fica oculto/somente-leitura (deny
+/// vence), com bypass total para ADMIN. Aplicado atras da flag de escopo.
+model RoleFieldGrant {
+  id             String  @id @default(cuid())
+  organizationId String
+  roleId         String
+  role           Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  entity         String
+  fieldKey       String
+  canView        Boolean @default(true)
+  canEdit        Boolean @default(true)
+
+  @@unique([roleId, entity, fieldKey])
+  @@index([organizationId])
+  @@index([roleId])
+  @@map("role_field_grants")
 }
 
 /// Atribuicao N:N entre User e Role. Um user pode ter varias roles
@@ -904,105 +945,6 @@ enum PermissionLevel {
   SELF
   TEAM
   ALL
-}
-
-/// Grupo de acesso (RBAC por grupo — modelo Kommo). As permissoes vivem no
-/// GRUPO; usuarios entram via GroupMember e herdam as regras. ADITIVO ao
-/// RBAC de papeis (Role): permissoes efetivas de um user = uniao das
-/// permissions dos papeis (booleanas) ∪ permissions dos grupos (scoped).
-/// A visibilidade por recurso (own/all) deriva do maior nivel concedido.
-model Group {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  name           String
-  description    String?
-  /// Acessos extras (toggles do editor de grupo).
-  sharedInbox    Boolean      @default(true)
-  mediaAccess    Boolean      @default(true)
-  /// Rotas de nav visiveis para o grupo (vazio = todas). Menu lateral.
-  sidebarRoutes  String[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  members     GroupMember[]
-  permissions GroupPermission[]
-  stageGrants GroupStageGrant[]
-  fieldGrants GroupFieldGrant[]
-
-  @@unique([organizationId, name])
-  @@index([organizationId])
-  @@map("groups")
-}
-
-/// Vinculo N:N entre User e Group. Um user pode estar em varios grupos;
-/// permissoes efetivas = uniao (maior nivel vence por resource:action).
-model GroupMember {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  groupId        String
-  group          Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  userId         String
-  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt      DateTime     @default(now())
-
-  @@unique([groupId, userId])
-  @@index([organizationId])
-  @@index([userId])
-  @@index([groupId])
-  @@map("group_members")
-}
-
-/// Permissao com escopo por acao de um grupo. `resource`/`action` referem o
-/// PERMISSION_CATALOG (src/lib/authz/permissions.ts). Ausencia de linha = NONE.
-model GroupPermission {
-  id             String          @id @default(cuid())
-  organizationId String
-  groupId        String
-  group          Group           @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  resource       String
-  action         String
-  level          PermissionLevel @default(NONE)
-
-  @@unique([groupId, resource, action])
-  @@index([organizationId])
-  @@index([groupId])
-  @@map("group_permissions")
-}
-
-/// Visibilidade por etapa do funil para um grupo (ver/editar deals do stage).
-model GroupStageGrant {
-  id             String  @id @default(cuid())
-  organizationId String
-  groupId        String
-  group          Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  stageId        String
-  canView        Boolean @default(true)
-  canEdit        Boolean @default(false)
-
-  @@unique([groupId, stageId])
-  @@index([organizationId])
-  @@index([groupId])
-  @@map("group_stage_grants")
-}
-
-/// Permissao por campo (Pro) de um grupo. `entity` = "deal"|"contact"|
-/// "company"|"product"; `fieldKey` = chave do campo (ex.: "deal.value").
-model GroupFieldGrant {
-  id             String  @id @default(cuid())
-  organizationId String
-  groupId        String
-  group          Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  entity         String
-  fieldKey       String
-  canView        Boolean @default(true)
-  canEdit        Boolean @default(true)
-
-  @@unique([groupId, entity, fieldKey])
-  @@index([organizationId])
-  @@index([groupId])
-  @@map("group_field_grants")
 }
 
 /// Configs por organizacao (substitui SystemSetting global pra dados

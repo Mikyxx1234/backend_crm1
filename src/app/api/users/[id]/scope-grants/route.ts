@@ -92,7 +92,7 @@ export async function PUT(request: Request, ctx: Ctx) {
     const channelDenyIds = parseField(body, "channelDenyIds");
 
     // Read-merge-write: preserva TODAS as outras chaves dos grants (outros
-    // usuários, roles, groups e eixos não mexidos por esta requisição).
+    // usuários, roles e eixos não mexidos por esta requisição).
     const grants = await getScopeGrants();
     const next: ScopeGrants = {
       ...grants,
@@ -104,27 +104,22 @@ export async function PUT(request: Request, ctx: Ctx) {
         view: {
           users: { ...(grants.channel?.view?.users ?? {}) },
           roles: { ...(grants.channel?.view?.roles ?? {}) },
-          groups: { ...(grants.channel?.view?.groups ?? {}) },
         },
         send: {
           users: { ...(grants.channel?.send?.users ?? {}) },
           roles: { ...(grants.channel?.send?.roles ?? {}) },
-          groups: { ...(grants.channel?.send?.groups ?? {}) },
         },
         initiate: {
           users: { ...(grants.channel?.initiate?.users ?? {}) },
           roles: { ...(grants.channel?.initiate?.roles ?? {}) },
-          groups: { ...(grants.channel?.initiate?.groups ?? {}) },
         },
         manage: {
           users: { ...(grants.channel?.manage?.users ?? {}) },
           roles: { ...(grants.channel?.manage?.roles ?? {}) },
-          groups: { ...(grants.channel?.manage?.groups ?? {}) },
         },
         deny: {
           users: { ...(grants.channel?.deny?.users ?? {}) },
           roles: { ...(grants.channel?.deny?.roles ?? {}) },
-          groups: { ...(grants.channel?.deny?.groups ?? {}) },
         },
       },
     };

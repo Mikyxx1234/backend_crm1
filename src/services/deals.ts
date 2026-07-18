@@ -632,16 +632,26 @@ export async function moveDeal(
     select: { id: true, stage: { select: { pipelineId: true } } },
   });
   if (!dealPeek) throw new Error("NOT_FOUND");
-  const pipelineId = dealPeek.stage.pipelineId;
+
+  // Preview do estágio destino pra validar lostReason no funil DESTINO
+  // (não no de origem) — a UI de troca de pipeline decide o motivo depois
+  // que o usuário escolheu o funil, então a política vale para o destino.
+  const targetPeek = await prisma.stage.findUnique({
+    where: { id: targetStageId },
+    select: { pipelineId: true },
+  });
+  if (!targetPeek) throw new Error("STAGE_NOT_FOUND");
 
   // Valida o motivo ANTES de abrir a transação (evita rollback se o destino
   // for o estágio Perdido e o motivo livre tiver sido bloqueado pela setting).
   if (options?.lostReason) {
-    await assertLostReasonAllowed(options.lostReason, pipelineId);
+    await assertLostReasonAllowed(options.lostReason, targetPeek.pipelineId);
   }
 
   let becameWon = false;
   let becameLost = false;
+  // Preserva o pipeline de ORIGEM para invalidação de cache pós-move.
+  let fromPipelineId: string | null = dealPeek.stage.pipelineId;
   const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id: dealId } });
     if (!deal) throw new Error("NOT_FOUND");
@@ -650,9 +660,11 @@ export async function moveDeal(
     if (!targetStage) throw new Error("STAGE_NOT_FOUND");
 
     const dealStage = await tx.stage.findUnique({ where: { id: deal.stageId } });
-    if (!dealStage || dealStage.pipelineId !== targetStage.pipelineId) {
-      throw new Error("CROSS_PIPELINE");
-    }
+    if (!dealStage) throw new Error("STAGE_NOT_FOUND");
+    fromPipelineId = dealStage.pipelineId;
+    // Cross-pipeline permitido: quando o funil muda, a reordenação de
+    // posições continua funcionando (origem decrementa, destino incrementa
+    // — ambos escopados por stageId, então não há colisão entre funis).
 
     if (targetStage.isLost) {
       const pipe = await tx.pipeline.findUnique({

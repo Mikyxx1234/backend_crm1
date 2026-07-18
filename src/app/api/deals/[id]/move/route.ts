@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { requirePermissionForUser, requireStageScope } from "@/lib/authz/resource-policy";
+import { prisma } from "@/lib/prisma";
+import {
+  requirePermissionForUser,
+  requirePipelineScope,
+  requireStageScope,
+} from "@/lib/authz/resource-policy";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent, getDealById, moveDeal } from "@/services/deals";
 
@@ -43,12 +48,31 @@ export async function POST(request: Request, context: RouteContext) {
       if (typeof b.stageId !== "string" || !b.stageId) {
         return NextResponse.json({ message: "stageId é obrigatório." }, { status: 400 });
       }
-      const stageDenied = await requireStageScope(
-        session.user as { id: string; organizationId: string | null; role?: string | null; isSuperAdmin?: boolean },
-        "move",
-        b.stageId,
-      );
+      const userLike = session.user as {
+        id: string;
+        organizationId: string | null;
+        role?: string | null;
+        isSuperAdmin?: boolean;
+      };
+      const stageDenied = await requireStageScope(userLike, "move", b.stageId);
       if (stageDenied) return stageDenied;
+
+      // Troca de funil: quando o pipeline destino difere do atual, exige
+      // acesso ao pipeline de destino também (o requireStageScope já cobre
+      // o estágio individual, mas a política de funil é um extra layer).
+      const targetStageMeta = await prisma.stage.findUnique({
+        where: { id: b.stageId },
+        select: { pipelineId: true },
+      });
+      if (!targetStageMeta) {
+        return NextResponse.json({ message: "Estágio não encontrado." }, { status: 400 });
+      }
+      const fromPipelineId = existing.stage.pipeline?.id ?? null;
+      const toPipelineId = targetStageMeta.pipelineId;
+      if (fromPipelineId && toPipelineId !== fromPipelineId) {
+        const pipeDenied = await requirePipelineScope(userLike, "view", toPipelineId);
+        if (pipeDenied) return pipeDenied;
+      }
       if (typeof b.position !== "number" || !Number.isInteger(b.position) || b.position < 0) {
         return NextResponse.json({ message: "position inválido." }, { status: 400 });
       }
@@ -57,24 +81,47 @@ export async function POST(request: Request, context: RouteContext) {
       const lostReason = typeof b.lostReason === "string" ? b.lostReason.trim() : undefined;
 
       try {
-        const fromStage = { id: existing.stage.id, name: existing.stage.name };
+        const fromStage = {
+          id: existing.stage.id,
+          name: existing.stage.name,
+          pipelineId: fromPipelineId,
+          pipelineName: existing.stage.pipeline?.name ?? null,
+        };
         const deal = await moveDeal(dealId, b.stageId, b.position, { lostReason });
         if (!deal) {
           return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
         }
 
         if (b.stageId !== fromStage.id) {
-          const uid = (session.user as { id: string }).id;
-          const toStage = (deal as { stage?: { id: string; name: string } }).stage;
+          const uid = userLike.id;
+          const toStage = (deal as {
+            stage?: {
+              id: string;
+              name: string;
+              pipeline?: { id: string; name: string } | null;
+            };
+          }).stage;
+          const pipelineChanged = fromPipelineId && toPipelineId !== fromPipelineId;
           createDealEvent(dealId, uid, "STAGE_CHANGED", {
             from: fromStage,
-            to: { id: b.stageId as string, name: toStage?.name ?? b.stageId },
+            to: {
+              id: b.stageId as string,
+              name: toStage?.name ?? b.stageId,
+              pipelineId: toStage?.pipeline?.id ?? toPipelineId,
+              pipelineName: toStage?.pipeline?.name ?? null,
+            },
+            ...(pipelineChanged ? { pipelineChanged: true } : {}),
           }).catch(() => {});
 
           fireTrigger("stage_changed", {
             dealId,
             contactId: existing.contactId ?? undefined,
-            data: { fromStageId: fromStage.id, toStageId: b.stageId },
+            data: {
+              fromStageId: fromStage.id,
+              toStageId: b.stageId,
+              fromPipelineId,
+              toPipelineId,
+            },
           }).catch(() => {});
 
           // Estágios terminais (Ganho/Perdido): o moveDeal sincroniza
@@ -112,12 +159,6 @@ export async function POST(request: Request, context: RouteContext) {
           }
           if (err.message === "STAGE_NOT_FOUND") {
             return NextResponse.json({ message: "Estágio não encontrado." }, { status: 400 });
-          }
-          if (err.message === "CROSS_PIPELINE") {
-            return NextResponse.json(
-              { message: "O estágio de destino deve pertencer ao mesmo pipeline." },
-              { status: 400 }
-            );
           }
           if (err.message === "INVALID_POSITION") {
             return NextResponse.json({ message: "position inválido." }, { status: 400 });

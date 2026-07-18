@@ -1,7 +1,8 @@
 import { Prisma } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
-import { groupResourceVisibility, loadAuthzContext } from "@/lib/authz";
+import { loadAuthzContext } from "@/lib/authz";
+import { isFeatureEnabled } from "@/lib/feature-flags";
 import { getOrgSettingsByPrefix } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -116,37 +117,40 @@ export async function getVisibilityFilter(
   }
 
   /**
-   * Modo "own" do papel — GRUPOS de acesso podem EXPANDIR a visibilidade
-   * (modelo aditivo): se algum grupo do usuário concede nível "Todos" (ALL)
-   * no `view` de deal/conversation, ele passa a ver tudo daquele recurso.
-   * Grupos nunca restringem aqui (defesa contra esconder dados por engano).
+   * Modo "own" do papel. A "caixa de entrada compartilhada" (extra do PAPEL,
+   * atrás da flag `rbac_granular_scope_v1`) decide se o agente enxerga
+   * conversas não atribuídas via contato:
+   *   - sharedInbox=true (default) → vê conversas próprias + não atribuídas
+   *     ligadas a contatos que ele acompanha.
+   *   - sharedInbox=false → estritamente as conversas atribuídas a ele.
+   * ADMIN e flag desligada mantêm o comportamento compartilhado.
    */
-  let dealAll = false;
-  let convAll = false;
+  let strictOwnInbox = false;
   try {
     const orgId = getOrgIdOrThrow();
-    const ctx = await loadAuthzContext({
-      userId: user.id,
-      organizationId: orgId,
-      isSuperAdmin: false,
-    });
-    dealAll = groupResourceVisibility(ctx, "deal") === "all";
-    convAll = groupResourceVisibility(ctx, "conversation") === "all";
+    if (await isFeatureEnabled("rbac_granular_scope_v1", orgId)) {
+      const ctx = await loadAuthzContext({
+        userId: user.id,
+        organizationId: orgId,
+        isSuperAdmin: false,
+      });
+      if (!ctx.isAdmin && !ctx.sharedInbox) strictOwnInbox = true;
+    }
   } catch {
-    // Fora de RequestContext (ex.: jobs) — mantém o modo "own" do papel.
+    // Fora de RequestContext (ex.: jobs) — mantém comportamento compartilhado.
   }
 
   return {
-    canSeeAll: dealAll,
-    dealWhere: dealAll ? {} : { ownerId: user.id },
+    canSeeAll: false,
+    dealWhere: { ownerId: user.id },
     /**
      * Inbox: conversa atribuída só ao agente indicado; sem atribuição segue a visibilidade por contato
      * (dono do negócio ou responsável pelo lead). Sobre isso aplica-se ainda
      * o isolamento por departamento (AND), quando configurado.
      */
     conversationWhere: composeDepartmentScope(
-      convAll
-        ? {}
+      strictOwnInbox
+        ? { assignedToId: user.id }
         : {
             OR: [
               { assignedToId: user.id },

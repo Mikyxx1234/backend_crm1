@@ -195,6 +195,24 @@ export async function PUT(request: Request, context: RouteContext) {
       if (payload.stageId) {
         const moveDenied = await requireStageScope(authResult.user, "move", payload.stageId);
         if (moveDenied) return moveDenied;
+        // Cross-pipeline: quando o novo estágio pertence a outro funil,
+        // exige acesso ao pipeline destino também.
+        const targetStageMeta = await prisma.stage.findUnique({
+          where: { id: payload.stageId },
+          select: { pipelineId: true },
+        });
+        if (!targetStageMeta) {
+          return NextResponse.json({ message: "Estágio não encontrado." }, { status: 400 });
+        }
+        const fromPipelineId = (existing.stage as { pipelineId?: string }).pipelineId ?? null;
+        if (fromPipelineId && targetStageMeta.pipelineId !== fromPipelineId) {
+          const pipeDenied = await requirePipelineScope(
+            authResult.user,
+            "view",
+            targetStageMeta.pipelineId,
+          );
+          if (pipeDenied) return pipeDenied;
+        }
       }
       const deal = await updateDeal(dealId, payload);
 
@@ -209,12 +227,43 @@ export async function PUT(request: Request, context: RouteContext) {
         createDealEvent(dealId, uid, "FIELD_UPDATED", { field: "expectedClose", from: existing.expectedClose, to: payload.expectedClose }).catch(() => {});
       }
       if (payload.stageId !== undefined && payload.stageId !== existing.stage.id) {
-        const toStage = await prisma.stage.findUnique({ where: { id: payload.stageId }, select: { name: true } });
-        createDealEvent(dealId, uid, "STAGE_CHANGED", { from: { id: existing.stage.id, name: existing.stage.name }, to: { id: payload.stageId, name: toStage?.name ?? payload.stageId } }).catch(() => {});
+        const toStage = await prisma.stage.findUnique({
+          where: { id: payload.stageId },
+          select: {
+            name: true,
+            pipelineId: true,
+            pipeline: { select: { id: true, name: true } },
+          },
+        });
+        const fromPipelineId = (existing.stage as { pipelineId?: string }).pipelineId ?? null;
+        const toPipelineId = toStage?.pipelineId ?? null;
+        const pipelineChanged =
+          !!fromPipelineId && !!toPipelineId && fromPipelineId !== toPipelineId;
+        createDealEvent(dealId, uid, "STAGE_CHANGED", {
+          from: {
+            id: existing.stage.id,
+            name: existing.stage.name,
+            pipelineId: fromPipelineId,
+            pipelineName:
+              (existing.stage as { pipeline?: { name?: string } }).pipeline?.name ?? null,
+          },
+          to: {
+            id: payload.stageId,
+            name: toStage?.name ?? payload.stageId,
+            pipelineId: toPipelineId,
+            pipelineName: toStage?.pipeline?.name ?? null,
+          },
+          ...(pipelineChanged ? { pipelineChanged: true } : {}),
+        }).catch(() => {});
         fireTrigger("stage_changed", {
           dealId,
           contactId: existing.contactId ?? undefined,
-          data: { fromStageId: existing.stage.id, toStageId: payload.stageId },
+          data: {
+            fromStageId: existing.stage.id,
+            toStageId: payload.stageId,
+            fromPipelineId,
+            toPipelineId,
+          },
         }).catch(() => {});
       }
       if (payload.ownerId !== undefined && payload.ownerId !== existing.owner?.id) {

@@ -13,6 +13,18 @@ import {
   type SidebarItemPreference,
 } from "@/services/user-preferences";
 
+export type RoleStageGrantInput = {
+  stageId: string;
+  canView: boolean;
+  canEdit: boolean;
+};
+export type RoleFieldGrantInput = {
+  entity: string;
+  fieldKey: string;
+  canView: boolean;
+  canEdit: boolean;
+};
+
 const roleListSelect = {
   id: true,
   name: true,
@@ -22,6 +34,8 @@ const roleListSelect = {
   permissions: true,
   inheritsFrom: true,
   sidebarItems: true,
+  sharedInbox: true,
+  mediaAccess: true,
   _count: { select: { assignments: true } },
 } satisfies Prisma.RoleSelect;
 
@@ -36,7 +50,53 @@ const roleDetailSelect = {
     },
     orderBy: { createdAt: "asc" as const },
   },
+  stageGrants: {
+    select: { stageId: true, canView: true, canEdit: true },
+  },
+  fieldGrants: {
+    select: { entity: true, fieldKey: true, canView: true, canEdit: true },
+  },
 } satisfies Prisma.RoleSelect;
+
+/** Filtra grants de etapa: mantem só os que concedem algo (view ou edit). */
+function sanitizeStageGrants(
+  input: RoleStageGrantInput[] | undefined | null,
+): RoleStageGrantInput[] {
+  if (!input) return [];
+  const byStage = new Map<string, RoleStageGrantInput>();
+  for (const g of input) {
+    const stageId = g.stageId?.trim();
+    if (!stageId) continue;
+    if (!g.canView && !g.canEdit) continue;
+    byStage.set(stageId, {
+      stageId,
+      canView: !!g.canView,
+      // editar implica ver.
+      canEdit: !!g.canEdit,
+    });
+  }
+  return Array.from(byStage.values());
+}
+
+/** Filtra grants de campo: mantem só regras que restringem algo. */
+function sanitizeFieldGrants(
+  input: RoleFieldGrantInput[] | undefined | null,
+): RoleFieldGrantInput[] {
+  if (!input) return [];
+  const byKey = new Map<string, RoleFieldGrantInput>();
+  for (const g of input) {
+    const entity = g.entity?.trim();
+    const fieldKey = g.fieldKey?.trim();
+    if (!entity || !fieldKey) continue;
+    byKey.set(`${entity}.${fieldKey}`, {
+      entity,
+      fieldKey,
+      canView: !!g.canView,
+      canEdit: !!g.canEdit,
+    });
+  }
+  return Array.from(byKey.values());
+}
 
 function extractSidebarItems(raw: unknown): SidebarItemPreference[] | null {
   if (!raw) return null;
@@ -61,6 +121,8 @@ function mapRoleList(
     inheritsFrom: row.inheritsFrom,
     // `null` = papel usa o catalogo padrao (sem override).
     sidebarItems: extractSidebarItems(row.sidebarItems),
+    sharedInbox: row.sharedInbox,
+    mediaAccess: row.mediaAccess,
     _count: {
       assignments: row._count.assignments,
       groups: 0,
@@ -77,6 +139,17 @@ function mapRoleDetail(
     assignments: row.assignments.map((a) => ({
       id: a.id,
       user: a.user,
+    })),
+    stageGrants: row.stageGrants.map((g) => ({
+      stageId: g.stageId,
+      canView: g.canView,
+      canEdit: g.canEdit,
+    })),
+    fieldGrants: row.fieldGrants.map((g) => ({
+      entity: g.entity,
+      fieldKey: g.fieldKey,
+      canView: g.canView,
+      canEdit: g.canEdit,
     })),
   };
 }
@@ -137,6 +210,10 @@ export async function createRole(input: {
   permissions: string[];
   inheritsFrom?: string | null;
   sidebarItems?: SidebarItemPreference[] | null;
+  sharedInbox?: boolean;
+  mediaAccess?: boolean;
+  stageGrants?: RoleStageGrantInput[] | null;
+  fieldGrants?: RoleFieldGrantInput[] | null;
 }) {
   const orgId = getOrgIdOrThrow();
   const name = input.name.trim();
@@ -144,6 +221,8 @@ export async function createRole(input: {
 
   const permissions = sanitizePermissions(input.permissions);
   const inheritsFrom = await resolveInheritsFrom(orgId, input.inheritsFrom);
+  const stageGrants = sanitizeStageGrants(input.stageGrants);
+  const fieldGrants = sanitizeFieldGrants(input.fieldGrants);
 
   // sidebarItems: undefined => nao salva override (usa catalogo padrao).
   // null explicito ou array vazio => tambem trata como "sem override"
@@ -167,7 +246,15 @@ export async function createRole(input: {
       inheritsFrom: inheritsFrom ?? null,
       isSystem: false,
       systemPreset: null,
+      ...(input.sharedInbox !== undefined ? { sharedInbox: input.sharedInbox } : {}),
+      ...(input.mediaAccess !== undefined ? { mediaAccess: input.mediaAccess } : {}),
       ...(sidebarJson !== undefined ? { sidebarItems: sidebarJson } : {}),
+      stageGrants: {
+        create: stageGrants.map((g) => ({ organizationId: orgId, ...g })),
+      },
+      fieldGrants: {
+        create: fieldGrants.map((g) => ({ organizationId: orgId, ...g })),
+      },
     },
     select: roleDetailSelect,
   });
@@ -182,6 +269,10 @@ export async function updateRole(
     permissions?: string[];
     inheritsFrom?: string | null;
     sidebarItems?: SidebarItemPreference[] | null;
+    sharedInbox?: boolean;
+    mediaAccess?: boolean;
+    stageGrants?: RoleStageGrantInput[] | null;
+    fieldGrants?: RoleFieldGrantInput[] | null;
   },
 ) {
   const orgId = getOrgIdOrThrow();
@@ -233,6 +324,25 @@ export async function updateRole(
       const normalized = normalizeSidebar(input.sidebarItems);
       data.sidebarItems = normalized as unknown as Prisma.InputJsonValue;
     }
+  }
+
+  // Extras + grants: operacionais, editaveis inclusive em presets do sistema
+  // (ADMIN bypassa enforcement de qualquer forma). Substitui a lista inteira.
+  if (input.sharedInbox !== undefined) data.sharedInbox = input.sharedInbox;
+  if (input.mediaAccess !== undefined) data.mediaAccess = input.mediaAccess;
+  if (input.stageGrants !== undefined) {
+    const grants = sanitizeStageGrants(input.stageGrants);
+    data.stageGrants = {
+      deleteMany: {},
+      create: grants.map((g) => ({ organizationId: orgId, ...g })),
+    };
+  }
+  if (input.fieldGrants !== undefined) {
+    const grants = sanitizeFieldGrants(input.fieldGrants);
+    data.fieldGrants = {
+      deleteMany: {},
+      create: grants.map((g) => ({ organizationId: orgId, ...g })),
+    };
   }
 
   const role = await prisma.role.update({
