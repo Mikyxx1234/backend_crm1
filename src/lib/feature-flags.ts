@@ -73,6 +73,12 @@ export const FLAGS = {
       "Ativa o novo wizard de campanhas com fluxo em 4 passos.",
     defaultEnabled: false,
   },
+  catalogo_cotas_v2: {
+    key: "catalogo_cotas_v2",
+    description:
+      "Habilita o motor de Cotas de Desconto (cupons com estoque, vigência, cumulatividade e cascata) no deal e nas configurações.",
+    defaultEnabled: false,
+  },
 } as const;
 
 export type FlagKey = keyof typeof FLAGS;

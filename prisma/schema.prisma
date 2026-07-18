@@ -143,6 +143,11 @@ model Organization {
   tabulations              Tabulation[]
   agentPermissions         AgentPermission[]
   quickReplyGroups         QuickReplyGroup[]
+  // Cotas de desconto (PRD Cotas de Desconto — Fase 1).
+  discountQuotas           DiscountQuota[]
+  quotaPolicies            QuotaConsumptionPolicy[]
+  dealQuotas               DealQuota[]
+  quotaMovements           QuotaMovement[]
 
   @@index([status])
   @@map("organizations")
@@ -1403,6 +1408,19 @@ model Deal {
   linksFrom      DealLink[]             @relation("DealLinkFrom")
   linksTo        DealLink[]             @relation("DealLinkTo")
   calls          Call[]
+  // Cotas de desconto vinculadas (PRD Cotas de Desconto — Fase 1).
+  quotas         DealQuota[]
+
+  /// Unidade (filial) associada ao deal — resolve `ProductOffer` e escopo
+  /// de matching de cotas de desconto (RN-01). Aditivo: null = deals legados.
+  orgUnitId      String?
+  orgUnit        OrgUnit?     @relation(fields: [orgUnitId], references: [id])
+  /// Snapshot do preço cheio (soma de linhas × oferta) resolvido no momento
+  /// da seleção das cotas. RN-04: nunca recalculado retroativamente.
+  priceFullSnapshot  Decimal? @db.Decimal(12, 2)
+  /// Snapshot do preço final após aplicar as cotas (RN-04). Recalculado
+  /// somente quando o conjunto de cotas do deal muda.
+  priceFinalSnapshot Decimal? @db.Decimal(12, 2)
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1420,6 +1438,7 @@ model Deal {
   @@index([organizationId, stageId, position])
   @@index([organizationId, contactId, status])
   @@index([organizationId, dealRole])
+  @@index([organizationId, orgUnitId])
   @@map("deals")
 }
 
@@ -1477,6 +1496,8 @@ model Product {
   capabilities     ProductCapability[]
   capacitySlots    CapacitySlot[]
   stakeholderRules StakeholderRule[]
+  /// Cotas de desconto restritas a este produto (opcional: null = qualquer).
+  discountQuotas   DiscountQuota[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1605,6 +1626,10 @@ model OrgUnit {
 
   offers ProductOffer[]
   pools  InventoryPool[]
+  /// Cotas de desconto restritas a esta unidade (opcional: null = global).
+  discountQuotas DiscountQuota[]
+  /// Deals cuja oferta foi resolvida por esta unidade (PRD cotas — Fase 1).
+  deals          Deal[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2057,6 +2082,159 @@ model StakeholderRule {
   @@index([productId])
   @@index([organizationId, event])
   @@map("stakeholder_rules")
+}
+
+// ──────────────────────────────────────────────
+// Cotas de Desconto (PRD Cotas — Fase 1)
+// ──────────────────────────────────────────────
+// Cupom de desconto com estoque (`qtyTotal`/`qtyConsumida`), vigência, escopo
+// opcional por produto/unidade e regras de cumulatividade + cálculo. Consumo
+// atômico via UPDATE condicional (padrão do `inventory.ts`). Ledger em
+// `QuotaMovement` = fonte de verdade auditável.
+
+enum DiscountType {
+  PERCENT
+  FIXED
+}
+
+enum QuotaCalcMode {
+  CASCADE
+  SUM_SIMPLE
+}
+
+enum QuotaConsumeMoment {
+  ON_WIN
+  ON_RESERVE
+}
+
+enum DealQuotaStatus {
+  SELECTED
+  RESERVED
+  CONSUMED
+  RETURNED
+  EXPIRED
+}
+
+enum QuotaMovementType {
+  RESERVE
+  CONSUME
+  RETURN
+  EXPIRE
+  MANUAL_ADJUST
+}
+
+/// Cota de desconto (cupom): valor % ou fixo, com estoque opcional, vigência,
+/// escopo por produto/unidade (nullable = "qualquer") e cumulatividade.
+model DiscountQuota {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  discountType   DiscountType @default(PERCENT)
+  discountValue  Decimal      @db.Decimal(12, 2)
+  /// Escopo: null em `productId` = vale para qualquer produto; null em
+  /// `orgUnitId` = vale para qualquer unidade (global).
+  productId      String?
+  product        Product?     @relation(fields: [productId], references: [id])
+  orgUnitId      String?
+  orgUnit        OrgUnit?     @relation(fields: [orgUnitId], references: [id])
+  /// Estoque: `qtyTotal` null = ilimitada. `qtyConsumed` só é incrementado
+  /// via serviço transacional (RN-06).
+  qtyTotal       Int?
+  qtyConsumed    Int          @default(0)
+  /// Vigência: `validTo` null = perene.
+  validFrom      DateTime     @default(now())
+  validTo        DateTime?
+  /// Cumulatividade: cotas do MESMO `exclusionGroup` não se acumulam entre si.
+  exclusionGroup String?
+  /// Máximo de cotas empilhadas no mesmo deal quando envolvida (1 = não acumula).
+  maxStacks      Int          @default(1)
+  /// Modo de aplicação em cascata (default) ou soma simples. Ver RN-04.
+  calcMode       QuotaCalcMode @default(CASCADE)
+  active         Boolean      @default(true)
+
+  policies       QuotaConsumptionPolicy[]
+  dealQuotas     DealQuota[]
+  movements      QuotaMovement[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, active])
+  @@index([organizationId, productId, orgUnitId, active])
+  @@index([productId])
+  @@index([orgUnitId])
+  @@map("discount_quotas")
+}
+
+/// Política de consumo (parametrizável, RN-05). `quotaId` null = política
+/// default da organização (uma por org).
+model QuotaConsumptionPolicy {
+  id                 String             @id @default(cuid())
+  organizationId     String
+  organization       Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  quotaId            String?
+  quota              DiscountQuota?     @relation(fields: [quotaId], references: [id], onDelete: Cascade)
+  consumeMoment      QuotaConsumeMoment @default(ON_WIN)
+  /// Se `saldo <= reserveThreshold`, seleção passa a reservar (RN-05).
+  /// null = nunca reserva por threshold.
+  reserveThreshold   Int?
+  reserveTtlHours    Int                @default(48)
+  active             Boolean            @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([quotaId])
+  @@index([organizationId])
+  @@map("quota_consumption_policies")
+}
+
+/// Vínculo Deal × Cota (N:N). Snapshot de valor/tipo no momento da seleção
+/// (RN-04: mudança na cota não altera deals já ganhos).
+model DealQuota {
+  id             String          @id @default(cuid())
+  organizationId String
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  dealId         String
+  deal           Deal            @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  quotaId        String
+  quota          DiscountQuota   @relation(fields: [quotaId], references: [id])
+  status         DealQuotaStatus @default(SELECTED)
+  /// Snapshot do valor no momento da seleção.
+  valueSnapshot  Decimal         @db.Decimal(12, 2)
+  typeSnapshot   DiscountType
+  reservedAt     DateTime?
+  expiresAt      DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([dealId, quotaId])
+  @@index([organizationId])
+  @@index([dealId])
+  @@index([quotaId])
+  @@index([status])
+  @@map("deal_quotas")
+}
+
+/// Ledger de movimentações da cota (fonte de verdade auditável).
+model QuotaMovement {
+  id             String            @id @default(cuid())
+  organizationId String
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  quotaId        String
+  quota          DiscountQuota     @relation(fields: [quotaId], references: [id], onDelete: Cascade)
+  dealId         String?
+  type           QuotaMovementType
+  qty            Int               @default(1)
+  userId         String?
+  reason         String?
+  createdAt      DateTime          @default(now())
+
+  @@index([organizationId])
+  @@index([quotaId, createdAt])
+  @@index([dealId])
+  @@map("quota_movements")
 }
 
 /// Vínculo tipado entre deals (PRD §3). N:N — um deal comercial pode
