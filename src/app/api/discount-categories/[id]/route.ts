@@ -1,10 +1,9 @@
 /**
- * /api/quotas/[id] — GET / PATCH / DELETE (soft) de uma cota.
+ * /api/discount-categories/[id] — GET / PATCH / DELETE (soft) de categoria.
  *
- * DELETE é soft (active=false): bloquear DELETE físico quando há
- * `deal_quotas` associados é responsabilidade do banco (RESTRICT no FK),
- * mas mantemos comportamento amigável desativando em vez de excluir —
- * PRD RN-09 ("desativar em vez de deletar cotas com histórico").
+ * DELETE é soft (active=false). Quotas vinculadas continuam existindo; o
+ * resolver de termos efetivos as trata como categoria inativa (cai no
+ * fallback das colunas locais da cota).
  */
 import { NextResponse } from "next/server";
 
@@ -29,30 +28,37 @@ export async function GET(request: Request, ctx: Ctx) {
     if (denied) return denied;
 
     const { id } = await ctx.params;
-    const row = await prisma.discountQuota.findUnique({
+    const row = await prisma.discountCategory.findUnique({
       where: { id },
       include: {
         product: { select: { id: true, name: true } },
-        orgUnit: { select: { id: true, name: true } },
-        policies: {
+        quotas: {
           select: {
             id: true,
-            consumeMoment: true,
-            reserveThreshold: true,
-            reserveTtlHours: true,
+            orgUnitId: true,
+            orgUnit: { select: { id: true, name: true } },
+            qtyTotal: true,
+            qtyConsumed: true,
             active: true,
           },
+          orderBy: { createdAt: "asc" },
         },
       },
     });
     if (!row) {
-      return NextResponse.json({ message: "Cota não encontrada." }, { status: 404 });
+      return NextResponse.json(
+        { message: "Categoria não encontrada." },
+        { status: 404 },
+      );
     }
     return NextResponse.json({
-      quota: {
+      category: {
         ...row,
         discountValue: Number(row.discountValue),
-        balance: row.qtyTotal === null ? null : row.qtyTotal - row.qtyConsumed,
+        quotas: row.quotas.map((q) => ({
+          ...q,
+          balance: q.qtyTotal === null ? null : q.qtyTotal - q.qtyConsumed,
+        })),
       },
     });
   });
@@ -88,16 +94,12 @@ export async function PATCH(request: Request, ctx: Ctx) {
       }
       patch.discountValue = v;
     }
-    if (body.qtyTotal !== undefined) {
-      patch.qtyTotal =
-        body.qtyTotal === null || body.qtyTotal === ""
-          ? null
-          : Math.max(0, Math.floor(Number(body.qtyTotal)));
+    if (body.productId !== undefined) {
+      patch.productId =
+        typeof body.productId === "string" && body.productId.trim()
+          ? body.productId.trim()
+          : null;
     }
-    const vf = toDateOrUndefined(body.validFrom);
-    if (vf !== undefined) patch.validFrom = vf ?? new Date();
-    const vt = toDateOrUndefined(body.validTo);
-    if (vt !== undefined) patch.validTo = vt;
     if (body.exclusionGroup !== undefined) {
       patch.exclusionGroup =
         typeof body.exclusionGroup === "string" && body.exclusionGroup.trim()
@@ -110,12 +112,10 @@ export async function PATCH(request: Request, ctx: Ctx) {
     if (body.calcMode === "CASCADE" || body.calcMode === "SUM_SIMPLE") {
       patch.calcMode = body.calcMode;
     }
-    if (body.categoryId !== undefined) {
-      patch.categoryId =
-        typeof body.categoryId === "string" && body.categoryId.trim()
-          ? body.categoryId.trim()
-          : null;
-    }
+    const vf = toDateOrUndefined(body.validFrom);
+    if (vf !== undefined) patch.validFrom = vf ?? new Date();
+    const vt = toDateOrUndefined(body.validTo);
+    if (vt !== undefined) patch.validTo = vt;
     if (body.active !== undefined) patch.active = body.active === true;
 
     if (Object.keys(patch).length === 0) {
@@ -123,9 +123,12 @@ export async function PATCH(request: Request, ctx: Ctx) {
     }
 
     try {
-      await prisma.discountQuota.update({ where: { id }, data: patch });
+      await prisma.discountCategory.update({ where: { id }, data: patch });
     } catch {
-      return NextResponse.json({ message: "Cota não encontrada." }, { status: 404 });
+      return NextResponse.json(
+        { message: "Categoria não encontrada." },
+        { status: 404 },
+      );
     }
     return NextResponse.json({ ok: true });
   });
@@ -140,12 +143,15 @@ export async function DELETE(request: Request, ctx: Ctx) {
 
     const { id } = await ctx.params;
     try {
-      await prisma.discountQuota.update({
+      await prisma.discountCategory.update({
         where: { id },
         data: { active: false },
       });
     } catch {
-      return NextResponse.json({ message: "Cota não encontrada." }, { status: 404 });
+      return NextResponse.json(
+        { message: "Categoria não encontrada." },
+        { status: 404 },
+      );
     }
     return NextResponse.json({ ok: true });
   });

@@ -1,14 +1,12 @@
 /**
- * /api/quotas — CRUD admin mínimo de Cotas de Desconto (PRD Cotas — Fase 1).
+ * /api/discount-categories — CRUD admin de Categorias de Desconto.
  *
- * Escopo desta rota: LIST e CREATE. GET/PATCH/DELETE por id ficam em
- * `[id]/route.ts`. Toda escrita em cota passa pelo `QuotaService` — mas
- * a CRIAÇÃO da própria cota (registro estático de cupom) é I/O simples,
- * sem transição de saldo, então cabe aqui.
+ * Categoria = fonte da verdade de % + regras (exclusionGroup, maxStacks,
+ * calcMode, vigencia). Cada categoria tem N `DiscountQuota` (alocações de
+ * volume por unidade). Zero regressão: cotas legadas (`categoryId=null`)
+ * continuam usando as próprias colunas.
  *
- * Permissões:
- *   - GET  -> `quota:view`
- *   - POST -> `quota:manage`
+ * Permissões: reusa `quota:view`/`quota:manage`.
  */
 import { NextResponse } from "next/server";
 
@@ -39,8 +37,6 @@ export async function GET(request: Request) {
 
     const url = new URL(request.url);
     const search = url.searchParams.get("search")?.trim() ?? "";
-    const productId = url.searchParams.get("productId")?.trim() || undefined;
-    const orgUnitId = url.searchParams.get("orgUnitId")?.trim() || undefined;
     const activeParam = url.searchParams.get("active");
     const active =
       activeParam === "true"
@@ -48,17 +44,13 @@ export async function GET(request: Request) {
         : activeParam === "false"
           ? false
           : undefined;
-
-    const categoryId = url.searchParams.get("categoryId")?.trim() || undefined;
+    const includeQuotas = url.searchParams.get("includeQuotas") === "true";
 
     const where: Record<string, unknown> = {};
     if (search) where.name = { contains: search, mode: "insensitive" };
-    if (productId) where.productId = productId;
-    if (orgUnitId) where.orgUnitId = orgUnitId;
-    if (categoryId) where.categoryId = categoryId;
     if (active !== undefined) where.active = active;
 
-    const rows = await prisma.discountQuota.findMany({
+    const rows = await prisma.discountCategory.findMany({
       where,
       orderBy: [{ active: "desc" }, { name: "asc" }],
       select: {
@@ -68,30 +60,43 @@ export async function GET(request: Request) {
         discountValue: true,
         productId: true,
         product: { select: { id: true, name: true } },
-        orgUnitId: true,
-        orgUnit: { select: { id: true, name: true } },
-        categoryId: true,
-        category: { select: { id: true, name: true, discountType: true, discountValue: true } },
-        qtyTotal: true,
-        qtyConsumed: true,
-        validFrom: true,
-        validTo: true,
         exclusionGroup: true,
         maxStacks: true,
         calcMode: true,
+        validFrom: true,
+        validTo: true,
         active: true,
         createdAt: true,
+        updatedAt: true,
+        quotas: includeQuotas
+          ? {
+              select: {
+                id: true,
+                orgUnitId: true,
+                orgUnit: { select: { id: true, name: true } },
+                qtyTotal: true,
+                qtyConsumed: true,
+                active: true,
+              },
+              orderBy: { createdAt: "asc" },
+            }
+          : false,
       },
     });
 
     return NextResponse.json({
-      quotas: rows.map((r) => ({
+      categories: rows.map((r) => ({
         ...r,
         discountValue: Number(r.discountValue),
-        category: r.category
-          ? { ...r.category, discountValue: Number(r.category.discountValue) }
-          : null,
-        balance: r.qtyTotal === null ? null : r.qtyTotal - r.qtyConsumed,
+        quotas: includeQuotas
+          ? (r as unknown as { quotas: Array<{ qtyTotal: number | null; qtyConsumed: number }> }).quotas.map(
+              (q) => ({
+                ...q,
+                balance:
+                  q.qtyTotal === null ? null : q.qtyTotal - q.qtyConsumed,
+              }),
+            )
+          : undefined,
       })),
     });
   });
@@ -117,8 +122,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: "Nome é obrigatório." }, { status: 400 });
     }
 
-    const discountType =
-      body.discountType === "FIXED" ? "FIXED" : "PERCENT";
+    const discountType = body.discountType === "FIXED" ? "FIXED" : "PERCENT";
     const discountValue = num(body.discountValue);
     if (discountValue === null || discountValue <= 0) {
       return NextResponse.json(
@@ -133,79 +137,40 @@ export async function POST(request: Request) {
       );
     }
 
-    const qtyTotalRaw = body.qtyTotal;
-    const qtyTotal =
-      qtyTotalRaw === null || qtyTotalRaw === undefined || qtyTotalRaw === ""
-        ? null
-        : Math.max(0, Math.floor(Number(qtyTotalRaw)));
-
     const productId =
       typeof body.productId === "string" && body.productId.trim()
         ? body.productId.trim()
         : null;
-    const orgUnitId =
-      typeof body.orgUnitId === "string" && body.orgUnitId.trim()
-        ? body.orgUnitId.trim()
-        : null;
-    const categoryId =
-      typeof body.categoryId === "string" && body.categoryId.trim()
-        ? body.categoryId.trim()
-        : null;
-
-    if (categoryId) {
-      const c = await prisma.discountCategory.findUnique({
-        where: { id: categoryId },
-        select: { id: true },
-      });
-      if (!c) {
-        return NextResponse.json(
-          { message: "Categoria não encontrada." },
-          { status: 400 },
-        );
-      }
-    }
-
-    // Valida existência (mesma org — extension escopa).
     if (productId) {
       const p = await prisma.product.findUnique({
         where: { id: productId },
         select: { id: true },
       });
       if (!p) {
-        return NextResponse.json({ message: "Produto não encontrado." }, { status: 400 });
-      }
-    }
-    if (orgUnitId) {
-      const u = await prisma.orgUnit.findUnique({
-        where: { id: orgUnitId },
-        select: { id: true },
-      });
-      if (!u) {
-        return NextResponse.json({ message: "Unidade não encontrada." }, { status: 400 });
+        return NextResponse.json(
+          { message: "Produto não encontrado." },
+          { status: 400 },
+        );
       }
     }
 
     const calcMode = body.calcMode === "SUM_SIMPLE" ? "SUM_SIMPLE" : "CASCADE";
     const maxStacks = Math.max(1, Math.floor(Number(body.maxStacks ?? 1)) || 1);
 
-    const created = await prisma.discountQuota.create({
+    const created = await prisma.discountCategory.create({
       data: withOrgFromCtx({
         name,
         discountType,
         discountValue,
-        categoryId,
         productId,
-        orgUnitId,
-        qtyTotal,
-        qtyConsumed: 0,
-        validFrom: toDateOrNull(body.validFrom) ?? new Date(),
-        validTo: toDateOrNull(body.validTo),
         exclusionGroup:
           typeof body.exclusionGroup === "string" && body.exclusionGroup.trim()
             ? body.exclusionGroup.trim()
             : null,
         maxStacks,
         calcMode,
+        validFrom: toDateOrNull(body.validFrom) ?? new Date(),
+        validTo: toDateOrNull(body.validTo),
         active: body.active !== false,
       }),
       select: { id: true },

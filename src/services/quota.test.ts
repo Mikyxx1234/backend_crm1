@@ -150,11 +150,15 @@ const { store, prismaMock } = vi.hoisted(() => {
       return 0;
     },
     discountQuota: {
-      async findMany({ where, orderBy: _orderBy }: { where: Record<string, unknown>; orderBy?: unknown }) {
-        return Object.values(store.quotas).filter((q) => matchesQuotaFilter(q, where));
+      async findMany({ where }: { where: Record<string, unknown>; orderBy?: unknown; include?: unknown }) {
+        return Object.values(store.quotas)
+          .filter((q) => matchesQuotaFilter(q, where))
+          .map((q) => ({ ...q, categoryId: null, category: null }));
       },
-      async findUnique({ where }: { where: { id: string } }) {
-        return store.quotas[where.id] ?? null;
+      async findUnique({ where }: { where: { id: string }; include?: unknown }) {
+        const q = store.quotas[where.id];
+        if (!q) return null;
+        return { ...q, categoryId: null, category: null };
       },
     },
     quotaConsumptionPolicy: {
@@ -170,7 +174,7 @@ const { store, prismaMock } = vi.hoisted(() => {
       },
     },
     dealQuota: {
-      async findMany({ where }: { where: Record<string, unknown> }) {
+      async findMany({ where }: { where: Record<string, unknown>; select?: unknown; include?: unknown }) {
         const statuses = ((where.status as { in?: string[] } | undefined)?.in) ?? null;
         return store.dealQuotas
           .filter((dq) => {
@@ -178,14 +182,25 @@ const { store, prismaMock } = vi.hoisted(() => {
             if (statuses && !statuses.includes(dq.status)) return false;
             return true;
           })
-          .map((dq) => ({
-            ...dq,
-            quota: {
-              exclusionGroup: store.quotas[dq.quotaId]?.exclusionGroup ?? null,
-              maxStacks: store.quotas[dq.quotaId]?.maxStacks ?? 1,
-              calcMode: store.quotas[dq.quotaId]?.calcMode ?? "CASCADE",
-            },
-          }));
+          .map((dq) => {
+            const q = store.quotas[dq.quotaId];
+            return {
+              ...dq,
+              // O service pode consultar tanto o shape completo (include)
+              // quanto o compacto (select) — devolvemos o superconjunto
+              // + `category: null` (nenhum teste usa categorias).
+              quota: q
+                ? { ...q, categoryId: null, category: null }
+                : {
+                    id: dq.quotaId,
+                    exclusionGroup: null,
+                    maxStacks: 1,
+                    calcMode: "CASCADE",
+                    categoryId: null,
+                    category: null,
+                  },
+            };
+          });
       },
       async findUnique({ where }: { where: { dealId_quotaId: { dealId: string; quotaId: string } } }) {
         const { dealId, quotaId } = where.dealId_quotaId;

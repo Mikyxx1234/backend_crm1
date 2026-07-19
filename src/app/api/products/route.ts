@@ -17,6 +17,7 @@ export async function GET(request: Request) {
   const search = url.searchParams.get("search")?.trim() ?? "";
   const activeOnly = url.searchParams.get("active") !== "false";
   const typeFilter = url.searchParams.get("type")?.toUpperCase();
+  const kindFilter = url.searchParams.get("kind")?.toUpperCase();
   const catalogId = url.searchParams.get("catalogId")?.trim();
   const page = Math.max(1, Number(url.searchParams.get("page")) || 1);
   const perPage = Math.min(100, Math.max(1, Number(url.searchParams.get("perPage")) || 50));
@@ -24,6 +25,14 @@ export async function GET(request: Request) {
   const where: Record<string, unknown> = {};
   if (activeOnly) where.isActive = true;
   if (typeFilter === "PRODUCT" || typeFilter === "SERVICE") where.type = typeFilter;
+  if (
+    kindFilter === "PHYSICAL" ||
+    kindFilter === "SERVICE" ||
+    kindFilter === "COURSE" ||
+    kindFilter === "JOB_OPENING"
+  ) {
+    where.kind = kindFilter;
+  }
   if (catalogId) where.catalogId = catalogId;
   if (search) {
     where.OR = [
@@ -66,10 +75,32 @@ export async function POST(request: Request) {
     return NextResponse.json({ message: "Nome é obrigatório." }, { status: 400 });
   }
 
-  const rawType = typeof body.type === "string" ? body.type.toUpperCase() : "PRODUCT";
-  const type = rawType === "SERVICE" ? "SERVICE" : "PRODUCT";
+  const rawKind = typeof body.kind === "string" ? body.kind.toUpperCase() : "";
+  const kind: "PHYSICAL" | "SERVICE" | "COURSE" | "JOB_OPENING" =
+    rawKind === "SERVICE" ||
+    rawKind === "COURSE" ||
+    rawKind === "JOB_OPENING" ||
+    rawKind === "PHYSICAL"
+      ? (rawKind as "PHYSICAL" | "SERVICE" | "COURSE" | "JOB_OPENING")
+      : (() => {
+          // Retrocompat: cliente antigo manda apenas `type` (PRODUCT|SERVICE).
+          const rawType =
+            typeof body.type === "string" ? body.type.toUpperCase() : "PRODUCT";
+          return rawType === "SERVICE" ? "SERVICE" : "PHYSICAL";
+        })();
 
-  const trackStock = type === "PRODUCT" && body.trackStock === true;
+  // Campo legado `type` — mantém coerência p/ leitores antigos.
+  const type = kind === "SERVICE" ? "SERVICE" : "PRODUCT";
+
+  const trackStock = kind === "PHYSICAL" && body.trackStock === true;
+
+  // CourseConfig (kind=COURSE)
+  const courseModeRaw =
+    typeof body.courseMode === "string" ? body.courseMode.toUpperCase() : "";
+  const courseMode: "EAD" | "IN_PERSON" | "HYBRID" =
+    courseModeRaw === "IN_PERSON" || courseModeRaw === "HYBRID"
+      ? (courseModeRaw as "IN_PERSON" | "HYBRID")
+      : "EAD";
 
   // catalogId opcional — valida pertença à org antes de vincular.
   let catalogId: string | null = null;
@@ -90,14 +121,31 @@ export async function POST(request: Request) {
       description: typeof body.description === "string" ? body.description.trim() || null : null,
       sku: typeof body.sku === "string" && body.sku.trim() ? body.sku.trim() : null,
       price: Number(body.price) || 0,
-      unit: type === "SERVICE" ? "serviço" : (typeof body.unit === "string" && body.unit.trim() ? body.unit.trim() : "un"),
+      unit:
+        kind === "SERVICE"
+          ? "serviço"
+          : kind === "COURSE"
+            ? "matrícula"
+            : typeof body.unit === "string" && body.unit.trim()
+              ? body.unit.trim()
+              : "un",
       type,
+      kind,
       catalogId,
       isActive: body.isActive !== false,
       trackStock,
       stock: trackStock ? Math.max(0, Number(body.stock) || 0) : 0,
     }),
   });
+
+  if (kind === "COURSE") {
+    await prisma.courseConfig.create({
+      data: withOrgFromCtx({
+        productId: product.id,
+        mode: courseMode,
+      }),
+    });
+  }
 
   return NextResponse.json({ product }, { status: 201 });
   });

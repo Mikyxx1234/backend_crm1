@@ -130,6 +130,25 @@ export async function PUT(request: Request, context: RouteContext) {
     if (b.stageId !== undefined && (typeof b.stageId !== "string" || !b.stageId)) {
       return NextResponse.json({ message: "stageId inválido." }, { status: 400 });
     }
+    if (
+      b.orgUnitId !== undefined &&
+      b.orgUnitId !== null &&
+      typeof b.orgUnitId !== "string"
+    ) {
+      return NextResponse.json({ message: "orgUnitId inválido." }, { status: 400 });
+    }
+    if (typeof b.orgUnitId === "string" && b.orgUnitId) {
+      const unit = await prisma.orgUnit.findUnique({
+        where: { id: b.orgUnitId },
+        select: { id: true },
+      });
+      if (!unit) {
+        return NextResponse.json(
+          { message: "Unidade não encontrada." },
+          { status: 400 },
+        );
+      }
+    }
 
     let expectedClose: Date | string | null | undefined;
     if (b.expectedClose === null) {
@@ -170,6 +189,12 @@ export async function PUT(request: Request, context: RouteContext) {
           ? null
           : typeof b.ownerId === "string"
             ? b.ownerId
+            : undefined,
+      orgUnitId:
+        b.orgUnitId === null
+          ? null
+          : typeof b.orgUnitId === "string"
+            ? b.orgUnitId
             : undefined,
     };
 

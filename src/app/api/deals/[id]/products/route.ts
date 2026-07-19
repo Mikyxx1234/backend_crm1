@@ -97,20 +97,59 @@ export async function POST(request: Request, context: RouteContext) {
 
     const product = await prisma.product.findUnique({
       where: { id: productId },
-      select: { price: true, type: true },
+      select: { price: true, type: true, kind: true },
     });
     if (!product) {
       return NextResponse.json({ message: "Produto não encontrado." }, { status: 404 });
     }
 
-    const isService = product.type === "SERVICE";
-    const quantity = isService ? 1 : Math.max(0.01, Number(body.quantity) || 1);
-    const unitPrice = isService
-      ? Number(product.price)
-      : (typeof body.unitPrice === "number" || typeof body.unitPrice === "string"
-          ? Number(body.unitPrice)
-          : Number(product.price));
-    const discount = isService ? 0 : Math.min(100, Math.max(0, Number(body.discount) || 0));
+    // Resolução de preço por unidade (ProductOffer):
+    // se o deal tem `orgUnitId` E existe oferta ativa para (produto, unidade),
+    // usa `offer.price` como preço base e `offer.discountPct` como desconto
+    // pré-preenchido. Cliente pode ainda sobrescrever `unitPrice`/`discount`
+    // no body — respeitamos a intenção explícita do vendedor.
+    let offerPrice: number | null = null;
+    let offerDiscountPct: number | null = null;
+    if (existingDeal.orgUnitId) {
+      const offer = await prisma.productOffer.findUnique({
+        where: {
+          productId_orgUnitId: {
+            productId,
+            orgUnitId: existingDeal.orgUnitId,
+          },
+        },
+        select: { price: true, discountPct: true, active: true },
+      });
+      if (offer && offer.active) {
+        offerPrice = Number(offer.price);
+        offerDiscountPct =
+          offer.discountPct !== null ? Number(offer.discountPct) : null;
+      }
+    }
+
+    const basePrice = offerPrice !== null ? offerPrice : Number(product.price);
+    const isService =
+      product.kind === "SERVICE" || product.type === "SERVICE";
+    // Curso: matrícula única (qty=1), como serviço.
+    const isCourse = product.kind === "COURSE";
+    const singleQty = isService || isCourse;
+    const quantity = singleQty ? 1 : Math.max(0.01, Number(body.quantity) || 1);
+    const unitPrice =
+      typeof body.unitPrice === "number" || typeof body.unitPrice === "string"
+        ? Number(body.unitPrice)
+        : basePrice;
+    const defaultDiscount = offerDiscountPct ?? 0;
+    const discount = singleQty
+      ? Math.min(100, Math.max(0, Number(body.discount) || defaultDiscount))
+      : Math.min(
+          100,
+          Math.max(
+            0,
+            body.discount !== undefined && body.discount !== null
+              ? Number(body.discount)
+              : defaultDiscount,
+          ),
+        );
 
     const item = (await prisma.dealProduct.create({
       data: withOrgFromCtx({ dealId, productId, quantity, unitPrice, discount }),

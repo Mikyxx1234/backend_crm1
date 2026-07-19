@@ -454,6 +454,7 @@ export type UpdateDealInput = {
   contactId?: string | null;
   stageId?: string;
   ownerId?: string | null;
+  orgUnitId?: string | null;
 };
 
 export async function updateDeal(id: string, data: UpdateDealInput) {
@@ -477,6 +478,7 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
   if (data.contactId !== undefined) payload.contactId = data.contactId;
   if (data.stageId !== undefined) payload.stageId = data.stageId;
   if (data.ownerId !== undefined) payload.ownerId = data.ownerId;
+  if (data.orgUnitId !== undefined) payload.orgUnitId = data.orgUnitId;
   if (data.externalId !== undefined) {
     payload.externalId = data.externalId;
   }

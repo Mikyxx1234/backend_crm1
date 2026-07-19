@@ -92,7 +92,94 @@ export type AvailableQuota = {
   exclusionGroup: string | null;
   maxStacks: number;
   calcMode: QuotaCalcMode;
+  /** ID da categoria vinculada (fonte da verdade de % + regras), se houver. */
+  categoryId: string | null;
+  /** Nome da categoria (para agrupar/exibir no picker do vendedor). */
+  categoryName: string | null;
 };
+
+/**
+ * Snapshot do valor/regras efetivas de uma cota.
+ * Quando existe categoria vinculada e ativa, ela sobrepõe as colunas locais
+ * (a categoria é a fonte da verdade de % + regras). Vigência da categoria
+ * também restringe a da cota (retorna null se fora do período).
+ */
+type EffectiveTerms = {
+  discountType: DiscountType;
+  discountValue: Prisma.Decimal;
+  exclusionGroup: string | null;
+  maxStacks: number;
+  calcMode: QuotaCalcMode;
+  validFrom: Date;
+  validTo: Date | null;
+  categoryId: string | null;
+  categoryName: string | null;
+  productId: string | null;
+};
+
+type QuotaRowForResolve = {
+  discountType: DiscountType;
+  discountValue: Prisma.Decimal;
+  productId: string | null;
+  exclusionGroup: string | null;
+  maxStacks: number;
+  calcMode: QuotaCalcMode;
+  validFrom: Date;
+  validTo: Date | null;
+  categoryId: string | null;
+  category: {
+    id: string;
+    name: string;
+    discountType: DiscountType;
+    discountValue: Prisma.Decimal;
+    productId: string | null;
+    exclusionGroup: string | null;
+    maxStacks: number;
+    calcMode: QuotaCalcMode;
+    validFrom: Date;
+    validTo: Date | null;
+    active: boolean;
+  } | null;
+};
+
+function resolveEffectiveTerms(q: QuotaRowForResolve): EffectiveTerms {
+  const c = q.category;
+  if (c && c.active) {
+    return {
+      discountType: c.discountType,
+      discountValue: c.discountValue,
+      exclusionGroup: c.exclusionGroup,
+      maxStacks: c.maxStacks,
+      calcMode: c.calcMode,
+      // Vigência efetiva = interseção categoria × cota (mais restritiva).
+      validFrom: c.validFrom > q.validFrom ? c.validFrom : q.validFrom,
+      validTo:
+        c.validTo === null
+          ? q.validTo
+          : q.validTo === null
+            ? c.validTo
+            : c.validTo < q.validTo
+              ? c.validTo
+              : q.validTo,
+      categoryId: c.id,
+      categoryName: c.name,
+      // Produto efetivo = categoria tem precedência (fonte da verdade).
+      productId: c.productId ?? q.productId,
+    };
+  }
+  return {
+    discountType: q.discountType,
+    discountValue: q.discountValue,
+    exclusionGroup: q.exclusionGroup,
+    maxStacks: q.maxStacks,
+    calcMode: q.calcMode,
+    validFrom: q.validFrom,
+    validTo: q.validTo,
+    categoryId: null,
+    categoryName: null,
+    productId: q.productId,
+  };
+}
 
 export type SelectQuotaInput = {
   dealId: string;
@@ -163,37 +250,72 @@ export async function listAvailableForDeal(args: {
     where: {
       active: true,
       AND: [
-        args.productId
-          ? { OR: [{ productId: null }, { productId: args.productId }] }
-          : { productId: null },
         args.orgUnitId
           ? { OR: [{ orgUnitId: null }, { orgUnitId: args.orgUnitId }] }
           : { orgUnitId: null },
-        { validFrom: { lte: now } },
-        { OR: [{ validTo: null }, { validTo: { gte: now } }] },
       ],
     },
-    orderBy: [{ discountValue: "desc" }, { createdAt: "asc" }],
+    include: {
+      category: {
+        select: {
+          id: true,
+          name: true,
+          discountType: true,
+          discountValue: true,
+          productId: true,
+          exclusionGroup: true,
+          maxStacks: true,
+          calcMode: true,
+          validFrom: true,
+          validTo: true,
+          active: true,
+        },
+      },
+    },
+    orderBy: [{ createdAt: "asc" }],
   });
 
-  return rows
-    .filter((r) => r.qtyTotal === null || r.qtyConsumed < r.qtyTotal)
-    .map((r) => ({
+  const out: AvailableQuota[] = [];
+  for (const r of rows) {
+    // Saldo primeiro (barato).
+    if (r.qtyTotal !== null && r.qtyConsumed >= r.qtyTotal) continue;
+
+    const eff = resolveEffectiveTerms(r);
+
+    // Vigência efetiva (categoria × cota).
+    if (eff.validFrom > now) continue;
+    if (eff.validTo !== null && eff.validTo < now) continue;
+
+    // Escopo por produto (categoria pode sobrepor).
+    if (args.productId) {
+      if (eff.productId !== null && eff.productId !== args.productId) continue;
+    } else {
+      if (eff.productId !== null) continue;
+    }
+
+    out.push({
       id: r.id,
       name: r.name,
-      discountType: r.discountType,
-      discountValue: Number(r.discountValue),
-      productId: r.productId,
+      discountType: eff.discountType,
+      discountValue: Number(eff.discountValue),
+      productId: eff.productId,
       orgUnitId: r.orgUnitId,
       qtyTotal: r.qtyTotal,
       qtyConsumed: r.qtyConsumed,
       balance: r.qtyTotal === null ? null : r.qtyTotal - r.qtyConsumed,
-      validFrom: r.validFrom,
-      validTo: r.validTo,
-      exclusionGroup: r.exclusionGroup,
-      maxStacks: r.maxStacks,
-      calcMode: r.calcMode,
-    }));
+      validFrom: eff.validFrom,
+      validTo: eff.validTo,
+      exclusionGroup: eff.exclusionGroup,
+      maxStacks: eff.maxStacks,
+      calcMode: eff.calcMode,
+      categoryId: eff.categoryId,
+      categoryName: eff.categoryName,
+    });
+  }
+
+  // Ordena por maior desconto (após resolver).
+  out.sort((a, b) => b.discountValue - a.discountValue);
+  return out;
 }
 
 /* ──────────────────────── RN-05: política de consumo ──────────────── */
@@ -360,7 +482,12 @@ async function refreshDealPriceSnapshots(
     select: {
       valueSnapshot: true,
       typeSnapshot: true,
-      quota: { select: { calcMode: true } },
+      quota: {
+        select: {
+          calcMode: true,
+          category: { select: { calcMode: true, active: true } },
+        },
+      },
     },
   });
   const full = await computeDealFullPrice(tx, dealId);
@@ -369,7 +496,11 @@ async function refreshDealPriceSnapshots(
     dealQuotas.map((dq) => ({
       discountType: dq.typeSnapshot,
       discountValue: new Decimal(dq.valueSnapshot),
-      calcMode: dq.quota.calcMode,
+      // Categoria vence quando presente e ativa.
+      calcMode:
+        dq.quota.category && dq.quota.category.active
+          ? dq.quota.category.calcMode
+          : dq.quota.calcMode,
     })),
   );
   await tx.deal.update({
@@ -474,28 +605,31 @@ export async function selectQuotaForDeal(
     // Confirma existência da cota + snapshot dos campos que usaremos.
     const quota = await tx.discountQuota.findUnique({
       where: { id: input.quotaId },
-      select: {
-        id: true,
-        active: true,
-        discountType: true,
-        discountValue: true,
-        productId: true,
-        orgUnitId: true,
-        qtyTotal: true,
-        qtyConsumed: true,
-        validFrom: true,
-        validTo: true,
-        exclusionGroup: true,
-        maxStacks: true,
-        calcMode: true,
+      include: {
+        category: {
+          select: {
+            id: true,
+            name: true,
+            discountType: true,
+            discountValue: true,
+            productId: true,
+            exclusionGroup: true,
+            maxStacks: true,
+            calcMode: true,
+            validFrom: true,
+            validTo: true,
+            active: true,
+          },
+        },
       },
     });
     if (!quota || !quota.active) {
       throw new QuotaError("COTA_INEXISTENTE", "Cota não encontrada ou inativa.");
     }
+    const eff = resolveEffectiveTerms(quota);
     if (
-      quota.validFrom > now ||
-      (quota.validTo !== null && quota.validTo < now)
+      eff.validFrom > now ||
+      (eff.validTo !== null && eff.validTo < now)
     ) {
       throw new QuotaOutOfPeriodError(quota.id);
     }
@@ -516,9 +650,9 @@ export async function selectQuotaForDeal(
         "Esta cota não vale para a unidade selecionada.",
       );
     }
-    if (quota.productId) {
+    if (eff.productId) {
       const productMatches = deal.products.some(
-        (p) => p.productId === quota.productId,
+        (p) => p.productId === eff.productId,
       );
       if (!productMatches) {
         throw new QuotaError(
@@ -528,7 +662,8 @@ export async function selectQuotaForDeal(
       }
     }
 
-    // Cotas já vinculadas (para cumulatividade).
+    // Cotas já vinculadas (para cumulatividade). Resolve os termos efetivos
+    // (categoria sobrepõe cota) para a validação de stackability.
     const existing = await tx.dealQuota.findMany({
       where: {
         dealId: input.dealId,
@@ -536,7 +671,25 @@ export async function selectQuotaForDeal(
       },
       select: {
         quotaId: true,
-        quota: { select: { exclusionGroup: true, maxStacks: true } },
+        quota: {
+          include: {
+            category: {
+              select: {
+                id: true,
+                name: true,
+                discountType: true,
+                discountValue: true,
+                productId: true,
+                exclusionGroup: true,
+                maxStacks: true,
+                calcMode: true,
+                validFrom: true,
+                validTo: true,
+                active: true,
+              },
+            },
+          },
+        },
       },
     });
     if (existing.some((e) => e.quotaId === input.quotaId)) {
@@ -546,15 +699,18 @@ export async function selectQuotaForDeal(
       );
     }
     assertStackable(
-      existing.map((e) => ({
-        quotaId: e.quotaId,
-        exclusionGroup: e.quota.exclusionGroup,
-        maxStacks: e.quota.maxStacks,
-      })),
+      existing.map((e) => {
+        const eeff = resolveEffectiveTerms(e.quota);
+        return {
+          quotaId: e.quotaId,
+          exclusionGroup: eeff.exclusionGroup,
+          maxStacks: eeff.maxStacks,
+        };
+      }),
       {
         quotaId: quota.id,
-        exclusionGroup: quota.exclusionGroup,
-        maxStacks: quota.maxStacks,
+        exclusionGroup: eff.exclusionGroup,
+        maxStacks: eff.maxStacks,
       },
     );
 
@@ -602,8 +758,9 @@ export async function selectQuotaForDeal(
           dealId: input.dealId,
           quotaId: quota.id,
           status,
-          valueSnapshot: quota.discountValue,
-          typeSnapshot: quota.discountType,
+          // Snapshot dos termos EFETIVOS (categoria sobrepõe cota).
+          valueSnapshot: eff.discountValue,
+          typeSnapshot: eff.discountType,
           reservedAt,
           expiresAt,
         },
