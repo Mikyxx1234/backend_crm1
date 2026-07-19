@@ -1284,10 +1284,6 @@ async function processStatusUpdate(status: Record<string, unknown>) {
   const s = str(status.status);
   if (!wamid || !s) return;
 
-  // DIAGNÓSTICO (ticks de leitura): loga TODO status recebido da Meta,
-  // em nível info, pra confirmar em teste real se o `read` chega.
-  log.info(`[ticks] status recebido wamid=${wamid} → ${s}`);
-
   if (!VALID_STATUSES.has(s)) {
     log.debug(`Status ignorado ${wamid} → ${s}`);
     return;
@@ -1329,10 +1325,6 @@ async function processStatusUpdate(status: Record<string, unknown>) {
     const shouldUpdate = isFailure
       ? (msg.sendStatus ?? "").toLowerCase() !== "failed"
       : newPriority > currentPriority;
-
-    log.info(
-      `[ticks] msg encontrada id=${msg.id} atual=${msg.sendStatus ?? "null"} novo=${s} shouldUpdate=${shouldUpdate}`,
-    );
 
     if (shouldUpdate) {
         // Estrutura oficial do erro do webhook (Meta docs):
