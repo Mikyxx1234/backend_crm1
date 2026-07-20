@@ -2,361 +2,81 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
-import { assertImportPermission } from "@/lib/import-guard";
+import { assertImportPermission, assertNoActiveImport } from "@/lib/import-guard";
+import { validateDealImportHeaders } from "@/lib/deal-import-core";
 import {
-  attachTagToDeal,
   readDelimiterFlag,
   readTagFlag,
   readUpdateExistingFlag,
   readUploadedTable,
-  upsertImportTag,
 } from "@/lib/import-helpers";
-import { buildCustomFieldHeaderMap } from "@/lib/contact-import-core";
 import { prisma } from "@/lib/prisma";
-import { enterRequestContext, getOrgIdOrThrow } from "@/lib/request-context";
-import { createContact, updateContact } from "@/services/contacts";
-import { getCustomFields, upsertDealCustomFieldValues } from "@/services/custom-fields";
-import { createDeal, isValidDealStatus, updateDeal } from "@/services/deals";
-
-/** Cabeçalhos padrão do negócio — não viram campo personalizado por nome. */
-const DEAL_RESERVED_HEADERS = new Set<string>([
-  "id",
-  "external_id",
-  "externalid",
-  "kommo_lead_id",
-  "lead_external_id",
-  "deal_number",
-  "title",
-  "value",
-  "status",
-  "pipeline",
-  "pipeline_name",
-  "stage",
-  "stage_name",
-  "stage_id",
-  "stageid",
-  "contact_id",
-  "contactid",
-  "contact_name",
-  "contactname",
-  "contact",
-  "contact_email",
-  "contactemail",
-  "contact_phone",
-  "contactphone",
-  "contact_external_id",
-  "contact_externalid",
-  "kommo_contact_id",
-  "owner_id",
-  "ownertoid",
-  "owner_email",
-  "owneremail",
-  "expected_close",
-  "expectedclose",
-  "lost_reason",
-  "lostreason",
-]);
-
-/** Grava os valores de campos personalizados do negócio a partir da linha. */
-async function applyDealCustomFields(
-  dealId: string,
-  row: Record<string, string>,
-  map: Map<string, string> | undefined,
-): Promise<void> {
-  if (!map || map.size === 0) return;
-  const values: { fieldId: string; value: string }[] = [];
-  for (const [header, fieldId] of map) {
-    const raw = row[header]?.trim();
-    if (raw) values.push({ fieldId, value: raw });
-  }
-  if (values.length > 0) {
-    await upsertDealCustomFieldValues(dealId, values);
-  }
-}
-
-function hasColumn(headers: string[], ...names: string[]) {
-  return names.some((n) => headers.includes(n));
-}
-
-function pickDealExternalId(
-  headers: string[],
-  row: Record<string, string>,
-): string | null | undefined {
-  if (!hasColumn(headers, "external_id", "externalid", "kommo_lead_id", "lead_external_id")) {
-    return undefined;
-  }
-  const v =
-    row.external_id?.trim() ||
-    row.externalid?.trim() ||
-    row.kommo_lead_id?.trim() ||
-    row.lead_external_id?.trim() ||
-    "";
-  return v === "" ? null : v;
-}
-
-async function resolveOwnerId(row: Record<string, string>): Promise<string | undefined> {
-  const id = row.owner_id?.trim() || row.ownertoid?.trim();
-  if (id) return id;
-
-  const emailRaw = row.owner_email?.trim() || row.owneremail?.trim();
-  if (!emailRaw) return undefined;
-  const u = await prisma.user.findFirst({
-    where: { email: { equals: emailRaw.toLowerCase(), mode: "insensitive" } },
-    select: { id: true },
-  });
-  return u?.id;
-}
-
-async function resolveStageId(row: Record<string, string>): Promise<string | null> {
-  const sid = row.stage_id?.trim() || row.stageid?.trim();
-  if (sid) {
-    const s = await prisma.stage.findUnique({ where: { id: sid }, select: { id: true } });
-    return s?.id ?? null;
-  }
-
-  const pn = row.pipeline_name?.trim() || row.pipeline?.trim();
-  const sn = row.stage_name?.trim() || row.stage?.trim();
-  if (pn && sn) {
-    const stage = await prisma.stage.findFirst({
-      where: {
-        name: { equals: sn, mode: "insensitive" },
-        pipeline: { name: { equals: pn, mode: "insensitive" } },
-      },
-      select: { id: true },
-    });
-    return stage?.id ?? null;
-  }
-
-  return null;
-}
+import { IMPORT_ETL_JOB_NAMES, enqueueImportEtl } from "@/lib/queue";
+import { enterRequestContext } from "@/lib/request-context";
+import { generateFileName, saveFile } from "@/lib/storage/local";
 
 /**
- * Resolve o contato de um deal. Estratégia em cascata:
- *   1) contact_id direto (UUID) — só busca, não cria
- *   2) contact_external_id (ou kommo_contact_id) — busca por (orgId, externalId);
- *      se NÃO existir, cria o contato com os dados opcionais disponíveis no row
- *      (contact_name, contact_email, contact_phone). Permite importar deals e
- *      contatos numa única passada.
- *   3) contact_email / contact_phone — busca por e-mail/telefone, sem criar.
+ * Importação de NEGÓCIOS — fluxo ASSÍNCRONO (etl-worker), T3/M1.
+ *
+ * Antes esta rota processava o arquivo inteiro de forma SÍNCRONA dentro do
+ * request HTTP, ocupando um worker Node da API (compartilhado com os demais
+ * tenants) por vários minutos em cargas grandes. Agora, igual ao import de
+ * contatos:
+ *   1. valida permissão + parseia para validar cabeçalho e contar linhas;
+ *   2. salva o arquivo no bucket `imports` do storage compartilhado;
+ *   3. cria um `BulkOperation` PENDING (fonte da verdade do progresso);
+ *   4. enfileira o job `deal-import` na fila `import-etl` e responde 202;
+ *   5. o etl-worker (processo/pool separado) processa em chunks.
+ *
+ * O frontend acompanha via GET /api/bulk-operations/[id] (o ImportPanel já
+ * trata 202 { operationId } genericamente para os dois endpoints).
  */
-/**
- * Resolve o contato de um deal. Em cascata:
- *   1) contact_id (UUID/CUID) — busca, não cria/atualiza.
- *   2) contact_external_id — busca por (orgId, externalId). Se NÃO existir cria
- *      com contact_name/email/phone; se existir E updateExisting=true, atualiza
- *      o contato com os campos vindos no row (sincroniza dados do contato).
- *   3) contact_email / contact_phone — busca; não cria nem atualiza.
- */
-async function resolveContactIdForDeal(
-  row: Record<string, string>,
-  updateExisting: boolean,
-): Promise<string | undefined> {
-  const contactName =
-    row.contact_name?.trim() || row.contactname?.trim() || row.contact?.trim() || "";
-  const contactEmail = row.contact_email?.trim() || row.contactemail?.trim() || "";
-  const contactPhone = row.contact_phone?.trim() || row.contactphone?.trim() || "";
-
-  const syncContactFields = async (id: string) => {
-    if (!updateExisting) return;
-    const patch: Record<string, string> = {};
-    if (contactName) patch.name = contactName;
-    if (contactEmail) patch.email = contactEmail;
-    if (contactPhone) patch.phone = contactPhone;
-    if (Object.keys(patch).length === 0) return;
-    try {
-      await updateContact(id, patch);
-    } catch {
-      // Ignora P2002 (e-mail/phone duplicado em outro contato): o link do deal
-      // não deve falhar por causa de uma atualização opcional do contato.
-    }
-  };
-
-  const cid = row.contact_id?.trim() || row.contactid?.trim();
-  if (cid) {
-    const c = await prisma.contact.findUnique({ where: { id: cid }, select: { id: true } });
-    if (c) {
-      await syncContactFields(c.id);
-      return c.id;
-    }
-  }
-
-  const ext =
-    row.contact_external_id?.trim() ||
-    row.contact_externalid?.trim() ||
-    row.kommo_contact_id?.trim();
-
-  if (ext) {
-    const orgId = getOrgIdOrThrow();
-    const found = await prisma.contact.findUnique({
-      where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
-      select: { id: true },
-    });
-    if (found) {
-      await syncContactFields(found.id);
-      return found.id;
-    }
-
-    // Auto-criação: contato referenciado por external_id ainda não existe.
-    const created = await createContact({
-      name: contactName || `Contato ${ext}`,
-      ...(contactEmail ? { email: contactEmail } : {}),
-      ...(contactPhone ? { phone: contactPhone } : {}),
-      externalId: ext,
-    });
-    return (created as { id?: string })?.id;
-  }
-
-  // Fallback principal (quando não há external_id): identificar por email ou
-  // telefone. Se não encontrar e houver dados suficientes, cria o contato.
-  if (contactEmail) {
-    const orgId = getOrgIdOrThrow();
-    const c = await prisma.contact.findFirst({
-      where: { organizationId: orgId, email: { equals: contactEmail, mode: "insensitive" } },
-      select: { id: true },
-    });
-    if (c) {
-      await syncContactFields(c.id);
-      return c.id;
-    }
-  }
-  if (contactPhone) {
-    const orgId = getOrgIdOrThrow();
-    const c = await prisma.contact.findFirst({
-      where: { organizationId: orgId, phone: contactPhone },
-      select: { id: true },
-    });
-    if (c) {
-      await syncContactFields(c.id);
-      return c.id;
-    }
-  }
-
-  // Auto-criar quando há dados mínimos para um contato novo. Requer pelo menos
-  // um nome OU email OU telefone — caso contrário não há como representar o
-  // contato no CRM.
-  if (contactName || contactEmail || contactPhone) {
-    const created = await createContact({
-      name: contactName || contactEmail || contactPhone || "Contato sem nome",
-      ...(contactEmail ? { email: contactEmail } : {}),
-      ...(contactPhone ? { phone: contactPhone } : {}),
-    });
-    return (created as { id?: string })?.id;
-  }
-
-  return undefined;
-}
-
-type DealUpsert =
-  | { mode: "update"; id: string }
-  | { mode: "create"; id?: string; externalId?: string | null };
-
-async function resolveDealUpsert(
-  row: Record<string, string>,
-  /**
-   * Contexto resolvido nas etapas anteriores do loop. Usado como fallback
-   * de deduplicação quando o CSV não trouxe nenhuma chave técnica (id /
-   * deal_number / external_id) — comum em reimport de template sem editar.
-   */
-  ctx: { contactId?: string; stageId?: string | null; title?: string } = {},
-): Promise<
-  | { ok: true; target: DealUpsert }
-  | { ok: false; message: string }
-> {
-  const id = row.id?.trim();
-  const ext =
-    row.external_id?.trim() ||
-    row.externalid?.trim() ||
-    row.kommo_lead_id?.trim() ||
-    row.lead_external_id?.trim();
-  const numRaw = row.deal_number?.trim();
-
-  const orgId = getOrgIdOrThrow();
-
-  // Precedência: id interno > deal_number > external_id.
-  if (id) {
-    const d = await prisma.deal.findUnique({ where: { id }, select: { id: true } });
-    if (d) return { ok: true, target: { mode: "update", id: d.id } };
-  }
-
-  if (numRaw && /^\d+$/.test(numRaw)) {
-    const d = await prisma.deal.findUnique({
-      where: { organizationId_number: { organizationId: orgId, number: parseInt(numRaw, 10) } },
-      select: { id: true },
-    });
-    if (d) return { ok: true, target: { mode: "update", id: d.id } };
-  }
-
-  if (ext) {
-    const d = await prisma.deal.findUnique({
-      where: { organizationId_externalId: { organizationId: orgId, externalId: ext } },
-      select: { id: true },
-    });
-    if (d) return { ok: true, target: { mode: "update", id: d.id } };
-  }
-
-  // Fallback de deduplicação: nenhuma chave técnica casou. Se temos contato
-  // resolvido + título, procuramos um deal existente da combinação
-  // (orgId, contactId, title). Isso evita duplicação ao reimportar o mesmo
-  // CSV sem editar (template tem deal_number vazio). Se houver mais de um
-  // deal idêntico, escolhe o mais recente — comportamento conservador.
-  if (ctx.contactId && ctx.title) {
-    const d = await prisma.deal.findFirst({
-      where: {
-        organizationId: orgId,
-        contactId: ctx.contactId,
-        title: ctx.title,
-      },
-      select: { id: true },
-      orderBy: { createdAt: "desc" },
-    });
-    if (d) return { ok: true, target: { mode: "update", id: d.id } };
-  }
-
-  return {
-    ok: true,
-    target: {
-      mode: "create",
-      ...(id ? { id } : {}),
-      ...(ext ? { externalId: ext } : {}),
-    },
-  };
-}
-
-function parseExpectedClose(raw: string | undefined): Date | null | undefined {
-  if (!raw?.trim()) return undefined;
-  const d = new Date(raw.trim());
-  if (Number.isNaN(d.getTime())) return null;
-  return d;
-}
-
 export async function POST(request: Request) {
   try {
     const session = await auth();
     const denied = assertImportPermission(session);
     if (denied) return denied;
 
-    // Populate AsyncLocalStorage para que getOrgIdOrThrow() funcione
-    // nas funcoes de resolucao (stage/contact/deal) e no Prisma multi-tenant.
     if (session?.user?.organizationId) {
       enterRequestContext({
         organizationId: session.user.organizationId,
         userId: session.user.id,
         isSuperAdmin: Boolean(session.user.isSuperAdmin),
+        actor: {
+          type: "HUMAN",
+          label: session.user.name ?? session.user.email ?? session.user.id,
+          sublabel: "Importação",
+        },
       });
     }
 
     const permissionDenied = await requirePermissionForUser(
-      (session?.user ?? {}) as { id: string; organizationId: string | null; role?: string | null; isSuperAdmin?: boolean },
+      (session?.user ?? {}) as {
+        id: string;
+        organizationId: string | null;
+        role?: string | null;
+        isSuperAdmin?: boolean;
+      },
       "deal:create",
     );
     if (permissionDenied) return permissionDenied;
+
+    if (!session?.user?.organizationId) {
+      return NextResponse.json({ message: "Sessão sem organização." }, { status: 401 });
+    }
+    const organizationId = session.user.organizationId;
+    const userId = session.user.id;
+
+    // M6 — 1 import ativo por org por vez.
+    const activeDenied = await assertNoActiveImport();
+    if (activeDenied) return activeDenied;
 
     const formData = await request.formData();
     const file = formData.get("file");
 
     if (!(file instanceof File)) {
       return NextResponse.json(
-        { message: "Envie o arquivo CSV no campo \"file\" (multipart/form-data)." },
+        { message: 'Envie o arquivo CSV no campo "file" (multipart/form-data).' },
         { status: 400 },
       );
     }
@@ -365,209 +85,82 @@ export async function POST(request: Request) {
     const updateExisting = readUpdateExistingFlag(formData);
     const tagName = readTagFlag(formData);
 
+    // Parseia uma vez para validar cabeçalho e contar as linhas (total do
+    // BulkOperation). O worker re-parseia o arquivo salvo no storage.
     const { headers, rows } = await readUploadedTable(file, delimiter);
+    const headerError = validateDealImportHeaders(headers);
+    if (headerError) {
+      return NextResponse.json({ message: headerError }, { status: 400 });
+    }
+    if (rows.length === 0) {
+      return NextResponse.json({ message: "Arquivo sem linhas de dados." }, { status: 400 });
+    }
 
-    if (headers.length === 0 || !headers.includes("title")) {
-      return NextResponse.json(
-        {
-          message:
-            "CSV inválido: coluna \"title\" obrigatória. Informe \"stage_id\" ou \"pipeline_name\" + \"stage_name\".",
+    const ext = file.name.toLowerCase().endsWith(".xlsx")
+      ? "xlsx"
+      : file.name.toLowerCase().endsWith(".xls")
+        ? "xls"
+        : file.name.toLowerCase().endsWith(".ods")
+          ? "ods"
+          : "csv";
+    const fileName = generateFileName({ prefix: "deals", ext });
+    const buffer = Buffer.from(await file.arrayBuffer());
+    await saveFile({ orgId: organizationId, bucket: "imports", fileName, buffer });
+
+    const operation = await prisma.bulkOperation.create({
+      data: {
+        type: "DEAL_IMPORT",
+        status: "PENDING",
+        total: rows.length,
+        payload: {
+          fileName,
+          originalName: file.name,
+          updateExisting,
+          fileContentB64: buffer.toString("base64"),
+          ...(delimiter ? { delimiter } : {}),
+          ...(tagName ? { tagName } : {}),
         },
-        { status: 400 },
-      );
-    }
+        createdById: userId,
+      },
+      select: { id: true },
+    });
 
-    const hasStage = headers.includes("stage_id") || headers.includes("stageid");
-    const hasPipelineStage =
-      (headers.includes("pipeline_name") || headers.includes("pipeline")) &&
-      (headers.includes("stage_name") || headers.includes("stage"));
+    const job = await enqueueImportEtl(IMPORT_ETL_JOB_NAMES.dealImport, {
+      operationId: operation.id,
+      organizationId,
+      initiatedByUserId: userId,
+      fileName,
+      originalName: file.name,
+      delimiter,
+      updateExisting,
+      tagName,
+    });
 
-    if (!hasStage && !hasPipelineStage) {
-      return NextResponse.json(
-        {
-          message:
-            "Inclua \"stage_id\" (recomendado) ou o par \"pipeline_name\" + \"stage_name\" para localizar o estágio.",
+    if (!job) {
+      await prisma.bulkOperation.update({
+        where: { id: operation.id },
+        data: {
+          status: "FAILED",
+          finishedAt: new Date(),
+          errors: [
+            {
+              itemId: "__operation__",
+              message: "Fila de jobs indisponível (Redis offline)",
+              attempt: 0,
+              at: new Date().toISOString(),
+            },
+          ],
         },
-        { status: 400 },
-      );
-    }
-
-    let importTagId: string | null = null;
-    if (tagName) {
-      try {
-        const orgId = getOrgIdOrThrow();
-        importTagId = await upsertImportTag(orgId, tagName);
-      } catch {
-        importTagId = null;
-      }
-    }
-
-    // Campos personalizados de negócio: casa colunas cf:<id> (remapeadas pelo
-    // wizard) ou por nome/label com CustomFields existentes (entity "deal").
-    let dealCustomFieldMap: Map<string, string> | undefined;
-    try {
-      const defs = (await getCustomFields("deal")) as Array<{
-        id: string;
-        name: string;
-        label?: string | null;
-      }>;
-      const map = buildCustomFieldHeaderMap(headers, defs, DEAL_RESERVED_HEADERS);
-      if (map.size > 0) dealCustomFieldMap = map;
-    } catch {
-      dealCustomFieldMap = undefined;
-    }
-
-    const failed: { row: number; message: string }[] = [];
-    let created = 0;
-    let updated = 0;
-    let skipped = 0;
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const rowNumber = i + 2;
-
-      const title = row.title?.trim();
-      if (!title) {
-        failed.push({ row: rowNumber, message: "Título vazio." });
-        continue;
-      }
-
-      const stageId = await resolveStageId(row);
-      if (!stageId) {
-        failed.push({ row: rowNumber, message: "Estágio não encontrado (stage_id ou pipeline+estágio)." });
-        continue;
-      }
-
-      const statusRaw = row.status?.trim()?.toUpperCase();
-      if (statusRaw && !isValidDealStatus(statusRaw)) {
-        failed.push({ row: rowNumber, message: "status inválido (OPEN, WON, LOST)." });
-        continue;
-      }
-
-      let value: number | undefined;
-      const valRaw = row.value?.trim();
-      if (valRaw) {
-        const n = Number.parseFloat(valRaw.replace(",", "."));
-        if (!Number.isFinite(n)) {
-          failed.push({ row: rowNumber, message: "value inválido." });
-          continue;
-        }
-        value = n;
-      }
-
-      const expectedClose = parseExpectedClose(row.expected_close?.trim() || row.expectedclose?.trim());
-      if (expectedClose === null) {
-        failed.push({ row: rowNumber, message: "expected_close inválido." });
-        continue;
-      }
-
-      let ownerId: string | undefined;
-      try {
-        ownerId = await resolveOwnerId(row);
-      } catch {
-        failed.push({ row: rowNumber, message: "Erro ao resolver proprietário." });
-        continue;
-      }
-
-      let contactId: string | undefined;
-      try {
-        contactId = await resolveContactIdForDeal(row, updateExisting);
-      } catch {
-        failed.push({ row: rowNumber, message: "Erro ao resolver contato." });
-        continue;
-      }
-
-      const resolved = await resolveDealUpsert(row, {
-        contactId,
-        stageId,
-        title,
       });
-      if (!resolved.ok) {
-        failed.push({ row: rowNumber, message: resolved.message });
-        continue;
-      }
-
-      const externalPatch = pickDealExternalId(headers, row);
-
-      const lostReason = row.lost_reason?.trim() || row.lostreason?.trim() || undefined;
-
-      try {
-        let dealId: string | null = null;
-        if (resolved.target.mode === "update") {
-          if (!updateExisting) {
-            skipped += 1;
-            if (importTagId) await attachTagToDeal(resolved.target.id, importTagId);
-            continue;
-          }
-          await updateDeal(resolved.target.id, {
-            title,
-            stageId,
-            ...(value !== undefined ? { value } : {}),
-            ...(statusRaw && isValidDealStatus(statusRaw) ? { status: statusRaw } : {}),
-            ...(expectedClose !== undefined ? { expectedClose } : {}),
-            ...(lostReason !== undefined ? { lostReason } : {}),
-            ...(contactId !== undefined ? { contactId } : {}),
-            ...(ownerId !== undefined ? { ownerId } : {}),
-            ...(externalPatch !== undefined ? { externalId: externalPatch } : {}),
-          });
-          dealId = resolved.target.id;
-          updated += 1;
-        } else {
-          let externalForCreate: string | null | undefined = undefined;
-          if (externalPatch !== undefined) {
-            externalForCreate = externalPatch;
-          } else if (resolved.target.externalId !== undefined) {
-            externalForCreate = resolved.target.externalId;
-          }
-          const d = await createDeal({
-            ...(resolved.target.id ? { id: resolved.target.id } : {}),
-            externalId: externalForCreate === undefined ? undefined : externalForCreate,
-            title,
-            stageId,
-            value,
-            status: statusRaw && isValidDealStatus(statusRaw) ? statusRaw : undefined,
-            expectedClose,
-            lostReason,
-            contactId: contactId ?? undefined,
-            ownerId,
-          });
-          dealId = (d as { id?: string })?.id ?? null;
-          created += 1;
-        }
-
-        if (importTagId && dealId) {
-          await attachTagToDeal(dealId, importTagId);
-        }
-        if (dealId) {
-          await applyDealCustomFields(dealId, row, dealCustomFieldMap);
-        }
-      } catch (e: unknown) {
-        const code =
-          typeof e === "object" && e !== null && "code" in e
-            ? String((e as { code: string }).code)
-            : "";
-        const msg =
-          e instanceof Error && e.message === "INVALID_TITLE"
-            ? "Título inválido."
-            : code === "P2002"
-              ? "Violação de unicidade (id externo ou número duplicado)."
-              : code === "P2003"
-                ? "Referência inválida (contato, estágio ou usuário)."
-                : "Erro ao salvar negócio.";
-        failed.push({ row: rowNumber, message: msg });
-      }
+      return NextResponse.json(
+        { message: "Fila de importação indisponível.", operationId: operation.id },
+        { status: 503 },
+      );
     }
 
     return NextResponse.json(
-      {
-        created,
-        updated,
-        skipped,
-        failed,
-        totalRows: rows.length,
-        tagId: importTagId,
-      },
-      { status: 201 },
+      { message: "Importação enfileirada.", operationId: operation.id, total: rows.length },
+      { status: 202 },
     );
   } catch (e) {
     console.error(e);

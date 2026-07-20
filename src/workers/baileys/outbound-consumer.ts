@@ -4,21 +4,17 @@ import path from "path";
 import fs from "fs/promises";
 
 import { prisma } from "@/lib/prisma";
+import { prismaBase } from "@/lib/prisma-base";
 import {
   BAILEYS_OUTBOUND_QUEUE_NAME,
   type BaileysOutboundPayload,
 } from "@/lib/queue";
 import { parseStoragePath, readStoredFile } from "@/lib/storage/local";
 import { logMessageFailed } from "@/services/activity-log";
-import { runWithContext } from "@/lib/request-context";
+import { sseBus } from "@/lib/sse-bus";
+import { withSystemContext } from "@/lib/webhook-context";
 import type { BaileysManager } from "./baileys-manager";
 import type { AnyMessageContent } from "@whiskeysockets/baileys";
-
-const SSE_REDIS_CHANNEL = "crm:sse:events";
-
-function publishSse(redis: IORedis, event: string, data: unknown) {
-  redis.publish(SSE_REDIS_CHANNEL, JSON.stringify({ event, data })).catch(() => {});
-}
 
 export function startOutboundConsumer(
   manager: BaileysManager,
@@ -111,17 +107,27 @@ export function startOutboundConsumer(
 
       const sent = await session.sendMessage(jid, waContent);
 
-      if (sent?.key?.id) {
-        await prisma.message.update({
-          where: { id: messageId },
-          data: { externalId: sent.key.id, sendStatus: "sent" },
-        }).catch(() => {});
-      }
-
-      publishSse(connection, "message_status", {
-        messageId,
-        status: "sent",
+      // Prisma scoped exige RequestContext. Sem withSystemContext o
+      // externalId nunca era gravado (.catch engolia) → ACKs de
+      // delivered/read do Baileys não achavam a mensagem por wamid.
+      const meta = await prismaBase.message.findUnique({
+        where: { id: messageId },
+        select: { organizationId: true, conversationId: true },
       });
+      if (meta?.organizationId && sent?.key?.id) {
+        await withSystemContext(meta.organizationId, async () => {
+          await prisma.message.update({
+            where: { id: messageId },
+            data: { externalId: sent.key!.id!, sendStatus: "sent" },
+          });
+          sseBus.publish("message_status", {
+            organizationId: meta.organizationId,
+            conversationId: meta.conversationId,
+            messageId,
+            status: "sent",
+          });
+        });
+      }
     },
     { connection },
   );
@@ -139,44 +145,45 @@ export function startOutboundConsumer(
 }
 
 async function markFailed(messageId: string, error: string) {
-  await prisma.message.update({
-    where: { id: messageId },
-    data: { sendStatus: "failed", sendError: error },
-  }).catch(() => {});
-
   // Activity Log (feed /logs + estatisticas). O worker roda fora de um
-  // request, entao montamos um contexto minimo com a org da mensagem
-  // para que `logEvent`/`withOrgFromCtx` consigam escrever o evento.
+  // request — resolve org via prismaBase e envolve updates em contexto.
   void (async () => {
-    const msg = await prisma.message
-      .findUnique({
-        where: { id: messageId },
-        select: {
-          organizationId: true,
-          conversationId: true,
-          conversation: {
-            select: {
-              contactId: true,
-              contact: { select: { name: true, phone: true } },
-            },
+    const msg = await prismaBase.message.findUnique({
+      where: { id: messageId },
+      select: {
+        organizationId: true,
+        conversationId: true,
+        conversation: {
+          select: {
+            contactId: true,
+            contact: { select: { name: true, phone: true } },
           },
         },
-      })
-      .catch(() => null);
+      },
+    });
     if (!msg?.organizationId) return;
-    await runWithContext(
-      { organizationId: msg.organizationId, userId: "system", isSuperAdmin: false },
-      () =>
-        logMessageFailed({
-          messageId,
-          conversationId: msg.conversationId,
-          contactId: msg.conversation?.contactId ?? null,
-          contactLabel: msg.conversation?.contact?.name ?? null,
-          contactSublabel: msg.conversation?.contact?.phone ?? null,
-          error,
-          source: "baileys",
-          channel: "WhatsApp",
-        }),
-    );
+    await withSystemContext(msg.organizationId, async () => {
+      await prisma.message.update({
+        where: { id: messageId },
+        data: { sendStatus: "failed", sendError: error },
+      });
+      sseBus.publish("message_status", {
+        organizationId: msg.organizationId,
+        conversationId: msg.conversationId,
+        messageId,
+        status: "failed",
+        error,
+      });
+      await logMessageFailed({
+        messageId,
+        conversationId: msg.conversationId,
+        contactId: msg.conversation?.contactId ?? null,
+        contactLabel: msg.conversation?.contact?.name ?? null,
+        contactSublabel: msg.conversation?.contact?.phone ?? null,
+        error,
+        source: "baileys",
+        channel: "WhatsApp",
+      });
+    });
   })();
 }

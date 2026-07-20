@@ -2,10 +2,25 @@ import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
 import { deleteActivity, getActivityById, isValidActivityType, updateActivity } from "@/services/activities";
+import { canAccessActivity, type TaskViewer } from "@/services/task-visibility";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
 
 type RouteContext = { params: Promise<{ id: string }> };
+
+function viewerFromSession(user: {
+  id: string;
+  role?: string | null;
+  organizationId?: string | null;
+  isSuperAdmin?: boolean;
+}): TaskViewer {
+  return {
+    id: user.id,
+    organizationId: user.organizationId ?? null,
+    role: user.role ?? null,
+    isSuperAdmin: Boolean(user.isSuperAdmin),
+  };
+}
 
 export async function GET(_request: Request, context: RouteContext) {
   try {
@@ -21,6 +36,10 @@ export async function GET(_request: Request, context: RouteContext) {
 
     const activity = await getActivityById(id);
     if (!activity) {
+      return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
+    }
+
+    if (!(await canAccessActivity(viewerFromSession(session.user as never), activity))) {
       return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
     }
 
@@ -59,6 +78,10 @@ export async function PUT(request: Request, context: RouteContext) {
     const existing = await getActivityById(id);
     if (!existing) {
       return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
+    }
+
+    if (!(await canAccessActivity(viewerFromSession(session.user as never), existing))) {
+      return NextResponse.json({ message: "Sem permissão para editar esta tarefa." }, { status: 403 });
     }
 
     if (b.type !== undefined && (typeof b.type !== "string" || !isValidActivityType(b.type))) {
@@ -117,6 +140,14 @@ export async function PUT(request: Request, context: RouteContext) {
             : undefined,
       dealId:
         b.dealId === null ? null : typeof b.dealId === "string" ? b.dealId : undefined,
+      userId:
+        b.userId === null ? null : typeof b.userId === "string" ? b.userId : undefined,
+      departmentId:
+        b.departmentId === null
+          ? null
+          : typeof b.departmentId === "string"
+            ? b.departmentId
+            : undefined,
     };
 
     const payload = Object.fromEntries(
@@ -247,6 +278,9 @@ export async function PUT(request: Request, context: RouteContext) {
         if (err.message === "EMPTY_UPDATE") {
           return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });
         }
+        if (err.message === "INVALID_DEPARTMENT") {
+          return NextResponse.json({ message: "Departamento inválido." }, { status: 400 });
+        }
       }
       throw err;
     }
@@ -280,6 +314,10 @@ export async function DELETE(_request: Request, context: RouteContext) {
     const existing = await getActivityById(id);
     if (!existing) {
       return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
+    }
+
+    if (!(await canAccessActivity(viewerFromSession(session.user as never), existing))) {
+      return NextResponse.json({ message: "Sem permissão para excluir esta tarefa." }, { status: 403 });
     }
 
     await deleteActivity(id);

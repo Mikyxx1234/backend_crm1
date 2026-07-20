@@ -1,5 +1,6 @@
 import { Prisma, type DealRole, type DealStatus } from "@prisma/client";
 
+import { defaultDealTitleForContact } from "@/lib/display-name";
 import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -13,46 +14,44 @@ import {
 } from "@/services/kanban-filters";
 
 /**
- * Valida o motivo da perda contra a setting `deals.loss_reason_allow_other`.
+ * Valida o motivo da perda no contexto do funil.
  *
- * - Quando `allow_other === true` (default): aceita qualquer string (inclusive
- *   um motivo livre digitado em "Outro…").
- * - Quando `allow_other === false`: rejeita motivos que não bateram exatamente
- *   com algum `LossReason.label` ativo cadastrado em
- *   `/settings/loss-reasons` para a org corrente.
+ * - Com `pipelineId`: usa `pipelines.lossReasonAllowOther`.
+ * - Sem funil: fallback na org setting `deals.loss_reason_allow_other`.
  *
- * Motivo vazio/null é cobertura de outra setting (`loss_reason_required`) e
- * portanto aceita aqui (no-op). Throws `Error("INVALID_LOST_REASON")` quando
- * inválido — handlers traduzem para HTTP 400.
- *
- * Defensivo: se falhar pra ler a setting (ex.: fora de RequestContext), cai
- * pro default permissivo (allow_other = true) e loga, em vez de bloquear
- * fluxos críticos.
+ * Motivo vazio/null é no-op (obrigatoriedade é outra checagem).
+ * Throws `Error("INVALID_LOST_REASON")` — handlers → HTTP 400.
  */
 export async function assertLostReasonAllowed(
   reason: string | null | undefined,
+  pipelineId?: string | null,
 ): Promise<void> {
   const trimmed = reason?.trim();
   if (!trimmed) return;
+
+  const {
+    assertLostReasonAllowedForPipeline,
+    isPipelineLossReasonAllowOther,
+  } = await import("@/services/loss-reasons");
+
   let allowOther = true;
   try {
-    allowOther = await getOrgSettingBool(
-      "deals.loss_reason_allow_other",
-      true,
-    );
+    if (pipelineId) {
+      allowOther = await isPipelineLossReasonAllowOther(pipelineId);
+    } else {
+      allowOther = await getOrgSettingBool(
+        "deals.loss_reason_allow_other",
+        true,
+      );
+    }
   } catch (e) {
     console.warn(
-      "[deals/assertLostReasonAllowed] Falha lendo setting; permitindo:",
+      "[deals/assertLostReasonAllowed] Falha lendo allowOther; permitindo:",
       (e as Error)?.message ?? e,
     );
     return;
   }
-  if (allowOther) return;
-  const match = await prisma.lossReason.findFirst({
-    where: { label: trimmed, isActive: true },
-    select: { id: true },
-  });
-  if (!match) throw new Error("INVALID_LOST_REASON");
+  await assertLostReasonAllowedForPipeline(pipelineId, trimmed, allowOther);
 }
 
 export function isValidDealStatus(v: string): v is DealStatus {
@@ -147,6 +146,8 @@ export type GetDealsParams = {
    * (mesmo vazio) → restringe deals aos estágios desses funis.
    */
   allowedPipelineIds?: string[] | null;
+  /** Mesma engine do POST /board — filtros avançados (tags, datas, custom…). */
+  advancedFilters?: AdvancedDealFilters;
 };
 
 const listInclude = {
@@ -201,6 +202,15 @@ export async function getDeals(params: GetDealsParams = {}) {
         { title: { contains: search, mode: "insensitive" } },
         { contact: { name: { contains: search, mode: "insensitive" } } },
         { contact: { email: { contains: search, mode: "insensitive" } } },
+        { contact: { phone: { contains: search } } },
+        // Qualquer valor de campo personalizado (RGM, CPF, matrícula, ...),
+        // do negócio ou do contato vinculado.
+        { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
+        {
+          contact: {
+            customFields: { some: { value: { contains: search, mode: "insensitive" } } },
+          },
+        },
       ],
     });
   }
@@ -228,6 +238,11 @@ export async function getDeals(params: GetDealsParams = {}) {
     });
   }
 
+  if (params.advancedFilters && Object.keys(params.advancedFilters).length > 0) {
+    const advConditions = await buildDealWhereFromFilters(params.advancedFilters);
+    for (const c of advConditions) conditions.push(c);
+  }
+
   const where: Prisma.DealWhereInput =
     conditions.length > 0 ? { AND: conditions } : {};
 
@@ -253,6 +268,7 @@ const detailInclude = {
   contact: {
     select: {
       id: true, number: true, name: true, email: true, phone: true, avatarUrl: true,
+      whatsappUsername: true,
       // `source` (nativo de Contact) usado pelo deal detail (frontend
       // mostra/edita inline no cabecalho fixo da sidebar via
       // InlineNativeEditor). Antes o painel tentava ler `Deal.source` que
@@ -375,12 +391,18 @@ function isPrismaUniqueViolation(err: unknown): boolean {
 }
 
 export async function createDeal(data: CreateDealInput) {
-  // Nome opcional: negócios criados sem título ganham nome automático
-  // "Negócio - #<number>" (o `number` sequencial por org, mesmo id
-  // exibido no card/header). Assim o operador pode criar um negócio
-  // rápido sem digitar nome. O fallback é resolvido dentro do loop
-  // porque depende do `number` alocado.
-  const rawTitle = data.title?.trim() ?? "";
+  // Título opcional. Prioridade:
+  //  1. título informado
+  //  2. "Negócio {Nome do Contato}" quando há contactId
+  //  3. "Negócio - #<number>" (fallback numérico, resolvido no loop)
+  let rawTitle = data.title?.trim() ?? "";
+  if (!rawTitle && data.contactId) {
+    const contact = await prisma.contact.findFirst({
+      where: { id: data.contactId },
+      select: { name: true },
+    });
+    rawTitle = defaultDealTitleForContact(contact?.name) ?? "";
+  }
 
   const maxPos = await prisma.deal.aggregate({
     where: { stageId: data.stageId },
@@ -436,6 +458,7 @@ export type UpdateDealInput = {
   contactId?: string | null;
   stageId?: string;
   ownerId?: string | null;
+  orgUnitId?: string | null;
 };
 
 export async function updateDeal(id: string, data: UpdateDealInput) {
@@ -459,6 +482,7 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
   if (data.contactId !== undefined) payload.contactId = data.contactId;
   if (data.stageId !== undefined) payload.stageId = data.stageId;
   if (data.ownerId !== undefined) payload.ownerId = data.ownerId;
+  if (data.orgUnitId !== undefined) payload.orgUnitId = data.orgUnitId;
   if (data.externalId !== undefined) {
     payload.externalId = data.externalId;
   }
@@ -608,12 +632,32 @@ export async function moveDeal(
     throw new Error("INVALID_POSITION");
   }
 
+  // Deal não tem pipelineId direto — o funil vem do estágio atual.
+  const dealPeek = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { id: true, stage: { select: { pipelineId: true } } },
+  });
+  if (!dealPeek) throw new Error("NOT_FOUND");
+
+  // Preview do estágio destino pra validar lostReason no funil DESTINO
+  // (não no de origem) — a UI de troca de pipeline decide o motivo depois
+  // que o usuário escolheu o funil, então a política vale para o destino.
+  const targetPeek = await prisma.stage.findUnique({
+    where: { id: targetStageId },
+    select: { pipelineId: true },
+  });
+  if (!targetPeek) throw new Error("STAGE_NOT_FOUND");
+
   // Valida o motivo ANTES de abrir a transação (evita rollback se o destino
   // for o estágio Perdido e o motivo livre tiver sido bloqueado pela setting).
-  if (options?.lostReason) await assertLostReasonAllowed(options.lostReason);
+  if (options?.lostReason) {
+    await assertLostReasonAllowed(options.lostReason, targetPeek.pipelineId);
+  }
 
   let becameWon = false;
   let becameLost = false;
+  // Preserva o pipeline de ORIGEM para invalidação de cache pós-move.
+  let fromPipelineId: string | null = dealPeek.stage.pipelineId;
   const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id: dealId } });
     if (!deal) throw new Error("NOT_FOUND");
@@ -622,8 +666,20 @@ export async function moveDeal(
     if (!targetStage) throw new Error("STAGE_NOT_FOUND");
 
     const dealStage = await tx.stage.findUnique({ where: { id: deal.stageId } });
-    if (!dealStage || dealStage.pipelineId !== targetStage.pipelineId) {
-      throw new Error("CROSS_PIPELINE");
+    if (!dealStage) throw new Error("STAGE_NOT_FOUND");
+    fromPipelineId = dealStage.pipelineId;
+    // Cross-pipeline permitido: quando o funil muda, a reordenação de
+    // posições continua funcionando (origem decrementa, destino incrementa
+    // — ambos escopados por stageId, então não há colisão entre funis).
+
+    if (targetStage.isLost) {
+      const pipe = await tx.pipeline.findUnique({
+        where: { id: targetStage.pipelineId },
+        select: { lossReasonRequired: true },
+      });
+      if (pipe?.lossReasonRequired && !options?.lostReason?.trim()) {
+        throw new Error("LOST_REASON_REQUIRED");
+      }
     }
 
     const oldStageId = deal.stageId;
@@ -753,12 +809,24 @@ export async function markDealWon(id: string) {
 }
 
 export async function markDealLost(id: string, lostReason?: string | null) {
-  // Obrigatoriedade do motivo é decidida na rota (org setting
-  // `deals.loss_reason_required`); aqui aceitamos vazio → null.
   const reason = lostReason?.trim() || null;
 
-  // Gate "Permitir outro motivo" — quando desligado, motivo livre é rejeitado.
-  await assertLostReasonAllowed(reason);
+  const dealPeek = await prisma.deal.findUnique({
+    where: { id },
+    select: { stageId: true, stage: { select: { pipelineId: true } } },
+  });
+  if (!dealPeek) throw new Error("NOT_FOUND");
+  const pipelineId = dealPeek.stage.pipelineId;
+
+  const pipe = await prisma.pipeline.findUnique({
+    where: { id: pipelineId },
+    select: { lossReasonRequired: true },
+  });
+  if (pipe?.lossReasonRequired && !reason) {
+    throw new Error("LOST_REASON_REQUIRED");
+  }
+
+  await assertLostReasonAllowed(reason, pipelineId);
 
   const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });

@@ -1,7 +1,6 @@
 import type { WAMessage, WASocket } from "@whiskeysockets/baileys";
 import { downloadMediaMessage, getContentType } from "@whiskeysockets/baileys";
 import crypto from "crypto";
-import IORedis from "ioredis";
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -9,34 +8,19 @@ import { generateFileName, saveFile } from "@/lib/storage/local";
 import { fireTrigger } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { nextContactNumber } from "@/services/contacts";
-import { withConversationNumberRetry } from "@/services/conversations";
+import {
+  isActiveConversationUniqueViolation,
+  withConversationNumberRetry,
+} from "@/services/conversations";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { getLogger } from "@/lib/logger";
+import { sseBus } from "@/lib/sse-bus";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { isLidJid, resolveJid } from "./lid-resolver";
 
 const log = getLogger("baileys-msg");
-
-const SSE_REDIS_CHANNEL = "crm:sse:events";
-
-let redisPub: IORedis | null = null;
-function getRedisPublisher(): IORedis | null {
-  const url = process.env.REDIS_URL?.trim();
-  if (!url) return null;
-  if (!redisPub) {
-    redisPub = new IORedis(url, { maxRetriesPerRequest: null });
-  }
-  return redisPub;
-}
-
-function publishSse(event: string, data: unknown) {
-  const redis = getRedisPublisher();
-  if (!redis) return;
-  redis.publish(SSE_REDIS_CHANNEL, JSON.stringify({ event, data })).catch((e) => {
-    log.debug("Falha ao publicar SSE:", e);
-  });
-}
 
 function normalizePhone(raw: string): string {
   const digits = raw.replace(/\D/g, "");
@@ -221,7 +205,8 @@ async function syncContactAvatar(
 
     // Notifica a UI: lista de conversas, header, deal panel — tudo
     // que renderiza ChatAvatar pra esse contato deve refetchar.
-    publishSse("contact_updated", {
+    sseBus.publish("contact_updated", {
+      organizationId: contact.organizationId,
       contactId: contact.id,
       avatarUrl: newUrl,
     });
@@ -239,17 +224,19 @@ async function syncContactAvatar(
 // a cargo das automações configuradas pelo operador (trigger
 // `message_received` + filtro `dealStatus`).
 
+const CONV_SELECT = { id: true, status: true, channelId: true, waJid: true } as const;
+
+async function findActiveConversation(contactId: string) {
+  return prisma.conversation.findFirst({
+    where: { contactId, channel: "whatsapp", status: { not: "RESOLVED" } },
+    select: CONV_SELECT,
+  });
+}
+
 async function findOrCreateConversation(contactId: string, channelId: string, rawJid: string) {
   // Modelo de ticket: nova mensagem em contato com ultima RESOLVED cria
   // conversa nova (com #N+1). Ver AGENT.md "ID de conversa + ticket".
-  const existing = await prisma.conversation.findFirst({
-    where: {
-      contactId,
-      channel: "whatsapp",
-      status: { not: "RESOLVED" },
-    },
-    select: { id: true, status: true, channelId: true, waJid: true },
-  });
+  const existing = await findActiveConversation(contactId);
 
   if (existing) {
     // Reusa conversa ativa (nao-RESOLVED por construcao); so reconcilia
@@ -269,20 +256,33 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
     select: { assignedToId: true },
   });
 
-  return withConversationNumberRetry((number) =>
-    prisma.conversation.create({
-      data: withOrgFromCtx({
-        number,
-        contactId,
-        channel: "whatsapp",
-        channelId,
-        waJid: rawJid,
-        status: "OPEN" as const,
-        ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+  try {
+    return await withConversationNumberRetry((number) =>
+      prisma.conversation.create({
+        data: withOrgFromCtx({
+          number,
+          contactId,
+          channel: "whatsapp",
+          channelId,
+          waJid: rawJid,
+          status: "OPEN" as const,
+          ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+        }),
+        select: CONV_SELECT,
       }),
-      select: { id: true, status: true, channelId: true, waJid: true },
-    }),
-  );
+    );
+  } catch (err) {
+    // Corrida: mensagens simultaneas do mesmo numero disparam dois
+    // findOrCreate; o indice unico parcial (1 conversa ativa por
+    // contato+canal) rejeita o 2o create com P2002. Reusa o vencedor em
+    // vez de duplicar o ticket. Ver migration
+    // `conversations_active_contact_channel`.
+    if (isActiveConversationUniqueViolation(err)) {
+      const won = await findActiveConversation(contactId);
+      if (won) return won;
+    }
+    throw err;
+  }
 }
 
 type ParsedMsg = {
@@ -567,7 +567,8 @@ export async function handleBaileysMessage(
       (err) => log.warn("Falha ao cancelar agendamentos pendentes:", err),
     );
 
-    publishSse("new_message", {
+    sseBus.publish("new_message", {
+      organizationId: getOrgIdOrNull(),
       conversationId: conversation.id,
       contactId: contact.id,
       direction: "in",

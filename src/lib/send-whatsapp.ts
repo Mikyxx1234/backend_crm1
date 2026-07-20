@@ -115,10 +115,12 @@ async function sendViaMeta(opts: SendTextOpts): Promise<SendTextResult> {
     );
     const externalId = result.messages?.[0]?.id ?? null;
     if (externalId) {
+      // Grava wamid + sent juntos: o webhook de status (sent/delivered/read)
+      // procura por externalId. Sem isso o ACK não encontra a mensagem.
       await prisma.message.update({
         where: { id: opts.messageId },
-        data: { externalId },
-      }).catch(() => {});
+        data: { externalId, sendStatus: "sent" },
+      });
     }
     return { externalId, failed: false, error: null };
   } catch (err) {

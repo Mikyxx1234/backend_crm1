@@ -60,6 +60,9 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   // Catálogo por capacidades — Gestor tem tudo
   "catalog:view", "catalog:create", "catalog:edit_capabilities",
   "catalog:delete", "catalog:save_as_template",
+  // Cotas de desconto — Gestor gerencia e visualiza. Operador (MEMBER)
+  // apenas visualiza (ver bloco abaixo).
+  "quota:view", "quota:manage",
   // Channel / Template
   "channel:view", "channel:edit",
   "template:view", "template:create", "template:edit",
@@ -87,6 +90,7 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   "job_opening:view",
   "org_unit:view",
   "catalog:view",
+  "quota:view",
   // Distribution: operador só visualiza (e altera o próprio online/offline,
   // controlado fora do RBAC via ownership na rota de status do agente).
   "distribution:view",

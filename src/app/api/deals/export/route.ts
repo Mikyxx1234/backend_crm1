@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { csvDate, toCsv } from "@/lib/csv-stringify";
+import { resolveContactDisplayName } from "@/lib/display-name";
 import { prisma } from "@/lib/prisma";
 import { getVisibilityFilter } from "@/lib/visibility";
 
@@ -55,6 +56,15 @@ export async function GET(request: Request) {
       });
       const dealFields = fieldDefs.filter((f) => f.entity === "deal");
       const contactFields = fieldDefs.filter((f) => f.entity === "contact");
+
+      // Fallback de email: alguns relatórios (matriculados) gravam o email
+      // apenas no campo personalizado do negócio. Se o contato não tiver email
+      // base, preenchemos a coluna "E-mail do contato" com o cf `email`
+      // (pessoal). `email_academico` é um campo DIFERENTE e sai na sua própria
+      // coluna de cf — nunca é usado como fallback do email pessoal.
+      const emailCfIds = ["email"]
+        .map((n) => dealFields.find((f) => f.name === n)?.id)
+        .filter((id): id is string => Boolean(id));
 
       const deals = await prisma.deal.findMany({
         where: {
@@ -126,9 +136,20 @@ export async function GET(request: Request) {
           "Etapa": deal.stage.name,
           "Responsável": deal.owner?.name ?? "",
           "E-mail do responsável": deal.owner?.email ?? "",
-          "Nome do contato": deal.contact?.name ?? "",
-          "E-mail do contato": deal.contact?.email ?? "",
-          "Telefone do contato": deal.contact?.phone ?? "",
+          // Se o nome do contato for placeholder (telefone/"Lead ..."), cai
+          // no título do negócio quando este for um nome real — garante que a
+          // coluna "Nome do contato" nunca traga telefone se houver nome.
+          "Nome do contato": resolveContactDisplayName(
+            deal.contact?.name,
+            deal.title,
+          ),
+          "E-mail do contato":
+            deal.contact?.email ||
+            emailCfIds
+              .map((id) => dealCfMap.get(id))
+              .find((v) => typeof v === "string" && v.includes("@")) ||
+            "",
+          "Telefone do contato": (deal.contact?.phone ?? "").replace(/^\+/, ""),
           "Empresa do contato": deal.contact?.company?.name ?? "",
           "Ciclo de vida do contato": deal.contact?.lifecycleStage ?? "",
           "Origem do contato": deal.contact?.source ?? "",

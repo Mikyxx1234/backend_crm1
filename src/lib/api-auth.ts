@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { logApiAccessAuthReject, logApiAccessCompleted, resolveResponseStatus } from "@/lib/api-access-audit";
 import { auth } from "@/lib/auth";
+import { observeHttpRequest } from "@/lib/metrics";
 import { checkRateLimit, setRateLimitHeaders } from "@/lib/rate-limiter";
 import { validateToken } from "@/services/api-tokens";
 import {
@@ -202,6 +203,7 @@ export async function withApiAuthContext<T>(
     const out = (await runWithContext(ctx, () => handler(r.user))) as T;
     const durationMs = Date.now() - t0;
     const status = resolveResponseStatus(out);
+    observeHttpRequest({ method, path, status, durationMs });
     void logApiAccessCompleted({
       method,
       path,
@@ -213,6 +215,7 @@ export async function withApiAuthContext<T>(
     return out;
   } catch (err) {
     const durationMs = Date.now() - t0;
+    observeHttpRequest({ method, path, status: 500, durationMs });
     void logApiAccessCompleted({
       method,
       path,

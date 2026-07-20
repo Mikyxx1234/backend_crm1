@@ -24,7 +24,7 @@ import type { CallDirection, CallStatus, Prisma } from "@prisma/client";
 
 import { withResolvedContext } from "@/lib/auth-helpers";
 import { getLogger } from "@/lib/logger";
-import { normalizePhone } from "@/lib/phone";
+import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
@@ -62,14 +62,37 @@ export type ProcessWebhookResult =
   | { ok: false; reason: string }
   | { ok: true; callId: string; callEventId: string };
 
+export type CallsSortField =
+  | "startedAt"
+  | "durationSeconds"
+  | "status"
+  | "direction";
+export type CallsSortDir = "asc" | "desc";
+
 export type ListCallsFilters = {
   extensionId?: string;
   direction?: CallDirection;
   contactId?: string;
   status?: CallStatus;
+  /** Busca livre por nome do contato ou dígitos do telefone. */
+  search?: string;
+  /** Data inicial (YYYY-MM-DD, inclusiva) sobre startedAt/createdAt. */
+  dateFrom?: string;
+  /** Data final (YYYY-MM-DD, inclusiva) sobre startedAt/createdAt. */
+  dateTo?: string;
+  /** Coluna de ordenação. Default: startedAt desc. */
+  sortBy?: CallsSortField;
+  sortDir?: CallsSortDir;
   page?: number;
   perPage?: number;
 };
+
+const VALID_SORT_FIELDS: readonly CallsSortField[] = [
+  "startedAt",
+  "durationSeconds",
+  "status",
+  "direction",
+];
 
 export type UpdateCallInput = {
   status?: CallStatus;
@@ -582,17 +605,65 @@ export async function processWebhookEvent(
 export async function listCalls(filters: ListCallsFilters = {}) {
   const page = Math.max(1, filters.page ?? 1);
   const perPage = Math.min(100, Math.max(1, filters.perPage ?? 20));
-  const where: Record<string, unknown> = {};
+  const where: Prisma.CallWhereInput = {};
 
   if (filters.extensionId) where.extensionId = filters.extensionId;
   if (filters.direction) where.direction = filters.direction;
   if (filters.contactId) where.contactId = filters.contactId;
   if (filters.status) where.status = filters.status;
 
+  const and: Prisma.CallWhereInput[] = [];
+
+  // Período (inclusivo) sobre startedAt, com fallback em createdAt quando
+  // a chamada ainda não tem startedAt registrado.
+  const from = filters.dateFrom ? new Date(`${filters.dateFrom}T00:00:00`) : null;
+  const to = filters.dateTo ? new Date(`${filters.dateTo}T23:59:59.999`) : null;
+  if ((from && !Number.isNaN(from.getTime())) || (to && !Number.isNaN(to.getTime()))) {
+    const range: Prisma.DateTimeFilter = {};
+    if (from && !Number.isNaN(from.getTime())) range.gte = from;
+    if (to && !Number.isNaN(to.getTime())) range.lte = to;
+    and.push({
+      OR: [{ startedAt: range }, { startedAt: null, createdAt: range }],
+    });
+  }
+
+  // Busca livre: nome do contato vinculado OU dígitos nos números.
+  const search = filters.search?.trim();
+  if (search) {
+    const or: Prisma.CallWhereInput[] = [
+      { contact: { is: { name: { contains: search, mode: "insensitive" } } } },
+    ];
+    const digits = search.replace(/\D/g, "");
+    if (digits) {
+      or.push(
+        { fromNumber: { contains: digits } },
+        { toNumber: { contains: digits } },
+      );
+    }
+    and.push({ OR: or });
+  }
+
+  if (and.length) where.AND = and;
+
+  // Ordenação — default startedAt desc (com fallback em createdAt).
+  const rawSortBy = filters.sortBy;
+  const sortBy: CallsSortField = VALID_SORT_FIELDS.includes(
+    rawSortBy as CallsSortField,
+  )
+    ? (rawSortBy as CallsSortField)
+    : "startedAt";
+  const sortDir: CallsSortDir = filters.sortDir === "asc" ? "asc" : "desc";
+  // Para "startedAt" ordenamos por createdAt também para garantir estabilidade
+  // quando startedAt é null (chamadas antigas/parciais).
+  const orderBy: Prisma.CallOrderByWithRelationInput[] =
+    sortBy === "startedAt"
+      ? [{ startedAt: sortDir }, { createdAt: sortDir }]
+      : [{ [sortBy]: sortDir } as Prisma.CallOrderByWithRelationInput, { createdAt: "desc" }];
+
   const [calls, total] = await Promise.all([
     prisma.call.findMany({
       where,
-      orderBy: { createdAt: "desc" },
+      orderBy,
       skip: (page - 1) * perPage,
       take: perPage,
       include: {
@@ -603,7 +674,103 @@ export async function listCalls(filters: ListCallsFilters = {}) {
     prisma.call.count({ where }),
   ]);
 
+  // Fallback: chamadas sem contactId gravado — tenta resolver o contato
+  // pelo telefone normalizado (variantes com/sem 9º dígito) dentro da org.
+  const unresolved = calls.filter((c) => !c.contact);
+  if (unresolved.length) {
+    const variantsByCall = new Map<string, string[]>();
+    const allVariants = new Set<string>();
+    for (const c of unresolved) {
+      const phone = c.direction === "INBOUND" ? c.fromNumber : c.toNumber;
+      const variants = phoneMatchVariants(phone);
+      if (variants.length) {
+        variantsByCall.set(c.id, variants);
+        for (const v of variants) allVariants.add(v);
+      }
+    }
+    if (allVariants.size) {
+      const contacts = await prisma.contact.findMany({
+        where: { phone: { in: [...allVariants] } },
+        select: { id: true, name: true, phone: true },
+      });
+      const byPhone = new Map(contacts.map((ct) => [ct.phone, ct]));
+      for (const c of unresolved) {
+        const variants = variantsByCall.get(c.id);
+        if (!variants) continue;
+        for (const v of variants) {
+          const match = byPhone.get(v);
+          if (match) {
+            c.contact = match;
+            break;
+          }
+        }
+      }
+    }
+  }
+
   return { calls, total, page, perPage };
+}
+
+/**
+ * Estatísticas agregadas de chamadas para o mini-dash da aba `/logs?tab=chamadas`.
+ * Aplica os mesmos filtros de escopo (busca / período / extensão / contato)
+ * de `listCalls`, mas ignora `direction` e `status` — a ideia é justamente
+ * mostrar o breakdown desses eixos.
+ */
+export async function getCallsStats(
+  filters: Pick<
+    ListCallsFilters,
+    "search" | "dateFrom" | "dateTo" | "extensionId" | "contactId"
+  > = {},
+) {
+  const baseAnd: Prisma.CallWhereInput[] = [];
+
+  const from = filters.dateFrom ? new Date(`${filters.dateFrom}T00:00:00`) : null;
+  const to = filters.dateTo ? new Date(`${filters.dateTo}T23:59:59.999`) : null;
+  if ((from && !Number.isNaN(from.getTime())) || (to && !Number.isNaN(to.getTime()))) {
+    const range: Prisma.DateTimeFilter = {};
+    if (from && !Number.isNaN(from.getTime())) range.gte = from;
+    if (to && !Number.isNaN(to.getTime())) range.lte = to;
+    baseAnd.push({
+      OR: [{ startedAt: range }, { startedAt: null, createdAt: range }],
+    });
+  }
+
+  const search = filters.search?.trim();
+  if (search) {
+    const or: Prisma.CallWhereInput[] = [
+      { contact: { is: { name: { contains: search, mode: "insensitive" } } } },
+    ];
+    const digits = search.replace(/\D/g, "");
+    if (digits) {
+      or.push(
+        { fromNumber: { contains: digits } },
+        { toNumber: { contains: digits } },
+      );
+    }
+    baseAnd.push({ OR: or });
+  }
+
+  const buildWhere = (extra?: Prisma.CallWhereInput): Prisma.CallWhereInput => {
+    const w: Prisma.CallWhereInput = {};
+    if (filters.extensionId) w.extensionId = filters.extensionId;
+    if (filters.contactId) w.contactId = filters.contactId;
+    const AND = extra ? [...baseAnd, extra] : baseAnd;
+    if (AND.length) w.AND = AND;
+    return w;
+  };
+
+  const [total, inbound, outbound, answered, completed] = await Promise.all([
+    prisma.call.count({ where: buildWhere() }),
+    prisma.call.count({ where: buildWhere({ direction: "INBOUND" }) }),
+    prisma.call.count({ where: buildWhere({ direction: "OUTBOUND" }) }),
+    prisma.call.count({
+      where: buildWhere({ status: { in: ["ANSWERED", "COMPLETED"] } }),
+    }),
+    prisma.call.count({ where: buildWhere({ status: "COMPLETED" }) }),
+  ]);
+
+  return { total, inbound, outbound, answered, completed };
 }
 
 export async function getCall(id: string) {

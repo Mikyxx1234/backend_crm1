@@ -27,6 +27,7 @@ export async function GET(request: Request) {
     const lifecycleStage =
       lifecycleStageRaw && isValidLifecycleStage(lifecycleStageRaw) ? lifecycleStageRaw : undefined;
     const companyId = searchParams.get("companyId") ?? undefined;
+    const unassigned = searchParams.get("unassigned") === "1";
     const tagIdsParam = searchParams.get("tagIds");
     const tagIds = tagIdsParam
       ? tagIdsParam.split(",").map((id) => id.trim()).filter(Boolean)
@@ -51,6 +52,18 @@ export async function GET(request: Request) {
         ? sortByRaw
         : undefined;
     const sortOrder = sortOrderRaw === "asc" || sortOrderRaw === "desc" ? sortOrderRaw : undefined;
+
+    const parseDate = (v: string | null, endOfDay = false): Date | undefined => {
+      if (!v) return undefined;
+      const d = new Date(v);
+      if (Number.isNaN(d.getTime())) return undefined;
+      if (endOfDay) d.setHours(23, 59, 59, 999);
+      return d;
+    };
+    const createdFrom = parseDate(searchParams.get("createdFrom"));
+    const createdTo = parseDate(searchParams.get("createdTo"), true);
+    const updatedFrom = parseDate(searchParams.get("updatedFrom"));
+    const updatedTo = parseDate(searchParams.get("updatedTo"), true);
 
     const customFieldFilters: { name: string; operator?: "eq" | "contains" | "filled"; value?: string }[] =
       [];
@@ -82,9 +95,14 @@ export async function GET(request: Request) {
       lifecycleStage,
       tagIds,
       companyId,
+      unassigned,
       customFieldFilters: customFieldFilters.length > 0 ? customFieldFilters : undefined,
       emailExact,
       phoneExact,
+      createdFrom,
+      createdTo,
+      updatedFrom,
+      updatedTo,
       page,
       perPage,
       sortBy,

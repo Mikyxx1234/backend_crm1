@@ -5,6 +5,7 @@ import { userHasConversationAccess } from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { SOURCE_NONE } from "@/services/kanban-filters";
@@ -39,6 +40,8 @@ export type GetConversationsParams = {
   perPage?: number;
   visibilityWhere?: Prisma.ConversationWhereInput;
   ownerId?: string;
+  /** true = só conversas sem responsável (`assignedToId` null). */
+  withoutOwner?: boolean;
   stageId?: string;
   tagIds?: string[];
   /** Origens do contato (Contact.source). Pode incluir `SOURCE_NONE`. */
@@ -69,6 +72,9 @@ const listSelect = {
   updatedAt: true,
   createdAt: true,
   assignedToId: true,
+  departmentId: true,
+  department: { select: { id: true, name: true, requireTabulationOnClose: true } },
+  tabulationId: true,
   assignedTo: {
     select: { id: true, name: true, email: true, avatarUrl: true },
   },
@@ -116,13 +122,23 @@ async function lastInboundBatch(
 ): Promise<Map<string, Date>> {
   if (conversationIds.length === 0) return new Map();
   const orgId = getOrgIdOrThrow();
+  // Janela de 24h e' do CONTATO (regra da Meta), nao do ticket: um ticket
+  // recem-aberto (reopen/resposta pos-encerramento) nasce sem inbound, mas
+  // o cliente pode ter escrito minutos atras no ticket anterior. Agrega o
+  // ultimo inbound de QUALQUER conversa do mesmo contato+canal.
   const rows = await prisma.$queryRaw<{ conversationId: string; lastIn: Date }[]>`
-    SELECT "conversationId", MAX("createdAt") AS "lastIn"
-    FROM "messages"
-    WHERE "conversationId" = ANY(${conversationIds})
-      AND "direction" = 'in'
-      AND "organizationId" = ${orgId}
-    GROUP BY "conversationId"
+    SELECT c."id" AS "conversationId", MAX(m."createdAt") AS "lastIn"
+    FROM "conversations" c
+    JOIN "conversations" c2
+      ON c2."contactId" = c."contactId"
+     AND c2."channel" = c."channel"
+     AND c2."organizationId" = c."organizationId"
+    JOIN "messages" m
+      ON m."conversationId" = c2."id"
+     AND m."direction" = 'in'
+    WHERE c."id" = ANY(${conversationIds})
+      AND c."organizationId" = ${orgId}
+    GROUP BY c."id"
   `;
   const map = new Map<string, Date>();
   for (const r of rows) {
@@ -261,7 +277,9 @@ export async function getConversations(
     conditions.push({ channelId: { in: params.allowedChannelIds } });
   }
 
-  if (params.ownerId) {
+  if (params.withoutOwner) {
+    conditions.push({ assignedToId: null });
+  } else if (params.ownerId) {
     conditions.push({
       OR: [
         { assignedToId: params.ownerId },
@@ -299,16 +317,52 @@ export async function getConversations(
   const sortOrder = params.sortOrder ?? "desc";
   const orderBy: Prisma.ConversationOrderByWithRelationInput = { [sortBy]: sortOrder };
 
-  const [rows, total] = await Promise.all([
-    prisma.conversation.findMany({
-      where,
-      skip,
-      take: perPage,
-      orderBy,
-      select: listSelect,
-    }),
-    prisma.conversation.count({ where }),
-  ]);
+  // Colapso por CONTATO+CANAL (1 card por numero — modelo de ticket).
+  // Reabrir uma conversa encerrada gera um NOVO id (ticket B); o ticket A
+  // (RESOLVED) nao pode aparecer como um segundo card do mesmo numero. Como
+  // os filtros dinamicos (tab/visibilidade/tags/sources/busca) sao objetos
+  // Prisma complexos, evitamos traduzir tudo pra SQL cru: buscamos os IDs
+  // que casam com o `where` NA ORDEM pedida (payload minimo) e colapsamos
+  // em memoria pegando o REPRESENTANTE = primeiro da ordem por grupo. Com
+  // `orderBy` = updatedAt desc (default), o primeiro e' o ticket ativo/mais
+  // recente (os RESOLVED antigos ficam congelados, pois qualquer nova msg
+  // reabre como ticket novo). Historico dos tickets antigos segue acessivel
+  // na timeline continua do chat. Paginamos a lista colapsada e hidratamos
+  // so a pagina com o `listSelect` completo. Ver frontend use-conversations.
+  const keyRows = await prisma.conversation.findMany({
+    where,
+    orderBy,
+    select: { id: true, contactId: true, channel: true },
+  });
+
+  // Quando a listagem e' de UM contato especifico (ex.: abas de ticket do
+  // painel de negocio), NAO colapsa — o caller quer todos os tickets.
+  const collapse = !params.contactId;
+  const seenGroups = new Set<string>();
+  const repIds: string[] = [];
+  for (const r of keyRows) {
+    const groupKey =
+      collapse && r.contactId
+        ? `c:${r.contactId}::${r.channel ?? ""}`
+        : `id:${r.id}`;
+    if (seenGroups.has(groupKey)) continue;
+    seenGroups.add(groupKey);
+    repIds.push(r.id);
+  }
+
+  const total = repIds.length;
+  const pageIds = repIds.slice(skip, skip + perPage);
+
+  const hydrated = await prisma.conversation.findMany({
+    where: { id: { in: pageIds } },
+    select: listSelect,
+  });
+  // Reordena para preservar a ordem paginada de `pageIds` (o `in` nao
+  // garante ordem). Evita cards "pulando" de posicao entre paginas.
+  const byIdRow = new Map(hydrated.map((r) => [r.id, r]));
+  const rows = pageIds
+    .map((id) => byIdRow.get(id))
+    .filter((r): r is (typeof hydrated)[number] => r !== undefined);
 
   const convIds = rows.map((r) => r.id);
   const [previewMap, lastInboundMap] = await Promise.all([
@@ -511,12 +565,73 @@ export async function assignConversationAssignedTo(
   return { ok: true, conversation: updated };
 }
 
+/**
+ * Reabre uma conversa RESOLVED como NOVO ticket (regra "reabrir = novo id").
+ * Se ja existe um ticket ativo pro contato+canal (ex.: um inbound reabriu
+ * antes), reusa; caso contrario cria um novo, tratando a corrida do indice
+ * unico parcial. Herda canal/jid/inbox/responsavel da conversa origem.
+ */
+export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
+  id: string;
+  created: boolean;
+  contactId: string | null;
+  channel: string;
+}> {
+  const src = await prisma.conversation.findUnique({
+    where: { id: sourceId },
+    select: {
+      id: true, contactId: true, channel: true, channelId: true,
+      waJid: true, inboxName: true, assignedToId: true,
+    },
+  });
+  if (!src || !src.contactId) {
+    return { id: sourceId, created: false, contactId: src?.contactId ?? null, channel: src?.channel ?? "" };
+  }
+
+  const findActive = () =>
+    prisma.conversation.findFirst({
+      where: { contactId: src.contactId!, channel: src.channel, status: { not: "RESOLVED" } },
+      select: { id: true },
+    });
+
+  const existing = await findActive();
+  if (existing) {
+    return { id: existing.id, created: false, contactId: src.contactId, channel: src.channel };
+  }
+
+  try {
+    const created = await withConversationNumberRetry((number) =>
+      prisma.conversation.create({
+        data: withOrgFromCtx({
+          number,
+          contactId: src.contactId!,
+          channel: src.channel,
+          status: "OPEN" as const,
+          ...(src.channelId ? { channelId: src.channelId } : {}),
+          ...(src.waJid ? { waJid: src.waJid } : {}),
+          ...(src.inboxName ? { inboxName: src.inboxName } : {}),
+          ...(src.assignedToId ? { assignedToId: src.assignedToId } : {}),
+        }),
+        select: { id: true },
+      }),
+    );
+    return { id: created.id, created: true, contactId: src.contactId, channel: src.channel };
+  } catch (err) {
+    if (isActiveConversationUniqueViolation(err)) {
+      const won = await findActive();
+      if (won) return { id: won.id, created: false, contactId: src.contactId, channel: src.channel };
+    }
+    throw err;
+  }
+}
+
 export async function getConversationLite(id: string) {
   return prisma.conversation.findUnique({
     where: { id },
     select: {
       id: true, externalId: true, contactId: true, status: true,
-      channelId: true, waJid: true, organizationId: true,
+      channel: true, channelId: true, waJid: true, organizationId: true,
+      number: true,
       channelRef: {
         select: { id: true, provider: true, config: true, name: true, phoneNumber: true, type: true },
       },
@@ -524,7 +639,11 @@ export async function getConversationLite(id: string) {
   });
 }
 
-export async function updateConversationStatusInDb(id: string, status: ConversationStatus) {
+export async function updateConversationStatusInDb(
+  id: string,
+  status: ConversationStatus,
+  extra?: { tabulationId?: string | null },
+) {
   // closedAt: preencher quando encerra, limpar quando reabre. Fica em sync
   // com o status pra UI/relatorios sem consultar historico de eventos.
   // Outros valores (PENDING/SNOOZED) nao mexem em closedAt.
@@ -535,9 +654,18 @@ export async function updateConversationStatusInDb(id: string, status: Conversat
         ? { closedAt: null }
         : {};
 
+  // Reabrir (OPEN) limpa a tabulacao — coerente com "novo ciclo". O
+  // caller pode passar `tabulationId` explicito no encerramento, ou omitir.
+  const tabulationPatch: { tabulationId: string | null } | Record<string, never> =
+    status === "OPEN"
+      ? { tabulationId: null }
+      : extra && "tabulationId" in extra
+        ? { tabulationId: extra.tabulationId ?? null }
+        : {};
+
   return prisma.conversation.update({
     where: { id },
-    data: { status, ...closedAtPatch },
+    data: { status, ...closedAtPatch, ...tabulationPatch },
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 }
@@ -551,6 +679,26 @@ export async function updateConversationStatusInDb(id: string, status: Conversat
 export async function nextConversationNumber(): Promise<number> {
   const r = await prisma.conversation.aggregate({ _max: { number: true } });
   return (r._max.number ?? 0) + 1;
+}
+
+/**
+ * Detecta P2002 do indice unico PARCIAL que garante no maximo UMA conversa
+ * ativa (status != RESOLVED) por (organizationId, contactId, channel).
+ * Criado na migration `conversations_active_contact_channel`. Usado pelos
+ * pontos de criacao (baileys/meta/whatsapp-conversation) para tratar a
+ * corrida de mensagens simultaneas do mesmo numero: em vez de criar um 2o
+ * ticket, o caller relê e reusa o ticket vencedor.
+ */
+export function isActiveConversationUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: string; meta?: { target?: string[] | string } };
+  if (e.code !== "P2002") return false;
+  const target = e.meta?.target;
+  const hit = (s: string) =>
+    s.includes("active_contact_channel") || s.includes("contactId");
+  if (Array.isArray(target)) return target.some(hit);
+  if (typeof target === "string") return hit(target);
+  return false;
 }
 
 const CONVERSATION_NUMBER_MAX_RETRIES = 5;

@@ -1,7 +1,9 @@
+import type { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { createActivity, getActivities, isValidActivityType } from "@/services/activities";
+import { getTaskVisibility } from "@/services/task-visibility";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
 
@@ -21,6 +23,7 @@ export async function GET(request: Request) {
     const dealId = searchParams.get("dealId") ?? undefined;
     const contactId = searchParams.get("contactId") ?? undefined;
     const userId = searchParams.get("userId") ?? undefined;
+    const departmentId = searchParams.get("departmentId") ?? undefined;
     const typeRaw = searchParams.get("type");
     const type = typeRaw && isValidActivityType(typeRaw) ? typeRaw : undefined;
     const completedParam = searchParams.get("completed");
@@ -30,14 +33,42 @@ export async function GET(request: Request) {
     const page = parseIntParam(searchParams.get("page"), 1);
     const perPage = parseIntParam(searchParams.get("perPage"), 20);
 
+    // Visibilidade por departamento: ADMIN/MANAGER veem tudo; demais veem
+    // apenas suas tarefas + as dos seus departamentos. `scope` refina:
+    //   mine        → só as minhas (userId = eu)
+    //   department  → só as dos meus departamentos
+    //   all/ausente → tudo que posso ver (own + departamentos)
+    //
+    // IMPORTANTE: só aplicamos a visibilidade de tarefa na LISTA GLOBAL
+    // (tela de Tarefas). Em views escopadas por entidade (dealId/contactId
+    // — ex.: aba de atividades de um negócio), mostramos todas as
+    // atividades daquela entidade; o acesso já é gated pela visibilidade
+    // do próprio deal/contato.
+    const scope = searchParams.get("scope");
+    let viewerWhere: Prisma.ActivityWhereInput = {};
+    if (!dealId && !contactId) {
+      const visibility = await getTaskVisibility(authResult.user);
+      viewerWhere = visibility.where;
+      if (scope === "mine") {
+        viewerWhere = { userId: authResult.user.id };
+      } else if (scope === "department") {
+        viewerWhere = visibility.departmentIds.length
+          ? { departmentId: { in: visibility.departmentIds } }
+          : // Sem departamentos → não retorna nada nesse escopo.
+            { id: "__none__" };
+      }
+    }
+
     const result = await getActivities({
       dealId,
       contactId,
       userId,
+      departmentId,
       type,
       completed,
       page,
       perPage,
+      viewerWhere,
     });
 
     return NextResponse.json(result);
@@ -108,6 +139,16 @@ export async function POST(request: Request) {
       const resolvedDealId =
         b.dealId === null ? null : typeof b.dealId === "string" ? b.dealId : undefined;
 
+      // Responsável: departamento (compartilhada) e/ou usuário. Se nada
+      // for informado, atribui ao próprio criador (compat retroativa).
+      const departmentId =
+        typeof b.departmentId === "string" && b.departmentId ? b.departmentId : undefined;
+      const assigneeUserId =
+        typeof b.userId === "string" && b.userId ? b.userId : undefined;
+      const resolvedUserId = departmentId
+        ? (assigneeUserId ?? null)
+        : (assigneeUserId ?? authResult.user.id);
+
       const activity = await createActivity({
         type: b.type,
         title: b.title,
@@ -127,7 +168,8 @@ export async function POST(request: Request) {
               ? b.contactId
               : undefined,
         dealId: resolvedDealId,
-        userId: authResult.user.id,
+        userId: resolvedUserId,
+        departmentId,
       });
 
       if (resolvedDealId) {
@@ -150,8 +192,19 @@ export async function POST(request: Request) {
 
       return NextResponse.json(activity, { status: 201 });
     } catch (err: unknown) {
-      if (err instanceof Error && err.message === "INVALID_TITLE") {
-        return NextResponse.json({ message: "Título inválido." }, { status: 400 });
+      if (err instanceof Error) {
+        if (err.message === "INVALID_TITLE") {
+          return NextResponse.json({ message: "Título inválido." }, { status: 400 });
+        }
+        if (err.message === "INVALID_DEPARTMENT") {
+          return NextResponse.json({ message: "Departamento inválido." }, { status: 400 });
+        }
+        if (err.message === "MISSING_ASSIGNEE") {
+          return NextResponse.json(
+            { message: "Informe um responsável (usuário ou departamento)." },
+            { status: 400 },
+          );
+        }
       }
       throw err;
     }

@@ -27,6 +27,21 @@ import {
   type ContextActor,
 } from "@/lib/request-context";
 
+/**
+ * M7/M8 — quando `IMPORT_SKIP_ACTIVITY_LOG` está setado (truthy), suprime a
+ * gravação de activity events. Deve ser configurado APENAS no processo do
+ * etl-worker durante cargas em massa: cada linha de import gerava 1+ evento
+ * (um por campo alterado no update), acumulando promises fire-and-forget que
+ * competem pela conexão e inundam `activity_events`. No processo da API
+ * (requests interativos) o flag NÃO deve ser setado.
+ */
+function shouldSkipActivityLog(): boolean {
+  const v = process.env.IMPORT_SKIP_ACTIVITY_LOG;
+  if (!v) return false;
+  const s = v.trim().toLowerCase();
+  return s === "1" || s === "true" || s === "yes";
+}
+
 export type LogEventInput = {
   /// Tipo do evento (SCREAMING_SNAKE_CASE). Ex.: STAGE_CHANGED,
   /// MESSAGE_SENT, CONTACT_CREATED, OWNER_CHANGED, FIELD_CHANGED,
@@ -117,6 +132,7 @@ function resolveActor(input: LogEventInput): {
 /// evita propagar falhas para o caller). Use `await` se quiser garantir
 /// ordem com outras escritas — em geral, deixe sem await.
 export async function logEvent(input: LogEventInput): Promise<void> {
+  if (shouldSkipActivityLog()) return;
   try {
     const actor = resolveActor(input);
     const metaJson = (input.meta ?? {}) as Prisma.InputJsonValue;
@@ -208,6 +224,7 @@ export async function logMessageFailed(input: {
 export async function logEventRaw(
   data: Prisma.ActivityEventUncheckedCreateInput,
 ): Promise<void> {
+  if (shouldSkipActivityLog()) return;
   try {
     await prisma.activityEvent.create({ data });
   } catch (err) {

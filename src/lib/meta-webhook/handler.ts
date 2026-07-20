@@ -4,9 +4,13 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
+import { phoneMatchVariants } from "@/lib/phone";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { nextContactNumber } from "@/services/contacts";
-import { withConversationNumberRetry } from "@/services/conversations";
+import {
+  isActiveConversationUniqueViolation,
+  withConversationNumberRetry,
+} from "@/services/conversations";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -39,6 +43,7 @@ import { fireTrigger } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { maybeReplyAsAIAgent } from "@/services/ai/inbox-handler";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
+import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 
 // Marcador único de build — usado pra confirmar via `grep` no bundle se o
@@ -323,6 +328,7 @@ type CrmContact = {
   name: string;
   phone: string | null;
   whatsappBsuid: string | null;
+  whatsappUsername: string | null;
 };
 
 type ContactRow = {
@@ -330,6 +336,7 @@ type ContactRow = {
   name: string;
   phone: string | null;
   whatsappBsuid: string | null;
+  whatsappUsername: string | null;
 };
 
 /**
@@ -460,22 +467,24 @@ async function resolveWebhookContact(
   bsuidRaw: string | undefined,
   profileName: string | null,
   phoneNumberId?: string,
+  opts?: { username?: string | null },
 ): Promise<CrmContact>;
 async function resolveWebhookContact(
   waIdRaw: string | undefined,
   bsuidRaw: string | undefined,
   profileName: string | null,
   phoneNumberId: string | undefined,
-  opts: { createIfMissing: false },
+  opts: { createIfMissing: false; username?: string | null },
 ): Promise<CrmContact | null>;
 async function resolveWebhookContact(
   waIdRaw: string | undefined,
   bsuidRaw: string | undefined,
   profileName: string | null,
   phoneNumberId?: string,
-  opts: { createIfMissing?: boolean } = {},
+  opts: { createIfMissing?: boolean; username?: string | null } = {},
 ): Promise<CrmContact | null> {
   const createIfMissing = opts.createIfMissing !== false;
+  const username = opts.username?.trim().replace(/^@/, "") || undefined;
   const bsuid = bsuidRaw?.trim() || undefined;
   let phone: string | null = null;
   if (waIdRaw) {
@@ -493,15 +502,18 @@ async function resolveWebhookContact(
   if (bsuid) {
     byBs = await prisma.contact.findFirst({
       where: { whatsappBsuid: bsuid },
-      select: { id: true, name: true, phone: true, whatsappBsuid: true },
+      select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
     });
   }
 
   let byPh: ContactRow | null = null;
   if (phone) {
+    // Match por variantes E.164 (cobre com/sem 9º dígito BR). Já é
+    // org-scoped pela extensão do Prisma dentro de withSystemContext.
+    const variants = phoneMatchVariants(phone);
     byPh = await prisma.contact.findFirst({
-      where: { phone },
-      select: { id: true, name: true, phone: true, whatsappBsuid: true },
+      where: variants.length > 0 ? { phone: { in: variants } } : { phone },
+      select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
     });
   }
 
@@ -521,17 +533,25 @@ async function resolveWebhookContact(
   }
 
   if (!contactRow && phone) {
-    const phoneSuffix = waIdRaw!.replace(/\D/g, "");
-    const candidates = await prisma.contact.findMany({
-      where: { phone: { not: null } },
-      select: { id: true, name: true, phone: true, whatsappBsuid: true },
-      take: 500,
-    });
-    const byFuzzy = candidates.find((c) => {
-      const d = (c.phone ?? "").replace(/\D/g, "");
-      return d.length >= 10 && phoneSuffix.length >= 10 && d.endsWith(phoneSuffix.slice(-10));
-    });
-    if (byFuzzy) contactRow = byFuzzy;
+    // Fallback para bases legadas ainda NÃO normalizadas (telefone gravado
+    // fora do E.164). Filtra por sufixo dos 8 dígitos do assinante — que é
+    // idêntico com ou sem o 9º dígito — e confirma pela comparação de
+    // variantes (que reintroduz o DDD, evitando colisão entre DDDs). Sem o
+    // antigo `take: 500`, que fazia o match silenciosamente incompleto em
+    // orgs grandes; `endsWith` mantém o conjunto de candidatos pequeno.
+    const digits = phone.replace(/\D/g, "");
+    const last8 = digits.slice(-8);
+    if (last8.length === 8) {
+      const variantSet = new Set(phoneMatchVariants(phone));
+      const candidates = await prisma.contact.findMany({
+        where: { phone: { endsWith: last8 } },
+        select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
+      });
+      const byFuzzy = candidates.find((c) =>
+        phoneMatchVariants(c.phone).some((v) => variantSet.has(v)),
+      );
+      if (byFuzzy) contactRow = byFuzzy;
+    }
   }
 
   // Fallback por `profile.name` REMOVIDO em 2026-06-30.
@@ -559,15 +579,31 @@ async function resolveWebhookContact(
   // feito aqui (migration separada, fora deste escopo).
 
   if (contactRow) {
-    const updates: { name?: string; phone?: string | null; whatsappBsuid?: string } = {};
+    const updates: {
+      name?: string;
+      phone?: string | null;
+      whatsappBsuid?: string;
+      whatsappUsername?: string;
+    } = {};
     if (profileName && contactRow.name.startsWith("Lead +")) {
-      updates.name = profileName;
+      updates.name = sanitizeContactName(profileName) || profileName;
+    } else {
+      // Contatos antigos com emoji no nome: limpa na próxima mensagem.
+      const cleaned = sanitizeContactName(contactRow.name);
+      if (cleaned && cleaned !== contactRow.name) {
+        updates.name = cleaned;
+      }
     }
     if (phone && !contactRow.phone) {
       updates.phone = phone;
     }
     if (bsuid && !contactRow.whatsappBsuid) {
       updates.whatsappBsuid = bsuid;
+    }
+    // Backfill do @ do WhatsApp: grava sempre que o payload trouxer o
+    // username e o valor mudou (o cliente pode ter adotado/trocado).
+    if (username && contactRow.whatsappUsername !== username) {
+      updates.whatsappUsername = username;
     }
     if (Object.keys(updates).length > 0) {
       prisma.contact
@@ -600,6 +636,7 @@ async function resolveWebhookContact(
       name: contactRow.name,
       phone: contactRow.phone ?? null,
       whatsappBsuid: contactRow.whatsappBsuid ?? null,
+      whatsappUsername: contactRow.whatsappUsername ?? null,
     };
   }
 
@@ -611,7 +648,7 @@ async function resolveWebhookContact(
   }
 
   const name =
-    profileName ||
+    (profileName ? sanitizeContactName(profileName) || profileName : null) ||
     (phone ? `Lead ${phone}` : `Lead WhatsApp (${(bsuid ?? "").slice(0, 18)}…)`);
 
   const sourceName = await getChannelSourceName(phoneNumberId);
@@ -622,10 +659,11 @@ async function resolveWebhookContact(
       name,
       ...(phone ? { phone } : {}),
       ...(bsuid ? { whatsappBsuid: bsuid } : {}),
+      ...(username ? { whatsappUsername: username } : {}),
       lifecycleStage: "LEAD" as const,
       source: sourceName,
     }),
-    select: { id: true, name: true, phone: true, whatsappBsuid: true },
+    select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
   });
 
   // Dispara automações com trigger "contact_created" (fire-and-forget,
@@ -655,6 +693,7 @@ async function resolveWebhookContact(
     name: created.name,
     phone: created.phone ?? null,
     whatsappBsuid: created.whatsappBsuid ?? null,
+    whatsappUsername: created.whatsappUsername ?? null,
   };
 }
 
@@ -669,16 +708,21 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
 
   // Modelo de ticket: contatos com conversa RESOLVED geram NOVA conversa
   // na proxima mensagem inbound (nao reabre). Ver AGENT.md.
-  const existing = await prisma.conversation.findFirst({
-    where: {
-      contactId,
-      channel: "whatsapp",
-      status: { not: "RESOLVED" },
-    },
-    // PR 1.3: incluímos organizationId para que callers (download de
-    // mídia inbound) possam roteá-lo no storage tenant-scoped.
-    select: { id: true, status: true, channelId: true, organizationId: true },
-  });
+  const convSelect = {
+    id: true,
+    status: true,
+    channelId: true,
+    organizationId: true,
+  } as const;
+  const findActive = () =>
+    prisma.conversation.findFirst({
+      where: { contactId, channel: "whatsapp", status: { not: "RESOLVED" } },
+      // PR 1.3: incluímos organizationId para que callers (download de
+      // mídia inbound) possam roteá-lo no storage tenant-scoped.
+      select: convSelect,
+    });
+
+  const existing = await findActive();
 
   if (existing) {
     // Reusa a conversa aberta. So reconcilia canal (para o inbox mostrar
@@ -698,19 +742,30 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     select: { assignedToId: true },
   });
 
-  return withConversationNumberRetry((number) =>
-    prisma.conversation.create({
-      data: withOrgFromCtx({
-        number,
-        contactId,
-        channel: "whatsapp",
-        channelId: targetChannel?.id,
-        status: "OPEN" as const,
-        ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+  try {
+    return await withConversationNumberRetry((number) =>
+      prisma.conversation.create({
+        data: withOrgFromCtx({
+          number,
+          contactId,
+          channel: "whatsapp",
+          channelId: targetChannel?.id,
+          status: "OPEN" as const,
+          ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+        }),
+        select: convSelect,
       }),
-      select: { id: true, status: true, channelId: true, organizationId: true },
-    }),
-  );
+    );
+  } catch (err) {
+    // Corrida: dois webhooks/mensagens simultaneos do mesmo numero. O
+    // indice unico parcial rejeita o 2o create com P2002 — reusa o
+    // ticket vencedor em vez de duplicar.
+    if (isActiveConversationUniqueViolation(err)) {
+      const won = await findActive();
+      if (won) return { ...won, channelId: targetChannel?.id ?? won.channelId };
+    }
+    throw err;
+  }
 }
 
 // ── Extract message content ──────────────────────
@@ -1237,26 +1292,41 @@ async function processStatusUpdate(status: Record<string, unknown>) {
   try {
     const msg = await prisma.message.findFirst({
       where: { externalId: wamid },
-      select: { id: true, sendStatus: true, conversationId: true },
+      select: {
+        id: true,
+        sendStatus: true,
+        conversationId: true,
+        organizationId: true,
+        externalId: true,
+      },
     });
-    if (msg) {
-      // Progressão normal: pending(0) → sent(1) → delivered(2) → read(3).
-      // "failed" NÃO entra nessa escala — é um estado terminal que
-      // SEMPRE deve sobrepor, porque a Meta pode mandar `sent` no ACK
-      // inicial e minutos depois `failed` (cliente bloqueou, janela de
-      // 24h expirou na entrega, número inválido, etc). Antes o código
-      // tratava failed como prioridade 0 e descartava esse callback,
-      // deixando a UI eternamente com ✓ mesmo após a falha real.
-      const statusPriority: Record<string, number> = { sent: 1, delivered: 2, read: 3 };
-      const currentPriority = statusPriority[msg.sendStatus] ?? 0;
-      const newPriority = statusPriority[s] ?? 0;
+    if (!msg) {
+      // Status chegou antes do externalId ser gravado (race raro) ou
+      // wamid desconhecido — sem mensagem não há o que atualizar na UI.
+      log.info(`Status ${s} ignorado: mensagem externalId=${wamid} não encontrada`);
+      await updateCampaignRecipientStatus(wamid, s, status);
+      return;
+    }
 
-      const isFailure = s === "failed";
-      const shouldUpdate = isFailure
-        ? msg.sendStatus !== "failed"
-        : newPriority > currentPriority;
+    // Progressão normal: pending(0) → sent(1) → delivered(2) → read(3).
+    // "failed" NÃO entra nessa escala — é um estado terminal que
+    // SEMPRE deve sobrepor, porque a Meta pode mandar `sent` no ACK
+    // inicial e minutos depois `failed` (cliente bloqueou, janela de
+    // 24h expirou na entrega, número inválido, etc). Antes o código
+    // tratava failed como prioridade 0 e descartava esse callback,
+    // deixando a UI eternamente com ✓ mesmo após a falha real.
+    const statusPriority: Record<string, number> = { sent: 1, delivered: 2, read: 3 };
+    // Normaliza caso (outros caminhos podem gravar SENT/DELIVERED/READ).
+    const currentPriority =
+      statusPriority[(msg.sendStatus ?? "").toLowerCase()] ?? 0;
+    const newPriority = statusPriority[s] ?? 0;
 
-      if (shouldUpdate) {
+    const isFailure = s === "failed";
+    const shouldUpdate = isFailure
+      ? (msg.sendStatus ?? "").toLowerCase() !== "failed"
+      : newPriority > currentPriority;
+
+    if (shouldUpdate) {
         // Estrutura oficial do erro do webhook (Meta docs):
         //   errors[i] = { code, title, message, error_data: { details }, href }
         // Recomendação Meta: usar `code` como chave de lógica, `error_data.details`
@@ -1364,16 +1434,27 @@ async function processStatusUpdate(status: Record<string, unknown>) {
           })();
         }
 
+        // O GET /messages expõe id = externalId ?? id (id da bolha no
+        // front). Se publicarmos só o UUID interno, o update otimista
+        // nunca casa e os ticks só mudam no refetch/poll.
+        const bubbleId = msg.externalId ?? msg.id;
+        const orgId = getOrgIdOrNull() ?? msg.organizationId;
         try {
           sseBus.publish("message_status", {
-            organizationId: getOrgIdOrNull(),
+            organizationId: orgId,
             conversationId: msg.conversationId,
-            messageId: msg.id,
+            messageId: bubbleId,
+            internalId: msg.id,
             status: s,
             ...(isFailure && sendError ? { error: sendError } : {}),
           });
         } catch {}
-      }
+
+        if (s === "read") {
+          log.info(
+            `Mensagem lida wamid=${wamid} conversationId=${msg.conversationId} bubbleId=${bubbleId}`,
+          );
+        }
     }
 
     await updateCampaignRecipientStatus(wamid, s, status);
@@ -1859,14 +1940,20 @@ async function executePostBody(
       }
 
       const contactMap = new Map<string, string>();
+      // @ do WhatsApp: `contacts[].profile.username` (só presente quando o
+      // usuário adotou username). Chaveamos por wa_id e user_id igual ao nome.
+      const usernameMap = new Map<string, string>();
       for (const c of contacts) {
         const co = obj(c);
         const waId = str(co.wa_id);
         const userId = str(co.user_id);
         const profile = obj(co.profile);
         const name = str(profile.name) || str(profile.username);
+        const username = str(profile.username);
         if (waId && name) contactMap.set(waId, name);
         if (userId && name) contactMap.set(userId, name);
+        if (waId && username) usernameMap.set(waId, username);
+        if (userId && username) usernameMap.set(userId, username);
       }
 
       for (const msg of messages) {
@@ -1922,6 +2009,10 @@ async function executePostBody(
             (from && contactMap.get(from)) ||
             (fromUserId && contactMap.get(fromUserId)) ||
             null;
+          const profileUsername =
+            (from && usernameMap.get(from)) ||
+            (fromUserId && usernameMap.get(fromUserId)) ||
+            null;
 
           // Tratamento especial para mensagens de sistema "user_changed_number":
           // o payload vem com o NOVO wa_id/BSUID, e se o contato antigo não
@@ -1945,6 +2036,7 @@ async function executePostBody(
                   name: true,
                   phone: true,
                   whatsappBsuid: true,
+                  whatsappUsername: true,
                 },
               });
               if (byOld) {
@@ -1953,6 +2045,7 @@ async function executePostBody(
                   name: byOld.name,
                   phone: byOld.phone ?? null,
                   whatsappBsuid: byOld.whatsappBsuid ?? null,
+                  whatsappUsername: byOld.whatsappUsername ?? null,
                 };
                 log.info(
                   `Troca de número: contato antigo ${byOld.id} localizado pelo oldPhone ${normalizedOld} → novo ${sysEvent.newPhone ?? "?"}`,
@@ -1966,7 +2059,7 @@ async function executePostBody(
                 fromUserId || undefined,
                 profileName,
                 phoneNumberId || undefined,
-                { createIfMissing: false },
+                { createIfMissing: false, username: profileUsername },
               );
             }
             if (!contact) {
@@ -1983,6 +2076,7 @@ async function executePostBody(
               fromUserId || undefined,
               profileName,
               phoneNumberId || undefined,
+              { username: profileUsername },
             );
           }
           // Evita warning de variável unused quando o fluxo principal

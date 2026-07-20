@@ -19,6 +19,7 @@ export type AutomationTriggerType =
   | "message_sent"
   | "call_received"
   | "call_made"
+  | "conversation_tabulated"
   | "manual";
 
 export type AutomationStep = {
@@ -42,6 +43,7 @@ export const AUTOMATION_TRIGGER_TYPES: AutomationTriggerType[] = [
   "message_sent",
   "call_received",
   "call_made",
+  "conversation_tabulated",
   "manual",
 ];
 
@@ -96,6 +98,7 @@ export function triggerTypeLabel(t: string): string {
     message_sent: "Mensagem enviada",
     call_received: "Ligação recebida",
     call_made: "Ligação realizada",
+    conversation_tabulated: "Conversa tabulada (encerramento)",
     manual: "Manual (executar pela conversa)",
   };
   return map[t] ?? t;
@@ -204,6 +207,12 @@ export function summarizeTriggerConfig(
     }
     case "manual":
       return "Disparada manualmente da conversa";
+    case "conversation_tabulated": {
+      if (c.tabulationLabel) return `Tabulação: ${String(c.tabulationLabel)}`;
+      if (c.tabulationId) return `Tabulação ID: ${String(c.tabulationId).slice(0, 8)}…`;
+      if (c.departmentId) return `Departamento: ${String(c.departmentId).slice(0, 8)}…`;
+      return "Qualquer tabulação";
+    }
     default:
       return "—";
   }
@@ -624,6 +633,13 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
       return { status: "" };
     case "manual":
       return {};
+    case "conversation_tabulated":
+      // Escopo por departamento + tabulacao especifica (opcional).
+      // Sem tabulationId => casa qualquer tabulacao do departamento.
+      // Sem departmentId => casa qualquer conversa tabulada.
+      // Matching considera ancestrais (mirar categoria pai vale pra
+      // descendentes — ver evaluateTrigger em services/automations.ts).
+      return { departmentId: "", tabulationId: "", tabulationLabel: "" };
     default:
       return {};
   }

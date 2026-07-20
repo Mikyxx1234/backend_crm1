@@ -2,10 +2,9 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
-import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import {
   assertLostReasonAllowed,
   assignDealOwner,
@@ -92,7 +91,15 @@ export async function POST(request: Request) {
           }
         }
 
-        const stage = await prisma.stage.findUnique({ where: { id: stageId }, select: { id: true, name: true } });
+        const stage = await prisma.stage.findUnique({
+          where: { id: stageId },
+          select: {
+            id: true,
+            name: true,
+            pipelineId: true,
+            pipeline: { select: { id: true, name: true } },
+          },
+        });
         if (!stage) return NextResponse.json({ message: "Etapa não encontrada." }, { status: 404 });
 
         // Modo async opt-in: explicito (body.async=true) ou implícito por
@@ -170,11 +177,24 @@ export async function POST(request: Request) {
 
         const deals = await prisma.deal.findMany({
           where: { id: { in: dealIds } },
-          select: { id: true, stageId: true, status: true, stage: { select: { name: true } } },
+          select: {
+            id: true,
+            stageId: true,
+            status: true,
+            stage: {
+              select: {
+                name: true,
+                pipelineId: true,
+                pipeline: { select: { id: true, name: true } },
+              },
+            },
+          },
         });
 
         for (const deal of deals) {
           if (deal.stageId !== stageId) {
+            const pipelineChanged =
+              deal.stage.pipelineId !== stage.pipelineId;
             // Estágios terminais (Ganho/Perdido) sincronizam Deal.status
             // — mesma regra do moveDeal single.
             const statusPatch = targetFlags?.isWon
@@ -191,12 +211,28 @@ export async function POST(request: Request) {
 
             await prisma.deal.update({ where: { id: deal.id }, data: { stageId, ...statusPatch } });
             createDealEvent(deal.id, uid, "STAGE_CHANGED", {
-              from: { id: deal.stageId, name: deal.stage.name },
-              to: { id: stage.id, name: stage.name },
+              from: {
+                id: deal.stageId,
+                name: deal.stage.name,
+                pipelineId: deal.stage.pipelineId,
+                pipelineName: deal.stage.pipeline?.name ?? null,
+              },
+              to: {
+                id: stage.id,
+                name: stage.name,
+                pipelineId: stage.pipelineId,
+                pipelineName: stage.pipeline?.name ?? null,
+              },
+              ...(pipelineChanged ? { pipelineChanged: true } : {}),
             }).catch(() => {});
             fireTrigger("stage_changed", {
               dealId: deal.id,
-              data: { fromStageId: deal.stageId, toStageId: stageId },
+              data: {
+                fromStageId: deal.stageId,
+                toStageId: stageId,
+                fromPipelineId: deal.stage.pipelineId,
+                toPipelineId: stage.pipelineId,
+              },
             }).catch(() => {});
             if ("status" in statusPatch && statusPatch.status && statusPatch.status !== deal.status) {
               createDealEvent(deal.id, uid, "STATUS_CHANGED", { from: deal.status, to: statusPatch.status }).catch(() => {});
@@ -243,12 +279,15 @@ export async function POST(request: Request) {
         // e sincroniza status/closedAt — mesma semântica do single.
         const deals = await prisma.deal.findMany({
           where: { id: { in: dealIds }, status: { not: "WON" } },
-          select: { id: true, status: true },
+          select: { id: true, status: true, stageId: true },
         });
         for (const deal of deals) {
-          await markDealWon(deal.id);
+          const updated = await markDealWon(deal.id);
           createDealEvent(deal.id, uid, "STATUS_CHANGED", { from: deal.status, to: "WON" }).catch(() => {});
           fireTrigger("deal_won", { dealId: deal.id, data: { fromStatus: deal.status } }).catch(() => {});
+          // markDealWon move pro estágio terminal Ganho — dispara também
+          // "mudança de fase" pra automações "quando entra na fase X".
+          notifyDealStageChanged(deal.id, deal.stageId, updated.stageId).catch(() => {});
           affected++;
         }
       }
@@ -256,16 +295,39 @@ export async function POST(request: Request) {
       if (action === "mark_lost") {
         const lostReason = typeof body.lostReason === "string" ? body.lostReason.trim() : "";
 
-        const required = await getOrgSettingBool("deals.loss_reason_required", false);
-        if (required && !lostReason) {
-          return NextResponse.json({ message: "Motivo da perda é obrigatório." }, { status: 400 });
+        const deals = await prisma.deal.findMany({
+          where: { id: { in: dealIds }, status: { not: "LOST" } },
+          select: {
+            id: true,
+            status: true,
+            stageId: true,
+            stage: { select: { pipelineId: true } },
+          },
+        });
+
+        // Obrigatoriedade por funil — se qualquer deal estiver em funil
+        // com lossReasonRequired, exige motivo.
+        if (!lostReason && deals.length > 0) {
+          const pipeIds = [...new Set(deals.map((d) => d.stage.pipelineId))];
+          const requiredPipes = await prisma.pipeline.findMany({
+            where: { id: { in: pipeIds }, lossReasonRequired: true },
+            select: { id: true },
+          });
+          if (requiredPipes.length > 0) {
+            return NextResponse.json(
+              { message: "Motivo da perda é obrigatório neste funil." },
+              { status: 400 },
+            );
+          }
         }
 
-        // Gate "Permitir outro" — falha o bulk inteiro antes de iniciar o
-        // loop, evitando estado parcial (N deals marcados, restante rejeitado).
+        // Gate "Permitir outro" — valida contra o catálogo/vínculo do funil
+        // de cada deal (falha o bulk inteiro antes do loop).
         if (lostReason) {
           try {
-            await assertLostReasonAllowed(lostReason);
+            for (const d of deals) {
+              await assertLostReasonAllowed(lostReason, d.stage.pipelineId);
+            }
           } catch (err) {
             if (err instanceof Error && err.message === "INVALID_LOST_REASON") {
               return NextResponse.json(
@@ -279,15 +341,13 @@ export async function POST(request: Request) {
             throw err;
           }
         }
-
-        const deals = await prisma.deal.findMany({
-          where: { id: { in: dealIds }, status: { not: "LOST" } },
-          select: { id: true, status: true },
-        });
         for (const deal of deals) {
-          await markDealLost(deal.id, lostReason);
+          const updated = await markDealLost(deal.id, lostReason);
           createDealEvent(deal.id, uid, "STATUS_CHANGED", { from: deal.status, to: "LOST", lostReason }).catch(() => {});
           fireTrigger("deal_lost", { dealId: deal.id, data: { fromStatus: deal.status, lostReason } }).catch(() => {});
+          // markDealLost move pro estágio terminal Perdido — dispara também
+          // "mudança de fase" pra automações "quando entra na fase X".
+          notifyDealStageChanged(deal.id, deal.stageId, updated.stageId).catch(() => {});
           affected++;
         }
       }

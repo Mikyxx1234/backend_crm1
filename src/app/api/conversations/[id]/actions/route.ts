@@ -14,6 +14,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
+import { assertLeafInDepartment, getAncestors } from "@/services/tabulations";
 
 async function logDealEventsForConversationContact(
   conversationId: string,
@@ -159,12 +160,14 @@ export async function POST(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
       }
 
-      // Modelo de ticket (aprovado 15/jul/26): action="reopen" NAO promove
-      // a conversa antiga de RESOLVED->OPEN. Ao inves disso, cria uma
-      // NOVA conversa vinculada ao mesmo contato/canal, com #N+1, e
-      // retorna o novo id para o frontend redirecionar. Assim cada ciclo
-      // vira um "ticket" independente com timeline propria. Ver
-      // AGENT.md "ID de conversa + ticket".
+      // Modelo de ticket: action="reopen" NAO promove a conversa antiga de
+      // RESOLVED->OPEN. Cria uma NOVA conversa vinculada ao mesmo
+      // contato/canal, com #N+1, e retorna o novo id para o frontend
+      // redirecionar. Assim cada ciclo vira um "ticket" independente com
+      // timeline propria. Ver AGENT.md "ID de conversa + ticket".
+      //
+      // A conversa antiga JA esta RESOLVED, entao criar a nova nao colide
+      // com o indice unico parcial (que so cobre status != RESOLVED).
       if (action === "reopen") {
         if (conv.status !== "RESOLVED") {
           return NextResponse.json(
@@ -179,8 +182,6 @@ export async function POST(request: Request, context: RouteContext) {
           );
         }
 
-        // Snapshot dos campos relevantes da conversa origem — nao carrega
-        // no `getConversationById` por padrao, entao lê agora.
         const src = await prisma.conversation.findUnique({
           where: { id },
           select: {
@@ -198,37 +199,57 @@ export async function POST(request: Request, context: RouteContext) {
           );
         }
 
-        const created = await withConversationNumberRetry((number) =>
-          prisma.conversation.create({
-            data: withOrgFromCtx({
-              number,
-              channel: src.channel,
-              status: "OPEN" as const,
-              inboxName: src.inboxName ?? null,
-              contactId: src.contactId!,
-              ...(src.channelId ? { channelId: src.channelId } : {}),
-              ...(src.assignedToId ? { assignedToId: src.assignedToId } : {}),
+        // Guard extra contra corrida: se ja existe um ticket ATIVO pro
+        // contato+canal (ex.: inbound reabriu enquanto o operador clicava),
+        // reusa em vez de tentar criar e violar o indice unico parcial.
+        const alreadyActive = await prisma.conversation.findFirst({
+          where: {
+            contactId: src.contactId,
+            channel: src.channel,
+            status: { not: "RESOLVED" },
+          },
+          select: {
+            id: true,
+            number: true,
+            status: true,
+            externalId: true,
+            channel: true,
+            channelId: true,
+            inboxName: true,
+            createdAt: true,
+            updatedAt: true,
+          },
+        });
+
+        const created =
+          alreadyActive ??
+          (await withConversationNumberRetry((number) =>
+            prisma.conversation.create({
+              data: withOrgFromCtx({
+                number,
+                channel: src.channel,
+                status: "OPEN" as const,
+                inboxName: src.inboxName ?? null,
+                contactId: src.contactId!,
+                ...(src.channelId ? { channelId: src.channelId } : {}),
+                ...(src.assignedToId ? { assignedToId: src.assignedToId } : {}),
+              }),
+              select: {
+                id: true,
+                number: true,
+                status: true,
+                externalId: true,
+                channel: true,
+                channelId: true,
+                inboxName: true,
+                createdAt: true,
+                updatedAt: true,
+              },
             }),
-            select: {
-              id: true,
-              number: true,
-              status: true,
-              externalId: true,
-              channel: true,
-              channelId: true,
-              inboxName: true,
-              contactId: true,
-              assignedToId: true,
-              createdAt: true,
-              updatedAt: true,
-            },
-          }),
-        );
+          ));
 
         const uid = (session.user as { id: string }).id;
 
-        // Log de rastreabilidade: conversa origem ganha um evento REOPENED
-        // apontando pro novo ticket; a nova ganha CREATED (padrao).
         void logEvent({
           type: "CONVERSATION_REOPENED",
           entityType: "CONVERSATION",
@@ -241,38 +262,41 @@ export async function POST(request: Request, context: RouteContext) {
           newValue: "OPEN",
           meta: { action, newConversationId: created.id, newNumber: created.number },
         });
-        void logEvent({
-          type: "CONVERSATION_CREATED",
-          entityType: "CONVERSATION",
-          entityId: created.id,
-          entityLabel: null,
-          conversationId: created.id,
-          contactId: conv.contact.id,
-          meta: {
-            channel: created.channel,
-            inboxName: created.inboxName,
-            source: "reopen",
-            previousConversationId: id,
-          },
-        });
+        if (!alreadyActive) {
+          void logEvent({
+            type: "CONVERSATION_CREATED",
+            entityType: "CONVERSATION",
+            entityId: created.id,
+            entityLabel: null,
+            conversationId: created.id,
+            contactId: conv.contact.id,
+            meta: {
+              channel: created.channel,
+              inboxName: created.inboxName,
+              source: "reopen",
+              previousConversationId: id,
+            },
+          });
+        }
         await logDealEventsForConversationContact(id, uid, "CONVERSATION_REOPENED", {
           action,
           newConversationId: created.id,
           newNumber: created.number,
         });
 
-        // Dispara automacao — cada ticket ativa "boas-vindas"/SLA de novo.
-        fireTrigger("conversation_created", {
-          contactId: conv.contact.id,
-          data: {
-            channel: created.channel,
-            inboxName: created.inboxName,
-            source: "reopen",
-            previousConversationId: id,
-          },
-        }).catch(() => {
-          /* fire-and-forget */
-        });
+        if (!alreadyActive) {
+          fireTrigger("conversation_created", {
+            contactId: conv.contact.id,
+            data: {
+              channel: created.channel,
+              inboxName: created.inboxName,
+              source: "reopen",
+              previousConversationId: id,
+            },
+          }).catch(() => {
+            /* fire-and-forget */
+          });
+        }
 
         return NextResponse.json({
           conversation: {
@@ -310,7 +334,57 @@ export async function POST(request: Request, context: RouteContext) {
         );
       }
 
-      const updated = await updateConversationStatusInDb(id, dbStatus);
+      // Tabulacao ao encerrar. Somente aplicavel quando esta indo pra
+      // RESOLVED e a conversa tem departamento vinculado. Se o
+      // departamento exigir e o body nao trouxer id valido (folha na
+      // arvore do dept) -> 400 (defesa; UI ja bloqueia o botao).
+      let tabulationId: string | null = null;
+      let tabulationAncestors: string[] = [];
+      let tabulationDepartmentId: string | null = null;
+      if (dbStatus === "RESOLVED") {
+        const dept = await prisma.conversation.findUnique({
+          where: { id },
+          select: {
+            departmentId: true,
+            department: { select: { id: true, requireTabulationOnClose: true } },
+          },
+        });
+        const rawTab = typeof b.tabulationId === "string" ? b.tabulationId.trim() : "";
+        const requires = !!dept?.department?.requireTabulationOnClose;
+        if (requires && !rawTab) {
+          return NextResponse.json(
+            {
+              message: "Este departamento exige uma tabulacao ao encerrar.",
+              code: "TABULATION_REQUIRED",
+            },
+            { status: 400 },
+          );
+        }
+        if (rawTab) {
+          if (!dept?.departmentId) {
+            return NextResponse.json(
+              { message: "Conversa sem departamento — nao aceita tabulacao." },
+              { status: 400 },
+            );
+          }
+          try {
+            await assertLeafInDepartment(rawTab, dept.departmentId);
+          } catch (e) {
+            const code = (e as { code?: string }).code ?? "TABULATION_INVALID";
+            return NextResponse.json(
+              { message: (e as Error).message, code },
+              { status: 400 },
+            );
+          }
+          tabulationId = rawTab;
+          tabulationDepartmentId = dept.departmentId;
+          tabulationAncestors = await getAncestors(rawTab);
+        }
+      }
+
+      const updated = await updateConversationStatusInDb(id, dbStatus, {
+        tabulationId,
+      });
 
       if (conv.status !== updated.status) {
         const uid = (session.user as { id: string }).id;
@@ -345,7 +419,48 @@ export async function POST(request: Request, context: RouteContext) {
           field: "status",
           oldValue: conv.status,
           newValue: updated.status,
-          meta: { action },
+          meta: { action, ...(tabulationId ? { tabulationId } : {}) },
+        });
+      }
+
+      // Trigger de automacao conversation_tabulated (soh quando o
+      // encerramento gravou tabulacao). Roda depois de logs, fire-and-forget.
+      if (dbStatus === "RESOLVED" && tabulationId) {
+        void logEvent({
+          type: "CONVERSATION_TABULATED",
+          entityType: "CONVERSATION",
+          entityId: id,
+          entityLabel: updated.externalId ?? null,
+          conversationId: id,
+          contactId: conv.contact?.id ?? null,
+          meta: {
+            tabulationId,
+            ancestorIds: tabulationAncestors,
+            departmentId: tabulationDepartmentId,
+          },
+        });
+        // Resolve dealId (primeiro deal aberto do contato) para automacoes
+        // que dependem de contexto de negocio (mover card, mudar funil).
+        let dealId: string | undefined;
+        if (conv.contact?.id) {
+          const deal = await prisma.deal.findFirst({
+            where: { contactId: conv.contact.id, status: "OPEN" },
+            orderBy: { createdAt: "desc" },
+            select: { id: true },
+          });
+          dealId = deal?.id;
+        }
+        fireTrigger("conversation_tabulated", {
+          contactId: conv.contact?.id ?? undefined,
+          dealId,
+          data: {
+            tabulationId,
+            ancestorIds: tabulationAncestors,
+            departmentId: tabulationDepartmentId,
+            conversationId: id,
+          },
+        }).catch(() => {
+          /* fire-and-forget */
         });
       }
 
@@ -354,6 +469,7 @@ export async function POST(request: Request, context: RouteContext) {
           id: updated.id,
           status: updated.status,
           externalId: updated.externalId,
+          tabulationId: updated.tabulationId,
         },
       });
     } catch (e: unknown) {

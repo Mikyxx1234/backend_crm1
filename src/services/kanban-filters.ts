@@ -361,6 +361,15 @@ export async function buildDealWhereFromFilters(
       { contact: { name: { contains: search, mode: "insensitive" } } },
       { contact: { email: { contains: search, mode: "insensitive" } } },
       { contact: { phone: { contains: search } } },
+      // Busca em QUALQUER valor de campo personalizado (RGM, CPF, matrícula,
+      // etc.) — tanto do negócio quanto do contato vinculado. Espelha o que a
+      // lista de contatos já faz (services/contacts.ts).
+      { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
+      {
+        contact: {
+          customFields: { some: { value: { contains: search, mode: "insensitive" } } },
+        },
+      },
     ];
 
     // Casa busca por telefone independente da formatação salva no banco.
@@ -372,9 +381,13 @@ export async function buildDealWhereFromFilters(
       }
       // Se a busca é PURAMENTE numérica, também tenta casar o número do
       // próprio deal (`#123` na busca → match no `number`).
+      // IMPORTANTE: `Deal.number` é Int (int4, máx 2.147.483.647). Buscas
+      // numéricas longas (CPF, RGM, telefone) estouram esse limite e fazem
+      // o Postgres abortar a query inteira ("value out of range for type
+      // integer") — por isso só aplicamos o match quando cabe no int32.
       if (/^\d+$/.test(search)) {
         const asNumber = Number(search);
-        if (Number.isFinite(asNumber)) {
+        if (Number.isInteger(asNumber) && asNumber >= 0 && asNumber <= 2147483647) {
           or.push({ number: asNumber });
         }
       }

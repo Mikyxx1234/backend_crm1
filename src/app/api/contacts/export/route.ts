@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { csvDate, toCsv } from "@/lib/csv-stringify";
+import { resolveContactDisplayName } from "@/lib/display-name";
 import { prisma } from "@/lib/prisma";
 
 const MAX_ROWS = 100_000;
@@ -38,6 +39,20 @@ export async function GET(request: Request) {
         orderBy: { name: "asc" },
       });
 
+      // Campos personalizados do NEGÓCIO — viram colunas "Negócio — <campo>"
+      // no export de contatos, para o relatório por telefone sempre trazer os
+      // dados da matrícula (cpf, curso, email, email_academico, rgm, polo,
+      // nascimento, situação...). Cada campo mantém sua própria coluna.
+      const dealFields = await prisma.customField.findMany({
+        where: { entity: "deal" },
+        select: { id: true, name: true },
+        orderBy: { name: "asc" },
+      });
+      // ID do email pessoal do negócio — usado como fallback da coluna "E-mail"
+      // base do contato (email_academico NÃO entra aqui, é campo distinto).
+      const dealPersonalEmailCfId =
+        dealFields.find((f) => f.name === "email")?.id ?? null;
+
       const contacts = await prisma.contact.findMany({
         take: MAX_ROWS,
         orderBy: [{ createdAt: "asc" }],
@@ -46,6 +61,16 @@ export async function GET(request: Request) {
           assignedTo: { select: { id: true, name: true, email: true } },
           tags: { include: { tag: { select: { name: true } } } },
           customFields: { select: { customFieldId: true, value: true } },
+          // Títulos dos negócios (mais recentes) — fallback de nome quando o
+          // `name` do contato for placeholder (telefone/"Lead ...").
+          deals: {
+            select: {
+              title: true,
+              customFields: { select: { customFieldId: true, value: true } },
+            },
+            orderBy: { createdAt: "desc" },
+            take: 20,
+          },
         },
       });
 
@@ -68,14 +93,26 @@ export async function GET(request: Request) {
         "Atualizado em",
       ];
       const cfHeaders = contactFields.map((f) => f.name);
-      const headers = [...baseHeaders, ...cfHeaders];
+      const dealCfHeaders = dealFields.map((f) => `Negócio — ${f.name}`);
+      const headers = [...baseHeaders, ...cfHeaders, ...dealCfHeaders];
 
       const rows = contacts.map((c) => {
         const cfMap = new Map(c.customFields.map((v) => [v.customFieldId, v.value]));
+        // Valor de um cf do negócio: primeiro não-vazio entre os negócios do
+        // contato (mais recentes primeiro).
+        const dealCfValue = (cfId: string): string => {
+          for (const d of c.deals) {
+            const v = d.customFields.find((x) => x.customFieldId === cfId)?.value;
+            if (typeof v === "string" && v.trim() !== "") return v;
+          }
+          return "";
+        };
         const row: Record<string, unknown> = {
-          "Nome": c.name,
-          "E-mail": c.email ?? "",
-          "Telefone": c.phone ?? "",
+          "Nome": resolveContactDisplayName(c.name, ...c.deals.map((d) => d.title)),
+          "E-mail":
+            c.email ||
+            (dealPersonalEmailCfId ? dealCfValue(dealPersonalEmailCfId) : ""),
+          "Telefone": (c.phone ?? "").replace(/^\+/, ""),
           "Ciclo de vida": c.lifecycleStage,
           "Origem": c.source ?? "",
           "Empresa": c.company?.name ?? "",
@@ -90,6 +127,9 @@ export async function GET(request: Request) {
         };
         for (const f of contactFields) {
           row[f.name] = cfMap.get(f.id) ?? "";
+        }
+        for (const f of dealFields) {
+          row[`Negócio — ${f.name}`] = dealCfValue(f.id);
         }
         return row;
       });
