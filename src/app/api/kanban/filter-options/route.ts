@@ -13,6 +13,7 @@ export async function GET() {
     try {
       const [pipelines, users, tags, customFields, sources, lossReasonCatalog, usedLostReasons] = await Promise.all([
         prisma.pipeline.findMany({
+          where: { archivedAt: null },
           orderBy: { name: "asc" },
           select: {
             id: true,

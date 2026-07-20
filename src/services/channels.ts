@@ -154,7 +154,7 @@ export async function updateChannel(id: string, data: UpdateChannelData): Promis
       // evita vincular o canal a um pipeline de outra organização. A
       // extension scope-by-org já injeta organizationId no where do find.
       const pipeline = await prisma.pipeline.findFirst({
-        where: { id: data.defaultPipelineId },
+        where: { id: data.defaultPipelineId, archivedAt: null },
         select: { id: true },
       });
       if (!pipeline) throw new Error("Funil de destino inválido.");

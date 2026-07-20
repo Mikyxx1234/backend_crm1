@@ -144,8 +144,8 @@ export async function ensureOpenDealForContact(
       select: { defaultPipelineId: true },
     });
     if (channel?.defaultPipelineId) {
-      pipeline = await prisma.pipeline.findUnique({
-        where: { id: channel.defaultPipelineId },
+      pipeline = await prisma.pipeline.findFirst({
+        where: { id: channel.defaultPipelineId, archivedAt: null },
         select: { id: true },
       });
     }
@@ -157,6 +157,7 @@ export async function ensureOpenDealForContact(
   // confundia operadores com mais de um pipeline (lead aparecia no errado).
   if (!pipeline) {
     pipeline = await prisma.pipeline.findFirst({
+      where: { archivedAt: null },
       orderBy: [{ isDefault: "desc" }, { createdAt: "asc" }],
       select: { id: true },
     });

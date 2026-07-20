@@ -174,6 +174,10 @@ export async function getDeals(params: GetDealsParams = {}) {
     conditions.push(params.visibilityWhere);
   }
 
+  // Pipeline soft-archived ("apagar pipeline" no CRM) não deve aparecer em
+  // listagens — deal/stage continuam no banco, só somem da UI.
+  conditions.push({ stage: { is: { pipeline: { is: { archivedAt: null } } } } });
+
   if (params.pipelineId) {
     conditions.push({ stage: { pipelineId: params.pipelineId } });
   }

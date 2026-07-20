@@ -1361,9 +1361,13 @@ model Pipeline {
   channels          Channel[]
   createdAt         DateTime           @default(now())
   updatedAt         DateTime           @updatedAt
+  /// Soft-archive: "apagar pipeline" no CRM seta isso em vez de DELETE —
+  /// stages/deals permanecem no banco, mas o pipeline some das listagens.
+  archivedAt        DateTime?
 
   @@index([organizationId])
   @@index([organizationId, isDefault])
+  @@index([organizationId, archivedAt])
   @@map("pipelines")
 }
 

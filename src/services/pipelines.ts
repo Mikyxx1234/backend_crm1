@@ -49,7 +49,7 @@ const stageWithCountSelect = {
 } satisfies Prisma.StageSelect;
 
 export async function ensureDefaultPipeline() {
-  const count = await prisma.pipeline.count();
+  const count = await prisma.pipeline.count({ where: { archivedAt: null } });
   if (count > 0) return;
   const organizationId = getOrgIdOrThrow();
   await prisma.pipeline.create({
@@ -70,9 +70,9 @@ export async function getPipelines(options?: { allowedPipelineIds?: string[] | n
   // `allowedPipelineIds === null/undefined` → sem restrição (todos). Array
   // (mesmo vazio) → restringe ao escopo do usuário.
   const allowed = options?.allowedPipelineIds;
-  const where: Prisma.PipelineWhereInput | undefined = allowed
-    ? { id: { in: allowed } }
-    : undefined;
+  const where: Prisma.PipelineWhereInput = allowed
+    ? { id: { in: allowed }, archivedAt: null }
+    : { archivedAt: null };
 
   const pipelines = await prisma.pipeline.findMany({
     where,
@@ -100,15 +100,15 @@ const dealListInclude = {
 } satisfies Prisma.DealInclude;
 
 export async function getPipelineMeta(id: string) {
-  return prisma.pipeline.findUnique({
-    where: { id },
+  return prisma.pipeline.findFirst({
+    where: { id, archivedAt: null },
     select: { id: true, name: true, isDefault: true },
   });
 }
 
 export async function getPipelineById(id: string) {
-  const pipeline = await prisma.pipeline.findUnique({
-    where: { id },
+  const pipeline = await prisma.pipeline.findFirst({
+    where: { id, archivedAt: null },
     include: {
       stages: {
         orderBy: { position: "asc" },
@@ -189,6 +189,52 @@ export async function updatePipeline(id: string, data: UpdatePipelineInput) {
 
 export async function deletePipeline(id: string) {
   await prisma.pipeline.delete({ where: { id } });
+}
+
+/**
+ * Soft-archive: "apagar pipeline" no CRM seta `archivedAt` em vez de
+ * DELETE — stages/deals permanecem no banco, só o pipeline some das
+ * listagens (`getPipelines`/`getPipelineById` já filtram `archivedAt: null`).
+ *
+ * Throws: NOT_FOUND | ALREADY_ARCHIVED | LAST_PIPELINE
+ */
+export async function archivePipeline(id: string): Promise<void> {
+  const pipeline = await prisma.pipeline.findUnique({
+    where: { id },
+    select: { id: true, organizationId: true, isDefault: true, archivedAt: true },
+  });
+  if (!pipeline) throw new Error("NOT_FOUND");
+  if (pipeline.archivedAt) throw new Error("ALREADY_ARCHIVED");
+
+  const activeCount = await prisma.pipeline.count({
+    where: { organizationId: pipeline.organizationId, archivedAt: null },
+  });
+  if (activeCount <= 1) throw new Error("LAST_PIPELINE");
+
+  await prisma.$transaction(async (tx) => {
+    if (pipeline.isDefault) {
+      const nextDefault = await tx.pipeline.findFirst({
+        where: {
+          organizationId: pipeline.organizationId,
+          archivedAt: null,
+          id: { not: id },
+        },
+        orderBy: { createdAt: "asc" },
+        select: { id: true },
+      });
+      if (nextDefault) {
+        await tx.pipeline.update({
+          where: { id: nextDefault.id },
+          data: { isDefault: true },
+        });
+      }
+    }
+
+    await tx.pipeline.update({
+      where: { id },
+      data: { archivedAt: new Date(), isDefault: false },
+    });
+  });
 }
 
 export type CreateStageInput = {

@@ -69,7 +69,7 @@ function createDealTool(ctx: RunContext) {
       try {
         if (!ctx.contactId) return fail("Sem contato associado para criar deal.");
         const defaultPipeline = await prisma.pipeline.findFirst({
-          where: { isDefault: true },
+          where: { isDefault: true, archivedAt: null },
           include: { stages: { orderBy: { position: "asc" }, take: 1 } },
         });
         const stage = defaultPipeline?.stages[0];
