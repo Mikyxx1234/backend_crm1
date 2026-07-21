@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { requireAuth } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -12,11 +12,9 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
-  const orgIdFilter = session.user.organizationId;
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
+  const orgIdFilter = r.session.user.organizationId;
   if (!orgIdFilter) {
     return NextResponse.json(
       { message: "Sem organizacao no contexto." },

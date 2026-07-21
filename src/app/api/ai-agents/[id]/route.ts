@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { requireAuth } from "@/lib/auth-helpers";
 import {
   deleteAIAgent,
   getAIAgent,
@@ -22,10 +22,8 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
   const { id } = await params;
   const agent = await getAIAgent(id);
   if (!agent) {
@@ -41,10 +39,8 @@ export async function PUT(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
   const { id } = await params;
   const body = (await request.json().catch(() => ({}))) as Record<
     string,
@@ -144,10 +140,8 @@ export async function DELETE(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
   const { id } = await params;
   try {
     await deleteAIAgent(id);

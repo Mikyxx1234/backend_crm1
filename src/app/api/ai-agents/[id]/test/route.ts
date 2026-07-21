@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { requireAuth } from "@/lib/auth-helpers";
 import { runAgent } from "@/services/ai/runner";
 
 /**
@@ -13,10 +13,8 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
   const { id } = await params;
 
   const body = (await request.json().catch(() => ({}))) as Record<

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { requireAuth } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -16,10 +16,8 @@ import { prisma } from "@/lib/prisma";
  * `source: "custom"` e incluem o tipo (TEXT, NUMBER, DATE...).
  */
 export async function GET() {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
 
   const builtin = [
     {

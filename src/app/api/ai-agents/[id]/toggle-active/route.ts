@@ -1,16 +1,14 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { requireAuth } from "@/lib/auth-helpers";
 import { toggleAIAgentActive } from "@/services/ai-agents";
 
 export async function POST(
   _req: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
   const { id } = await params;
   try {
     const updated = await toggleAIAgentActive(id);

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { requireAuth } from "@/lib/auth-helpers";
 import {
   createAIAgent,
   listAIAgents,
@@ -18,10 +18,8 @@ const ARCHETYPES: AIAgentArchetype[] = [
 const AUTONOMIES: AIAgentAutonomy[] = ["AUTONOMOUS", "DRAFT"];
 
 export async function GET() {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
   try {
     const agents = await listAIAgents();
     return NextResponse.json(agents);
@@ -34,10 +32,8 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const session = await auth();
-  if (!session?.user) {
-    return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-  }
+  const r = await requireAuth();
+  if (!r.ok) return r.response;
 
   const body = (await request.json().catch(() => ({}))) as Record<
     string,
