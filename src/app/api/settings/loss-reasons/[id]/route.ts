@@ -1,45 +1,40 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
+import { withOrgContext } from "@/lib/auth-helpers";
+import { softDeleteLossReason, updateLossReason } from "@/services/loss-reasons";
 
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function PUT(request: Request, ctx: Ctx) {
-  try {
-    const session = await auth();
-    if (!session?.user) return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-
-    const { id } = await ctx.params;
-    const body = (await request.json()) as Record<string, unknown>;
-
-    const data: Record<string, unknown> = {};
-    if (typeof body.label === "string" && body.label.trim()) data.label = body.label.trim();
-    if (typeof body.position === "number") data.position = body.position;
-    if (typeof body.isActive === "boolean") data.isActive = body.isActive;
-
-    if (Object.keys(data).length === 0) {
-      return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });
+  return withOrgContext(async () => {
+    try {
+      const { id } = await ctx.params;
+      const body = (await request.json()) as Record<string, unknown>;
+      const updated = await updateLossReason(id, {
+        label: typeof body.label === "string" ? body.label : undefined,
+        position: typeof body.position === "number" ? body.position : undefined,
+        isActive: typeof body.isActive === "boolean" ? body.isActive : undefined,
+      });
+      return NextResponse.json(updated);
+    } catch (e) {
+      if (e instanceof Error && e.message === "EMPTY_UPDATE") {
+        return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });
+      }
+      console.error(e);
+      return NextResponse.json({ message: "Erro ao atualizar motivo." }, { status: 500 });
     }
-
-    const updated = await prisma.lossReason.update({ where: { id }, data });
-    return NextResponse.json(updated);
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json({ message: "Erro ao atualizar motivo." }, { status: 500 });
-  }
+  });
 }
 
 export async function DELETE(_req: Request, ctx: Ctx) {
-  try {
-    const session = await auth();
-    if (!session?.user) return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-
-    const { id } = await ctx.params;
-    await prisma.lossReason.update({ where: { id }, data: { isActive: false } });
-    return NextResponse.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json({ message: "Erro ao desativar motivo." }, { status: 500 });
-  }
+  return withOrgContext(async () => {
+    try {
+      const { id } = await ctx.params;
+      await softDeleteLossReason(id);
+      return NextResponse.json({ ok: true });
+    } catch (e) {
+      console.error(e);
+      return NextResponse.json({ message: "Erro ao desativar motivo." }, { status: 500 });
+    }
+  });
 }

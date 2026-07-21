@@ -1,12 +1,44 @@
 import type { AutomationStep } from "@/lib/automation-workflow";
 
 const NONE = "__none__";
-const START_X = 200;
-const GAP_X = 300;
+// Espelha frontend: 1ª coluna começa após o nó do gatilho (x=32, ~280px).
+const TRIGGER_X = 32;
+const TRIGGER_W = 280;
+// Espelha frontend: folga fixa entre colunas somada à largura real do nó.
+const COL_GAP = 140;
+const START_X = TRIGGER_X + TRIGGER_W + COL_GAP; // = 452
 // 27/mai/26 — Alinhado com `NODE_Y` do canvas no frontend (=300) e com
 // o `START_Y` espelhado em `frontend_crm1/src/lib/automation-layout.ts`.
 const START_Y = 300;
-const GAP_Y = 220;
+const GAP_Y = 280;
+
+// Largura estimada (recolhida) por tipo — espelha `estStepWidth` do
+// frontend pra manter o layout idêntico nos dois lados.
+const DEFAULT_NODE_W = 290;
+function estStepWidth(type: string): number {
+  switch (type) {
+    case "condition":
+      return 300;
+    case "business_hours":
+      return 340;
+    case "execute_distribution":
+      return 300;
+    case "question":
+    case "send_whatsapp_interactive":
+      return 320;
+    case "wait_for_reply":
+      return 310;
+    case "delay":
+    case "set_variable":
+    case "goto":
+      return 270;
+    case "finish":
+    case "stop_automation":
+      return 260;
+    default:
+      return DEFAULT_NODE_W;
+  }
+}
 
 function isRealTarget(target: unknown, stepIds: Set<string>): target is string {
   return typeof target === "string" && target !== "" && target !== NONE && stepIds.has(target);
@@ -133,11 +165,26 @@ export function autoAlignWorkflowSteps(steps: AutomationStep[]): AutomationStep[
     }
   }
 
+  const maxDepth = Math.max(0, ...Array.from(depth.values()));
+  const colWidth = new Map<number, number>();
+  for (const step of steps) {
+    const d = depth.get(step.id) ?? 0;
+    const w = estStepWidth(step.type);
+    if (w > (colWidth.get(d) ?? 0)) colWidth.set(d, w);
+  }
+  const colX = new Map<number, number>();
+  let cursorX = START_X;
+  for (let d = 0; d <= maxDepth; d++) {
+    colX.set(d, cursorX);
+    cursorX += (colWidth.get(d) ?? DEFAULT_NODE_W) + COL_GAP;
+  }
+
   return steps.map((step) => {
     const cfg = (step.config ?? {}) as Record<string, unknown>;
     const nextCfg = { ...cfg };
+    const d = depth.get(step.id) ?? 0;
     nextCfg.__rfPos = {
-      x: START_X + (depth.get(step.id) ?? 0) * GAP_X,
+      x: colX.get(d) ?? START_X,
       y: START_Y + (laneById.get(step.id) ?? 0) * GAP_Y,
     };
     return { ...step, config: nextCfg };

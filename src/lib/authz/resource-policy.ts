@@ -1,8 +1,15 @@
 import { NextResponse } from "next/server";
 
-import { loadAuthzContext, can, type PermissionKey } from "@/lib/authz";
 import {
-  canAccessField,
+  loadAuthzContext,
+  can,
+  canViewStage,
+  canEditStage,
+  canViewRoleField,
+  canEditRoleField,
+  type PermissionKey,
+} from "@/lib/authz";
+import {
   canAccessScopedResource,
   canAccessPipelineForUser,
   canAccessChannelForUser,
@@ -27,23 +34,6 @@ async function getUserAssignedRoleIds(userId: string): Promise<string[]> {
     select: { roleId: true },
   });
   return rows.map((r) => r.roleId);
-}
-
-/**
- * IDs dos grupos aos quais o usuário pertence. Usado pra resolver grants de
- * canal por grupo (eixo aditivo de `channel.*.groups`, adicionado em
- * 25/jun/26). Mesmo padrão de `getUserAssignedRoleIds` — só lê quando a
- * flag de escopo granular está ligada.
- *
- * Filtra por `userId` apenas (cada user pertence a uma única org via
- * `User.organizationId`; índice em `group_members(userId)` cobre).
- */
-async function getUserGroupIds(userId: string): Promise<string[]> {
-  const rows = await prismaBase.groupMember.findMany({
-    where: { userId },
-    select: { groupId: true },
-  });
-  return rows.map((r) => r.groupId);
 }
 
 type UserLike = {
@@ -176,10 +166,7 @@ export async function canDoChannelAction(
   if (!channelId) return true;
   const policy = await loadScopedPolicy(user);
   if (!policy.enabled) return true;
-  const [roleIds, groupIds] = await Promise.all([
-    getUserAssignedRoleIds(user.id),
-    getUserGroupIds(user.id),
-  ]);
+  const roleIds = await getUserAssignedRoleIds(user.id);
   return canAccessChannelForUser({
     grants: policy.grants,
     role: user.role,
@@ -187,7 +174,6 @@ export async function canDoChannelAction(
     action,
     channelId,
     roleIds,
-    groupIds,
   });
 }
 
@@ -222,10 +208,7 @@ export async function requireChannelScope(
   if (!channelId) return null;
   const policy = await loadScopedPolicy(user);
   if (!policy.enabled) return null;
-  const [roleIds, groupIds] = await Promise.all([
-    getUserAssignedRoleIds(user.id),
-    getUserGroupIds(user.id),
-  ]);
+  const roleIds = await getUserAssignedRoleIds(user.id);
   const allowed = canAccessChannelForUser({
     grants: policy.grants,
     role: user.role,
@@ -233,7 +216,6 @@ export async function requireChannelScope(
     action,
     channelId,
     roleIds,
-    groupIds,
   });
   if (allowed) return null;
   return NextResponse.json(
@@ -251,16 +233,12 @@ export async function listAllowedChannelIds(
 ): Promise<string[] | null> {
   const policy = await loadScopedPolicy(user);
   if (!policy.enabled) return null;
-  const [roleIds, groupIds] = await Promise.all([
-    getUserAssignedRoleIds(user.id),
-    getUserGroupIds(user.id),
-  ]);
+  const roleIds = await getUserAssignedRoleIds(user.id);
   return listAllowedChannelIdsForUser({
     grants: policy.grants,
     role: user.role,
     userId: user.id,
     roleIds,
-    groupIds,
   });
 }
 
@@ -269,15 +247,16 @@ export async function requireStageScope(
   action: "view" | "edit" | "move",
   stageId: string,
 ): Promise<NextResponse | null> {
-  const policy = await loadScopedPolicy(user);
-  if (!policy.enabled) return null;
-  const allowed = canAccessScopedResource({
-    grants: policy.grants,
-    role: user.role,
-    resource: "stage",
-    action,
-    targetId: stageId,
+  if (!user.organizationId) return null;
+  const enabled = await isFeatureEnabled("rbac_granular_scope_v1", user.organizationId);
+  if (!enabled) return null;
+  const ctx = await loadAuthzContext({
+    userId: user.id,
+    organizationId: user.organizationId,
+    isSuperAdmin: Boolean(user.isSuperAdmin),
   });
+  const allowed =
+    action === "view" ? canViewStage(ctx, stageId) : canEditStage(ctx, stageId);
   if (allowed) return null;
   return NextResponse.json({ message: "Acesso negado à etapa." }, { status: 403 });
 }
@@ -287,15 +266,15 @@ export async function canEditFieldForUser(
   entity: "deal" | "contact" | "product",
   fieldKey: string,
 ): Promise<boolean> {
-  const policy = await loadScopedPolicy(user);
-  if (!policy.enabled) return true;
-  return canAccessField({
-    grants: policy.grants,
-    role: user.role,
-    entity,
-    action: "edit",
-    fieldKey,
+  if (!user.organizationId) return true;
+  const enabled = await isFeatureEnabled("rbac_granular_scope_v1", user.organizationId);
+  if (!enabled) return true;
+  const ctx = await loadAuthzContext({
+    userId: user.id,
+    organizationId: user.organizationId,
+    isSuperAdmin: Boolean(user.isSuperAdmin),
   });
+  return canEditRoleField(ctx, entity, fieldKey);
 }
 
 export async function canViewFieldForUser(
@@ -303,14 +282,14 @@ export async function canViewFieldForUser(
   entity: "deal" | "contact" | "product",
   fieldKey: string,
 ): Promise<boolean> {
-  const policy = await loadScopedPolicy(user);
-  if (!policy.enabled) return true;
-  return canAccessField({
-    grants: policy.grants,
-    role: user.role,
-    entity,
-    action: "view",
-    fieldKey,
+  if (!user.organizationId) return true;
+  const enabled = await isFeatureEnabled("rbac_granular_scope_v1", user.organizationId);
+  if (!enabled) return true;
+  const ctx = await loadAuthzContext({
+    userId: user.id,
+    organizationId: user.organizationId,
+    isSuperAdmin: Boolean(user.isSuperAdmin),
   });
+  return canViewRoleField(ctx, entity, fieldKey);
 }
 

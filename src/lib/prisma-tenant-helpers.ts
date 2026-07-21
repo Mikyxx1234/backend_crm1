@@ -142,7 +142,15 @@ export function deepInjectOrgId(value: unknown, orgId: string): unknown {
     }
     out[key] = v;
   }
-  if (!seenOrgId && !seenOrganization) {
+  // connect/disconnect/set = input "checked". Injetar organizationId
+  // (unchecked) no mesmo objeto faz o Prisma rejeitar o write
+  // (ex.: contact.update com company: { connect } → 500 genérico).
+  const hasCheckedRelationOp = Object.values(src).some((v) => {
+    if (!v || typeof v !== "object" || Array.isArray(v)) return false;
+    const r = v as Record<string, unknown>;
+    return "connect" in r || "disconnect" in r || "set" in r;
+  });
+  if (!seenOrgId && !seenOrganization && !hasCheckedRelationOp) {
     out.organizationId = orgId;
   }
   return out;

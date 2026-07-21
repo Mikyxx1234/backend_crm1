@@ -36,6 +36,14 @@ function prismaFailureMessage(e: unknown): string | null {
   if (/relation .* does not exist|table .* does not exist/i.test(msg)) {
     return "Esquema desatualizado. Execute: npx prisma migrate deploy";
   }
+  // Coluna nova no schema (ex.: pipelines.lossReasonRequired) sem migrate deploy.
+  if (
+    /column .* does not exist|Unknown column|does not exist in the current database/i.test(
+      msg,
+    )
+  ) {
+    return "Esquema desatualizado (coluna ausente). Execute: npx prisma migrate deploy";
+  }
 
   return null;
 }

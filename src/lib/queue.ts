@@ -47,6 +47,14 @@ export type AutomationJobContext = {
   dealId?: string;
   event: string;
   data?: unknown;
+  /**
+   * Profundidade de encadeamento (anti-loop). 0 = disparo de origem
+   * (kanban, rota, botão, IA). Cada vez que uma automação, ao rodar,
+   * dispara outro gatilho como efeito (ex.: passo "mover etapa" →
+   * stage_changed), o novo job herda `depth+1`. `notifyDealStageChanged`
+   * corta o encadeamento acima de um teto pra evitar loops A→B→A.
+   */
+  depth?: number;
 };
 
 export type AutomationJobPayload = {

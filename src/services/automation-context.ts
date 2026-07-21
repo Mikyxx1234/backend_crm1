@@ -7,9 +7,34 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 // (cross-tenant). Os outros helpers deste arquivo sao chamados de
 // API routes / webhooks que ja tem contexto montado.
 import { prismaBase } from "@/lib/prisma-base";
+import { sseBus } from "@/lib/sse-bus";
 import { withSystemContext } from "@/lib/webhook-context";
 
 const log = getLogger("automation-context");
+
+/**
+ * Notifica o inbox (SSE `automation_state`) que o conjunto de automações
+ * ativas de um contato mudou — o frontend invalida o cache do chip
+ * "robô em execução". Best-effort: nunca derruba o fluxo da automação.
+ */
+function publishAutomationState(row: {
+  organizationId?: string | null;
+  contactId?: string | null;
+  automationId?: string | null;
+  status?: string | null;
+}) {
+  if (!row?.contactId || !row.organizationId) return;
+  try {
+    sseBus.publish("automation_state", {
+      organizationId: row.organizationId,
+      contactId: row.contactId,
+      automationId: row.automationId ?? null,
+      status: row.status ?? null,
+    });
+  } catch {
+    /* best-effort */
+  }
+}
 
 function readNumber(cfg: unknown, key: string): number | undefined {
   if (!cfg || typeof cfg !== "object") return undefined;
@@ -52,7 +77,7 @@ export async function createContext(
   firstStepId: string,
   timeoutMs?: number,
 ) {
-  return prisma.automationContext.create({
+  const row = await prisma.automationContext.create({
     data: withOrgFromCtx({
       automationId,
       contactId,
@@ -62,6 +87,8 @@ export async function createContext(
       timeoutAt: timeoutMs && timeoutMs > 0 ? new Date(Date.now() + timeoutMs) : null,
     }),
   });
+  publishAutomationState(row);
+  return row;
 }
 
 export async function advanceContext(
@@ -73,13 +100,15 @@ export async function advanceContext(
   const vars = variables as Prisma.InputJsonValue;
 
   if (!nextStepId) {
-    return prisma.automationContext.update({
+    const done = await prisma.automationContext.update({
       where: { id: contextId },
       data: { status: "COMPLETED", variables: vars, currentStepId: null, timeoutAt: null },
     });
+    publishAutomationState(done);
+    return done;
   }
 
-  return prisma.automationContext.update({
+  const advanced = await prisma.automationContext.update({
     where: { id: contextId },
     data: {
       currentStepId: nextStepId,
@@ -87,20 +116,49 @@ export async function advanceContext(
       timeoutAt: timeoutMs && timeoutMs > 0 ? new Date(Date.now() + timeoutMs) : null,
     },
   });
+  publishAutomationState(advanced);
+  return advanced;
 }
 
 export async function pauseContext(contextId: string) {
-  return prisma.automationContext.update({
+  const row = await prisma.automationContext.update({
     where: { id: contextId },
     data: { status: "PAUSED" },
   });
+  publishAutomationState(row);
+  return row;
+}
+
+/**
+ * Interrompe manualmente um fluxo (robô) — acionado pelo operador via
+ * inbox/deal ("Interromper robô"). Só age em contextos vivos
+ * (RUNNING/PAUSED); marca como COMPLETED, limpa step/cronômetro e
+ * publica `automation_state` pra sumir da lista de robôs ativos.
+ * Retorna null se o contexto não existir ou já não estiver vivo.
+ */
+export async function cancelContext(contextId: string) {
+  const ctx = await prisma.automationContext.findUnique({
+    where: { id: contextId },
+    select: { id: true, status: true },
+  });
+  if (!ctx || (ctx.status !== "RUNNING" && ctx.status !== "PAUSED")) {
+    return null;
+  }
+  const row = await prisma.automationContext.update({
+    where: { id: contextId },
+    data: { status: "COMPLETED", currentStepId: null, timeoutAt: null },
+  });
+  publishAutomationState(row);
+  return row;
 }
 
 export async function timeoutContext(contextId: string) {
-  return prisma.automationContext.update({
+  const row = await prisma.automationContext.update({
     where: { id: contextId },
     data: { status: "TIMED_OUT", timeoutAt: null },
   });
+  publishAutomationState(row);
+  return row;
 }
 
 export async function getContactActiveContexts(contactId: string) {
@@ -110,6 +168,20 @@ export async function getContactActiveContexts(contactId: string) {
       automation: { select: { id: true, name: true, steps: { orderBy: { position: "asc" } } } },
     },
     orderBy: { updatedAt: "desc" },
+  });
+}
+
+/**
+ * Histórico de execuções ENCERRADAS (COMPLETED/TIMED_OUT) do contato —
+ * alimenta a seção "Histórico" do card de automações no inbox/deal.
+ * Ordena da mais recente pra mais antiga.
+ */
+export async function getContactAutomationHistory(contactId: string, limit = 20) {
+  return prisma.automationContext.findMany({
+    where: { contactId, status: { in: ["COMPLETED", "TIMED_OUT"] } },
+    include: { automation: { select: { id: true, name: true } } },
+    orderBy: { updatedAt: "desc" },
+    take: limit,
   });
 }
 

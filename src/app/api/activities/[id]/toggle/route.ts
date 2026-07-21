@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { auth } from "@/lib/auth";
-import { toggleActivityComplete } from "@/services/activities";
+import { getActivityById, toggleActivityComplete } from "@/services/activities";
+import { canAccessActivity } from "@/services/task-visibility";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -15,6 +16,33 @@ export async function POST(_request: Request, context: RouteContext) {
     const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
+    }
+
+    const existing = await getActivityById(id);
+    if (!existing) {
+      return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
+    }
+    const su = session.user as {
+      id: string;
+      role?: string | null;
+      organizationId?: string | null;
+      isSuperAdmin?: boolean;
+    };
+    if (
+      !(await canAccessActivity(
+        {
+          id: su.id,
+          organizationId: su.organizationId ?? null,
+          role: su.role ?? null,
+          isSuperAdmin: Boolean(su.isSuperAdmin),
+        },
+        existing,
+      ))
+    ) {
+      return NextResponse.json(
+        { message: "Sem permissão para concluir esta tarefa." },
+        { status: 403 },
+      );
     }
 
     try {

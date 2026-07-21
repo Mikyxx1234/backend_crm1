@@ -5,6 +5,7 @@ import { listAllowedPipelineIds, requirePermissionForUser, requireStageScope } f
 import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, getDeals, isValidDealStatus } from "@/services/deals";
+import { parseAdvancedDealFilters } from "@/services/kanban-filters";
 import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 
 function parseIntParam(v: string | null, fallback: number) {
@@ -37,6 +38,31 @@ export async function GET(request: Request) {
     const contactPhone = searchParams.get("contactPhone") ?? undefined;
     const page = parseIntParam(searchParams.get("page"), 1);
     const perPage = parseIntParam(searchParams.get("perPage"), 20);
+    // Filtros avançados (mesmo shape do kanban) — JSON em `filters` ou base64url em `f`.
+    let advancedFilters = parseAdvancedDealFilters(
+      (() => {
+        const raw = searchParams.get("filters");
+        if (!raw) return undefined;
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return undefined;
+        }
+      })(),
+    );
+    if (Object.keys(advancedFilters).length === 0) {
+      const f = searchParams.get("f");
+      if (f) {
+        try {
+          const b64 = f.replace(/-/g, "+").replace(/_/g, "/");
+          const pad = b64.length % 4 === 0 ? "" : "=".repeat(4 - (b64.length % 4));
+          const json = Buffer.from(b64 + pad, "base64").toString("utf8");
+          advancedFilters = parseAdvancedDealFilters(JSON.parse(json));
+        } catch {
+          /* ignora f inválido */
+        }
+      }
+    }
 
     const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
     const visibility = await getVisibilityFilter(user);
@@ -58,6 +84,7 @@ export async function GET(request: Request) {
       perPage,
       visibilityWhere: visibility.dealWhere,
       allowedPipelineIds,
+      advancedFilters: Object.keys(advancedFilters).length > 0 ? advancedFilters : undefined,
     });
 
     const items = await Promise.all(

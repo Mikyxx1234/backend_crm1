@@ -137,6 +137,27 @@ function buildMetrics(registry: Registry): AppMetrics {
     registers: [registry],
   });
 
+  // Profundidade das filas BullMQ (waiting/active/delayed/failed) — usado
+  // para dimensionar concurrency de workers e detectar back-pressure.
+  // Populado sob demanda via `updateQueueDepth()` chamado por scraping ou
+  // por um ticker leve (ver call-site opcional em src/lib/queue.ts).
+  const bullmqQueueDepth = new Gauge({
+    name: "crm_bullmq_queue_depth",
+    help: "Jobs na fila BullMQ por estado (snapshot no scrape).",
+    labelNames: ["queue", "state"] as const,
+    registers: [registry],
+  });
+
+  // Pool de conexoes Postgres (Prisma adapter-pg). Populado por
+  // `updateDbPool()`. Se o pool nao estiver acessivel, permanece zerado
+  // (nao explode).
+  const dbPool = new Gauge({
+    name: "crm_db_pool_connections",
+    help: "Conexoes do pool pg (total/idle/waiting).",
+    labelNames: ["state"] as const,
+    registers: [registry],
+  });
+
   // Cache (PR 5.1) — hits/misses por namespace (channel, ai_agent, org).
   // Usado pra decidir se o TTL atual e bom ou se hot-keys merecem
   // pre-warming.
@@ -157,11 +178,11 @@ function buildMetrics(registry: Registry): AppMetrics {
   return {
     http: { requests: httpRequests, duration: httpDuration },
     sse: { subscribers: sseSubscribers, messages: sseMessages },
-    bullmq: { jobs: bullmqJobs, duration: bullmqDuration },
+    bullmq: { jobs: bullmqJobs, duration: bullmqDuration, queueDepth: bullmqQueueDepth },
     meta: { calls: metaApi, duration: metaApiDuration },
     messages: { inbound: inboundMessages, outbound: outboundMessages },
     ai: { tokens: aiTokens },
-    db: { queries: dbQueries },
+    db: { queries: dbQueries, pool: dbPool },
     errors,
     cacheHits,
     cacheMisses,
@@ -180,6 +201,7 @@ export type AppMetrics = {
   bullmq: {
     jobs: Counter<"queue" | "status">;
     duration: Histogram<"queue" | "status">;
+    queueDepth: Gauge<"queue" | "state">;
   };
   meta: {
     calls: Counter<"endpoint" | "status" | "organization">;
@@ -194,6 +216,7 @@ export type AppMetrics = {
   };
   db: {
     queries: Histogram<"model" | "action">;
+    pool: Gauge<"state">;
   };
   errors: Counter<"scope" | "kind">;
   cacheHits: Counter<"key">;
@@ -215,13 +238,36 @@ export const metrics: AppMetrics = ensureRegistry().metrics;
 /**
  * Renderiza o snapshot atual no formato Prometheus exposition (text/plain).
  * Usado pelo endpoint `/api/metrics`.
+ *
+ * Antes de serializar, coleta snapshots de gauges "puxados" (queue depth
+ * BullMQ e pool pg) — assim o valor exposto reflete o instante do scrape.
+ * Falhas silenciosas (Redis fora, adapter sem pool) mantem gauge zerado.
  */
 export async function renderMetrics(): Promise<{
   body: string;
   contentType: string;
 }> {
+  await Promise.allSettled([snapshotQueueDepth(), snapshotDbPool()]);
   const body = await registry.metrics();
   return { body, contentType: registry.contentType };
+}
+
+async function snapshotQueueDepth(): Promise<void> {
+  try {
+    const mod = await import("@/lib/queue-metrics");
+    await mod.collectQueueDepth();
+  } catch {
+    // modulo opcional / redis indisponivel — ok.
+  }
+}
+
+async function snapshotDbPool(): Promise<void> {
+  try {
+    const mod = await import("@/lib/db-pool-metrics");
+    await mod.collectDbPool();
+  } catch {
+    // pool nao exposto — ok.
+  }
 }
 
 /**
@@ -232,4 +278,57 @@ export function safeLabel(v: unknown, fallback = "unknown"): string {
   if (v === null || v === undefined) return fallback;
   if (typeof v === "string") return v.length > 0 ? v : fallback;
   return String(v);
+}
+
+/**
+ * Reduz um pathname concreto ao TEMPLATE da rota, trocando segmentos que
+ * parecem id (numérico, cuid, uuid) por `:id`. Sem isso, cada request com
+ * id diferente viraria uma série nova em `crm_http_requests_total` e
+ * explodiria a cardinalidade do Prometheus (o comentário do topo do arquivo
+ * exige `route` = template, não path concreto).
+ */
+const ID_SEGMENT =
+  /^(?:\d+|c[a-z0-9]{20,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+export function templatizeRoute(path: string): string {
+  if (!path) return "unknown";
+  const clean = path.split("?")[0];
+  const out = clean
+    .split("/")
+    .map((seg) => (ID_SEGMENT.test(seg) ? ":id" : seg))
+    .join("/");
+  return out || "/";
+}
+
+/**
+ * Emite as métricas HTTP (contador + histograma de latência) para uma request
+ * concluída. Chamado pelos wrappers de entrada (`withOrgContext`,
+ * `withApiAuthContext`) que já calculam método/path/status/duração.
+ *
+ * `route` é templatizado (cardinalidade controlada). NÃO quebramos por
+ * organização aqui — o relatório agrega por `env` (label injetada pelo scrape
+ * do Prometheus), e quebrar por org multiplicaria as séries sem necessidade.
+ * A label `organization` fica fixa em "all" só para satisfazer o schema.
+ *
+ * Totalmente resiliente: qualquer erro na emissão é engolido — métrica nunca
+ * pode derrubar um handler.
+ */
+export function observeHttpRequest(args: {
+  method: string;
+  path: string;
+  status: number;
+  durationMs: number;
+}): void {
+  try {
+    const route = templatizeRoute(args.path);
+    const method = (args.method || "GET").toUpperCase();
+    const status = String(args.status || 0);
+    metrics.http.requests.inc({ route, method, status, organization: "all" });
+    metrics.http.duration.observe(
+      { route, method, status },
+      Math.max(0, args.durationMs) / 1000,
+    );
+  } catch {
+    // métricas nunca devem quebrar o request
+  }
 }

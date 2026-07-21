@@ -8,6 +8,7 @@ import {
 } from "@prisma/client";
 
 import { normalizeConditionConfig } from "@/lib/automation-condition";
+import { defaultDealTitleForContact } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 import {
   metaWhatsApp,
@@ -28,6 +29,7 @@ import {
   propagateOwnerToContactAndChat,
 } from "@/services/deals";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
+import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
 import { logEvent } from "@/services/activity-log";
@@ -37,8 +39,42 @@ import {
   getActiveContext,
   interpolateVariables,
 } from "@/services/automation-context";
+import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 
 const log = getLogger("automation");
+
+/**
+ * Resolve a conversa WhatsApp de DESTINO para um envio de automação (robô).
+ *
+ * Modelo de ticket (decisão do operador 17/jul/26): quando o robô envia uma
+ * mensagem e a última conversa do contato está ENCERRADA (RESOLVED), a
+ * conversa é REABERTA como um NOVO ticket (#N+1) — assim o card nunca fica
+ * "resolvido com robô ativo". `ensureWhatsAppConversationForContact` já faz
+ * isso: reusa a conversa não-RESOLVED ou cria um ticket novo (com tratamento
+ * de corrida e disparo de `conversation_created`).
+ *
+ * Retorna `{ id } | null` de propósito, para manter compatível o uso
+ * downstream (`conv?.id`, `conv.id`, `if (conv)`) dos sites de envio.
+ * Fallback best-effort (sem canal/telefone): usa a conversa mais recente,
+ * preservando o comportamento antigo.
+ */
+async function resolveAutomationSendConv(
+  contactId: string | null | undefined,
+): Promise<{ id: string } | null> {
+  if (!contactId) return null;
+  try {
+    const ensured = await ensureWhatsAppConversationForContact(contactId);
+    if ("conversationId" in ensured) return { id: ensured.conversationId };
+  } catch (err) {
+    log.warn(`resolveAutomationSendConv: ensure falhou p/ contato ${contactId}:`, err);
+  }
+  const conv = await prisma.conversation.findFirst({
+    where: { contactId, channel: "whatsapp" },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+  return conv ? { id: conv.id } : null;
+}
 
 /**
  * Resolve o cliente Meta WhatsApp correto para uma automação multi-tenant.
@@ -411,6 +447,11 @@ type RuntimeContext = {
       "AUTOMAÇÃO — <nome>" e o operador identifique qual regra
       disparou. `null`/undefined mantém fallback "Automação" no front. */
   automationName?: string | null;
+  /** Nome do agente que disparou a automação MANUALMENTE (via /run). Quando
+      presente, as mensagens enviadas pelos steps são tagueadas com
+      `triggeredByName` — o inbox exibe o selo "Manual" + avatar do agente
+      (colab) na própria mensagem enviada, sem card de status separado. */
+  triggeredByName?: string | null;
   contactId?: string;
   dealId?: string;
   event: string;
@@ -435,6 +476,12 @@ type RuntimeContext = {
   // string no banco).
   contactCustomFields: Record<string, string>;
   dealCustomFields: Record<string, string>;
+  /**
+   * Profundidade de encadeamento herdada do job (anti-loop). Passos que
+   * disparam gatilhos como efeito (mover etapa) propagam `depth+1` via
+   * `notifyDealStageChanged`. Ver `AutomationJobContext.depth`.
+   */
+  depth: number;
 };
 
 /**
@@ -583,6 +630,27 @@ async function loadConversationSnapshot(
   };
 }
 
+// Cache do check da coluna `messages.triggeredByName`. Em ambientes onde a
+// migração ainda não rodou, tentar gravar a coluna faria o insert dos steps
+// de envio quebrar (P2022). Só tagueamos o disparo manual quando a coluna
+// existe — degradação graciosa (mensagem ainda é enviada, apenas sem o selo
+// "Manual"/avatar do agente até a migração aplicar).
+let _msgTriggeredByNameColumn: boolean | null = null;
+async function messageSupportsTriggeredBy(): Promise<boolean> {
+  if (_msgTriggeredByNameColumn !== null) return _msgTriggeredByNameColumn;
+  try {
+    const rows = await prisma.$queryRaw<Array<{ exists: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'messages' AND column_name = 'triggeredByName'
+      ) AS "exists"`;
+    _msgTriggeredByNameColumn = Boolean(rows?.[0]?.exists);
+  } catch {
+    _msgTriggeredByNameColumn = false;
+  }
+  return _msgTriggeredByNameColumn;
+}
+
 async function resolveRuntimeContext(
   automationId: string,
   payload: AutomationJobPayload,
@@ -670,9 +738,20 @@ async function resolveRuntimeContext(
     dealId,
   );
 
+  const rawTriggeredByName =
+    typeof data.triggeredByName === "string" && data.triggeredByName.trim()
+      ? data.triggeredByName.trim()
+      : null;
+  // Só propaga (e, portanto, grava nas mensagens) se a coluna existir.
+  const triggeredByName =
+    rawTriggeredByName && (await messageSupportsTriggeredBy())
+      ? rawTriggeredByName
+      : null;
+
   return {
     automationId,
     automationName: automationName ?? null,
+    triggeredByName,
     contactId,
     dealId,
     event: ctx.event,
@@ -686,6 +765,7 @@ async function resolveRuntimeContext(
     dealTagNames,
     contactCustomFields: customFieldsSnapshot.contactCustomFields,
     dealCustomFields: customFieldsSnapshot.dealCustomFields,
+    depth: typeof ctx.depth === "number" ? ctx.depth : 0,
   };
 }
 
@@ -836,7 +916,7 @@ async function executeStep(
       });
       const currentDeal = await prisma.deal.findUnique({
         where: { id: targetDealId },
-        select: { status: true },
+        select: { status: true, stageId: true, contactId: true },
       });
       const statusPatch = targetStage?.isWon
         ? currentDeal?.status === "WON"
@@ -850,6 +930,15 @@ async function executeStep(
             ? {}
             : { status: "OPEN" as const, closedAt: null, lostReason: null };
       await prisma.deal.update({ where: { id: targetDealId }, data: { stageId, ...statusPatch } });
+      // Dispara "mudança de fase" (encadeado, com guarda anti-loop) pra que
+      // automações "quando entra na fase X" também rodem quando OUTRA
+      // automação move o negócio. Antes esse caminho não disparava nada.
+      if (currentDeal?.stageId && currentDeal.stageId !== stageId) {
+        void notifyDealStageChanged(targetDealId, currentDeal.stageId, stageId, {
+          contactId: rt.contactId ?? currentDeal.contactId ?? undefined,
+          depth: (rt.depth ?? 0) + 1,
+        });
+      }
       return {};
     }
 
@@ -1115,7 +1204,26 @@ async function executeStep(
         } else if (field === "status" && typeof value === "string" && isDealStatus(value)) data.status = value;
         else if (field === "stageId" && typeof value === "string") data.stageId = value;
         if (Object.keys(data).length > 0) {
+          // Se o update for de etapa, captura a etapa anterior ANTES pra
+          // disparar "mudança de fase" depois (mesmo caminho do move_stage).
+          const isStageMove = field === "stageId" && typeof value === "string";
+          let prevStageId: string | null = null;
+          let moveContactId: string | null = null;
+          if (isStageMove) {
+            const cur = await prisma.deal.findUnique({
+              where: { id: targetDealId },
+              select: { stageId: true, contactId: true },
+            });
+            prevStageId = cur?.stageId ?? null;
+            moveContactId = cur?.contactId ?? null;
+          }
           await prisma.deal.update({ where: { id: targetDealId }, data });
+          if (isStageMove && prevStageId && prevStageId !== value) {
+            void notifyDealStageChanged(targetDealId, prevStageId, value as string, {
+              contactId: rt.contactId ?? moveContactId ?? undefined,
+              depth: (rt.depth ?? 0) + 1,
+            });
+          }
         } else {
           const customField = await prisma.customField.findFirst({
             where: { entity: "deal", name: field },
@@ -1227,10 +1335,7 @@ async function executeStep(
 
       let conversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         conversationId = conv?.id;
         if (!conv) log.warn(`Nenhuma conversa WhatsApp encontrada para o contato ${rt.contactId}`);
       }
@@ -1314,7 +1419,7 @@ async function executeStep(
                 content,
                 direction: "out",
                 messageType: "text",
-                senderName: rt.automationName ?? "Automação", authorType: "bot",
+                senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
                 sendStatus: "failed",
                 sendError: formatMetaSendError(hardFailure).slice(0, 500),
               }),
@@ -1339,7 +1444,7 @@ async function executeStep(
             content: sentContent,
             direction: "out",
             messageType: msgType,
-            senderName: rt.automationName ?? "Automação", authorType: "bot",
+            senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId,
             ...(typeof outFlowToken === "string" && outFlowToken.trim()
               ? { flowToken: outFlowToken.trim() }
@@ -1436,10 +1541,7 @@ async function executeStep(
 
       let preTplConversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         preTplConversationId = conv?.id;
       }
       const tplMetaClient = await resolveAutomationMetaClient({
@@ -1492,10 +1594,7 @@ async function executeStep(
 
       let tplConversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         tplConversationId = conv?.id;
       }
 
@@ -1523,7 +1622,7 @@ async function executeStep(
             content: tplContent,
             direction: "out",
             messageType: "template",
-            senderName: rt.automationName ?? "Automação", authorType: "bot",
+            senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId: tplExternalId,
             ...(typeof enrichTpl.flowToken === "string" && enrichTpl.flowToken.trim()
               ? { flowToken: enrichTpl.flowToken.trim() }
@@ -1565,10 +1664,7 @@ async function executeStep(
 
       let preMediaConversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         preMediaConversationId = conv?.id;
       }
       const mediaMetaClient = await resolveAutomationMetaClient({
@@ -1651,10 +1747,7 @@ async function executeStep(
       const mediaExternalId = sendResult.messages?.[0]?.id ?? null;
 
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         if (conv) {
           await prisma.message.create({
             data: withOrgFromCtx({
@@ -1662,7 +1755,7 @@ async function executeStep(
               content: displayContent,
               direction: "out",
               messageType: mediaType,
-              senderName: rt.automationName ?? "Automação", authorType: "bot",
+              senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
               externalId: mediaExternalId,
               mediaUrl,
             }),
@@ -1709,10 +1802,7 @@ async function executeStep(
 
       let conversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await prisma.conversation.findFirst({
-          where: { contactId: rt.contactId, channel: "whatsapp" },
-          select: { id: true },
-        });
+        const conv = await resolveAutomationSendConv(rt.contactId);
         conversationId = conv?.id;
       }
 
@@ -1743,7 +1833,7 @@ async function executeStep(
                 content: displayContent,
                 direction: "out",
                 messageType: "interactive",
-                senderName: rt.automationName ?? "Automação", authorType: "bot",
+                senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
                 sendStatus: "failed",
                 sendError: errMsg.slice(0, 500),
               }),
@@ -1763,8 +1853,9 @@ async function executeStep(
             content: displayContent,
             direction: "out",
             messageType: "interactive",
-            senderName: rt.automationName ?? "Automação", authorType: "bot",
+            senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId,
+            sendStatus: "sent",
           }),
         });
         sseBus.publish("new_message", {
@@ -1989,10 +2080,7 @@ async function executeStep(
           const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
           const interpolated = interpolateContextVariables(content, rt, vars);
 
-          const conv = await prisma.conversation.findFirst({
-            where: { contactId: rt.contactId, channel: "whatsapp" },
-            select: { id: true },
-          });
+          const conv = await resolveAutomationSendConv(rt.contactId);
           const questionMetaClient = await resolveAutomationMetaClient({
             automationId: rt.automationId,
             conversationId: conv?.id,
@@ -2008,7 +2096,7 @@ async function executeStep(
           const externalId = sendResult.messages?.[0]?.id ?? null;
           if (conv) {
             await prisma.message.create({
-              data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", externalId }),
+              data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId }),
             });
             sseBus.publish("new_message", { organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
           }
@@ -2124,9 +2212,15 @@ async function executeStep(
       if (!rt.contactId) throw new Error("create_deal: contactId ausente");
       const stageId = readString(cfg, "stageId");
       if (!stageId) throw new Error("create_deal: stageId obrigatório");
-      // Título opcional: sem nome configurado, o deal é batizado como
-      // "Negócio - #<number>" (resolvido dentro do loop, depende do number).
-      const rawTitle = readString(cfg, "title")?.trim() ?? "";
+      // Título opcional: sem config → "Negócio {contato}"; senão "Negócio - #n".
+      let rawTitle = readString(cfg, "title")?.trim() ?? "";
+      if (!rawTitle && rt.contactId) {
+        const contact = await prisma.contact.findFirst({
+          where: { id: rt.contactId },
+          select: { name: true },
+        });
+        rawTitle = defaultDealTitleForContact(contact?.name) ?? "";
+      }
       const rawValue = readNumber(cfg, "value");
       const stage = await prisma.stage.findUnique({
         where: { id: stageId },
@@ -2740,41 +2834,12 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     }).catch(() => {});
   }
 
-  // Visibilidade no chat: quando o operador dispara MANUALMENTE pela conversa,
-  // postamos uma nota interna (não enviada ao cliente) confirmando a execução.
-  if (context.event === "manual" && rt.conversation?.id) {
-    const note =
-      stepsFailed > 0
-        ? `⚙️ Automação "${automation.name}" executada com ${stepsFailed} erro(s).`
-        : `⚙️ Automação "${automation.name}" executada.`;
-    void (async () => {
-      try {
-        const conversationId = rt.conversation!.id;
-        const saved = await prisma.message.create({
-          data: withOrgFromCtx({
-            conversationId,
-            content: note,
-            direction: "out",
-            messageType: "note",
-            isPrivate: true,
-            senderName: rt.automationName ?? "Automação", authorType: "bot",
-          }),
-        });
-        await prisma.conversation
-          .update({ where: { id: conversationId }, data: { updatedAt: new Date() } })
-          .catch(() => {});
-        sseBus.publish("new_message", {
-          organizationId: getOrgIdOrNull(),
-          conversationId,
-          direction: "out",
-          content: note,
-          timestamp: saved.createdAt,
-        });
-      } catch (e) {
-        log.warn(`[${traceId}] falha ao postar nota de automação manual: ${String(e)}`);
-      }
-    })();
-  }
+  // Disparo manual: NÃO postamos mais um card de status ("executada...") no
+  // chat. As próprias mensagens enviadas pelos steps já são tagueadas com
+  // `triggeredByName` (via withOrgFromCtx acima), então o inbox as exibe com
+  // o selo "Manual" + avatar do agente que acionou (colab) — reproduzindo a
+  // mensagem enviada, sem log redundante. Runs sem envio ao cliente ficam
+  // visíveis apenas no activity log (AUTOMATION_EXECUTED).
     },
   );
 }
@@ -2878,6 +2943,9 @@ export async function continueFromStep(
     dealTagNames: tagSnapshot.dealTagNames,
     contactCustomFields: customFieldsSnapshot.contactCustomFields,
     dealCustomFields: customFieldsSnapshot.dealCustomFields,
+    // Continuação após wait/question: mantém profundidade base (0). O
+    // encadeamento relevante ocorre no fluxo principal (executeStep).
+    depth: 0,
   };
 
   let contConvIdForMeta: string | undefined;

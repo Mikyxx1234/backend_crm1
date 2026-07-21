@@ -37,7 +37,13 @@ type ListenerEntry = {
 const REDIS_CHANNEL = "crm:sse:events";
 
 function sseRedisPubSubEnabled(): boolean {
-  return process.env.SSE_ENABLE_REDIS_PUBSUB === "1" && Boolean(process.env.REDIS_URL?.trim());
+  // Com REDIS_URL, liga pub/sub por padrão — necessário no EasyPanel
+  // (várias réplicas): webhook cai numa instância e o EventSource noutra.
+  // Opt-out explícito: SSE_ENABLE_REDIS_PUBSUB=0.
+  const url = process.env.REDIS_URL?.trim();
+  if (!url) return false;
+  const flag = (process.env.SSE_ENABLE_REDIS_PUBSUB ?? "1").trim();
+  return flag !== "0" && flag.toLowerCase() !== "false";
 }
 
 /**

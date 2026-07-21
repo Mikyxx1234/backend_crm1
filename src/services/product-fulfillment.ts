@@ -23,6 +23,10 @@ import {
   restock,
   reverse,
 } from "@/services/inventory";
+import {
+  onDealReverted as onDealRevertedQuotas,
+  onDealWon as onDealWonQuotas,
+} from "@/services/quota";
 
 function toQty(value: unknown): number {
   const n = Math.round(Number(value ?? 0));
@@ -199,6 +203,19 @@ export async function onDealWon(dealId: string): Promise<void> {
       err: err instanceof Error ? err.message : String(err),
     });
   }
+
+  // Cotas de desconto (RN-07): consome/confirma cotas SELECTED/RESERVED.
+  // Best-effort — mesmo padrão dos demais efeitos pós-ganho (nunca derruba
+  // o ganho do deal). O `refreshDealPriceSnapshots` interno mantém os
+  // snapshots consistentes.
+  try {
+    await onDealWonQuotas(dealId);
+  } catch (err) {
+    console.warn("[product-fulfillment] onDealWon (quotas) falhou:", {
+      dealId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -211,6 +228,18 @@ export async function onDealReverted(dealId: string): Promise<void> {
     await reverse(dealId, { note: "Estorno por reabertura/perda do deal" });
   } catch (err) {
     console.warn("[product-fulfillment] onDealReverted falhou:", {
+      dealId,
+      err: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Cotas de desconto (RN-07): devolve saldo de RESERVED/CONSUMED e marca
+  // RETURNED. Best-effort igual ao inventário — falha aqui não trava a
+  // reabertura/perda.
+  try {
+    await onDealRevertedQuotas(dealId);
+  } catch (err) {
+    console.warn("[product-fulfillment] onDealReverted (quotas) falhou:", {
       dealId,
       err: err instanceof Error ? err.message : String(err),
     });

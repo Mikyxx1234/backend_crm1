@@ -163,7 +163,7 @@ export async function POST(request: Request, context: RouteContext) {
         if (externalId) {
           await prisma.message.update({
             where: { id: saved.id },
-            data: { externalId },
+            data: { externalId, sendStatus: "sent" },
           });
         }
       } catch (sendErr) {

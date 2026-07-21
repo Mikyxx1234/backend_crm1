@@ -16,6 +16,7 @@ import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import {
   createContact,
+  findContactIdByPhone,
   isValidLifecycleStage,
   updateContact,
 } from "@/services/contacts";
@@ -276,11 +277,10 @@ async function resolveContactUpsert(
   const phone = row.phone?.trim();
   if (phone) {
     const orgId = getOrgIdOrThrow();
-    const c = await prisma.contact.findFirst({
-      where: { organizationId: orgId, phone },
-      select: { id: true },
-    });
-    if (c) return { ok: true, target: { mode: "update", id: c.id } };
+    // Match por variantes E.164 (com/sem 9º dígito) em vez de igualdade
+    // literal — deduplica contatos importados com formatos diferentes.
+    const foundId = await findContactIdByPhone(orgId, phone);
+    if (foundId) return { ok: true, target: { mode: "update", id: foundId } };
   }
 
   return { ok: true, target: { mode: "create" } };

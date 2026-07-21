@@ -1,7 +1,8 @@
 import type { LifecycleStage, Prisma } from "@prisma/client";
 
+import { sanitizeContactName } from "@/lib/display-name";
 import { resolveHighlight, type ResolvedHighlight } from "@/lib/highlight";
-import { normalizePhone } from "@/lib/phone";
+import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
@@ -56,6 +57,8 @@ export type GetContactsParams = {
   lifecycleStage?: LifecycleStage;
   tagIds?: string[];
   companyId?: string;
+  /** Filtra contatos sem responsável atribuído (assignedToId = null). */
+  unassigned?: boolean;
   /** Filtros por campos customizados do contato (AND entre itens). */
   customFieldFilters?: ContactCustomFieldFilter[];
   /**
@@ -71,6 +74,12 @@ export type GetContactsParams = {
    * vs `(11) 9...`. Para n8n: passe só dígitos no query param.
    */
   phoneExact?: string;
+  /** Intervalo de criação (createdAt). */
+  createdFrom?: Date;
+  createdTo?: Date;
+  /** Intervalo de última modificação (updatedAt). */
+  updatedFrom?: Date;
+  updatedTo?: Date;
   page?: number;
   perPage?: number;
   sortBy?: "name" | "email" | "createdAt" | "updatedAt" | "leadScore" | "lifecycleStage";
@@ -178,6 +187,20 @@ export async function getContacts(params: GetContactsParams = {}) {
     };
   }
 
+  if (params.unassigned) {
+    where.assignedToId = null;
+  }
+
+  const createdAt: Prisma.DateTimeFilter = {};
+  if (params.createdFrom) createdAt.gte = params.createdFrom;
+  if (params.createdTo) createdAt.lte = params.createdTo;
+  if (createdAt.gte || createdAt.lte) where.createdAt = createdAt;
+
+  const updatedAt: Prisma.DateTimeFilter = {};
+  if (params.updatedFrom) updatedAt.gte = params.updatedFrom;
+  if (params.updatedTo) updatedAt.lte = params.updatedTo;
+  if (updatedAt.gte || updatedAt.lte) where.updatedAt = updatedAt;
+
   const exactFilters: Prisma.ContactWhereInput[] = [];
 
   const emailExact = params.emailExact?.trim().toLowerCase();
@@ -232,11 +255,15 @@ export async function getContacts(params: GetContactsParams = {}) {
         avatarUrl: true,
         leadScore: true,
         lifecycleStage: true,
+        source: true,
         createdAt: true,
+        updatedAt: true,
+        assignedTo: { select: { id: true, name: true, avatarUrl: true } },
         company: { select: { id: true, name: true, domain: true } },
         tags: {
           select: { tag: { select: { id: true, name: true, color: true } } },
         },
+        customFields: { select: { customFieldId: true, value: true } },
       },
     }),
     prisma.contact.count({ where }),
@@ -304,9 +331,14 @@ export async function getContacts(params: GetContactsParams = {}) {
       );
     }
 
+    const customFields = Object.fromEntries(
+      (c.customFields ?? []).map((v) => [v.customFieldId, v.value]),
+    ) as Record<string, string>;
+
     return {
       ...c,
       tags: c.tags.map((t) => t.tag),
+      customFields,
       totalValue,
       dealCount,
       avgTicket,
@@ -322,6 +354,33 @@ export async function getContacts(params: GetContactsParams = {}) {
     perPage,
     totalPages: Math.ceil(total / perPage) || 1,
   };
+}
+
+export type ContactStats = {
+  total: number;
+  unassigned: number;
+  byStage: Record<LifecycleStage, number>;
+};
+
+/**
+ * Contagens agregadas por segmento para os stat cards do diretório.
+ * Escopo por organização é aplicado automaticamente pela extensão do Prisma.
+ */
+export async function getContactStats(): Promise<ContactStats> {
+  const [total, unassigned, byStageRaw] = await Promise.all([
+    prisma.contact.count(),
+    prisma.contact.count({ where: { assignedToId: null } }),
+    prisma.contact.groupBy({ by: ["lifecycleStage"], _count: { _all: true } }),
+  ]);
+
+  const byStage = Object.fromEntries(
+    LIFECYCLE_STAGES.map((stage) => [stage, 0]),
+  ) as Record<LifecycleStage, number>;
+  for (const row of byStageRaw) {
+    byStage[row.lifecycleStage] = row._count._all;
+  }
+
+  return { total, unassigned, byStage };
 }
 
 export type CreateContactInput = {
@@ -456,6 +515,65 @@ export async function getInboxLeadPanelFieldsForDeal(
       highlight: resolveHighlight(value, f.highlightRules),
     };
   });
+}
+
+/**
+ * Versão em LOTE de `getInboxLeadPanelFieldsForDeal` para vários negócios de
+ * uma vez. Retorna um mapa `dealId → campos` (cada negócio recebe TODOS os
+ * custom fields marcados para o painel da Inbox, com o valor daquele negócio
+ * ou null). Faz 2 queries no total (defs + valores de todos os deals) em vez
+ * de 2 por negócio — usado no painel do contato, que pode ter vários cards.
+ */
+export async function getInboxLeadPanelFieldsForDeals(
+  dealIds: string[]
+): Promise<Record<string, InboxLeadPanelFieldRow[]>> {
+  const result: Record<string, InboxLeadPanelFieldRow[]> = {};
+  if (dealIds.length === 0) return result;
+
+  const fields = await prisma.customField.findMany({
+    where: { entity: "deal", showInInboxLeadPanel: true },
+  });
+  fields.sort(
+    (a, b) =>
+      (a.inboxLeadPanelOrder ?? 9999) - (b.inboxLeadPanelOrder ?? 9999) ||
+      a.label.localeCompare(b.label, "pt-BR")
+  );
+  if (fields.length === 0) return result;
+
+  const fieldIds = fields.map((f) => f.id);
+  const values = await prisma.dealCustomFieldValue.findMany({
+    where: { dealId: { in: dealIds }, customFieldId: { in: fieldIds } },
+    select: { dealId: true, customFieldId: true, value: true },
+  });
+
+  const byDeal = new Map<string, Map<string, string>>();
+  for (const v of values) {
+    let m = byDeal.get(v.dealId);
+    if (!m) {
+      m = new Map<string, string>();
+      byDeal.set(v.dealId, m);
+    }
+    m.set(v.customFieldId, v.value);
+  }
+
+  for (const dealId of dealIds) {
+    const valueByField = byDeal.get(dealId) ?? new Map<string, string>();
+    result[dealId] = fields.map((f) => {
+      const value = valueByField.get(f.id) ?? null;
+      return {
+        fieldId: f.id,
+        name: f.name,
+        label: f.label,
+        type: f.type,
+        options: f.options,
+        value,
+        highlightRules: Array.isArray(f.highlightRules) ? f.highlightRules : [],
+        highlight: resolveHighlight(value, f.highlightRules),
+      };
+    });
+  }
+
+  return result;
 }
 
 /**
@@ -731,18 +849,19 @@ export async function getContactById(id: string) {
     safe("inboxLeadPanelFields", () => getInboxLeadPanelFieldsForContact(id), [] as InboxLeadPanelFieldRow[]),
   ]);
 
-  const activeDeal = deals.find((d) => d.status === "OPEN");
-  const dealInboxPanelFields: Record<string, InboxLeadPanelFieldRow[]> = {};
-  if (activeDeal) {
-    const dealFields = await safe(
-      "dealInboxPanelFields",
-      () => getInboxLeadPanelFieldsForDeal(activeDeal.id),
-      [] as InboxLeadPanelFieldRow[],
-    );
-    if (dealFields.length > 0) {
-      dealInboxPanelFields[activeDeal.id] = dealFields;
-    }
-  }
+  // Campos de painel de TODOS os negócios do contato (não só o "primeiro
+  // aberto"). O frontend abre um negócio específico e busca
+  // `dealInboxPanelFields[dealAberto]` — se preenchêssemos só um negócio, abrir
+  // qualquer outro do mesmo contato (ex.: reimport que gerou 2 cards) mostraria
+  // a lateral vazia. Batched: 1 query pros defs + 1 pros valores de todos.
+  const dealInboxPanelFields: Record<string, InboxLeadPanelFieldRow[]> =
+    deals.length > 0
+      ? await safe(
+          "dealInboxPanelFields",
+          () => getInboxLeadPanelFieldsForDeals(deals.map((d) => d.id)),
+          {} as Record<string, InboxLeadPanelFieldRow[]>,
+        )
+      : {};
 
   return {
     ...core,
@@ -789,6 +908,26 @@ function isPrismaUniqueViolation(err: unknown): boolean {
   );
 }
 
+/**
+ * Busca o id de um contato existente (na org atual) por telefone, tolerando
+ * diferenças de formato e a ambiguidade do 9º dígito BR. Requer que os
+ * telefones estejam gravados em E.164 (garantido por `createContact`/
+ * `updateContact` + backfill `scripts/backfill-phone-e164.mjs`).
+ */
+export async function findContactIdByPhone(
+  orgId: string,
+  rawPhone: string | null | undefined,
+): Promise<string | null> {
+  const variants = phoneMatchVariants(rawPhone);
+  if (variants.length === 0) return null;
+  const c = await prisma.contact.findFirst({
+    where: { organizationId: orgId, phone: { in: variants } },
+    select: { id: true },
+    orderBy: { createdAt: "asc" },
+  });
+  return c?.id ?? null;
+}
+
 export async function createContact(data: CreateContactInput) {
   const normalizedPhone = normalizeContactPhoneInput(data.phone);
   let lastErr: unknown;
@@ -799,7 +938,8 @@ export async function createContact(data: CreateContactInput) {
         data: withOrgFromCtx({
           ...(data.id ? { id: data.id } : {}),
           number,
-          name: data.name,
+          // Contato nunca deve herdar prefixo de negócio ("Negócio Marcelo…").
+          name: sanitizeContactName(data.name) || data.name,
           externalId: data.externalId === undefined ? undefined : data.externalId,
           email: data.email ?? undefined,
           phone: normalizedPhone ?? undefined,
@@ -843,7 +983,10 @@ export async function createContact(data: CreateContactInput) {
 }
 
 export async function updateContact(id: string, data: UpdateContactInput) {
-  const updateData: Prisma.ContactUpdateInput = {};
+  // Unchecked: FKs escalares (`companyId`/`assignedToId`). Relação
+  // `company: { connect }` + `organizationId` injetado pelo scope Prisma
+  // mistura checked/unchecked e o update estoura 500.
+  const updateData: Prisma.ContactUncheckedUpdateInput = {};
 
   // Snapshot anterior para diff (somente os campos que podem mudar).
   const prev = await prisma.contact.findUnique({
@@ -862,7 +1005,9 @@ export async function updateContact(id: string, data: UpdateContactInput) {
     },
   });
 
-  if (data.name !== undefined) updateData.name = data.name;
+  if (data.name !== undefined) {
+    updateData.name = sanitizeContactName(data.name) || data.name;
+  }
   if (data.email !== undefined) updateData.email = data.email;
   if (data.phone !== undefined) {
     updateData.phone = normalizeContactPhoneInput(data.phone) ?? null;
@@ -872,12 +1017,10 @@ export async function updateContact(id: string, data: UpdateContactInput) {
   if (data.lifecycleStage !== undefined) updateData.lifecycleStage = data.lifecycleStage;
   if (data.source !== undefined) updateData.source = data.source;
   if (data.companyId !== undefined) {
-    updateData.company =
-      data.companyId === null ? { disconnect: true } : { connect: { id: data.companyId } };
+    updateData.companyId = data.companyId;
   }
   if (data.assignedToId !== undefined) {
-    updateData.assignedTo =
-      data.assignedToId === null ? { disconnect: true } : { connect: { id: data.assignedToId } };
+    updateData.assignedToId = data.assignedToId;
   }
   if (data.externalId !== undefined) {
     updateData.externalId = data.externalId;

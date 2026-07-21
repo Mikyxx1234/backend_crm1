@@ -27,7 +27,7 @@ type RouteContext = { params: Promise<{ id: string }> };
  * 27/mai/26
  */
 export async function POST(request: Request, context: RouteContext) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
     try {
       const { id } = await context.params;
       if (!id) {
@@ -120,6 +120,10 @@ export async function POST(request: Request, context: RouteContext) {
           conversationId,
           dealId: resolvedDealId,
           manuallyTriggered: true,
+          // Quem clicou em "Rodar automação" — usado para exibir o avatar
+          // do agente ao lado do robô na confirmação no chat (colab).
+          triggeredByUserId: session.user.id,
+          triggeredByName: session.user.name ?? null,
         },
       });
 

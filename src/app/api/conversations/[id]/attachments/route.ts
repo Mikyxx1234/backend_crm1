@@ -17,7 +17,7 @@ import { metaWhatsApp, metaClientFromConfig, formatMetaSendError } from "@/lib/m
 import { sendWhatsAppMedia, isBaileysChannel } from "@/lib/send-whatsapp";
 import { sseBus } from "@/lib/sse-bus";
 import { generateFileName, saveFile } from "@/lib/storage/local";
-import { getConversationLite } from "@/services/conversations";
+import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 
@@ -88,9 +88,23 @@ export async function POST(request: Request, context: RouteContext) {
       const denied = await requireConversationAccess(session, id);
       if (denied) return denied;
 
-      const conv = await getConversationLite(id);
+      let conv = await getConversationLite(id);
       if (!conv) {
         return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
+      }
+
+      // Regra "reabrir = novo id": anexo em conversa ENCERRADA reabre como
+      // NOVO ticket (mesmo comportamento do POST /messages).
+      let reopenedConversationId: string | null = null;
+      if (conv.status === "RESOLVED" && conv.contactId) {
+        const reopened = await reopenResolvedAsNewTicket(conv.id);
+        if (reopened.id !== conv.id) {
+          const fresh = await getConversationLite(reopened.id);
+          if (fresh) {
+            reopenedConversationId = reopened.id;
+            conv = fresh;
+          }
+        }
       }
 
       const sendDenied = await requireChannelScope(session.user, "send", conv.channelId);
@@ -254,6 +268,8 @@ export async function POST(request: Request, context: RouteContext) {
             mediaUrl: publicUrl,
             sendStatus: metaSendError ? "failed" : "sent",
           },
+          conversationId: conv.id,
+          ...(reopenedConversationId ? { reopenedConversationId } : {}),
         }, { status: 201 });
       }
 
@@ -402,6 +418,8 @@ export async function POST(request: Request, context: RouteContext) {
           senderName,
           mediaUrl: publicUrl,
         },
+        conversationId: conv.id,
+        ...(reopenedConversationId ? { reopenedConversationId } : {}),
         ...(metaSendError ? { metaError: metaSendError } : {}),
       }, { status: 201 });
     } catch (e: unknown) {

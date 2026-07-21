@@ -152,63 +152,6 @@ async function main() {
     console.log(`  ✔ ${u.email} (${u.role}) → role "${presetRole.name}"`);
   }
 
-  // ─── 2. Grupo de acesso com escopo (estilo Kommo) ───────────────────────
-  // Demonstra GroupPermission por resource:action com PermissionLevel.
-  //   deal:view = SELF  → só vê os próprios negócios
-  //   deal:edit = SELF
-  //   contact:view = ALL → vê todos os contatos
-  //   conversation:view = SELF
-  const GROUP_NAME = "Equipe Comercial (teste)";
-  let group = await prisma.group.findFirst({
-    where: { organizationId: EDUIT_ORG_ID, name: GROUP_NAME },
-    select: { id: true },
-  });
-  if (!group) {
-    group = await prisma.group.create({
-      data: {
-        organizationId: EDUIT_ORG_ID,
-        name: GROUP_NAME,
-        description: "Grupo de teste: vê apenas os próprios deals, todos os contatos.",
-        sharedInbox: true,
-        mediaAccess: true,
-      },
-      select: { id: true },
-    });
-  }
-  const groupGrants: Array<{ resource: string; action: string; level: "SELF" | "ALL" | "NONE" | "TEAM" }> = [
-    { resource: "deal", action: "view", level: "SELF" },
-    { resource: "deal", action: "edit", level: "SELF" },
-    { resource: "contact", action: "view", level: "ALL" },
-    { resource: "conversation", action: "view", level: "SELF" },
-  ];
-  for (const g of groupGrants) {
-    await prisma.groupPermission.upsert({
-      where: {
-        groupId_resource_action: {
-          groupId: group.id,
-          resource: g.resource,
-          action: g.action,
-        },
-      },
-      create: {
-        organizationId: EDUIT_ORG_ID,
-        groupId: group.id,
-        resource: g.resource,
-        action: g.action,
-        level: g.level,
-      },
-      update: { level: g.level },
-    });
-  }
-  // operador2 entra no grupo (operador "simples" fica fora pra comparar).
-  const operador2Id = userIdByEmail.get("operador2@eduit.com.br")!;
-  await prisma.groupMember.upsert({
-    where: { groupId_userId: { groupId: group.id, userId: operador2Id } },
-    create: { organizationId: EDUIT_ORG_ID, groupId: group.id, userId: operador2Id },
-    update: {},
-  });
-  console.log(`  ✔ Grupo "${GROUP_NAME}" com ${groupGrants.length} permissões + operador2 como membro`);
-
   // ─── 3. Produtos (catálogo estava vazio) ────────────────────────────────
   const productIdBySku = new Map<string, string>();
   for (const p of PRODUCTS) {

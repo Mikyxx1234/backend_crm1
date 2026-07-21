@@ -13,6 +13,7 @@ export async function GET() {
       name: true,
       email: true,
       role: true,
+      avatarUrl: true,
       agentStatus: { select: { status: true, availableForVoiceCalls: true, updatedAt: true } },
       schedule: {
         select: {

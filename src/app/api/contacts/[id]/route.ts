@@ -158,7 +158,7 @@ export async function PUT(request: Request, context: RouteContext) {
     return NextResponse.json(contact);
     });
   } catch (e: unknown) {
-    console.error(e);
+    log.error(`PUT /api/contacts falhou:`, e);
     if (typeof e === "object" && e !== null && "code" in e) {
       const code = (e as { code: string }).code;
       if (code === "P2025") {
@@ -168,10 +168,12 @@ export async function PUT(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "Violação de unicidade." }, { status: 409 });
       }
       if (code === "P2003") {
-        return NextResponse.json({ message: "Referência inválida." }, { status: 400 });
+        return NextResponse.json({ message: "Referência inválida (empresa ou responsável)." }, { status: 400 });
       }
     }
-    return NextResponse.json({ message: "Erro ao atualizar contato." }, { status: 500 });
+    const errMsg =
+      process.env.NODE_ENV !== "production" && e instanceof Error ? ` Detalhe: ${e.message}` : "";
+    return NextResponse.json({ message: `Erro ao atualizar contato.${errMsg}` }, { status: 500 });
   }
 }
 

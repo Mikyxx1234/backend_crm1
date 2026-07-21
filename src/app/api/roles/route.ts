@@ -11,12 +11,29 @@ const sidebarItemSchema = z.object({
   order: z.number().int().min(0).max(1000),
 });
 
+const stageGrantSchema = z.object({
+  stageId: z.string().min(1),
+  canView: z.boolean(),
+  canEdit: z.boolean(),
+});
+
+const fieldGrantSchema = z.object({
+  entity: z.string().min(1).max(60),
+  fieldKey: z.string().min(1).max(120),
+  canView: z.boolean(),
+  canEdit: z.boolean(),
+});
+
 const createSchema = z.object({
   name: z.string().min(1).max(120),
   description: z.string().max(500).nullable().optional(),
   permissions: z.array(z.string()).default([]),
   inheritsFrom: z.string().min(1).nullable().optional(),
   sidebarItems: z.array(sidebarItemSchema).max(100).nullable().optional(),
+  sharedInbox: z.boolean().optional(),
+  mediaAccess: z.boolean().optional(),
+  stageGrants: z.array(stageGrantSchema).max(500).nullable().optional(),
+  fieldGrants: z.array(fieldGrantSchema).max(500).nullable().optional(),
 });
 
 export async function GET() {

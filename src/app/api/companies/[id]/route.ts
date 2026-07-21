@@ -88,6 +88,15 @@ export async function PUT(request: Request, context: RouteContext) {
       data.address =
         b.address === null ? null : typeof b.address === "string" ? b.address.trim() : undefined;
     }
+    if (b.cep !== undefined) {
+      data.cep = b.cep === null ? null : typeof b.cep === "string" ? b.cep.trim() : undefined;
+    }
+    if (b.city !== undefined) {
+      data.city = b.city === null ? null : typeof b.city === "string" ? b.city.trim() : undefined;
+    }
+    if (b.state !== undefined) {
+      data.state = b.state === null ? null : typeof b.state === "string" ? b.state.trim() : undefined;
+    }
     if (b.notes !== undefined) {
       data.notes = b.notes === null ? null : typeof b.notes === "string" ? b.notes.trim() : undefined;
     }

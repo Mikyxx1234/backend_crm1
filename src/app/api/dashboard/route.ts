@@ -122,10 +122,11 @@ export async function GET(request: Request) {
       if (!pipelineId) {
         const def =
           (await prisma.pipeline.findFirst({
-            where: { isDefault: true },
+            where: { isDefault: true, archivedAt: null },
             select: { id: true },
           })) ??
           (await prisma.pipeline.findFirst({
+            where: { archivedAt: null },
             orderBy: { createdAt: "asc" },
             select: { id: true },
           }));

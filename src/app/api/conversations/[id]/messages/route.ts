@@ -1,3 +1,4 @@
+import { Prisma } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
@@ -15,8 +16,12 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaWhatsApp, metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { withRateLimit } from "@/lib/rate-limit";
 import { sendWhatsAppText, isBaileysChannel } from "@/lib/send-whatsapp";
+import {
+  platformFromConversationChannel,
+  sendMessengerOrInstagramText,
+} from "@/lib/send-meta-messaging";
 import { sseBus } from "@/lib/sse-bus";
-import { getConversationLite } from "@/services/conversations";
+import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { logEvent } from "@/services/activity-log";
@@ -53,6 +58,12 @@ export type InboxMessageDto = {
    * impedia mostrar o NOME da automação que executou o passo.
    */
   authorType?: "human" | "bot" | "system";
+  /**
+   * Nome do agente que disparou a automação MANUALMENTE. Quando presente
+   * (mensagem `out` de bot), o inbox exibe o selo "Manual" + o avatar do
+   * agente ao lado do robô (colab). NULL para envios automáticos/reativos.
+   */
+  triggeredByName?: string | null;
   /**
    * URL da foto de perfil do agente que assinou a mensagem (resolvido
    * server-side via match de `senderName` com `User.name` no workspace).
@@ -113,6 +124,43 @@ function mapSendStatus(s: string | null | undefined): InboxMessageDto["status"] 
   }
 }
 
+const MSG_SELECT = {
+  id: true, externalId: true, content: true, createdAt: true,
+  direction: true, messageType: true, isPrivate: true, senderName: true,
+  authorType: true, triggeredByName: true,
+  mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
+  sendStatus: true, sendError: true, channelId: true,
+} satisfies Prisma.MessageSelect;
+
+type MsgRow = Prisma.MessageGetPayload<{ select: typeof MSG_SELECT }>;
+
+/**
+ * findMany de mensagens tolerante à ausência da coluna `triggeredByName`.
+ * Em ambientes onde a migração `..._add_message_triggered_by_name` ainda não
+ * rodou, selecionar a coluna faz o Prisma lançar P2022 e derruba TODO o GET
+ * de mensagens — a conversa aparece VAZIA. Aqui, nesse caso, refazemos a
+ * query sem o campo e devolvemos `triggeredByName: null`, mantendo o inbox
+ * funcional até a migração ser aplicada.
+ */
+async function findMessagesSafe(args: {
+  where: Prisma.MessageWhereInput;
+  orderBy: Prisma.MessageOrderByWithRelationInput;
+  take: number;
+}): Promise<MsgRow[]> {
+  try {
+    return await prisma.message.findMany({ ...args, select: MSG_SELECT });
+  } catch (e) {
+    const code = (e as { code?: string })?.code;
+    const message = e instanceof Error ? e.message : String(e);
+    if (code === "P2022" || /triggeredByName/i.test(message)) {
+      const { triggeredByName: _omit, ...safeSelect } = MSG_SELECT;
+      const rows = await prisma.message.findMany({ ...args, select: safeSelect });
+      return rows.map((r) => ({ ...r, triggeredByName: null })) as MsgRow[];
+    }
+    throw e;
+  }
+}
+
 // ── GET ──────────────────────────────────────
 
 export async function GET(request: Request, context: RouteContext) {
@@ -164,8 +212,18 @@ export async function GET(request: Request, context: RouteContext) {
         .map((p) => p.message.externalId ?? p.message.id);
     } catch { /* tabela pode não existir ainda em ambientes antigos */ }
 
+    // Janela de 24h e' do CONTATO (regra da Meta), nao do ticket. Com o
+    // modelo de ticket, um ticket recem-criado (reopen/resposta) nasce sem
+    // mensagens inbound — calcular so pelo ticket marcava a sessao como
+    // fechada mesmo com o cliente ativo minutos antes no ticket anterior.
+    // Busca o ultimo inbound em QUALQUER conversa do contato no canal.
     const lastInMsg = await prisma.message.findFirst({
-      where: { conversationId: conv.id, direction: "in" },
+      where: {
+        direction: "in",
+        conversation: conv.contactId
+          ? { contactId: conv.contactId, channel: conv.channel }
+          : { id: conv.id },
+      },
       orderBy: { createdAt: "desc" },
       select: { createdAt: true },
     });
@@ -186,24 +244,49 @@ export async function GET(request: Request, context: RouteContext) {
     const url = new URL(request.url);
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 50));
     const before = url.searchParams.get("before");
+    const includeHistory = url.searchParams.get("history") === "1" && !before;
 
-    const rows = await prisma.message.findMany({
+    const rows = await findMessagesSafe({
       where: {
         conversationId: conv.id,
         ...(before ? { createdAt: { lt: new Date(before) } } : {}),
       },
       orderBy: { createdAt: "desc" },
       take: limit,
-      select: {
-        id: true, externalId: true, content: true, createdAt: true,
-        direction: true, messageType: true, isPrivate: true, senderName: true,
-        authorType: true,
-        mediaUrl: true, replyToId: true, replyToPreview: true, reactions: true,
-        sendStatus: true, sendError: true, channelId: true,
-      },
     });
 
     rows.reverse();
+
+    // Tickets anteriores do mesmo contato+canal (history=1, sem paginação).
+    // Cada ticket RESOLVED recebe um separador visual antes das suas mensagens.
+    type HistoryTicket = {
+      id: string;
+      number: number;
+      closedAt: Date | null;
+      rows: (typeof rows)[number][];
+    };
+    const historyTickets: HistoryTicket[] = [];
+    if (includeHistory && conv.contactId && conv.channel) {
+      const prevConvs = await prisma.conversation.findMany({
+        where: {
+          contactId: conv.contactId,
+          channel: conv.channel,
+          status: "RESOLVED",
+          id: { not: conv.id },
+        },
+        orderBy: { createdAt: "asc" },
+        select: { id: true, number: true, closedAt: true },
+        take: 15,
+      });
+      for (const pc of prevConvs) {
+        const pRows = await findMessagesSafe({
+          where: { conversationId: pc.id },
+          orderBy: { createdAt: "asc" },
+          take: 100,
+        });
+        historyTickets.push({ id: pc.id, number: pc.number, closedAt: pc.closedAt, rows: pRows });
+      }
+    }
 
     // Resolve foto de perfil dos agentes que assinaram cada mensagem
     // outbound. Sem FK `Message.senderId` no schema atual, a única
@@ -263,6 +346,7 @@ export async function GET(request: Request, context: RouteContext) {
       isPrivate: r.isPrivate || undefined,
       senderName: r.senderName,
       authorType: r.authorType as "human" | "bot" | "system",
+      triggeredByName: r.triggeredByName ?? undefined,
       senderImageUrl:
         r.direction === "out" && r.senderName
           ? senderAvatarMap.get(r.senderName.trim().toLowerCase()) ?? null
@@ -316,8 +400,63 @@ export async function GET(request: Request, context: RouteContext) {
     // verdade é o backend; client usa só pra UX (desabilitar input + aviso).
     const canReply = await canDoChannelAction(accessUser, "send", conv.channelId);
 
+    // Monta a linha do tempo completa: tickets anteriores (com separadores)
+    // + mensagens do ticket atual.
+    let finalMessages: InboxMessageDto[] = messages;
+    if (historyTickets.length > 0) {
+      const mapRows = (rr: typeof rows): InboxMessageDto[] =>
+        rr.map((r) => ({
+          id: r.externalId ?? r.id,
+          content: r.content,
+          createdAt: r.createdAt.toISOString(),
+          direction: r.direction as InboxMessageDto["direction"],
+          messageType: r.messageType,
+          isPrivate: r.isPrivate || undefined,
+          senderName: r.senderName,
+          authorType: r.authorType as "human" | "bot" | "system",
+          triggeredByName: r.triggeredByName ?? undefined,
+          mediaUrl: r.mediaUrl,
+          replyToId: r.replyToId,
+          replyToPreview: r.replyToPreview,
+          reactions: Array.isArray(r.reactions) ? (r.reactions as ReactionDto[]) : [],
+          sendStatus: r.sendStatus,
+          sendError: r.sendError ?? undefined,
+          status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
+          channelId: r.channelId ?? null,
+        }));
+
+      const historical: InboxMessageDto[] = [];
+      for (const ticket of historyTickets) {
+        // Separador: um item "system" especial com os metadados do ticket.
+        historical.push({
+          id: `__ticket_sep_${ticket.id}`,
+          content: JSON.stringify({
+            number: ticket.number,
+            closedAt: ticket.closedAt?.toISOString() ?? null,
+          }),
+          createdAt: null,
+          direction: "system",
+          messageType: "ticket-separator",
+        });
+        historical.push(...mapRows(ticket.rows));
+      }
+      // Separador do ticket atual (só se houver histórico).
+      historical.push({
+        id: `__ticket_sep_${conv.id}`,
+        content: JSON.stringify({
+          number: conv.number,
+          closedAt: null,
+          isCurrent: true,
+        }),
+        createdAt: null,
+        direction: "system",
+        messageType: "ticket-separator",
+      });
+      finalMessages = [...historical, ...messages];
+    }
+
     return NextResponse.json({
-      messages,
+      messages: finalMessages,
       pinnedNoteId,
       pinnedMessageIds,
       channelProvider: conv.channelRef?.provider ?? null,
@@ -364,7 +503,7 @@ export async function POST(request: Request, context: RouteContext) {
     const denied = await requireConversationAccess({ user: accessUser }, id);
     if (denied) return denied;
 
-    const conv = await getConversationLite(id);
+    let conv = await getConversationLite(id);
     if (!conv) {
       return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
     }
@@ -387,6 +526,37 @@ export async function POST(request: Request, context: RouteContext) {
         ? b.messageType
         : "outgoing";
     const isPrivateNote = b.private === true || messageType === "note";
+
+    // Regra "reabrir = novo id": responder numa conversa ENCERRADA reabre
+    // como NOVO ticket. A mensagem entra no ticket novo; o id antigo fica
+    // como historico. Notas internas NAO reabrem (sao anotacoes do ticket).
+    let reopenedConversationId: string | null = null;
+    if (!isPrivateNote && conv.status === "RESOLVED" && conv.contactId) {
+      const reopened = await reopenResolvedAsNewTicket(conv.id);
+      if (reopened.id !== conv.id) {
+        const fresh = await getConversationLite(reopened.id);
+        if (fresh) {
+          reopenedConversationId = reopened.id;
+          const previousConversationId = conv.id;
+          if (reopened.created) {
+            void logEvent({
+              type: "CONVERSATION_CREATED",
+              entityType: "CONVERSATION",
+              entityId: fresh.id,
+              entityLabel: null,
+              conversationId: fresh.id,
+              contactId: fresh.contactId,
+              meta: { channel: fresh.channel, source: "reply_reopen", previousConversationId },
+            });
+            fireTrigger("conversation_created", {
+              contactId: fresh.contactId ?? undefined,
+              data: { channel: fresh.channel, source: "reply_reopen", previousConversationId },
+            }).catch(() => { /* fire-and-forget */ });
+          }
+          conv = fresh;
+        }
+      }
+    }
 
     // Override de canal vindo do composer (UI permite escolher por qual
     // WhatsApp enviar quando a org tem >1 conectado). Quando ausente ou
@@ -524,6 +694,112 @@ export async function POST(request: Request, context: RouteContext) {
           senderName,
         } satisfies InboxMessageDto,
       }, { status: 201 });
+    }
+
+    // ── Send via Facebook Messenger / Instagram Direct ──
+    // Branch antes do fluxo WhatsApp: canais IG/FB tem identificadores
+    // (PSID/IGSID) e endpoints distintos e nao passam pelo getContactWhatsAppTargets.
+    const messagingPlatform = platformFromConversationChannel(conv.channel);
+    if (messagingPlatform) {
+      const savedMsg = await prisma.message.create({
+        data: withOrgFromCtx({
+          conversationId: conv.id,
+          channelId: outboundChannelId ?? undefined,
+          content,
+          direction: "out",
+          messageType: "text",
+          senderName,
+          replyToId: replyParentInternalId,
+          replyToPreview,
+        }),
+      });
+
+      const sendRes = await sendMessengerOrInstagramText({
+        conversationId: conv.id,
+        contactId: conv.contactId,
+        channelRef: outboundChannelRef
+          ? { id: outboundChannelRef.id, config: outboundChannelRef.config }
+          : null,
+        content,
+        messageId: savedMsg.id,
+        platform: messagingPlatform,
+      });
+
+      const channelLabel =
+        messagingPlatform === "instagram" ? "Instagram" : "Messenger";
+
+      try {
+        await prisma.conversation.update({
+          where: { id: conv.id },
+          data: {
+            lastMessageDirection: "out",
+            hasAgentReply: true,
+            ...(sendRes.failed ? { hasError: true } : { hasError: false }),
+          },
+        });
+      } catch { /* colunas opcionais */ }
+
+      fireTrigger("message_sent", {
+        contactId: conv.contactId,
+        data: { channel: channelLabel, content },
+      }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+
+      if (!sendRes.failed) {
+        void logEvent({
+          type: "MESSAGE_SENT",
+          entityType: "MESSAGE",
+          entityId: savedMsg.id,
+          entityLabel: senderName ?? "Mensagem enviada",
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          meta: {
+            preview: content.slice(0, 200),
+            channel: channelLabel,
+            via: "meta_messaging",
+            externalId: sendRes.externalId,
+          },
+        });
+      }
+
+      try {
+        sseBus.publish("new_message", {
+          organizationId: conv.organizationId,
+          conversationId: conv.id,
+          contactId: conv.contactId,
+          direction: "out",
+          content,
+          timestamp: savedMsg.createdAt,
+        });
+      } catch { /* best-effort */ }
+
+      cancelPendingForConversation(conv.id, "agent_reply", authResult.user.id).catch(
+        (err) =>
+          console.warn(
+            "[scheduled-messages] falha ao cancelar apos envio manual:",
+            err,
+          ),
+      );
+
+      return NextResponse.json(
+        {
+          message: {
+            id: sendRes.externalId ?? savedMsg.id,
+            content,
+            createdAt: savedMsg.createdAt.toISOString(),
+            direction: "out",
+            messageType: "text",
+            senderName,
+            replyToId: replyParentInternalId,
+            replyToPreview,
+            status: sendRes.error ? "FAILED" : "SENT",
+            channelId: outboundChannelId ?? null,
+          } satisfies InboxMessageDto,
+          conversationId: conv.id,
+          ...(reopenedConversationId ? { reopenedConversationId } : {}),
+          ...(sendRes.error ? { metaError: sendRes.error } : {}),
+        },
+        { status: 201 },
+      );
     }
 
     // ── Send via WhatsApp (Meta Cloud API or Baileys) ──
@@ -668,6 +944,8 @@ export async function POST(request: Request, context: RouteContext) {
         status: sendErrorMsg ? "FAILED" : "SENT",
         channelId: outboundChannelId ?? null,
       } satisfies InboxMessageDto,
+      conversationId: conv.id,
+      ...(reopenedConversationId ? { reopenedConversationId } : {}),
       ...(sendErrorMsg ? { metaError: sendErrorMsg } : {}),
     }, { status: 201 });
     });

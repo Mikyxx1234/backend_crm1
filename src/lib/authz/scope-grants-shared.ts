@@ -88,8 +88,6 @@ export type ScopeGrants = {
    *   - `users[userId]`   → override por usuário (configurável na ficha do user)
    *   - `roles[roleId]`   → grant por Role CUSTOMIZADA (editor de papel).
    *                          `roleId` é o id real da Role.
-   *   - `groups[groupId]` → grant por Group (editor de grupo, 25/jun/26).
-   *                          `groupId` é o id real do Group.
    *
    * Ações (ver `canAccessChannelForUser`):
    *   - `view`     — ler conversas/mensagens do canal
@@ -98,12 +96,12 @@ export type ScopeGrants = {
    *   - `manage`   — administrar o canal (PUT/DELETE/connect/disconnect/qr).
    *                  IMPLICA `view` + `send` + `initiate` automaticamente.
    *
-   * Resolução: para cada ação, regras de user + roles + groups são unidas
+   * Resolução: para cada ação, regras de user + roles são unidas
    * de forma permissiva (OR). Sem nenhuma regra → liberado (compat com
    * comportamento anterior — orgs sem upgrade ficam idênticas).
    *
    * `deny` é GLOBAL ao canal (não por eixo): se `chId` aparece em
-   * `deny.users[uid]` (ou em deny.roles/groups que cubra o user), ALL
+   * `deny.users[uid]` (ou em deny.roles que cubra o user), ALL
    * actions naquele canal são negadas — independente de grants positivos.
    * Anti-lockout: ADMIN (enum legado) e quem tem `manage` no canal IGNORAM
    * o deny (admin do canal não pode ser bloqueado dele acidentalmente).
@@ -112,28 +110,23 @@ export type ScopeGrants = {
     view?: {
       users?: UserScopeGrants;
       roles?: UserScopeGrants;
-      groups?: UserScopeGrants;
     };
     send?: {
       users?: UserScopeGrants;
       roles?: UserScopeGrants;
-      groups?: UserScopeGrants;
     };
     initiate?: {
       users?: UserScopeGrants;
       roles?: UserScopeGrants;
-      groups?: UserScopeGrants;
     };
     manage?: {
       users?: UserScopeGrants;
       roles?: UserScopeGrants;
-      groups?: UserScopeGrants;
     };
-    /** Override negativo — lista de canais a NEGAR pra principal (user/role/group). */
+    /** Override negativo — lista de canais a NEGAR pra principal (user/role). */
     deny?: {
       users?: UserScopeGrants;
       roles?: UserScopeGrants;
-      groups?: UserScopeGrants;
     };
   };
   stage?: {
@@ -257,27 +250,22 @@ export function parseScopeGrants(input: unknown): ScopeGrants {
       view: {
         users: normalizeUserScope(channelView.users),
         roles: normalizeUserScope(channelView.roles),
-        groups: normalizeUserScope(channelView.groups),
       },
       send: {
         users: normalizeUserScope(channelSend.users),
         roles: normalizeUserScope(channelSend.roles),
-        groups: normalizeUserScope(channelSend.groups),
       },
       initiate: {
         users: normalizeUserScope(channelInitiate.users),
         roles: normalizeUserScope(channelInitiate.roles),
-        groups: normalizeUserScope(channelInitiate.groups),
       },
       manage: {
         users: normalizeUserScope(channelManage.users),
         roles: normalizeUserScope(channelManage.roles),
-        groups: normalizeUserScope(channelManage.groups),
       },
       deny: {
         users: normalizeUserScope(channelDeny.users),
         roles: normalizeUserScope(channelDeny.roles),
-        groups: normalizeUserScope(channelDeny.groups),
       },
     },
     stage: {
@@ -421,19 +409,17 @@ type ChannelAction = "view" | "send" | "initiate" | "manage";
 type ChannelGrantNode = {
   users?: UserScopeGrants;
   roles?: UserScopeGrants;
-  groups?: UserScopeGrants;
 };
 
 /**
  * Coleta as regras aplicáveis a um usuário pra um nó de grant de canal
- * (user override + grants das roles + grants dos grupos). Cada entrada é
- * uma lista de IDs; resolução ADITIVA (OR) em `canAccessChannelForUser`.
+ * (user override + grants das roles). Cada entrada é uma lista de IDs;
+ * resolução ADITIVA (OR) em `canAccessChannelForUser`.
  */
 function collectChannelRules(
   node: ChannelGrantNode | undefined,
   userId: string,
   roleIds: string[],
-  groupIds: string[],
 ): string[][] {
   const rules: string[][] = [];
   const userRule = node?.users?.[userId];
@@ -442,16 +428,12 @@ function collectChannelRules(
     const roleRule = node?.roles?.[roleId];
     if (Array.isArray(roleRule)) rules.push(roleRule);
   }
-  for (const groupId of groupIds) {
-    const groupRule = node?.groups?.[groupId];
-    if (Array.isArray(groupRule)) rules.push(groupRule);
-  }
   return rules;
 }
 
 /**
  * Checa se o canal cai em alguma regra de `deny` que cubra o usuário (via
- * user, role ou group). Deny é GLOBAL ao canal — se bater, nega todas as
+ * user ou role). Deny é GLOBAL ao canal — se bater, nega todas as
  * ações nesse canal, exceto pra ADMIN ou pra quem tem `manage` no mesmo
  * canal (anti-lockout, ver `canAccessChannelForUser`).
  */
@@ -459,27 +441,25 @@ function isChannelDenied(
   deny: ChannelGrantNode | undefined,
   userId: string,
   roleIds: string[],
-  groupIds: string[],
   channelId: string,
 ): boolean {
-  const rules = collectChannelRules(deny, userId, roleIds, groupIds);
+  const rules = collectChannelRules(deny, userId, roleIds);
   if (rules.length === 0) return false;
   return rules.some((r) => userScopeAllows(r, channelId));
 }
 
 /**
  * Resolve grants positivos pra uma ação: regras definidas devem cobrir o
- * canal (OR entre user+roles+groups). Sem nenhuma regra → permissivo
+ * canal (OR entre user+roles). Sem nenhuma regra → permissivo
  * (compat com comportamento pré-feature; orgs sem upgrade ficam idênticas).
  */
 function actionAllowsChannel(
   node: ChannelGrantNode | undefined,
   userId: string,
   roleIds: string[],
-  groupIds: string[],
   channelId: string,
 ): boolean {
-  const rules = collectChannelRules(node, userId, roleIds, groupIds);
+  const rules = collectChannelRules(node, userId, roleIds);
   if (rules.length === 0) return true;
   return rules.some((r) => userScopeAllows(r, channelId));
 }
@@ -506,26 +486,23 @@ export function canAccessChannelForUser(args: {
   action: ChannelAction;
   channelId: string;
   roleIds?: string[];
-  groupIds?: string[];
 }): boolean {
   if (asRoleKey(args.role) === "ADMIN") return true;
   const roleIds = args.roleIds ?? [];
-  const groupIds = args.groupIds ?? [];
 
   const hasManage = actionAllowsChannel(
     args.grants.channel?.manage,
     args.userId,
     roleIds,
-    groupIds,
     args.channelId,
   );
   const hasExplicitManageGrant =
-    collectChannelRules(args.grants.channel?.manage, args.userId, roleIds, groupIds).length > 0;
+    collectChannelRules(args.grants.channel?.manage, args.userId, roleIds).length > 0;
   const managesThisChannel = hasManage && hasExplicitManageGrant;
 
   if (!managesThisChannel) {
     if (
-      isChannelDenied(args.grants.channel?.deny, args.userId, roleIds, groupIds, args.channelId)
+      isChannelDenied(args.grants.channel?.deny, args.userId, roleIds, args.channelId)
     ) {
       return false;
     }
@@ -541,7 +518,6 @@ export function canAccessChannelForUser(args: {
     args.grants.channel?.view,
     args.userId,
     roleIds,
-    groupIds,
     args.channelId,
   );
   if (!viewOk) return false;
@@ -552,12 +528,12 @@ export function canAccessChannelForUser(args: {
     args.action === "send"
       ? args.grants.channel?.send
       : args.grants.channel?.initiate;
-  return actionAllowsChannel(node, args.userId, roleIds, groupIds, args.channelId);
+  return actionAllowsChannel(node, args.userId, roleIds, args.channelId);
 }
 
 /**
  * Lista de IDs de canais que o usuário pode VER, pra filtrar conversas.
- * Une grants de user + roles + groups e remove canais negados explicitamente
+ * Une grants de user + roles e remove canais negados explicitamente
  * por `deny` (a menos que o user tenha `manage` cobrindo o canal).
  *
  * Retorna `null` quando não há restrição (nenhuma regra de view ou alguma
@@ -569,29 +545,24 @@ export function listAllowedChannelIdsForUser(args: {
   role: string | null | undefined;
   userId: string;
   roleIds?: string[];
-  groupIds?: string[];
 }): string[] | null {
   if (asRoleKey(args.role) === "ADMIN") return null;
   const roleIds = args.roleIds ?? [];
-  const groupIds = args.groupIds ?? [];
 
   const viewRules = collectChannelRules(
     args.grants.channel?.view,
     args.userId,
     roleIds,
-    groupIds,
   );
   const denyRules = collectChannelRules(
     args.grants.channel?.deny,
     args.userId,
     roleIds,
-    groupIds,
   );
   const manageRules = collectChannelRules(
     args.grants.channel?.manage,
     args.userId,
     roleIds,
-    groupIds,
   );
 
   const noViewRestriction =

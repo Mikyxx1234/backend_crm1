@@ -19,4 +19,14 @@ export const CRM_META_APP_ID =
 export const CRM_META_ES_CONFIG_ID =
   process.env.NEXT_PUBLIC_META_ES_CONFIG_ID?.trim() || "1510210360812755";
 
+/**
+ * Login for Business Configuration dedicada ao Messenger. Necessaria
+ * desde 2024 para permissoes de Pages Messaging via FB.login — o fluxo
+ * `scope: "pages_messaging"` cru foi deprecado. Configure no painel Meta
+ * em Facebook Login for Business > Configurations com as permissoes:
+ * pages_show_list, pages_messaging, pages_manage_metadata, business_management.
+ */
+export const CRM_META_MESSENGER_CONFIG_ID =
+  process.env.NEXT_PUBLIC_META_MESSENGER_CONFIG_ID?.trim() || "";
+
 export const CRM_META_APP_SECRET = process.env.META_APP_SECRET?.trim() || "";

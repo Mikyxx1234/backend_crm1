@@ -101,6 +101,9 @@ export async function GET(request: Request) {
       const perPage = parseIntParam(searchParams.get("perPage"), 30);
 
       const ownerId = searchParams.get("ownerId") ?? undefined;
+      const withoutOwner =
+        searchParams.get("withoutOwner") === "1" ||
+        searchParams.get("withoutOwner") === "true";
       const stageId = searchParams.get("stageId") ?? undefined;
       const tagIdsRaw = searchParams.get("tagIds") ?? "";
       const tagIds = tagIdsRaw ? tagIdsRaw.split(",").filter(Boolean) : undefined;
@@ -144,6 +147,7 @@ export async function GET(request: Request) {
         perPage,
         visibilityWhere: visibility.conversationWhere,
         ownerId,
+        withoutOwner,
         stageId,
         tagIds,
         sources,

@@ -5,6 +5,45 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-07-21 — Sync do schema de produção (`db_crm`) com a `DEV_BRANCH` antes do merge
+
+**Decisão.** Alinhar o banco de produção ao schema da `DEV_BRANCH` via
+`prisma migrate deploy` (não via cópia de tabelas / diff bruto), aplicando as
+22 migrations pendentes no `db_crm`.
+
+**Contexto.** Merge da `DEV_BRANCH` → `main` exigia o banco de prod já com as
+tabelas/colunas novas para não quebrar o deploy (prod roda com
+`SKIP_PRISMA_MIGRATE`, ou seja, **não** aplica migrations sozinho). Descobertas
+importantes durante a análise:
+
+- O servidor de prod (`banco-banco-crm`, `187.127.27.39:5432`, PostgreSQL 17.10)
+  tem múltiplas databases. A **produção real é a `db_crm`** — não a `banco`
+  (85 tabelas, beco sem saída) informada por engano nas credenciais.
+- `db_crm` estava 22 migrations atrás (delta da `DEV_BRANCH`).
+- App conecta como `postgres` (superuser, BYPASSRLS); role `app_runtime`
+  **não existe** → nenhum GRANT necessário nas tabelas novas.
+- `groups` tinha 0 linhas → o DROP das tabelas `group*` (migration
+  `roles_absorb_groups`, descarte intencional) não perdeu dado.
+
+**Alternativas descartadas:**
+
+- **Aplicar o `migrate diff` bruto (schema atual → alvo).** Perigoso: gerava
+  `ADD COLUMN ... NOT NULL` sem backfill (`conversations.number`), `DROP TABLE`
+  dos backups `_bkp_*` e de tabelas drift (`contracts`, `price_tables`,
+  `stock_movements`, `user_groups`) e `DROP COLUMN` de dados reais. O
+  `migrate deploy` roda os arquivos de migration (com backfill, ordem correta)
+  e **não** toca no drift.
+- **Copiar tabelas do banco de dev (`crm`) para prod.** Quebraria o tracking do
+  `_prisma_migrations` e causaria drift em deploys futuros.
+
+**Impacto.** `db_crm` agora com "schema is up to date". Backup completo prévio
+em `Desktop/db_crm_backup_20260721_070548.dump` (151,6 MB, `pg_restore`).
+Tabelas drift (`contracts`, `price_tables`, `stock_movements`, `user_groups`,
+colunas antigas de `products`/`deal_products`) foram **mantidas** — não são
+tocadas pelas migrations; limpeza futura opcional se necessário.
+
+---
+
 ### 2026-06-30 — Override de canal de envio: `channelId` opcional no POST de mensagens/anexos
 
 **Decisão.** O envio outbound em `POST /api/conversations/:id/messages` e

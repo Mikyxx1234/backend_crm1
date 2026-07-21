@@ -88,6 +88,7 @@ model Organization {
   campaigns                Campaign[]
   campaignRecipients       CampaignRecipient[]
   lossReasons              LossReason[]
+  pipelineLossReasons      PipelineLossReason[]
   apiTokens                ApiToken[]
   mobileLayoutConfigs      MobileLayoutConfig[]
   userDashboardLayouts     UserDashboardLayout[]
@@ -108,8 +109,7 @@ model Organization {
   aiAgentMessages          AIAgentMessage[]
   roles                    Role[]
   roleAssignments          UserRoleAssignment[]
-  groups                   Group[]
-  groupMembers             GroupMember[]
+  departmentMembers        DepartmentMember[]
   organizationSettings     OrganizationSetting[]
   savedFilters             SavedFilter[]
   organizationWidgets      OrganizationWidget[]
@@ -140,8 +140,15 @@ model Organization {
   callEvents               CallEvent[]
   callProviderConfigs      CallProviderConfig[]
   departments              Department[]
+  tabulations              Tabulation[]
   agentPermissions         AgentPermission[]
   quickReplyGroups         QuickReplyGroup[]
+  // Cotas de desconto (PRD Cotas de Desconto — Fase 1).
+  discountCategories       DiscountCategory[]
+  discountQuotas           DiscountQuota[]
+  quotaPolicies            QuotaConsumptionPolicy[]
+  dealQuotas               DealQuota[]
+  quotaMovements           QuotaMovement[]
 
   @@index([status])
   @@map("organizations")
@@ -516,7 +523,7 @@ model User {
   loginAttempts                  LoginAttempt[]
   dataRequests                   DataRequest[]
   roleAssignments                UserRoleAssignment[]
-  groupMemberships               GroupMember[]
+  departmentMemberships          DepartmentMember[]
   savedFilters                   SavedFilter[]             @relation("UserSavedFilters")
   emailAccounts                  EmailAccount[]
   sipExtensions                  SipExtension[]
@@ -527,7 +534,7 @@ model User {
   /// hashedPassword = NULL, phone/avatarUrl/signature = NULL.
   isErased                       Boolean                   @default(false)
   agentPermission                AgentPermission?
-  createdQuickReplies            QuickReply[]     @relation("QuickReplyCreatedBy")
+  createdQuickReplies            QuickReply[]              @relation("QuickReplyCreatedBy")
   favoriteMessages               FavoriteMessage[]
 
   @@index([type])
@@ -854,16 +861,60 @@ model Role {
   /// (habilitado se qualquer role habilitou; ordem = primeira ocorrencia). Ver
   /// getSidebarPreferences em services/user-preferences.ts.
   sidebarItems   Json?
+  /// Acessos extras do papel (antes viviam em Group). Aplicados atras da
+  /// flag `rbac_granular_scope_v1`; efetivo do user = uniao (OR) entre papeis.
+  sharedInbox    Boolean      @default(true)
+  mediaAccess    Boolean      @default(true)
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   assignments UserRoleAssignment[]
+  stageGrants RoleStageGrant[]
+  fieldGrants RoleFieldGrant[]
 
   @@unique([organizationId, name])
   @@unique([organizationId, systemPreset])
   @@index([organizationId])
   @@index([inheritsFrom])
   @@map("roles")
+}
+
+/// Visibilidade por etapa do funil para um PAPEL (ver/editar deals do stage).
+/// Efetivo do user = uniao entre papeis (mais permissivo vence). Ausencia de
+/// QUALQUER linha para um papel = papel sem restricao de etapa (ve todas).
+model RoleStageGrant {
+  id             String  @id @default(cuid())
+  organizationId String
+  roleId         String
+  role           Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  stageId        String
+  canView        Boolean @default(true)
+  canEdit        Boolean @default(false)
+
+  @@unique([roleId, stageId])
+  @@index([organizationId])
+  @@index([roleId])
+  @@map("role_stage_grants")
+}
+
+/// Permissao por campo (Pro) de um PAPEL. `entity` = "deal"|"contact"|
+/// "company"|"product"; `fieldKey` = chave do campo. Semantica de mascaramento:
+/// campo negado por QUALQUER papel do user fica oculto/somente-leitura (deny
+/// vence), com bypass total para ADMIN. Aplicado atras da flag de escopo.
+model RoleFieldGrant {
+  id             String  @id @default(cuid())
+  organizationId String
+  roleId         String
+  role           Role    @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  entity         String
+  fieldKey       String
+  canView        Boolean @default(true)
+  canEdit        Boolean @default(true)
+
+  @@unique([roleId, entity, fieldKey])
+  @@index([organizationId])
+  @@index([roleId])
+  @@map("role_field_grants")
 }
 
 /// Atribuicao N:N entre User e Role. Um user pode ter varias roles
@@ -900,105 +951,6 @@ enum PermissionLevel {
   SELF
   TEAM
   ALL
-}
-
-/// Grupo de acesso (RBAC por grupo — modelo Kommo). As permissoes vivem no
-/// GRUPO; usuarios entram via GroupMember e herdam as regras. ADITIVO ao
-/// RBAC de papeis (Role): permissoes efetivas de um user = uniao das
-/// permissions dos papeis (booleanas) ∪ permissions dos grupos (scoped).
-/// A visibilidade por recurso (own/all) deriva do maior nivel concedido.
-model Group {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  name           String
-  description    String?
-  /// Acessos extras (toggles do editor de grupo).
-  sharedInbox    Boolean      @default(true)
-  mediaAccess    Boolean      @default(true)
-  /// Rotas de nav visiveis para o grupo (vazio = todas). Menu lateral.
-  sidebarRoutes  String[]
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
-
-  members     GroupMember[]
-  permissions GroupPermission[]
-  stageGrants GroupStageGrant[]
-  fieldGrants GroupFieldGrant[]
-
-  @@unique([organizationId, name])
-  @@index([organizationId])
-  @@map("groups")
-}
-
-/// Vinculo N:N entre User e Group. Um user pode estar em varios grupos;
-/// permissoes efetivas = uniao (maior nivel vence por resource:action).
-model GroupMember {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  groupId        String
-  group          Group        @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  userId         String
-  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  createdAt      DateTime     @default(now())
-
-  @@unique([groupId, userId])
-  @@index([organizationId])
-  @@index([userId])
-  @@index([groupId])
-  @@map("group_members")
-}
-
-/// Permissao com escopo por acao de um grupo. `resource`/`action` referem o
-/// PERMISSION_CATALOG (src/lib/authz/permissions.ts). Ausencia de linha = NONE.
-model GroupPermission {
-  id             String          @id @default(cuid())
-  organizationId String
-  groupId        String
-  group          Group           @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  resource       String
-  action         String
-  level          PermissionLevel @default(NONE)
-
-  @@unique([groupId, resource, action])
-  @@index([organizationId])
-  @@index([groupId])
-  @@map("group_permissions")
-}
-
-/// Visibilidade por etapa do funil para um grupo (ver/editar deals do stage).
-model GroupStageGrant {
-  id             String  @id @default(cuid())
-  organizationId String
-  groupId        String
-  group          Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  stageId        String
-  canView        Boolean @default(true)
-  canEdit        Boolean @default(false)
-
-  @@unique([groupId, stageId])
-  @@index([organizationId])
-  @@index([groupId])
-  @@map("group_stage_grants")
-}
-
-/// Permissao por campo (Pro) de um grupo. `entity` = "deal"|"contact"|
-/// "company"|"product"; `fieldKey` = chave do campo (ex.: "deal.value").
-model GroupFieldGrant {
-  id             String  @id @default(cuid())
-  organizationId String
-  groupId        String
-  group          Group   @relation(fields: [groupId], references: [id], onDelete: Cascade)
-  entity         String
-  fieldKey       String
-  canView        Boolean @default(true)
-  canEdit        Boolean @default(true)
-
-  @@unique([groupId, entity, fieldKey])
-  @@index([organizationId])
-  @@index([groupId])
-  @@map("group_field_grants")
 }
 
 /// Configs por organizacao (substitui SystemSetting global pra dados
@@ -1075,6 +1027,17 @@ model Contact {
   /// Meta WhatsApp business-scoped user ID (BSUID), ex. US.xxx — ver doc Meta / usernames.
   /// Unicidade por org (WABAs diferentes têm espaços de BSUID independentes).
   whatsappBsuid          String?        @map("whatsapp_bsuid")
+  /// @ (username) do WhatsApp — vem em `contacts[].profile.username` no webhook Meta.
+  /// Só existe quando o usuário adotou username; ausente para a maioria dos contatos.
+  whatsappUsername       String?        @map("whatsapp_username")
+  /// PSID (Page-Scoped ID) do Facebook Messenger. Único por Página do Facebook,
+  /// portanto único por organização (uma org pode ter várias Páginas, mas o
+  /// mesmo usuário terá PSIDs distintos por Página — na prática mapeamos
+  /// contato = PSID+Página, mas a unicidade por org é suficiente pra evitar
+  /// duplicatas nos fluxos mais comuns).
+  messengerPsid          String?        @map("messenger_psid")
+  /// IGSID (Instagram-Scoped ID) da Instagram Messaging API — análogo ao PSID.
+  instagramIgsid         String?        @map("instagram_igsid")
 
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
@@ -1106,6 +1069,8 @@ model Contact {
   @@unique([organizationId, number])
   @@unique([organizationId, externalId])
   @@unique([organizationId, whatsappBsuid])
+  @@unique([organizationId, messengerPsid])
+  @@unique([organizationId, instagramIgsid])
   @@index([organizationId])
   @@index([organizationId, number])
   @@index([organizationId, email])
@@ -1193,6 +1158,9 @@ model Company {
   size           String?
   phone          String?
   address        String?
+  cep            String?
+  city           String?
+  state          String?
   notes          String?
 
   /// Auto-relação: grupo econômico (matriz) -> filiais/CNPJs.
@@ -1209,6 +1177,8 @@ model Company {
   @@index([organizationId])
   @@index([organizationId, name])
   @@index([organizationId, parentId])
+  @@index([organizationId, state])
+  @@index([organizationId, city])
   @@map("companies")
 }
 
@@ -1350,20 +1320,30 @@ model DealCustomFieldValue {
 // ──────────────────────────────────────────────
 
 model Pipeline {
-  id                String             @id @default(cuid())
-  organizationId    String
-  organization      Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  name              String
-  isDefault         Boolean            @default(false)
-  stages            Stage[]
-  distributionRules DistributionRule[]
+  id                   String               @id @default(cuid())
+  organizationId       String
+  organization         Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name                 String
+  isDefault            Boolean              @default(false)
+  /// Se true, marcar negócio como perdido neste funil exige motivo.
+  lossReasonRequired   Boolean              @default(false)
+  /// Se true, permite motivo livre (“Outro…”) neste funil.
+  lossReasonAllowOther Boolean              @default(true)
+  stages               Stage[]
+  distributionRules    DistributionRule[]
   /// Canais cujo inbound roteia para este funil (Channel.defaultPipelineId).
-  channels          Channel[]
-  createdAt         DateTime           @default(now())
-  updatedAt         DateTime           @updatedAt
+  channels             Channel[]
+  /// Motivos de perda vinculados a este funil (ordem = position).
+  pipelineLossReasons  PipelineLossReason[]
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+  /// Soft-archive: "apagar pipeline" no CRM seta isso em vez de DELETE —
+  /// stages/deals permanecem no banco, mas o pipeline some das listagens.
+  archivedAt           DateTime?
 
   @@index([organizationId])
   @@index([organizationId, isDefault])
+  @@index([organizationId, archivedAt])
   @@map("pipelines")
 }
 
@@ -1433,6 +1413,19 @@ model Deal {
   linksFrom      DealLink[]             @relation("DealLinkFrom")
   linksTo        DealLink[]             @relation("DealLinkTo")
   calls          Call[]
+  // Cotas de desconto vinculadas (PRD Cotas de Desconto — Fase 1).
+  quotas         DealQuota[]
+
+  /// Unidade (filial) associada ao deal — resolve `ProductOffer` e escopo
+  /// de matching de cotas de desconto (RN-01). Aditivo: null = deals legados.
+  orgUnitId          String?
+  orgUnit            OrgUnit? @relation(fields: [orgUnitId], references: [id])
+  /// Snapshot do preço cheio (soma de linhas × oferta) resolvido no momento
+  /// da seleção das cotas. RN-04: nunca recalculado retroativamente.
+  priceFullSnapshot  Decimal? @db.Decimal(12, 2)
+  /// Snapshot do preço final após aplicar as cotas (RN-04). Recalculado
+  /// somente quando o conjunto de cotas do deal muda.
+  priceFinalSnapshot Decimal? @db.Decimal(12, 2)
 
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
@@ -1450,6 +1443,7 @@ model Deal {
   @@index([organizationId, stageId, position])
   @@index([organizationId, contactId, status])
   @@index([organizationId, dealRole])
+  @@index([organizationId, orgUnitId])
   @@map("deals")
 }
 
@@ -1494,19 +1488,23 @@ model Product {
   catalogId String?
   catalog   Catalog? @relation(fields: [catalogId], references: [id])
 
-  dealProducts     DealProduct[]
-  customValues     ProductCustomFieldValue[]
-  offers           ProductOffer[]
-  inventoryPools   InventoryPool[]
-  shipping         ProductShipping?
-  plans            ProductPlan[]
-  courseConfig     CourseConfig?
-  jobOpenings      JobOpening[]
-  stakeholders     ProductStakeholder[]
+  dealProducts       DealProduct[]
+  customValues       ProductCustomFieldValue[]
+  offers             ProductOffer[]
+  inventoryPools     InventoryPool[]
+  shipping           ProductShipping?
+  plans              ProductPlan[]
+  courseConfig       CourseConfig?
+  jobOpenings        JobOpening[]
+  stakeholders       ProductStakeholder[]
   // Catálogo por capacidades (aditivo).
-  capabilities     ProductCapability[]
-  capacitySlots    CapacitySlot[]
-  stakeholderRules StakeholderRule[]
+  capabilities       ProductCapability[]
+  capacitySlots      CapacitySlot[]
+  stakeholderRules   StakeholderRule[]
+  /// Cotas de desconto restritas a este produto (opcional: null = qualquer).
+  discountQuotas     DiscountQuota[]
+  /// Categorias de desconto restritas a este produto (opcional: null = qualquer).
+  discountCategories DiscountCategory[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1633,8 +1631,12 @@ model OrgUnit {
   parent   OrgUnit?  @relation("OrgUnitHierarchy", fields: [parentId], references: [id])
   children OrgUnit[] @relation("OrgUnitHierarchy")
 
-  offers ProductOffer[]
-  pools  InventoryPool[]
+  offers         ProductOffer[]
+  pools          InventoryPool[]
+  /// Cotas de desconto restritas a esta unidade (opcional: null = global).
+  discountQuotas DiscountQuota[]
+  /// Deals cuja oferta foi resolvida por esta unidade (PRD cotas — Fase 1).
+  deals          Deal[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2089,6 +2091,196 @@ model StakeholderRule {
   @@map("stakeholder_rules")
 }
 
+// ──────────────────────────────────────────────
+// Cotas de Desconto (PRD Cotas — Fase 1)
+// ──────────────────────────────────────────────
+// Cupom de desconto com estoque (`qtyTotal`/`qtyConsumida`), vigência, escopo
+// opcional por produto/unidade e regras de cumulatividade + cálculo. Consumo
+// atômico via UPDATE condicional (padrão do `inventory.ts`). Ledger em
+// `QuotaMovement` = fonte de verdade auditável.
+
+enum DiscountType {
+  PERCENT
+  FIXED
+}
+
+enum QuotaCalcMode {
+  CASCADE
+  SUM_SIMPLE
+}
+
+enum QuotaConsumeMoment {
+  ON_WIN
+  ON_RESERVE
+}
+
+enum DealQuotaStatus {
+  SELECTED
+  RESERVED
+  CONSUMED
+  RETURNED
+  EXPIRED
+}
+
+enum QuotaMovementType {
+  RESERVE
+  CONSUME
+  RETURN
+  EXPIRE
+  MANUAL_ADJUST
+}
+
+/// Categoria de desconto (fonte da verdade de % + regras). Uma categoria
+/// (ex.: "Balcão 25%", "Estratégico 30%") pode ter N alocações de volume
+/// por unidade via `DiscountQuota.categoryId`. Aditivo: cotas legadas com
+/// `categoryId = null` continuam usando as próprias colunas.
+model DiscountCategory {
+  id             String        @id @default(cuid())
+  organizationId String
+  organization   Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  discountType   DiscountType  @default(PERCENT)
+  discountValue  Decimal       @db.Decimal(12, 2)
+  /// Escopo opcional por produto (null = vale para qualquer produto/curso).
+  productId      String?
+  product        Product?      @relation(fields: [productId], references: [id])
+  exclusionGroup String?
+  maxStacks      Int           @default(1)
+  calcMode       QuotaCalcMode @default(CASCADE)
+  validFrom      DateTime      @default(now())
+  validTo        DateTime?
+  active         Boolean       @default(true)
+
+  quotas DiscountQuota[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, active])
+  @@index([productId])
+  @@map("discount_categories")
+}
+
+/// Cota de desconto (cupom): valor % ou fixo, com estoque opcional, vigência,
+/// escopo por produto/unidade (nullable = "qualquer") e cumulatividade.
+model DiscountQuota {
+  id             String            @id @default(cuid())
+  organizationId String
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  discountType   DiscountType      @default(PERCENT)
+  discountValue  Decimal           @db.Decimal(12, 2)
+  /// Referência opcional à categoria de desconto. Quando presente, o
+  /// serviço resolve `%`, tipo e regras (exclusionGroup/maxStacks/calcMode)
+  /// da categoria; as colunas locais permanecem como fallback (cotas legadas).
+  categoryId     String?
+  category       DiscountCategory? @relation(fields: [categoryId], references: [id])
+  /// Escopo: null em `productId` = vale para qualquer produto; null em
+  /// `orgUnitId` = vale para qualquer unidade (global).
+  productId      String?
+  product        Product?          @relation(fields: [productId], references: [id])
+  orgUnitId      String?
+  orgUnit        OrgUnit?          @relation(fields: [orgUnitId], references: [id])
+  /// Estoque: `qtyTotal` null = ilimitada. `qtyConsumed` só é incrementado
+  /// via serviço transacional (RN-06).
+  qtyTotal       Int?
+  qtyConsumed    Int               @default(0)
+  /// Vigência: `validTo` null = perene.
+  validFrom      DateTime          @default(now())
+  validTo        DateTime?
+  /// Cumulatividade: cotas do MESMO `exclusionGroup` não se acumulam entre si.
+  exclusionGroup String?
+  /// Máximo de cotas empilhadas no mesmo deal quando envolvida (1 = não acumula).
+  maxStacks      Int               @default(1)
+  /// Modo de aplicação em cascata (default) ou soma simples. Ver RN-04.
+  calcMode       QuotaCalcMode     @default(CASCADE)
+  active         Boolean           @default(true)
+
+  policies   QuotaConsumptionPolicy[]
+  dealQuotas DealQuota[]
+  movements  QuotaMovement[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([organizationId, active])
+  @@index([organizationId, productId, orgUnitId, active])
+  @@index([productId])
+  @@index([orgUnitId])
+  @@index([categoryId])
+  @@map("discount_quotas")
+}
+
+/// Política de consumo (parametrizável, RN-05). `quotaId` null = política
+/// default da organização (uma por org).
+model QuotaConsumptionPolicy {
+  id               String             @id @default(cuid())
+  organizationId   String
+  organization     Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  quotaId          String?
+  quota            DiscountQuota?     @relation(fields: [quotaId], references: [id], onDelete: Cascade)
+  consumeMoment    QuotaConsumeMoment @default(ON_WIN)
+  /// Se `saldo <= reserveThreshold`, seleção passa a reservar (RN-05).
+  /// null = nunca reserva por threshold.
+  reserveThreshold Int?
+  reserveTtlHours  Int                @default(48)
+  active           Boolean            @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([quotaId])
+  @@index([organizationId])
+  @@map("quota_consumption_policies")
+}
+
+/// Vínculo Deal × Cota (N:N). Snapshot de valor/tipo no momento da seleção
+/// (RN-04: mudança na cota não altera deals já ganhos).
+model DealQuota {
+  id             String          @id @default(cuid())
+  organizationId String
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  dealId         String
+  deal           Deal            @relation(fields: [dealId], references: [id], onDelete: Cascade)
+  quotaId        String
+  quota          DiscountQuota   @relation(fields: [quotaId], references: [id])
+  status         DealQuotaStatus @default(SELECTED)
+  /// Snapshot do valor no momento da seleção.
+  valueSnapshot  Decimal         @db.Decimal(12, 2)
+  typeSnapshot   DiscountType
+  reservedAt     DateTime?
+  expiresAt      DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@unique([dealId, quotaId])
+  @@index([organizationId])
+  @@index([dealId])
+  @@index([quotaId])
+  @@index([status])
+  @@map("deal_quotas")
+}
+
+/// Ledger de movimentações da cota (fonte de verdade auditável).
+model QuotaMovement {
+  id             String            @id @default(cuid())
+  organizationId String
+  organization   Organization      @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  quotaId        String
+  quota          DiscountQuota     @relation(fields: [quotaId], references: [id], onDelete: Cascade)
+  dealId         String?
+  type           QuotaMovementType
+  qty            Int               @default(1)
+  userId         String?
+  reason         String?
+  createdAt      DateTime          @default(now())
+
+  @@index([organizationId])
+  @@index([quotaId, createdAt])
+  @@index([dealId])
+  @@map("quota_movements")
+}
+
 /// Vínculo tipado entre deals (PRD §3). N:N — um deal comercial pode
 /// originar vários operacionais; rastreabilidade "entregue X de N".
 model DealLink {
@@ -2249,12 +2441,17 @@ model Activity {
   scheduledAt    DateTime?
   completedAt    DateTime?
 
-  contactId String?
-  contact   Contact? @relation(fields: [contactId], references: [id])
-  dealId    String?
-  deal      Deal?    @relation(fields: [dealId], references: [id])
-  userId    String
-  user      User     @relation(fields: [userId], references: [id])
+  contactId    String?
+  contact      Contact?    @relation(fields: [contactId], references: [id])
+  dealId       String?
+  deal         Deal?       @relation(fields: [dealId], references: [id])
+  // Responsável: usuário específico OU um departamento (tarefa
+  // compartilhada — todos os membros do depto veem/concluem). Pelo menos
+  // um dos dois costuma estar preenchido; ambos podem coexistir.
+  userId       String?
+  user         User?       @relation(fields: [userId], references: [id])
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2262,6 +2459,7 @@ model Activity {
   @@index([organizationId])
   @@index([organizationId, scheduledAt])
   @@index([organizationId, userId])
+  @@index([organizationId, departmentId])
   @@index([organizationId, completed, scheduledAt])
   @@index([contactId])
   @@index([dealId])
@@ -2307,32 +2505,32 @@ model Note {
 // ──────────────────────────────────────────────
 
 model Conversation {
-  id                   String             @id @default(cuid())
-  organizationId       String
-  organization         Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  id                     String             @id @default(cuid())
+  organizationId         String
+  organization           Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   /// ID amigavel sequencial POR ORGANIZACAO (comeca em 1 em cada org).
   /// Usado como "ticket number" nas UIs (ex.: #1234) — mesmo padrao de
   /// Contact.number / Deal.number. Atribuido em `createConversation`
   /// via `nextConversationNumber()` com retry P2002 em race.
-  number               Int
+  number                 Int
   /// ID externo (ex.: Meta thread id) — unicidade por organização.
-  externalId           String?
-  channel              String
-  status               ConversationStatus @default(OPEN)
-  inboxName            String?
-  unreadCount          Int                @default(0)
-  lastReadAt           DateTime?
-  lastInboundAt        DateTime?
-  lastMessageDirection String?
-  hasAgentReply        Boolean            @default(false)
-  hasError             Boolean            @default(false)
-  pinnedNoteId         String?
+  externalId             String?
+  channel                String
+  status                 ConversationStatus @default(OPEN)
+  inboxName              String?
+  unreadCount            Int                @default(0)
+  lastReadAt             DateTime?
+  lastInboundAt          DateTime?
+  lastMessageDirection   String?
+  hasAgentReply          Boolean            @default(false)
+  hasError               Boolean            @default(false)
+  pinnedNoteId           String?
   /// Mensagem fixada no topo da conversa (banner estilo WhatsApp).
   /// Diferente de `pinnedNoteId` (exclusivo para notas internas na aba
   /// "Notas") — este campo aceita QUALQUER mensagem (in/out/nota) e é
   /// exibido no topo da timeline de "Conversa". Um único slot por
   /// conversa (fixar outra substitui a anterior — igual WhatsApp).
-  pinnedMessageId      String?
+  pinnedMessageId        String?
   /// Expiração do fixar (estilo WhatsApp: 24h / 7 dias / 30 dias).
   /// Null = fixado sem prazo (compat com fixadas antes desta coluna
   /// existir). Checado no GET /messages — quando vencido, o banner some
@@ -2343,7 +2541,7 @@ model Conversation {
   /// atribuição (ou quando a conversa acabou de ser reatribuída).
   /// Usado pra garantir que a saudação dispare em cada novo ciclo
   /// de atribuição ao agente, e não apenas na 1ª vida da conversa.
-  aiGreetedAt          DateTime?
+  aiGreetedAt            DateTime?
 
   contactId String
   contact   Contact @relation(fields: [contactId], references: [id])
@@ -2381,6 +2579,14 @@ model Conversation {
 
   closedAt DateTime?
 
+  /// Tabulacao final escolhida ao encerrar (folha da arvore por departamento).
+  /// Setada por POST /conversations/:id/actions com action=resolve quando o
+  /// departamento tem `requireTabulationOnClose=true`. Dispara o trigger de
+  /// automacao `conversation_tabulated`. Null enquanto OPEN ou quando o
+  /// departamento nao exige tabulacao.
+  tabulationId String?
+  tabulation   Tabulation? @relation(fields: [tabulationId], references: [id], onDelete: SetNull)
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -2397,6 +2603,7 @@ model Conversation {
   @@index([hasError])
   @@index([lastMessageDirection, hasAgentReply])
   @@index([whatsappCallConsentStatus])
+  @@index([organizationId, tabulationId])
   @@map("conversations")
 }
 
@@ -2451,6 +2658,12 @@ model Message {
   isPrivate        Boolean                 @default(false)
   externalId       String?
   senderName       String?
+  /// Nome do agente que disparou a automação MANUALMENTE (gatilho `manual`
+  /// via /api/automations/[id]/run). Preenchido nas mensagens enviadas pelos
+  /// steps quando o disparo foi manual — o inbox exibe o selo "Manual" + o
+  /// avatar (iniciais) do agente ao lado do robô (colab). NULL para envios
+  /// automáticos/reativos.
+  triggeredByName  String?
   /// Quando a mensagem foi gerada por um agente de IA (authorType=bot),
   /// aponta para o User virtual (type=AI). Permite filtrar trace/custo por agente.
   aiAgentUserId    String?
@@ -2736,6 +2949,7 @@ enum ChannelType {
 enum ChannelProvider {
   META_CLOUD_API
   BAILEYS_MD
+  META_INSTAGRAM_LOGIN
 }
 
 enum ChannelStatus {
@@ -2771,20 +2985,20 @@ model BaileysAuthKey {
 // ──────────────────────────────────────────────
 
 model QuickReply {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  title          String
-  content        String
-  category       String?
-  position       Int          @default(0)
+  id              String           @id @default(cuid())
+  organizationId  String
+  organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  title           String
+  content         String
+  category        String?
+  position        Int              @default(0)
   groupId         String?
   group           QuickReplyGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
   attachmentUrl   String?
   createdByUserId String?
-  createdBy       User?        @relation("QuickReplyCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  createdBy       User?            @relation("QuickReplyCreatedBy", fields: [createdByUserId], references: [id], onDelete: SetNull)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
 
   @@index([organizationId])
   @@index([organizationId, category])
@@ -2797,20 +3011,92 @@ model QuickReply {
 // ──────────────────────────────────────────────
 
 model Department {
-  id             String       @id @default(cuid())
-  organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
-  name           String
-  color          String       @default("#6366f1")
-  icon           String       @default("🏢")
-  businessHoursId String?
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  id                       String       @id @default(cuid())
+  organizationId           String
+  organization             Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name                     String
+  color                    String       @default("#6366f1")
+  icon                     String       @default("🏢")
+  businessHoursId          String?
+  /// Se true, o encerramento de conversas deste departamento exige
+  /// escolha de uma folha da arvore de `Tabulation` (validado no
+  /// backend e no modal do frontend). Default false = comportamento
+  /// atual (encerrar sem tabular).
+  requireTabulationOnClose Boolean      @default(false)
+  createdAt                DateTime     @default(now())
+  updatedAt                DateTime     @updatedAt
 
-  conversations    Conversation[]
+  conversations Conversation[]
+  tabulations   Tabulation[]
+  members       DepartmentMember[]
+  activities    Activity[]
 
   @@index([organizationId])
   @@map("departments")
+}
+
+/// Associacao N:N entre usuarios e departamentos (composicao do time).
+/// Vinculo puramente organizacional — NAO concede acesso ao inbox
+/// (isso continua em `AgentPermission.allowedDepartmentIds`). Serve de
+/// base para visibilidade de tarefas por departamento e afins.
+model DepartmentMember {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  departmentId   String
+  department     Department   @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime     @default(now())
+
+  @@unique([departmentId, userId])
+  @@index([organizationId])
+  @@index([userId])
+  @@index([departmentId])
+  @@map("department_members")
+}
+
+// ──────────────────────────────────────────────
+// Tabulations (arvore por departamento)
+// ──────────────────────────────────────────────
+
+/// Tabulacao hierarquica (arvore) por departamento. O agente escolhe uma
+/// FOLHA ao encerrar a conversa; a folha (e seus ancestrais) alimenta o
+/// trigger `conversation_tabulated`, permitindo a org montar automacoes
+/// que reagem a "porque essa conversa foi encerrada" (ex.: mover card,
+/// distribuir para outro agente, mudar de funil, disparar mensagem).
+///
+/// Escopo:
+///   - organizationId (multi-tenant)
+///   - departmentId  (arvore por departamento; nao ha herança entre depts)
+///   - parentId?     (null = raiz)
+///
+/// Regras aplicadas no serviço:
+///   - `parent.departmentId === this.departmentId` (arvore homogenea)
+///   - remocao em cascade das filhas; `Conversation.tabulationId` SET NULL
+///     (histórico preservado sem quebrar FK).
+model Tabulation {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  departmentId   String
+  department     Department   @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  parentId       String?
+  parent         Tabulation?  @relation("TabulationHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+  children       Tabulation[] @relation("TabulationHierarchy")
+  name           String
+  color          String?
+  position       Int          @default(0)
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  conversations Conversation[]
+
+  @@index([organizationId])
+  @@index([organizationId, departmentId])
+  @@index([organizationId, departmentId, parentId])
+  @@map("tabulations")
 }
 
 // ──────────────────────────────────────────────
@@ -2818,22 +3104,22 @@ model Department {
 // ──────────────────────────────────────────────
 
 model AgentPermission {
-  id             String   @id @default(cuid())
+  id             String       @id @default(cuid())
   organizationId String
-  userId         String   @unique
+  userId         String       @unique
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  canViewOtherAgentsConversations  Boolean  @default(false)
-  disableConversationsWithoutAgent Boolean  @default(false)
-  canTransferConversation          Boolean  @default(true)
-  canCloseConversation             Boolean  @default(true)
-  canDeleteConversation            Boolean  @default(false)
-  canManageQuickMessages           Boolean  @default(false)
-  canConfigureFieldVisibility      Boolean  @default(false)
+  canViewOtherAgentsConversations  Boolean @default(false)
+  disableConversationsWithoutAgent Boolean @default(false)
+  canTransferConversation          Boolean @default(true)
+  canCloseConversation             Boolean @default(true)
+  canDeleteConversation            Boolean @default(false)
+  canManageQuickMessages           Boolean @default(false)
+  canConfigureFieldVisibility      Boolean @default(false)
 
-  allowedConnectionIds  String[] @default([])
-  allowedDepartmentIds  String[] @default([])
+  allowedConnectionIds String[] @default([])
+  allowedDepartmentIds String[] @default([])
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2856,7 +3142,7 @@ model QuickReplyGroup {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
-  quickReplies   QuickReply[]
+  quickReplies QuickReply[]
 
   @@index([organizationId])
   @@map("quick_reply_groups")
@@ -3282,17 +3568,39 @@ enum AgentOnlineStatus {
 // ──────────────────────────────────────────────
 
 model LossReason {
-  id             String       @id @default(cuid())
+  id             String               @id @default(cuid())
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization   Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   label          String
-  position       Int          @default(0)
-  isActive       Boolean      @default(true)
-  createdAt      DateTime     @default(now())
+  position       Int                  @default(0)
+  isActive       Boolean              @default(true)
+  createdAt      DateTime             @default(now())
+  /// Vínculos reutilizáveis com funis (M2M via PipelineLossReason).
+  pipelineLinks  PipelineLossReason[]
 
   @@index([organizationId])
   @@index([organizationId, isActive, position])
   @@map("loss_reasons")
+}
+
+/// Motivo de perda ↔ funil (catálogo reutilizável, ordem por funil).
+model PipelineLossReason {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  pipelineId     String
+  pipeline       Pipeline     @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  lossReasonId   String
+  lossReason     LossReason   @relation(fields: [lossReasonId], references: [id], onDelete: Cascade)
+  /// Ordem de exibição dos motivos neste funil.
+  position       Int          @default(0)
+  createdAt      DateTime     @default(now())
+
+  @@unique([pipelineId, lossReasonId])
+  @@index([organizationId])
+  @@index([pipelineId, position])
+  @@index([lossReasonId])
+  @@map("pipeline_loss_reasons")
 }
 
 // ──────────────────────────────────────────────
@@ -4256,17 +4564,17 @@ model SipExtension {
 
   /// ── Provisionamento automático Api4com ─────────────────────────
   /// Toggle principal: indica se o usuário tem telefonia habilitada.
-  telephonyEnabled    Boolean                    @default(false) @map("telephony_enabled")
+  telephonyEnabled  Boolean                   @default(false) @map("telephony_enabled")
   /// UUID do usuário criado na Api4com via POST /users.
-  api4comUserId       String?                    @map("api4com_user_id")
+  api4comUserId     String?                   @map("api4com_user_id")
   /// Gateway lógico usado em metadata.gateway (webhookConstraint + /dialer).
-  api4comGateway      String?                    @map("api4com_gateway")
+  api4comGateway    String?                   @map("api4com_gateway")
   /// Estado da máquina de provisionamento (retomada a partir do último step).
-  provisioningStep    TelephonyProvisioningStep  @default(IDLE) @map("provisioning_step")
+  provisioningStep  TelephonyProvisioningStep @default(IDLE) @map("provisioning_step")
   /// Último erro para exibição na UI e retomada manual.
-  provisioningError   String?                    @map("provisioning_error")
+  provisioningError String?                   @map("provisioning_error")
   /// Timestamp de conclusão bem-sucedida do provisionamento.
-  provisionedAt       DateTime?                  @map("provisioned_at")
+  provisionedAt     DateTime?                 @map("provisioned_at")
 
   calls Call[]
 
