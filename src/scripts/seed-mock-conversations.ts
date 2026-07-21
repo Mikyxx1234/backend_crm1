@@ -303,6 +303,15 @@ async function seed() {
     },
   ];
 
+  // Ponto de partida para o `number` sequencial das conversas seed. Le o
+  // max atual da org e vai incrementando por scenario. Idempotente com
+  // o unique (organizationId, number) porque cada re-run apaga+recria.
+  const baseNumber = await prisma.conversation.aggregate({
+    _max: { number: true },
+    where: { organizationId },
+  });
+  let seedConvCounter = baseNumber._max.number ?? 0;
+
   for (const sc of scenarios) {
     const contact = CONTACTS[sc.contactIdx];
     const messages = sc.build(sc.convId, new Date());
@@ -313,10 +322,12 @@ async function seed() {
     await prisma.message.deleteMany({ where: { conversationId: sc.convId } });
     await prisma.conversation.deleteMany({ where: { id: sc.convId } });
 
+    seedConvCounter += 1;
     await prisma.conversation.create({
       data: {
         id: sc.convId,
         organizationId,
+        number: seedConvCounter,
         contactId: contact.id,
         channel: "whatsapp",
         status: sc.status,

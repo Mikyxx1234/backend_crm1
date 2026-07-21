@@ -6,6 +6,7 @@ import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { nextContactNumber } from "@/services/contacts";
+import { withConversationNumberRetry } from "@/services/conversations";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -666,24 +667,29 @@ async function resolveWebhookContact(
 async function findOrCreateConversation(contactId: string, phoneNumberId?: string) {
   const targetChannel = await findChannelByPhoneNumberId(phoneNumberId);
 
+  // Modelo de ticket: contatos com conversa RESOLVED geram NOVA conversa
+  // na proxima mensagem inbound (nao reabre). Ver AGENT.md.
   const existing = await prisma.conversation.findFirst({
-    where: { contactId, channel: "whatsapp" },
+    where: {
+      contactId,
+      channel: "whatsapp",
+      status: { not: "RESOLVED" },
+    },
     // PR 1.3: incluímos organizationId para que callers (download de
     // mídia inbound) possam roteá-lo no storage tenant-scoped.
     select: { id: true, status: true, channelId: true, organizationId: true },
   });
 
   if (existing) {
-    const updates: Record<string, unknown> = {};
-    if (existing.status !== "OPEN") updates.status = "OPEN";
+    // Reusa a conversa aberta. So reconcilia canal (para o inbox mostrar
+    // que a mensagem entrou pela conta X). Nao promove status pra OPEN
+    // porque agora a conversa ja e' non-RESOLVED por construcao.
     if (targetChannel && existing.channelId !== targetChannel.id) {
-      updates.channelId = targetChannel.id;
+      await prisma.conversation.update({
+        where: { id: existing.id },
+        data: { channelId: targetChannel.id },
+      });
     }
-    if (Object.keys(updates).length > 0) {
-      await prisma.conversation.update({ where: { id: existing.id }, data: updates });
-    }
-    // Retorna o channelId já reconciliado com o canal que recebeu (targetChannel),
-    // para o caller carimbar a mensagem inbound na conexão correta.
     return { ...existing, channelId: targetChannel?.id ?? existing.channelId };
   }
 
@@ -692,16 +698,19 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     select: { assignedToId: true },
   });
 
-  return prisma.conversation.create({
-    data: withOrgFromCtx({
-      contactId,
-      channel: "whatsapp",
-      channelId: targetChannel?.id,
-      status: "OPEN" as const,
-      ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+  return withConversationNumberRetry((number) =>
+    prisma.conversation.create({
+      data: withOrgFromCtx({
+        number,
+        contactId,
+        channel: "whatsapp",
+        channelId: targetChannel?.id,
+        status: "OPEN" as const,
+        ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+      }),
+      select: { id: true, status: true, channelId: true, organizationId: true },
     }),
-    select: { id: true, status: true, channelId: true, organizationId: true },
-  });
+  );
 }
 
 // ── Extract message content ──────────────────────
