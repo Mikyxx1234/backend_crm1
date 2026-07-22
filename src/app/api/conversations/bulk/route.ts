@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 
 import { auth } from "@/lib/auth";
 import { getVisibilityFilter } from "@/lib/visibility";
+import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { logEvent } from "@/services/activity-log";
 
@@ -88,9 +89,21 @@ export async function POST(request: Request) {
           where: scopedWhere(effectiveIds, { status: { not: "RESOLVED" } }),
           select: { id: true },
         });
+        // Respeita "Manter atendente/departamento ao finalizar" (default:
+        // NÃO manter → desvincula). Mesmo comportamento do encerramento
+        // individual (actions/route.ts).
+        const [keepAgent, keepDepartment] = await Promise.all([
+          getOrgSettingBool("conversation.keepAgentOnEnd", false),
+          getOrgSettingBool("conversation.keepDepartmentOnEnd", false),
+        ]);
         const result = await prisma.conversation.updateMany({
           where: scopedWhere(effectiveIds, { status: { not: "RESOLVED" } }),
-          data: { status: "RESOLVED", closedAt: new Date() },
+          data: {
+            status: "RESOLVED",
+            closedAt: new Date(),
+            ...(keepAgent ? {} : { assignedToId: null }),
+            ...(keepDepartment ? {} : { departmentId: null }),
+          },
         });
         void logBulkStatus(
           toChange.map((c) => c.id),

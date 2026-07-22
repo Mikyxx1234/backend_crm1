@@ -648,7 +648,13 @@ export async function getConversationLite(id: string) {
 export async function updateConversationStatusInDb(
   id: string,
   status: ConversationStatus,
-  extra?: { tabulationId?: string | null },
+  extra?: {
+    tabulationId?: string | null;
+    /** Ao encerrar (RESOLVED), desvincula o atendente (assignedToId=null). */
+    clearAssignedTo?: boolean;
+    /** Ao encerrar (RESOLVED), desvincula o departamento (departmentId=null). */
+    clearDepartment?: boolean;
+  },
 ) {
   // closedAt: preencher quando encerra, limpar quando reabre. Fica em sync
   // com o status pra UI/relatorios sem consultar historico de eventos.
@@ -669,9 +675,20 @@ export async function updateConversationStatusInDb(
         ? { tabulationId: extra.tabulationId ?? null }
         : {};
 
+  // Ao ENCERRAR: respeita as configs "Manter atendente/departamento ao
+  // finalizar". Quando desligadas, o caller passa clearAssignedTo/
+  // clearDepartment=true e desvinculamos os campos aqui.
+  const clearPatch: { assignedToId?: null; departmentId?: null } =
+    status === "RESOLVED"
+      ? {
+          ...(extra?.clearAssignedTo ? { assignedToId: null } : {}),
+          ...(extra?.clearDepartment ? { departmentId: null } : {}),
+        }
+      : {};
+
   return prisma.conversation.update({
     where: { id },
-    data: { status, ...closedAtPatch, ...tabulationPatch },
+    data: { status, ...closedAtPatch, ...tabulationPatch, ...clearPatch },
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 }
