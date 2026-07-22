@@ -32,6 +32,11 @@ model Organization {
   logoUrl               String?
   /// Cor principal (hex) aplicada em headers/CTAs do app. Null = default EduIT.
   primaryColor          String?   @default("#1e3a8a")
+  /// Distribuição Inteligente restrita ao departamento do lead. Quando true,
+  /// o motor só considera responsáveis que sejam membros do departamento da
+  /// conversa (DepartmentMember), ainda respeitando a regra individual de
+  /// cada um. Sem departamento resolvível ou sem membro elegível → fila.
+  distributeByDepartment Boolean  @default(false)
   /// Preenchido quando o admin terminou o wizard de 6 passos. Enquanto for
   /// null, o layout força redirecionamento pra `/onboarding` após login.
   onboardingCompletedAt DateTime?

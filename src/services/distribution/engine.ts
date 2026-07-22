@@ -29,6 +29,7 @@ import {
   getDistributionResponsibles,
   type DistributionResponsibleView,
 } from "./responsibles";
+import { getDistributionSettings } from "./settings";
 
 export type DistributionTriggerSource =
   | "SYSTEM"
@@ -39,7 +40,8 @@ export type DistributionTriggerSource =
 export type DistributionReason =
   | "ASSIGNED"
   | "SMART_DISTRIBUTION_NOT_ENABLED"
-  | "NO_ELIGIBLE_RESPONSIBLE";
+  | "NO_ELIGIBLE_RESPONSIBLE"
+  | "NO_DEPARTMENT";
 
 export interface ExecuteDistributionInput {
   dealId?: string | null;
@@ -48,8 +50,36 @@ export interface ExecuteDistributionInput {
   triggerSource: DistributionTriggerSource;
   /** Tipo/segmento solicitado (avalia `TYPE_INCOMPATIBLE`). */
   distributionType?: string | null;
+  /**
+   * Departamento-alvo explícito (opcional). Quando a distribuição por
+   * departamento está ligada e não vier explícito, o motor resolve pelo
+   * departamento da conversa (`Conversation.departmentId`).
+   */
+  departmentId?: string | null;
   /** Momento de referência (testes). Default: agora. */
   now?: Date;
+}
+
+/**
+ * Resolve o escopo de departamento para uma distribuição. Retorna se o modo
+ * (toggle org `distributeByDepartment`) está ligado e qual departamento
+ * aplicar (explícito > conversa). `departmentId` null com `enabled=true`
+ * significa "modo ligado mas sem departamento resolvível".
+ */
+async function resolveDepartmentScope(
+  input: Pick<ExecuteDistributionInput, "conversationId" | "departmentId">,
+): Promise<{ enabled: boolean; departmentId: string | null }> {
+  const { distributeByDepartment } = await getDistributionSettings();
+  if (!distributeByDepartment) return { enabled: false, departmentId: null };
+  if (input.departmentId) return { enabled: true, departmentId: input.departmentId };
+  if (input.conversationId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { departmentId: true },
+    });
+    return { enabled: true, departmentId: conv?.departmentId ?? null };
+  }
+  return { enabled: true, departmentId: null };
 }
 
 /** Diagnóstico compacto de um responsável (vai para o log e a resposta). */
@@ -277,9 +307,30 @@ export async function executeDistribution(
     };
   }
 
+  // Distribuição por departamento (toggle org). Modo ligado sem departamento
+  // resolvível → não distribui (fallback = fila), respeitando a fronteira.
+  const deptScope = await resolveDepartmentScope(input);
+  if (deptScope.enabled && !deptScope.departmentId) {
+    await writeLog(input, false, "NO_DEPARTMENT", null, []);
+    await enqueuePending(input);
+    await postDistributionNote(
+      input.conversationId,
+      "⏳ A distribuição por departamento está ativa, mas este lead ainda não tem departamento definido. Ele entrou na fila de espera e será distribuído quando for roteado a um departamento.",
+    );
+    await emitDistributionEvent(input, false, "NO_DEPARTMENT", null, null, null);
+    return {
+      success: false,
+      reason: "NO_DEPARTMENT",
+      selectedUserId: null,
+      selectedUserName: null,
+      evaluated: [],
+    };
+  }
+
   const responsibles = await getDistributionResponsibles({
     distributionType: input.distributionType ?? null,
     now: input.now,
+    departmentId: deptScope.enabled ? deptScope.departmentId : null,
   });
   const evaluated = toSummary(responsibles);
   const eligible = responsibles.filter((r) => r.eligible);
@@ -392,9 +443,15 @@ export async function simulateDistribution(
     };
   }
 
+  // Simulação: se o modo por-departamento estiver ligado E houver depto
+  // resolvível (explícito/conversa), escopa; sem depto, simula org-wide
+  // (o "testar" genérico não tem lead atrelado).
+  const deptScope = await resolveDepartmentScope(input);
+
   const responsibles = await getDistributionResponsibles({
     distributionType: input.distributionType ?? null,
     now: input.now,
+    departmentId: deptScope.departmentId,
   });
   const evaluated = toSummary(responsibles);
   const eligible = responsibles.filter((r) => r.eligible);

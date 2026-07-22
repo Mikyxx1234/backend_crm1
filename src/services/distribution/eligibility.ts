@@ -28,7 +28,8 @@ export type DistributionBlockReason =
   | "ON_PAUSE"
   | "OUTSIDE_WORKING_HOURS"
   | "QUEUE_LIMIT_REACHED"
-  | "TYPE_INCOMPATIBLE";
+  | "TYPE_INCOMPATIBLE"
+  | "DEPARTMENT_MISMATCH";
 
 /** Subconjunto do AgentSchedule necessário para o cálculo de expediente. */
 export interface ScheduleLike {
@@ -55,6 +56,12 @@ export interface ResponsibleEligibilityInput {
   schedule: ScheduleLike | null;
   /** Fila atual (deals OPEN com este owner). */
   queueCount: number;
+  /**
+   * Distribuição por departamento: `false` bloqueia com `DEPARTMENT_MISMATCH`
+   * (responsável não é membro do departamento-alvo). `true` quando o modo
+   * está desligado ou o usuário pertence ao departamento — sem restrição.
+   */
+  inDepartment?: boolean;
 }
 
 export interface EligibilityContext {
@@ -154,6 +161,12 @@ export function evaluateResponsibleEligibility(
   const ownType = input.type?.trim();
   if (requested && ownType && ownType !== requested) {
     reasons.push("TYPE_INCOMPATIBLE");
+  }
+
+  // Distribuição por departamento: só bloqueia quando explicitamente marcado
+  // como fora do departamento-alvo (undefined = modo desligado = sem restrição).
+  if (input.inDepartment === false) {
+    reasons.push("DEPARTMENT_MISMATCH");
   }
 
   return { eligible: reasons.length === 0, blockedReasons: reasons };

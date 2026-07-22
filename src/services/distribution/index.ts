@@ -44,3 +44,9 @@ export {
   type PendingDistributionView,
   type RetryResult,
 } from "./pending";
+
+export {
+  getDistributionSettings,
+  setDistributionSettings,
+  type DistributionSettings,
+} from "./settings";
