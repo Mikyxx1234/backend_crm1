@@ -51,19 +51,23 @@ async function makeHash(pw) {
 
 const TEMP_PASSWORD = process.env.CONSULTOR_TEMP_PASSWORD ?? "Eduit@!20";
 const DRY_RUN = process.env.DRY_RUN === "1";
+// Por seguranca em prod: NAO reseta a senha de quem ja existe (pode ja ter
+// trocado). Senha so e definida ao CRIAR um usuario novo. Para forcar o reset
+// de todos para a senha temporaria, rode com RESET_PASSWORDS=1.
+const RESET_PASSWORDS = process.env.RESET_PASSWORDS === "1";
 // Volume/limite de fila por consultor (igual DataCrazy: ~25 por consultor).
 // queueLimit no motor = teto de deals OPEN simultaneos como owner (0 = sem
 // limite). Ajustavel via QUEUE_LIMIT=NN. 0 desliga o limite.
 const QUEUE_LIMIT = Number.parseInt(process.env.QUEUE_LIMIT ?? "25", 10);
 
 // key interno -> definicao do departamento.
-// create=false => reaproveita o que JA existe no CRM (erro se nao achar, para
-// nao duplicar). Confirmado com o time (22/07): so o Acolhimento e criado;
-// Retencao e "Atendimento - SAC" ja existem e devem ser reusados.
+// create=true => reusa se ja existir (findFirst por nome antes de criar, logo
+// nao duplica) e CRIA se faltar. Em prod ("Cruzeiro EaD") a org nasce sem
+// nenhum departamento, entao os 3 precisam poder ser criados.
 const DEPARTMENTS = [
   { key: "acolhimento", name: "Acolhimento", color: "#8B5CF6", icon: "🤝", create: true },
-  { key: "retencao", name: "Retenção", create: false },
-  { key: "atendimento", name: "Atendimento - SAC", create: false },
+  { key: "retencao", name: "Retenção", color: "#EF4444", icon: "🔁", create: true },
+  { key: "atendimento", name: "Atendimento - SAC", color: "#3B82F6", icon: "🎧", create: true },
 ];
 
 // Regras de departamento (confirmadas com o time):
@@ -190,13 +194,20 @@ async function main() {
     if (existing) {
       user = await prisma.user.update({
         where: { email },
-        // Nao rebaixa role de quem ja e ADMIN/MANAGER; so garante HUMAN,
-        // org e a senha temporaria (pedido: senha p/ todos).
-        data: { name: c.name, type: "HUMAN", hashedPassword: hashed, organizationId: orgId },
+        // Nao rebaixa role de quem ja e ADMIN/MANAGER; so garante HUMAN e org.
+        // Senha so e resetada com RESET_PASSWORDS=1 (default: nao mexe).
+        data: {
+          name: c.name,
+          type: "HUMAN",
+          organizationId: orgId,
+          ...(RESET_PASSWORDS ? { hashedPassword: hashed } : {}),
+        },
         select: { id: true, role: true },
       });
       updated++;
-      console.log(`  [user] atualizado ${c.name} <${email}> (${user.id})`);
+      console.log(
+        `  [user] atualizado ${c.name} <${email}> (${user.id})${RESET_PASSWORDS ? " [senha resetada]" : ""}`,
+      );
     } else {
       user = await prisma.user.create({
         data: {
@@ -219,6 +230,7 @@ async function main() {
         where: { userId_roleId: { userId: user.id, roleId: memberRoleId } },
         create: { userId: user.id, roleId: memberRoleId, organizationId: orgId },
         update: {},
+        select: { userId: true },
       });
     }
 
@@ -228,6 +240,7 @@ async function main() {
         where: { departmentId_userId: { departmentId: depId, userId: user.id } },
         create: { organizationId: orgId, departmentId: depId, userId: user.id },
         update: {},
+        select: { userId: true },
       });
     }
 
@@ -236,6 +249,7 @@ async function main() {
       where: { userId: user.id },
       create: { organizationId: orgId, userId: user.id, allowedDepartmentIds: deptIds },
       update: { allowedDepartmentIds: deptIds },
+      select: { userId: true },
     });
 
     // DistributionResponsible — participa do motor + limite de fila (volume).
@@ -249,6 +263,7 @@ async function main() {
         queueLimit: QUEUE_LIMIT,
       },
       update: { participates: true, queueLimit: QUEUE_LIMIT },
+      select: { userId: true },
     });
 
     console.log(
