@@ -57,6 +57,7 @@ function readNumber(cfg: unknown, key: string): number | undefined {
 const PAUSING_STEP_TYPES = new Set([
   "question",
   "send_whatsapp_interactive",
+  "send_whatsapp_template",
   "wait_for_reply",
 ]);
 
