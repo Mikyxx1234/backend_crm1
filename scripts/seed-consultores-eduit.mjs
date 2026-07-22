@@ -21,9 +21,33 @@
  *   CONSULTOR_TEMP_PASSWORD=... node ...                # troca a senha padrao
  */
 import { PrismaClient } from "@prisma/client";
-import { hash } from "bcryptjs";
 
 const prisma = new PrismaClient();
+
+// O runner (Next standalone) EMPACOTA o bcryptjs no bundle do app e nao o
+// deixa como pacote resolvivel em node_modules -> um script avulso quebra com
+// ERR_MODULE_NOT_FOUND. Para nao depender disso, tentamos importar o bcryptjs
+// e, se falhar, usamos um hash bcrypt pre-computado da senha padrao (cost 12,
+// compativel com o bcryptjs.compare do login).
+const PRECOMPUTED_HASH =
+  "$2b$12$RTKZ8cGWvEhQYRc41/cO9OZ4tc.J6gi8FoinZIRKqZxwdvW3PJzt2"; // "Eduit@!20"
+
+async function makeHash(pw) {
+  try {
+    const { hash } = await import("bcryptjs");
+    return await hash(pw, 12);
+  } catch {
+    if (pw !== "Eduit@!20") {
+      console.error(
+        "❌ bcryptjs indisponivel e a senha != padrao — nao consigo gerar o hash.\n" +
+          "   Rode com a senha padrao ou disponibilize o bcryptjs.",
+      );
+      process.exit(1);
+    }
+    console.warn("  ⚠ bcryptjs nao resolvido no runner — usando hash pre-computado da senha padrao.");
+    return PRECOMPUTED_HASH;
+  }
+}
 
 const TEMP_PASSWORD = process.env.CONSULTOR_TEMP_PASSWORD ?? "Eduit@!20";
 const DRY_RUN = process.env.DRY_RUN === "1";
@@ -142,7 +166,7 @@ async function main() {
     );
   }
 
-  const hashed = await hash(TEMP_PASSWORD, 12);
+  const hashed = await makeHash(TEMP_PASSWORD);
   let created = 0;
   let updated = 0;
 
