@@ -58,6 +58,10 @@ COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 # Esses arquivos são executados com `node dist/workers/<name>.js` quando
 # APP_MODE=worker-whatsapp ou APP_MODE=worker-leads no docker-entrypoint.sh.
 COPY --from=builder /app/dist/workers ./dist/workers
+# Scripts de manutencao/seed rodados manualmente no console do container
+# (ex.: `node scripts/seed-consultores-eduit.mjs`). Nao entram no runtime
+# normal; usam o @prisma/client e bcryptjs ja presentes no runner.
+COPY --from=builder /app/scripts ./scripts
 # CLI: não copiar só `node_modules/prisma` — `@prisma/config` exige `effect`, `c12`, … hoistados.
 ARG PRISMA_VERSION=6.19.3
 RUN mkdir -p /opt/prisma-cli \
