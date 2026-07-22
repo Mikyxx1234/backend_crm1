@@ -13,6 +13,7 @@ const UpdateSchema = z.object({
   icon: z.string().min(1).max(40).optional(),
   requireTabulationOnClose: z.boolean().optional(),
   isSupport: z.boolean().optional(),
+  distributionEnabled: z.boolean().optional(),
 });
 
 export async function PUT(

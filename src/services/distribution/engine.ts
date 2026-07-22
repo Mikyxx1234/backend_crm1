@@ -29,7 +29,6 @@ import {
   getDistributionResponsibles,
   type DistributionResponsibleView,
 } from "./responsibles";
-import { getDistributionSettings } from "./settings";
 
 export type DistributionTriggerSource =
   | "SYSTEM"
@@ -51,9 +50,9 @@ export interface ExecuteDistributionInput {
   /** Tipo/segmento solicitado (avalia `TYPE_INCOMPATIBLE`). */
   distributionType?: string | null;
   /**
-   * Departamento-alvo explícito (opcional). Quando a distribuição por
-   * departamento está ligada e não vier explícito, o motor resolve pelo
-   * departamento da conversa (`Conversation.departmentId`).
+   * Departamento-alvo explícito (opcional). Quando não vier, o motor resolve
+   * pelo departamento da conversa (`Conversation.departmentId`, definido por
+   * automações de transferência).
    */
   departmentId?: string | null;
   /** Momento de referência (testes). Default: agora. */
@@ -61,25 +60,52 @@ export interface ExecuteDistributionInput {
 }
 
 /**
- * Resolve o escopo de departamento para uma distribuição. Retorna se o modo
- * (toggle org `distributeByDepartment`) está ligado e qual departamento
- * aplicar (explícito > conversa). `departmentId` null com `enabled=true`
- * significa "modo ligado mas sem departamento resolvível".
+ * Escopo resolvido para uma distribuição:
+ *  - `org-wide`: nenhum departamento da org opta por distribuição automática
+ *    (feature não adotada) → comportamento clássico (todos os elegíveis).
+ *  - `department`: o lead foi roteado a um departamento COM `distributionEnabled`
+ *    → só membros desse departamento entram na disputa.
+ *  - `blocked`: a org usa o recurso, mas este lead não está em um departamento
+ *    habilitado (ou não tem departamento) → não distribui, vai pra fila.
+ */
+type DepartmentScope =
+  | { mode: "org-wide"; departmentId: null }
+  | { mode: "department"; departmentId: string }
+  | { mode: "blocked"; departmentId: string | null };
+
+/**
+ * Resolve o escopo de departamento. A distribuição por departamento é POR
+ * DEPARTAMENTO (`Department.distributionEnabled`), não um toggle global: cada
+ * departamento decide se usa distribuição automática entre seus membros. Se
+ * NENHUM departamento da org habilitou, mantém o comportamento org-wide
+ * (retrocompatível). A regra individual de cada responsável continua valendo.
  */
 async function resolveDepartmentScope(
   input: Pick<ExecuteDistributionInput, "conversationId" | "departmentId">,
-): Promise<{ enabled: boolean; departmentId: string | null }> {
-  const { distributeByDepartment } = await getDistributionSettings();
-  if (!distributeByDepartment) return { enabled: false, departmentId: null };
-  if (input.departmentId) return { enabled: true, departmentId: input.departmentId };
-  if (input.conversationId) {
+): Promise<DepartmentScope> {
+  // Feature em uso? Só quando ao menos 1 departamento opta por distribuição.
+  const enabledCount = await prisma.department.count({
+    where: { distributionEnabled: true },
+  });
+  if (enabledCount === 0) return { mode: "org-wide", departmentId: null };
+
+  // Resolve o departamento-alvo: explícito > conversa.
+  let departmentId = input.departmentId ?? null;
+  if (!departmentId && input.conversationId) {
     const conv = await prisma.conversation.findUnique({
       where: { id: input.conversationId },
       select: { departmentId: true },
     });
-    return { enabled: true, departmentId: conv?.departmentId ?? null };
+    departmentId = conv?.departmentId ?? null;
   }
-  return { enabled: true, departmentId: null };
+  if (!departmentId) return { mode: "blocked", departmentId: null };
+
+  const dept = await prisma.department.findUnique({
+    where: { id: departmentId },
+    select: { distributionEnabled: true },
+  });
+  if (dept?.distributionEnabled) return { mode: "department", departmentId };
+  return { mode: "blocked", departmentId };
 }
 
 /** Diagnóstico compacto de um responsável (vai para o log e a resposta). */
@@ -307,15 +333,16 @@ export async function executeDistribution(
     };
   }
 
-  // Distribuição por departamento (toggle org). Modo ligado sem departamento
-  // resolvível → não distribui (fallback = fila), respeitando a fronteira.
+  // Distribuição por departamento (flag por depto). A org usa o recurso mas
+  // este lead não está num departamento habilitado (ou sem departamento) →
+  // não distribui (fallback = fila), respeitando a fronteira do departamento.
   const deptScope = await resolveDepartmentScope(input);
-  if (deptScope.enabled && !deptScope.departmentId) {
+  if (deptScope.mode === "blocked") {
     await writeLog(input, false, "NO_DEPARTMENT", null, []);
     await enqueuePending(input);
     await postDistributionNote(
       input.conversationId,
-      "⏳ A distribuição por departamento está ativa, mas este lead ainda não tem departamento definido. Ele entrou na fila de espera e será distribuído quando for roteado a um departamento.",
+      "⏳ Este lead ainda não está em um departamento que use distribuição automática. Ele entrou na fila de espera e será distribuído quando for roteado a um departamento habilitado.",
     );
     await emitDistributionEvent(input, false, "NO_DEPARTMENT", null, null, null);
     return {
@@ -330,7 +357,7 @@ export async function executeDistribution(
   const responsibles = await getDistributionResponsibles({
     distributionType: input.distributionType ?? null,
     now: input.now,
-    departmentId: deptScope.enabled ? deptScope.departmentId : null,
+    departmentId: deptScope.mode === "department" ? deptScope.departmentId : null,
   });
   const evaluated = toSummary(responsibles);
   const eligible = responsibles.filter((r) => r.eligible);
@@ -443,15 +470,15 @@ export async function simulateDistribution(
     };
   }
 
-  // Simulação: se o modo por-departamento estiver ligado E houver depto
-  // resolvível (explícito/conversa), escopa; sem depto, simula org-wide
-  // (o "testar" genérico não tem lead atrelado).
+  // Simulação: escopa ao departamento apenas quando resolvido para um depto
+  // habilitado; caso contrário simula org-wide (o "testar" genérico não tem
+  // lead atrelado, então não bloqueia).
   const deptScope = await resolveDepartmentScope(input);
 
   const responsibles = await getDistributionResponsibles({
     distributionType: input.distributionType ?? null,
     now: input.now,
-    departmentId: deptScope.departmentId,
+    departmentId: deptScope.mode === "department" ? deptScope.departmentId : null,
   });
   const evaluated = toSummary(responsibles);
   const eligible = responsibles.filter((r) => r.eligible);

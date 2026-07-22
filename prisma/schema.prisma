@@ -32,11 +32,6 @@ model Organization {
   logoUrl               String?
   /// Cor principal (hex) aplicada em headers/CTAs do app. Null = default EduIT.
   primaryColor          String?   @default("#1e3a8a")
-  /// Distribuição Inteligente restrita ao departamento do lead. Quando true,
-  /// o motor só considera responsáveis que sejam membros do departamento da
-  /// conversa (DepartmentMember), ainda respeitando a regra individual de
-  /// cada um. Sem departamento resolvível ou sem membro elegível → fila.
-  distributeByDepartment Boolean  @default(false)
   /// Preenchido quando o admin terminou o wizard de 6 passos. Enquanto for
   /// null, o layout força redirecionamento pra `/onboarding` após login.
   onboardingCompletedAt DateTime?
@@ -3038,6 +3033,13 @@ model Department {
   /// Apenas um departamento por organização deveria ter isso como true
   /// (garantido no app layer ao ligar a flag).
   isSupport                Boolean      @default(false)
+  /// Se true, este departamento usa a Distribuição Inteligente restrita aos
+  /// seus próprios membros (`DepartmentMember`). Leads roteados para cá só são
+  /// distribuídos entre os membros elegíveis do depto (a regra individual de
+  /// cada um continua valendo). Departamentos com false NÃO auto-distribuem
+  /// (o lead fica na fila). Quando NENHUM depto da org tem isso true, o motor
+  /// mantém o comportamento org-wide (retrocompatível).
+  distributionEnabled      Boolean      @default(false)
   createdAt                DateTime     @default(now())
   updatedAt                DateTime     @updatedAt
 
