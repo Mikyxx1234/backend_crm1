@@ -8,6 +8,8 @@
  *   4) DepartmentMember (vinculo organizacional N:N).
  *   5) AgentPermission.allowedDepartmentIds — o que REALMENTE controla o
  *      acesso ao inbox / distribuicao por departamento.
+ *   6) DistributionResponsible — participa=true + queueLimit (volume ~25),
+ *      igual DataCrazy. NAO altera presenca (online/offline).
  *
  * Fonte dos e-mails: GET /api/crm/attendants do DataCrazy (22/07/2026).
  * Removidos a pedido: Debora Mani, Jessica Castro, Gustavo.
@@ -25,6 +27,10 @@ const prisma = new PrismaClient();
 
 const TEMP_PASSWORD = process.env.CONSULTOR_TEMP_PASSWORD ?? "Eduit@!20";
 const DRY_RUN = process.env.DRY_RUN === "1";
+// Volume/limite de fila por consultor (igual DataCrazy: ~25 por consultor).
+// queueLimit no motor = teto de deals OPEN simultaneos como owner (0 = sem
+// limite). Ajustavel via QUEUE_LIMIT=NN. 0 desliga o limite.
+const QUEUE_LIMIT = Number.parseInt(process.env.QUEUE_LIMIT ?? "25", 10);
 
 // key interno -> definicao do departamento.
 // create=false => reaproveita o que JA existe no CRM (erro se nao achar, para
@@ -208,7 +214,22 @@ async function main() {
       update: { allowedDepartmentIds: deptIds },
     });
 
-    console.log(`         depts=[${c.depts.join(", ")}] inbox=${deptIds.length} ok`);
+    // DistributionResponsible — participa do motor + limite de fila (volume).
+    // Nao mexe em presenca (online/offline) nem em lastExecutionAt.
+    await prisma.distributionResponsible.upsert({
+      where: { organizationId_userId: { organizationId: orgId, userId: user.id } },
+      create: {
+        organizationId: orgId,
+        userId: user.id,
+        participates: true,
+        queueLimit: QUEUE_LIMIT,
+      },
+      update: { participates: true, queueLimit: QUEUE_LIMIT },
+    });
+
+    console.log(
+      `         depts=[${c.depts.join(", ")}] inbox=${deptIds.length} volume=${QUEUE_LIMIT} ok`,
+    );
   }
 
   console.log(
