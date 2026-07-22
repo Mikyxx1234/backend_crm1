@@ -17,6 +17,9 @@ export async function createTemplate(data: {
   category?: string;
   language?: string;
   channelType?: ChannelType;
+  mediaUrl?: string | null;
+  mediaType?: string | null;
+  mediaName?: string | null;
 }) {
   return prisma.messageTemplate.create({
     data: withOrgFromCtx({
@@ -25,6 +28,9 @@ export async function createTemplate(data: {
       category: data.category ?? null,
       language: data.language ?? "pt_BR",
       channelType: data.channelType ?? null,
+      mediaUrl: data.mediaUrl ?? null,
+      mediaType: data.mediaType ?? null,
+      mediaName: data.mediaName ?? null,
     }),
   });
 }
@@ -38,6 +44,9 @@ export async function updateTemplate(
     language?: string;
     status?: TemplateStatus;
     channelType?: ChannelType | null;
+    mediaUrl?: string | null;
+    mediaType?: string | null;
+    mediaName?: string | null;
   }
 ) {
   return prisma.messageTemplate.update({ where: { id }, data });

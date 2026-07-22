@@ -53,6 +53,18 @@ export async function PUT(request: Request, ctx: Ctx) {
             : typeof body.channelType === "string"
               ? (body.channelType as Parameters<typeof updateTemplate>[1]["channelType"])
               : undefined,
+        mediaUrl:
+          "mediaUrl" in body
+            ? (typeof body.mediaUrl === "string" && body.mediaUrl ? body.mediaUrl : null)
+            : undefined,
+        mediaType:
+          "mediaType" in body
+            ? (typeof body.mediaType === "string" && body.mediaType ? body.mediaType : null)
+            : undefined,
+        mediaName:
+          "mediaName" in body
+            ? (typeof body.mediaName === "string" && body.mediaName ? body.mediaName : null)
+            : undefined,
       });
       return NextResponse.json(template);
     } catch (e) {

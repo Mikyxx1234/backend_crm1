@@ -51,6 +51,12 @@ export async function POST(request: Request) {
           typeof body.channelType === "string"
             ? (body.channelType as Parameters<typeof createTemplate>[0]["channelType"])
             : undefined,
+        mediaUrl:
+          typeof body.mediaUrl === "string" && body.mediaUrl ? body.mediaUrl : null,
+        mediaType:
+          typeof body.mediaType === "string" && body.mediaType ? body.mediaType : null,
+        mediaName:
+          typeof body.mediaName === "string" && body.mediaName ? body.mediaName : null,
       });
       return NextResponse.json(template, { status: 201 });
     } catch (e) {

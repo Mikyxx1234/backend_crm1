@@ -3244,6 +3244,12 @@ model MessageTemplate {
   language       String         @default("pt_BR")
   status         TemplateStatus @default(DRAFT)
   channelType    ChannelType?
+  /// URL pública do arquivo de mídia anexado ao modelo (imagem ou vídeo).
+  mediaUrl       String?
+  /// Tipo MIME do anexo (ex.: "image/png"). Null se `mediaUrl` null.
+  mediaType      String?
+  /// Nome original do arquivo (para exibição). Null se `mediaUrl` null.
+  mediaName      String?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
