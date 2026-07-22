@@ -424,6 +424,7 @@ type ConversationSnapshot = {
   hasError: boolean;
   unreadCount: number;
   assignedToId: string | null;
+  departmentId: string | null;
 };
 
 /**
@@ -598,6 +599,7 @@ async function loadConversationSnapshot(
           hasError: true,
           unreadCount: true,
           assignedToId: true,
+          departmentId: true,
           contactId: true,
         },
       })
@@ -612,6 +614,7 @@ async function loadConversationSnapshot(
           hasError: true,
           unreadCount: true,
           assignedToId: true,
+          departmentId: true,
         },
       });
 
@@ -627,6 +630,7 @@ async function loadConversationSnapshot(
     hasError: conv.hasError,
     unreadCount: conv.unreadCount,
     assignedToId: conv.assignedToId,
+    departmentId: conv.departmentId,
   };
 }
 
@@ -963,6 +967,35 @@ async function executeStep(
           propagateOwnerToContactAndChat(tx, targetContactId, userId),
         );
       }
+      return {};
+    }
+
+    case "transfer_department": {
+      // Transfere a conversa para um departamento (seta conversation.departmentId).
+      // Alvo: a conversa do evento (rt.conversation) ou, na ausência, a mais
+      // recente do contato. No-op se não houver conversa resolvível.
+      const departmentId = readString(cfg, "departmentId");
+      if (!departmentId) throw new Error("transfer_department: departmentId obrigatório");
+
+      const convId =
+        (rt.conversation && typeof rt.conversation === "object"
+          ? (rt.conversation as { id?: string }).id
+          : undefined) ??
+        (rt.contactId
+          ? (
+              await prisma.conversation.findFirst({
+                where: { contactId: rt.contactId },
+                orderBy: [{ updatedAt: "desc" }],
+                select: { id: true },
+              })
+            )?.id
+          : undefined);
+
+      if (!convId) return {};
+      await prisma.conversation.update({
+        where: { id: convId },
+        data: { departmentId },
+      });
       return {};
     }
 

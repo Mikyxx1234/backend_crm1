@@ -51,6 +51,7 @@ export const ACTION_STEP_TYPES = [
   "send_email",
   "move_stage",
   "assign_owner",
+  "transfer_department",
   "add_tag",
   "remove_tag",
   "update_field",
@@ -109,6 +110,7 @@ export function stepTypeLabel(t: string): string {
     send_email: "Enviar e-mail",
     move_stage: "Mover estágio",
     assign_owner: "Atribuir responsável",
+    transfer_department: "Transferir para departamento",
     add_tag: "Adicionar tag",
     remove_tag: "Remover tag",
     update_field: "Atualizar campo",
@@ -231,6 +233,12 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
     }
     case "assign_owner":
       return c.userId ? `Usuário: ${String(c.userId)}` : "Definir usuário";
+    case "transfer_department":
+      return c.departmentName
+        ? String(c.departmentName)
+        : c.departmentId
+          ? `Depto: ${String(c.departmentId).slice(0, 8)}…`
+          : "Selecionar departamento";
     case "add_tag":
     case "remove_tag":
       return c.tagName ? String(c.tagName) : c.tagId ? `ID: ${String(c.tagId)}` : "Definir tag";
@@ -373,6 +381,8 @@ export function isStepIncomplete(stepType: string, config: unknown): boolean {
       return !str(c.agentId);
     case "transfer_to_ai_agent":
       return !str(c.agentUserId);
+    case "transfer_department":
+      return !str(c.departmentId);
     default:
       return false;
   }
@@ -386,6 +396,8 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       return { stageId: "" };
     case "assign_owner":
       return { userId: "" };
+    case "transfer_department":
+      return { departmentId: "", departmentName: "" };
     case "add_tag":
     case "remove_tag":
       return { tagName: "" };
