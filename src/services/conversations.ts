@@ -251,15 +251,21 @@ export async function getConversations(
 
   const q = params.search?.trim() ?? "";
   if (q.length > 0) {
-    conditions.push({
-      OR: [
-        { contact: { name: { contains: q, mode: "insensitive" } } },
-        { contact: { phone: { contains: q, mode: "insensitive" } } },
-        { inboxName: { contains: q, mode: "insensitive" } },
-        { assignedTo: { name: { contains: q, mode: "insensitive" } } },
-        { assignedTo: { email: { contains: q, mode: "insensitive" } } },
-      ],
-    });
+    const or: Prisma.ConversationWhereInput[] = [
+      { contact: { name: { contains: q, mode: "insensitive" } } },
+      { contact: { phone: { contains: q, mode: "insensitive" } } },
+      { inboxName: { contains: q, mode: "insensitive" } },
+      { assignedTo: { name: { contains: q, mode: "insensitive" } } },
+      { assignedTo: { email: { contains: q, mode: "insensitive" } } },
+    ];
+    // Busca pelo #número do ticket ("1234" ou "#1234") — match exato,
+    // usa o índice @@unique([organizationId, number]) (rápido).
+    const numeric = q.replace(/^#/, "");
+    if (/^\d+$/.test(numeric)) {
+      const n = Number(numeric);
+      if (Number.isSafeInteger(n)) or.push({ number: n });
+    }
+    conditions.push({ OR: or });
   } else if (params.tab) {
     if (params.tab === "todos") {
       const orTabs = params.todosCategoryTabs;
