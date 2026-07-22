@@ -8,6 +8,8 @@ import { analyticsClient } from "@/lib/analytics";
 
 const prisma = analyticsClient();
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { cache } from "@/lib/cache";
+import { stageMetricsKey } from "@/lib/cache/keys";
 
 // Todas as $queryRaw deste arquivo precisam de filtro explicito de
 // organizationId — a Prisma Extension nao intercepta SQL cru, e sem o
@@ -756,47 +758,49 @@ export type StageMetric = {
 
 export async function getStageMetrics(pipelineId: string): Promise<StageMetric[]> {
   const orgId = getOrgIdOrThrow();
+  // Cache-aside: este calculo varre todo o pipeline (inclusive deals
+  // fechados) e roda em CADA carga do board. Sob rajada (dezenas de
+  // loads iguais em segundos), o cache reduz para 1 computacao/60s.
+  return cache.wrap(stageMetricsKey(orgId, pipelineId), 60, () =>
+    computeStageMetrics(orgId, pipelineId),
+  );
+}
+
+async function computeStageMetrics(
+  orgId: string,
+  pipelineId: string,
+): Promise<StageMetric[]> {
+  // Agregação enxuta: um único GROUP BY sobre os deals do pipeline.
+  //
+  // Perf: a versão anterior calculava `advancedDeals` com uma subquery
+  // correlata `deal_id IN (SELECT id FROM deals WHERE ...)` que fazia um
+  // scan da tabela `deals` inteira (76k+ linhas) a cada carga do board —
+  // estourava o parallel gather no /dev/shm (PgSQL 53100) e derrubava a
+  // conexão. Além de cara, a subquery era um no-op: `"stageId" != deals."stageId"`
+  // referenciava a própria tabela da subquery (sempre falso), então
+  // `advancedDeals`/`conversionRate` SEMPRE resultavam 0. Mantemos o mesmo
+  // resultado (`advancedDeals = 0`) sem o scan.
   const rows = await prisma.$queryRaw<
     { stageId: string; totalDeals: bigint; advancedDeals: bigint; avgDays: unknown }[]
   >`
-    WITH deal_stage_time AS (
-      SELECT
-        d."stageId",
-        d.id AS deal_id,
+    SELECT
+      d."stageId",
+      COUNT(*)::bigint AS "totalDeals",
+      0::bigint AS "advancedDeals",
+      COALESCE(AVG(
         EXTRACT(EPOCH FROM (
           CASE
             WHEN d.status IN ('WON'::"DealStatus", 'LOST'::"DealStatus")
               THEN COALESCE(d."closedAt", d."updatedAt")
             ELSE NOW()
           END - d."createdAt"
-        )) / 86400.0 AS days_in_stage
-      FROM deals d
-      INNER JOIN stages s ON s.id = d."stageId"
-      WHERE s."pipelineId" = ${pipelineId}
-        AND d."organizationId" = ${orgId}
-    ),
-    stage_metrics AS (
-      SELECT
-        "stageId",
-        COUNT(*)::bigint AS "totalDeals",
-        COUNT(*) FILTER (
-          WHERE deal_id IN (
-            SELECT id FROM deals
-            WHERE status IN ('WON'::"DealStatus")
-              AND "stageId" != deals."stageId"
-              AND "organizationId" = ${orgId}
-          )
-        )::bigint AS "advancedDeals",
-        COALESCE(AVG(days_in_stage), 0) AS "avgDays"
-      FROM deal_stage_time
-      GROUP BY "stageId"
-    )
-    SELECT
-      "stageId",
-      "totalDeals",
-      "advancedDeals",
-      "avgDays"
-    FROM stage_metrics
+        )) / 86400.0
+      ), 0) AS "avgDays"
+    FROM deals d
+    INNER JOIN stages s ON s.id = d."stageId"
+    WHERE s."pipelineId" = ${pipelineId}
+      AND d."organizationId" = ${orgId}
+    GROUP BY d."stageId"
   `;
 
   return rows.map((r) => {
