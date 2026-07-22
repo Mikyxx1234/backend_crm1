@@ -62,6 +62,8 @@ model Organization {
   notes                    Note[]
   conversations            Conversation[]
   messages                 Message[]
+  supportTickets           SupportTicket[]
+  supportTicketMessages    SupportTicketMessage[]
   whatsappCallEvents       WhatsappCallEvent[]
   scheduledWhatsappCalls   ScheduledWhatsappCall[]
   scheduledMessages        ScheduledMessage[]
@@ -536,6 +538,9 @@ model User {
   agentPermission                AgentPermission?
   createdQuickReplies            QuickReply[]              @relation("QuickReplyCreatedBy")
   favoriteMessages               FavoriteMessage[]
+  supportTicketsRequested        SupportTicket[]           @relation("SupportTicketRequester")
+  supportTicketsAssigned         SupportTicket[]           @relation("SupportTicketAssignee")
+  supportTicketMessages          SupportTicketMessage[]    @relation("SupportTicketMessageAuthor")
 
   @@index([type])
   @@index([organizationId])
@@ -3023,13 +3028,19 @@ model Department {
   /// backend e no modal do frontend). Default false = comportamento
   /// atual (encerrar sem tabular).
   requireTabulationOnClose Boolean      @default(false)
+  /// Marca este departamento como o de SUPORTE INTERNO — recebe os
+  /// tickets do chat interno de suporte (usuários ↔ time de suporte).
+  /// Apenas um departamento por organização deveria ter isso como true
+  /// (garantido no app layer ao ligar a flag).
+  isSupport                Boolean      @default(false)
   createdAt                DateTime     @default(now())
   updatedAt                DateTime     @updatedAt
 
-  conversations Conversation[]
-  tabulations   Tabulation[]
-  members       DepartmentMember[]
-  activities    Activity[]
+  conversations  Conversation[]
+  tabulations    Tabulation[]
+  members        DepartmentMember[]
+  activities     Activity[]
+  supportTickets SupportTicket[]
 
   @@index([organizationId])
   @@map("departments")
@@ -3054,6 +3065,81 @@ model DepartmentMember {
   @@index([userId])
   @@index([departmentId])
   @@map("department_members")
+}
+
+// ──────────────────────────────────────────────
+// Suporte interno (chat usuário ↔ time de suporte)
+// ──────────────────────────────────────────────
+
+/// Estado do ticket de suporte interno.
+///   OPEN     -> atribuído a um agente, em atendimento
+///   PENDING  -> na fila, sem agente disponível ainda
+///   RESOLVED -> encerrado
+enum SupportTicketStatus {
+  OPEN
+  PENDING
+  RESOLVED
+}
+
+/// Autor de uma mensagem de suporte.
+enum SupportMessageAuthorType {
+  requester
+  agent
+  system
+}
+
+/// Ticket de suporte INTERNO: um usuário da org abre um chat com o time
+/// de suporte (departamento marcado com `isSupport`). Distribuído ao
+/// agente ONLINE menos ocupado; se ninguém disponível, fica em PENDING
+/// (fila) e é distribuído quando um agente ficar online.
+model SupportTicket {
+  id              String                 @id @default(cuid())
+  organizationId  String
+  organization    Organization           @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por organização (exibido como #123).
+  number          Int
+  /// Tipo/categoria do problema (lista fixa no app: bug, duvida, etc).
+  category        String
+  /// Descrição breve informada no formulário de abertura.
+  description     String
+  status          SupportTicketStatus    @default(PENDING)
+  requesterId     String
+  requester       User                   @relation("SupportTicketRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  assignedToId    String?
+  assignedTo      User?                  @relation("SupportTicketAssignee", fields: [assignedToId], references: [id])
+  departmentId    String?
+  department      Department?            @relation(fields: [departmentId], references: [id])
+  lastMessageAt   DateTime               @default(now())
+  /// Mensagens não lidas para cada ponta (badge).
+  requesterUnread Int                    @default(0)
+  agentUnread     Int                    @default(0)
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  resolvedAt      DateTime?
+
+  messages SupportTicketMessage[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, assignedToId])
+  @@index([organizationId, requesterId])
+  @@map("support_tickets")
+}
+
+model SupportTicketMessage {
+  id             String                   @id @default(cuid())
+  organizationId String
+  organization   Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ticketId       String
+  ticket         SupportTicket            @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  authorId       String?
+  author         User?                    @relation("SupportTicketMessageAuthor", fields: [authorId], references: [id])
+  authorType     SupportMessageAuthorType
+  content        String
+  createdAt      DateTime                 @default(now())
+
+  @@index([ticketId])
+  @@index([organizationId])
+  @@map("support_ticket_messages")
 }
 
 // ──────────────────────────────────────────────

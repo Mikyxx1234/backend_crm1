@@ -7,6 +7,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { retryPendingDistributions } from "@/services/distribution";
+import { drainSupportQueue } from "@/services/support/distribution";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -83,6 +84,27 @@ export async function PUT(req: Request, ctx: Ctx) {
           } catch (e) {
             console.warn(
               "[/api/agents/[id]/status] retryPendingDistributions falhou:",
+              e instanceof Error ? e.message : e,
+            );
+          }
+
+          // Também drena a fila do chat interno de suporte (tickets
+          // PENDING que ficaram sem agente online). Best-effort.
+          try {
+            const orgId = getOrgIdOrNull();
+            if (orgId) {
+              const assigned = await drainSupportQueue(orgId);
+              for (const ticketId of assigned) {
+                sseBus.publish("support_ticket_updated", {
+                  organizationId: orgId,
+                  ticketId,
+                  status: "OPEN",
+                });
+              }
+            }
+          } catch (e) {
+            console.warn(
+              "[/api/agents/[id]/status] drainSupportQueue falhou:",
               e instanceof Error ? e.message : e,
             );
           }
