@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireAuth } from "@/lib/auth-helpers";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 
 /**
@@ -12,102 +12,105 @@ export async function GET(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const r = await requireAuth();
-  if (!r.ok) return r.response;
-  const orgIdFilter = r.session.user.organizationId;
-  if (!orgIdFilter) {
-    return NextResponse.json(
-      { message: "Sem organizacao no contexto." },
-      { status: 403 },
+  return withOrgContext(async (session) => {
+    const orgIdFilter = session.user.organizationId;
+    if (!orgIdFilter) {
+      return NextResponse.json(
+        { message: "Sem organizacao no contexto." },
+        { status: 403 },
+      );
+    }
+    const { id } = await params;
+    const url = new URL(request.url);
+    const days = Math.min(
+      Math.max(Number(url.searchParams.get("days")) || 7, 1),
+      30,
     );
-  }
-  const { id } = await params;
-  const url = new URL(request.url);
-  const days = Math.min(Math.max(Number(url.searchParams.get("days")) || 7, 1), 30);
 
-  const since = new Date();
-  since.setDate(since.getDate() - days);
-  since.setHours(0, 0, 0, 0);
+    const since = new Date();
+    since.setDate(since.getDate() - days);
+    since.setHours(0, 0, 0, 0);
 
-  const [totals, statusBreak, perDay, lastRuns, draftsPending] =
-    await Promise.all([
-      prisma.aIAgentRun.aggregate({
-        where: { agentId: id, createdAt: { gte: since } },
-        _sum: { inputTokens: true, outputTokens: true, costUsd: true },
-        _count: { _all: true },
-      }),
-      prisma.aIAgentRun.groupBy({
-        by: ["status"],
-        where: { agentId: id, createdAt: { gte: since } },
-        _count: { _all: true },
-      }),
-      // Defesa em profundidade: agentId vem do path; embora o caller
-      // tipicamente carregue o agente com prisma scoped antes, esse raw
-      // nao passa pela extension. Filtramos organizationId pra alinhar.
-      prisma.$queryRaw<
-        Array<{ day: Date; runs: bigint; tokens: bigint; cost: number }>
-      >`
-        SELECT DATE_TRUNC('day', "createdAt") AS day,
-               COUNT(*) AS runs,
-               SUM("inputTokens" + "outputTokens") AS tokens,
-               SUM("costUsd") AS cost
-          FROM "ai_agent_runs"
-         WHERE "agentId" = ${id}
-           AND "createdAt" >= ${since}
-           AND "organizationId" = ${orgIdFilter}
-         GROUP BY DATE_TRUNC('day', "createdAt")
-         ORDER BY day ASC
-      `,
-      prisma.aIAgentRun.findMany({
-        where: { agentId: id },
-        orderBy: { createdAt: "desc" },
-        take: 10,
-        select: {
-          id: true,
-          source: true,
-          status: true,
-          inputTokens: true,
-          outputTokens: true,
-          costUsd: true,
-          responsePreview: true,
-          errorMessage: true,
-          createdAt: true,
-          finishedAt: true,
-        },
-      }),
-      prisma.message.count({
-        where: {
-          aiAgentUser: { aiAgentConfig: { id } },
-          messageType: "ai_draft",
-          isPrivate: true,
-        },
-      }),
-    ]);
+    const [totals, statusBreak, perDay, lastRuns, draftsPending] =
+      await Promise.all([
+        prisma.aIAgentRun.aggregate({
+          where: { agentId: id, createdAt: { gte: since } },
+          _sum: { inputTokens: true, outputTokens: true, costUsd: true },
+          _count: { _all: true },
+        }),
+        prisma.aIAgentRun.groupBy({
+          by: ["status"],
+          where: { agentId: id, createdAt: { gte: since } },
+          _count: { _all: true },
+        }),
+        // Defesa em profundidade: agentId vem do path; embora o caller
+        // tipicamente carregue o agente com prisma scoped antes, esse raw
+        // nao passa pela extension. Filtramos organizationId pra alinhar.
+        prisma.$queryRaw<
+          Array<{ day: Date; runs: bigint; tokens: bigint; cost: number }>
+        >`
+          SELECT DATE_TRUNC('day', "createdAt") AS day,
+                 COUNT(*) AS runs,
+                 SUM("inputTokens" + "outputTokens") AS tokens,
+                 SUM("costUsd") AS cost
+            FROM "ai_agent_runs"
+           WHERE "agentId" = ${id}
+             AND "createdAt" >= ${since}
+             AND "organizationId" = ${orgIdFilter}
+           GROUP BY DATE_TRUNC('day', "createdAt")
+           ORDER BY day ASC
+        `,
+        prisma.aIAgentRun.findMany({
+          where: { agentId: id },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+          select: {
+            id: true,
+            source: true,
+            status: true,
+            inputTokens: true,
+            outputTokens: true,
+            costUsd: true,
+            responsePreview: true,
+            errorMessage: true,
+            createdAt: true,
+            finishedAt: true,
+          },
+        }),
+        prisma.message.count({
+          where: {
+            aiAgentUser: { aiAgentConfig: { id } },
+            messageType: "ai_draft",
+            isPrivate: true,
+          },
+        }),
+      ]);
 
-  const statusCounts = statusBreak.reduce(
-    (acc, row) => {
-      acc[row.status] = row._count._all;
-      return acc;
-    },
-    {} as Record<string, number>,
-  );
+    const statusCounts = statusBreak.reduce(
+      (acc, row) => {
+        acc[row.status] = row._count._all;
+        return acc;
+      },
+      {} as Record<string, number>,
+    );
 
-  return NextResponse.json({
-    windowDays: days,
-    totals: {
-      runs: totals._count._all ?? 0,
-      inputTokens: totals._sum.inputTokens ?? 0,
-      outputTokens: totals._sum.outputTokens ?? 0,
-      costUsd: Number((totals._sum.costUsd ?? 0).toFixed(4)),
-    },
-    statusCounts,
-    perDay: perDay.map((d) => ({
-      day: d.day,
-      runs: Number(d.runs ?? 0),
-      tokens: Number(d.tokens ?? 0),
-      cost: Number(d.cost ?? 0),
-    })),
-    lastRuns,
-    draftsPending,
+    return NextResponse.json({
+      windowDays: days,
+      totals: {
+        runs: totals._count._all ?? 0,
+        inputTokens: totals._sum.inputTokens ?? 0,
+        outputTokens: totals._sum.outputTokens ?? 0,
+        costUsd: Number((totals._sum.costUsd ?? 0).toFixed(4)),
+      },
+      statusCounts,
+      perDay: perDay.map((d) => ({
+        day: d.day,
+        runs: Number(d.runs ?? 0),
+        tokens: Number(d.tokens ?? 0),
+        cost: Number(d.cost ?? 0),
+      })),
+      lastRuns,
+      draftsPending,
+    });
   });
 }

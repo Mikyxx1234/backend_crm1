@@ -79,6 +79,8 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "Note",
   "Conversation",
   "Message",
+  "SupportTicket",
+  "SupportTicketMessage",
   "WhatsappCallEvent",
   "ScheduledWhatsappCall",
   "ScheduledMessage",

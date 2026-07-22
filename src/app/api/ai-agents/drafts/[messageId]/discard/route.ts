@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireAuth } from "@/lib/auth-helpers";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { sseBus } from "@/lib/sse-bus";
 
@@ -14,25 +14,31 @@ export async function POST(
   _req: Request,
   { params }: { params: Promise<{ messageId: string }> },
 ) {
-  const r = await requireAuth();
-  if (!r.ok) return r.response;
-  const { messageId } = await params;
+  return withOrgContext(async () => {
+    const { messageId } = await params;
 
-  const draft = await prisma.message.findUnique({
-    where: { id: messageId },
-    select: { id: true, messageType: true, isPrivate: true, conversationId: true, organizationId: true },
+    const draft = await prisma.message.findUnique({
+      where: { id: messageId },
+      select: {
+        id: true,
+        messageType: true,
+        isPrivate: true,
+        conversationId: true,
+        organizationId: true,
+      },
+    });
+    if (!draft || draft.messageType !== "ai_draft" || !draft.isPrivate) {
+      return NextResponse.json(
+        { message: "Rascunho não encontrado." },
+        { status: 404 },
+      );
+    }
+    await prisma.message.delete({ where: { id: messageId } });
+    sseBus.publish("message_deleted", {
+      organizationId: draft.organizationId,
+      conversationId: draft.conversationId,
+      messageId,
+    });
+    return NextResponse.json({ ok: true });
   });
-  if (!draft || draft.messageType !== "ai_draft" || !draft.isPrivate) {
-    return NextResponse.json(
-      { message: "Rascunho não encontrado." },
-      { status: 404 },
-    );
-  }
-  await prisma.message.delete({ where: { id: messageId } });
-  sseBus.publish("message_deleted", {
-    organizationId: draft.organizationId,
-    conversationId: draft.conversationId,
-    messageId,
-  });
-  return NextResponse.json({ ok: true });
 }

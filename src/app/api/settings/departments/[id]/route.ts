@@ -12,6 +12,7 @@ const UpdateSchema = z.object({
     .optional(),
   icon: z.string().min(1).max(40).optional(),
   requireTabulationOnClose: z.boolean().optional(),
+  isSupport: z.boolean().optional(),
 });
 
 export async function PUT(
@@ -37,6 +38,19 @@ export async function PUT(
     if (!parsed.success) {
       return NextResponse.json({ message: "Dados inválidos." }, { status: 400 });
     }
+    // Apenas um departamento de suporte por org: ao ligar a flag,
+    // desliga nos demais.
+    if (parsed.data.isSupport === true) {
+      await prisma.department.updateMany({
+        where: {
+          organizationId: session.user.organizationId!,
+          isSupport: true,
+          id: { not: id },
+        },
+        data: { isSupport: false },
+      });
+    }
+
     const updated = await prisma.department.update({
       where: { id },
       data: parsed.data,

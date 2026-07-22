@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { requireAuth } from "@/lib/auth-helpers";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { runAgent } from "@/services/ai/runner";
 
 /**
@@ -13,51 +13,53 @@ export async function POST(
   request: Request,
   { params }: { params: Promise<{ id: string }> },
 ) {
-  const r = await requireAuth();
-  if (!r.ok) return r.response;
-  const { id } = await params;
-
   const body = (await request.json().catch(() => ({}))) as Record<
     string,
     unknown
   >;
 
-  const userMessage =
-    typeof body.message === "string" ? body.message.trim() : "";
-  if (!userMessage) {
-    return NextResponse.json(
-      { message: "Mensagem vazia." },
-      { status: 400 },
-    );
-  }
+  return withOrgContext(async () => {
+    const { id } = await params;
 
-  const contactId =
-    typeof body.contactId === "string" && body.contactId ? body.contactId : null;
-  const dealId =
-    typeof body.dealId === "string" && body.dealId ? body.dealId : null;
-  const history = Array.isArray(body.history)
-    ? (body.history as Array<{ role: "user" | "assistant"; content: string }>)
-        .filter(
-          (m) =>
-            m &&
-            (m.role === "user" || m.role === "assistant") &&
-            typeof m.content === "string",
-        )
-        .slice(-10)
-    : undefined;
+    const userMessage =
+      typeof body.message === "string" ? body.message.trim() : "";
+    if (!userMessage) {
+      return NextResponse.json(
+        { message: "Mensagem vazia." },
+        { status: 400 },
+      );
+    }
 
-  try {
-    const result = await runAgent({
-      agentId: id,
-      source: "playground",
-      userMessage,
-      contactId,
-      dealId,
-      history,
-    });
-    return NextResponse.json(result);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : "Erro desconhecido.";
-    return NextResponse.json({ message: msg }, { status: 500 });
-  }
+    const contactId =
+      typeof body.contactId === "string" && body.contactId
+        ? body.contactId
+        : null;
+    const dealId =
+      typeof body.dealId === "string" && body.dealId ? body.dealId : null;
+    const history = Array.isArray(body.history)
+      ? (body.history as Array<{ role: "user" | "assistant"; content: string }>)
+          .filter(
+            (m) =>
+              m &&
+              (m.role === "user" || m.role === "assistant") &&
+              typeof m.content === "string",
+          )
+          .slice(-10)
+      : undefined;
+
+    try {
+      const result = await runAgent({
+        agentId: id,
+        source: "playground",
+        userMessage,
+        contactId,
+        dealId,
+        history,
+      });
+      return NextResponse.json(result);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Erro desconhecido.";
+      return NextResponse.json({ message: msg }, { status: 500 });
+    }
+  });
 }
