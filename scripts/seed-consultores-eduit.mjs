@@ -26,18 +26,21 @@ const prisma = new PrismaClient();
 const TEMP_PASSWORD = process.env.CONSULTOR_TEMP_PASSWORD ?? "Eduit@!20";
 const DRY_RUN = process.env.DRY_RUN === "1";
 
-// key interno -> definicao do departamento
+// key interno -> definicao do departamento.
+// create=false => reaproveita o que JA existe no CRM (erro se nao achar, para
+// nao duplicar). Confirmado com o time (22/07): so o Acolhimento e criado;
+// Retencao e "Atendimento - SAC" ja existem e devem ser reusados.
 const DEPARTMENTS = [
-  { key: "acolhimento", name: "Acolhimento", color: "#8B5CF6", icon: "🤝" },
-  { key: "retencao", name: "Retenção", color: "#F59E0B", icon: "🛟" },
-  { key: "atendimento", name: "Atendimento", color: "#3B82F6", icon: "🎧" },
+  { key: "acolhimento", name: "Acolhimento", color: "#8B5CF6", icon: "🤝", create: true },
+  { key: "retencao", name: "Retenção", create: false },
+  { key: "atendimento", name: "Atendimento - SAC", create: false },
 ];
 
 // Regras de departamento (confirmadas com o time):
 //  - Wesley  -> Retencao (somente; quem e retencao nao recebe outro dept)
 //  - Danubia -> Acolhimento + Atendimento (acolhimento faz acolhimento E
 //               atendimento — regra herdada do papel de acolhimento)
-//  - Marilia + demais -> Atendimento (somente)
+//  - Marilia + demais -> Atendimento ("Atendimento - SAC", somente)
 const CONSULTORES = [
   { name: "Wesley Guerreiro", email: "wesley.guerreiro@cruzeiroead.com.br", depts: ["retencao"] },
   { name: "Danubia", email: "danubia.sousa@cruzeiroead.com.br", depts: ["acolhimento", "atendimento"] },
@@ -78,6 +81,13 @@ async function ensureDepartments(orgId) {
       select: { id: true, name: true },
     });
     if (!dep) {
+      if (!d.create) {
+        console.error(
+          `  ❌ [dept] "${d.name}" nao encontrado (create=false). ` +
+            `Confira o nome exato no CRM (Configuracoes > Equipe > Departamentos).`,
+        );
+        process.exit(1);
+      }
       if (DRY_RUN) {
         console.log(`  [dept] CRIARIA "${d.name}"`);
         map[d.key] = `dryrun-${d.key}`;
