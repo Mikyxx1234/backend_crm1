@@ -794,10 +794,20 @@ function executeDistributionTool(ctx: RunContext) {
 
 // ── consultar_matricula ────────────────────────────────────────
 
+/**
+ * Mensagem padrão de transferência quando o aluno pede dado pessoal específico.
+ * Mantida no código para consistência (o agente deve reproduzi-la ao transferir).
+ */
+const MATRICULA_TRANSFER_MESSAGE =
+  "Para garantir a segurança dos seus dados, vou te transferir para um de nossos consultores, que poderá confirmar essas informações com você. Só um instante, por favor. 🙂";
+
+const MATRICULA_POLITICA =
+  "USO INTERNO — NÃO DIVULGUE. Use estes dados apenas como contexto para entender a situação do aluno e rotear/atender melhor. NUNCA repita ou confirme ao aluno dados pessoais/acadêmicos específicos (situação da matrícula, curso, polo, série, documentos, financeiro). Se o aluno pedir informação específica sobre a própria situação/dados, responda EXATAMENTE com a mensagem de transferência e acione a transferência para um consultor humano (transfer_to_department + execute_distribution, ou transfer_to_human).";
+
 function consultarMatriculaTool(ctx: RunContext) {
   return tool({
     description:
-      "Consulta os dados acadêmicos (matrícula) do aluno com quem você está conversando: curso(s), polo, série/período, situação da matrícula (EM CURSO, CANCELADO, TRANCADO), ciclo e tipo de matrícula. O casamento é feito automaticamente pelo telefone/e-mail do contato. Use SEMPRE que o aluno perguntar sobre a própria situação, curso, polo ou status de matrícula, antes de responder — assim você personaliza o atendimento em vez de dar resposta genérica. Só passe `cpf` se o aluno informar o CPF dele no chat e o telefone/e-mail não tiver retornado dados.",
+      "Consulta, para USO INTERNO do agente, o contexto acadêmico do aluno em conversa (curso, polo, série, situação da matrícula, ciclo) a partir do relatório de matriculados. Serve para você ENTENDER a situação do aluno e rotear/atender melhor — NÃO para repassar esses dados a ele. O casamento é automático por telefone/e-mail do contato. Regra de segurança: se o aluno pedir informação específica sobre os próprios dados/situação, NÃO responda com os dados — envie a mensagem de transferência e encaminhe para um consultor humano. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar.",
     inputSchema: z.object({
       cpf: z
         .string()
@@ -818,20 +828,21 @@ function consultarMatriculaTool(ctx: RunContext) {
         });
         if (!contact) return fail("Contato não encontrado.");
 
-        // Prioriza identidade do próprio contato (telefone/e-mail) para não
-        // expor dados de terceiros. CPF informado só é usado como fallback.
-        let records = await lookupStudent(orgId, {
+        // Casamento amplo (telefone + e-mail + CPF informado) para maximizar a
+        // chance de ter contexto — sem risco de vazamento, pois o agente NÃO
+        // divulga estes dados ao aluno (uso interno + transferência segura).
+        const records = await lookupStudent(orgId, {
           phone: contact.phone,
           email: contact.email,
+          cpf: cpf?.trim() || null,
         });
-        if (records.length === 0 && cpf?.trim()) {
-          records = await lookupStudent(orgId, { cpf });
-        }
 
         if (records.length === 0) {
           return ok({
             found: false,
-            hint: "Nenhuma matrícula encontrada para este contato. Confirme com o aluno o CPF ou e-mail cadastrado, ou encaminhe para um atendente.",
+            politica: MATRICULA_POLITICA,
+            transferMessage: MATRICULA_TRANSFER_MESSAGE,
+            hint: "Sem contexto de matrícula para este contato. Atenda normalmente; se o aluno pedir dado específico da situação dele, envie a mensagem de transferência e encaminhe para um consultor humano.",
           });
         }
 
@@ -856,6 +867,8 @@ function consultarMatriculaTool(ctx: RunContext) {
 
         return ok({
           found: true,
+          politica: MATRICULA_POLITICA,
+          transferMessage: MATRICULA_TRANSFER_MESSAGE,
           nome: records[0]?.nome ?? contact.name,
           ativo,
           totalMatriculas: matriculas.length,
