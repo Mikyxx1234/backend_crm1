@@ -29,6 +29,7 @@ const validTabs = new Set<InboxTab>([
   "finalizados",
   "erro",
   "todos",
+  "abertas",
 ]);
 const validSortBy = new Set(["updatedAt", "createdAt", "unreadCount"]);
 
