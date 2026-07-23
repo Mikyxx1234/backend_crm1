@@ -89,6 +89,22 @@ if [ "$APP_MODE" = "api" ]; then
           db execute --schema=prisma/schema.prisma --file "$f" || \
           echo "[entrypoint]   (warning) falha aplicando $f, prosseguindo"
       done
+
+      # Gate final: reexecuta migrate deploy como verificação. Se AINDA
+      # falhar, o schema está fora de sincronia com o Prisma Client e subir
+      # o app resultaria em 500 silencioso em runtime (P2022 "column does
+      # not exist") — foi a causa do incidente de 23/07 (modelos internos).
+      # Abortar aqui torna o problema VISÍVEL no deploy, em vez de vazar
+      # pro usuário. Para casos excepcionais, use SKIP_PRISMA_MIGRATE.
+      echo "[entrypoint] revalidando migrations (gate de boot)..."
+      if ! node /opt/prisma-cli/node_modules/prisma/build/index.js \
+            migrate deploy --schema=prisma/schema.prisma; then
+        echo "[entrypoint] !! ERRO FATAL: migrations não aplicadas — abortando boot."
+        echo "[entrypoint] !! O schema do banco está atrás do código. Aplique as"
+        echo "[entrypoint] !! migrations pendentes e reinicie (ou SKIP_PRISMA_MIGRATE=1"
+        echo "[entrypoint] !! para forçar boot sob sua responsabilidade)."
+        exit 1
+      fi
     fi
   fi
 else
