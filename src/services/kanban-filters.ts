@@ -116,6 +116,14 @@ export type AdvancedDealFilters = {
   /** Campos personalizados de deal/contato. */
   dealCustomFields?: CustomFieldFilter[];
   contactCustomFields?: CustomFieldFilter[];
+
+  /**
+   * Filtros de conversa do contato (via Contact.conversations.some).
+   * `conversationStatus`: "open" = alguma conversa não resolvida / "closed" = alguma resolvida.
+   * `lastMessageDirection`: "out" = última msg nossa / "in" = última msg do cliente.
+   */
+  conversationStatus?: "open" | "closed";
+  lastMessageDirection?: "in" | "out";
 };
 
 /**
@@ -499,6 +507,20 @@ export async function buildDealWhereFromFilters(
     });
   }
 
+  // Filtros de conversa (status + direção da última mensagem). Combinados no
+  // MESMO `some` para casar a mesma conversation quando ambos estão ativos.
+  {
+    const convSome: Prisma.ConversationWhereInput = {};
+    if (filters.conversationStatus === "open") convSome.status = { not: "RESOLVED" };
+    else if (filters.conversationStatus === "closed") convSome.status = "RESOLVED";
+    if (filters.lastMessageDirection === "in" || filters.lastMessageDirection === "out") {
+      convSome.lastMessageDirection = filters.lastMessageDirection;
+    }
+    if (Object.keys(convSome).length > 0) {
+      conditions.push({ contact: { is: { conversations: { some: convSome } } } });
+    }
+  }
+
   // Custom fields (Deal)
   if (filters.dealCustomFields && filters.dealCustomFields.length > 0) {
     const names = filters.dealCustomFields.map((f) => f.name.trim()).filter(Boolean);
@@ -694,6 +716,13 @@ export function parseAdvancedDealFilters(input: unknown): AdvancedDealFilters {
   if (dealCfs) out.dealCustomFields = dealCfs;
   const contactCfs = asCustomFieldArray(o.contactCustomFields);
   if (contactCfs) out.contactCustomFields = contactCfs;
+
+  if (o.conversationStatus === "open" || o.conversationStatus === "closed") {
+    out.conversationStatus = o.conversationStatus;
+  }
+  if (o.lastMessageDirection === "in" || o.lastMessageDirection === "out") {
+    out.lastMessageDirection = o.lastMessageDirection;
+  }
 
   return out;
 }
