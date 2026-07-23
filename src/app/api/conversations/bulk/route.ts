@@ -7,6 +7,23 @@ import { getVisibilityFilter } from "@/lib/visibility";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { LEADS_BULK_JOB_NAMES, enqueueLeadsBulk } from "@/lib/queue";
+import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
+import {
+  getResolvableConversationIds,
+  type InboxTab,
+} from "@/services/conversations";
+
+/** Abas válidas para o encerramento "todas do filtro" (paridade com a listagem). */
+const FILTER_TABS = new Set<InboxTab>([
+  "entrada",
+  "esperando",
+  "respondidas",
+  "automacao",
+  "finalizados",
+  "erro",
+  "todos",
+  "abertas",
+]);
 
 /**
  * POST /api/conversations/bulk
@@ -43,14 +60,38 @@ export async function POST(request: Request) {
         return { AND: [idIn, conversationWhere, extra] };
       };
 
-      const body = (await request.json()) as { ids?: string[]; action?: string };
-      const { ids, action } = body;
+      const body = (await request.json()) as {
+        ids?: string[];
+        action?: string;
+        /** true = encerrar TODAS as conversas do filtro atual (todas as páginas). */
+        allInFilter?: boolean;
+        /** Aba atual (usada só quando `allInFilter`). */
+        tab?: string;
+        /** Busca atual (usada só quando `allInFilter`). */
+        search?: string;
+        /** Filtros da lista (usados só quando `allInFilter`) — paridade com a listagem. */
+        filters?: {
+          ownerId?: string;
+          withoutOwner?: boolean;
+          channel?: string;
+          stageId?: string;
+          tagIds?: string[];
+          sources?: string[];
+          withoutSource?: boolean;
+        };
+      };
+      const { ids, action, allInFilter } = body;
 
-      if (!Array.isArray(ids) || ids.length === 0) {
-        return NextResponse.json({ message: "Nenhuma conversa selecionada." }, { status: 400 });
-      }
-      if (ids.length > 500) {
-        return NextResponse.json({ message: "Máximo 500 conversas por vez." }, { status: 400 });
+      // No modo "todas do filtro" a seleção não vem por `ids` — o backend
+      // resolve os alvos pelo mesmo `where` da listagem. Fora dele, mantém a
+      // validação por lista de ids (máx. 500 por chamada).
+      if (!allInFilter) {
+        if (!Array.isArray(ids) || ids.length === 0) {
+          return NextResponse.json({ message: "Nenhuma conversa selecionada." }, { status: 400 });
+        }
+        if (ids.length > 500) {
+          return NextResponse.json({ message: "Máximo 500 conversas por vez." }, { status: 400 });
+        }
       }
 
       switch (action) {
@@ -62,30 +103,63 @@ export async function POST(request: Request) {
             );
           }
 
-          // Departamentos que exigem tabulação ao encerrar NÃO entram no bulk
-          // (o encerramento individual colhe a tabulação). Devolvemos a lista
-          // pra UI avisar "encerre individualmente".
-          const skippedRows = await prisma.conversation.findMany({
-            where: scopedWhere(ids, {
-              status: { not: "RESOLVED" },
-              department: { is: { requireTabulationOnClose: true } },
-            }),
-            select: { id: true },
-          });
-          const skippedIds = skippedRows.map((c) => c.id);
-          const skippedSet = new Set(skippedIds);
-          const candidateIds = ids.filter((i) => !skippedSet.has(i));
+          let targetIds: string[];
+          let skippedIds: string[];
 
-          // Resolve os ids REAIS a encerrar já com visibilidade aplicada —
-          // o worker roda em system-context (sem a visibilidade do usuário),
-          // então a checagem de escopo precisa acontecer aqui.
-          const targets = candidateIds.length
-            ? await prisma.conversation.findMany({
-                where: scopedWhere(candidateIds, { status: { not: "RESOLVED" } }),
-                select: { id: true },
-              })
-            : [];
-          const targetIds = targets.map((c) => c.id);
+          if (allInFilter) {
+            // "Todas do filtro": resolve os alvos server-side com o MESMO where
+            // da lista (visibilidade + aba + busca + escopo de canais). O worker
+            // roda em system-context, então a visibilidade é aplicada aqui.
+            const tab =
+              body.tab && FILTER_TABS.has(body.tab as InboxTab)
+                ? (body.tab as InboxTab)
+                : undefined;
+            const allowedChannelIds = await listAllowedChannelIds({
+              id: user.id,
+              role: user.role,
+              organizationId: user.organizationId,
+            });
+            const f = body.filters ?? {};
+            const resolved = await getResolvableConversationIds({
+              tab,
+              search: body.search,
+              visibilityWhere: conversationWhere ?? undefined,
+              allowedChannelIds,
+              ownerId: f.ownerId,
+              withoutOwner: f.withoutOwner,
+              channel: f.channel,
+              stageId: f.stageId,
+              tagIds: f.tagIds,
+              sources: f.sources,
+              withoutSource: f.withoutSource,
+            });
+            targetIds = resolved.ids;
+            skippedIds = resolved.skippedIds;
+          } else {
+            const selectedIds = ids as string[];
+            // Departamentos que exigem tabulação ao encerrar NÃO entram no bulk
+            // (o encerramento individual colhe a tabulação). Devolvemos a lista
+            // pra UI avisar "encerre individualmente".
+            const skippedRows = await prisma.conversation.findMany({
+              where: scopedWhere(selectedIds, {
+                status: { not: "RESOLVED" },
+                department: { is: { requireTabulationOnClose: true } },
+              }),
+              select: { id: true },
+            });
+            skippedIds = skippedRows.map((c) => c.id);
+            const skippedSet = new Set(skippedIds);
+            const candidateIds = selectedIds.filter((i) => !skippedSet.has(i));
+
+            // Resolve os ids REAIS a encerrar já com visibilidade aplicada.
+            const targets = candidateIds.length
+              ? await prisma.conversation.findMany({
+                  where: scopedWhere(candidateIds, { status: { not: "RESOLVED" } }),
+                  select: { id: true },
+                })
+              : [];
+            targetIds = targets.map((c) => c.id);
+          }
 
           if (targetIds.length === 0) {
             return NextResponse.json({ updated: 0, skipped: skippedIds });
@@ -166,8 +240,17 @@ export async function POST(request: Request) {
           return NextResponse.json({ message: `Ação desconhecida: ${action}` }, { status: 400 });
       }
     } catch (e) {
-      console.error("[bulk]", e);
-      return NextResponse.json({ message: "Erro ao executar ação em massa." }, { status: 500 });
+      const msg = e instanceof Error ? e.message : String(e);
+      const code = (e as { code?: string })?.code;
+      const stack = e instanceof Error ? e.stack?.split("\n").slice(0, 6) : undefined;
+      // Log detalhado no servidor + detalhe na resposta para diagnóstico via
+      // Network tab (o "funciona no dev, 500 na prod" costuma ser schema drift
+      // — migração pendente — ou Redis lançando no enqueue).
+      console.error("[bulk]", { msg, code, stack });
+      return NextResponse.json(
+        { message: "Erro ao executar ação em massa.", detail: msg, code, stack },
+        { status: 500 },
+      );
     }
   });
 }
