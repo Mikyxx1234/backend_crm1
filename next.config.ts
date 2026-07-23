@@ -48,9 +48,13 @@ const nextConfig: NextConfig = {
     ignoreDuringBuilds: true,
   },
   experimental: {
+    // 20mb: uploads de mídia até 16MB + overhead do multipart/form-data +
+    // margem de segurança pro buffer do middleware (evita truncar o body
+    // silenciosamente antes de chegar na rota de upload).
     serverActions: {
-      bodySizeLimit: "2mb",
+      bodySizeLimit: "20mb",
     },
+    middlewareClientMaxBodySize: "20mb",
   },
   serverExternalPackages: [
     "bullmq",
