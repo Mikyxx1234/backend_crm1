@@ -25,6 +25,7 @@ import { sseBus } from "@/lib/sse-bus";
 import { createActivity } from "@/services/activities";
 import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
+import { executeDistribution } from "@/services/distribution";
 import { addTagToContact } from "@/services/tags";
 import type { ActivityType, Prisma } from "@prisma/client";
 
@@ -661,6 +662,135 @@ function transferToHumanTool(ctx: RunContext) {
   });
 }
 
+// ── transfer_to_department ─────────────────────────────────────
+
+function transferToDepartmentTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Roteia a conversa atual para um departamento (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC') com base no assunto do aluno. NÃO tira a conversa do agente — apenas define o departamento responsável, que é usado pela Distribuição Inteligente para escolher o consultor certo. Chame ANTES de `execute_distribution` quando souber a área. Match do nome é case-insensitive.",
+    inputSchema: z.object({
+      departmentName: z
+        .string()
+        .min(1)
+        .describe(
+          "Nome do departamento de destino (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC').",
+        ),
+    }),
+    execute: async ({ departmentName }) => {
+      try {
+        if (!ctx.conversationId) return fail("Sem conversa ativa para rotear.");
+        const name = departmentName.trim();
+        if (!name) return fail("Nome de departamento vazio.");
+        const dept = await prisma.department.findFirst({
+          where: { name: { equals: name, mode: "insensitive" } },
+          select: { id: true, name: true },
+        });
+        if (!dept)
+          return fail(
+            `Departamento "${name}" não encontrado. Departamentos válidos são configurados pela organização.`,
+          );
+        await prisma.conversation.update({
+          where: { id: ctx.conversationId },
+          data: { departmentId: dept.id, updatedAt: new Date() },
+        });
+        if (ctx.dealId) {
+          createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
+            action: "transferred_to_department",
+            agentId: ctx.agentId ?? null,
+            departmentId: dept.id,
+            departmentName: dept.name,
+          }).catch(() => {});
+        }
+        return ok({ departmentId: dept.id, departmentName: dept.name });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao rotear departamento.",
+        );
+      }
+    },
+  });
+}
+
+// ── execute_distribution ───────────────────────────────────────
+
+function executeDistributionTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Aciona a Distribuição Inteligente para atribuir a conversa/negócio a um consultor humano. O motor escolhe automaticamente quem recebe (menor fila, dentro do departamento roteado, respeitando horário e disponibilidade) — você NÃO escolhe a pessoa. Se souber a área, chame `transfer_to_department` antes (ou informe `departmentName` aqui). Se ninguém estiver disponível, o lead entra na fila de espera e será redistribuído depois. Use quando o caso precisar de um atendente humano.",
+    inputSchema: z.object({
+      departmentName: z
+        .string()
+        .optional()
+        .describe(
+          "Departamento-alvo (opcional). Se omitido, usa o departamento já roteado na conversa. Ex.: 'Retenção'.",
+        ),
+      reason: z
+        .string()
+        .optional()
+        .describe("Motivo curto do encaminhamento, para registro."),
+    }),
+    execute: async ({ departmentName, reason }) => {
+      try {
+        if (!ctx.contactId && !ctx.dealId)
+          return fail("Sem contato/negócio para distribuir.");
+
+        let departmentId: string | null = null;
+        if (departmentName?.trim()) {
+          const dept = await prisma.department.findFirst({
+            where: { name: { equals: departmentName.trim(), mode: "insensitive" } },
+            select: { id: true },
+          });
+          if (!dept)
+            return fail(`Departamento "${departmentName}" não encontrado.`);
+          departmentId = dept.id;
+        }
+
+        const result = await executeDistribution({
+          dealId: ctx.dealId ?? null,
+          contactId: ctx.contactId ?? null,
+          conversationId: ctx.conversationId ?? null,
+          triggerSource: "AUTOMATION",
+          departmentId,
+        });
+
+        if (ctx.dealId) {
+          createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
+            action: "executed_distribution",
+            agentId: ctx.agentId ?? null,
+            success: result.success,
+            reason: result.reason,
+            selectedUserId: result.selectedUserId,
+            note: reason?.trim() ?? null,
+          }).catch(() => {});
+        }
+
+        if (result.success) {
+          return ok({
+            assigned: true,
+            assignedTo: result.selectedUserName,
+            assignedUserId: result.selectedUserId,
+          });
+        }
+        // Não é erro de execução — é resultado de negócio (sem elegível, etc.).
+        return ok({
+          assigned: false,
+          reason: result.reason,
+          hint:
+            result.reason === "NO_ELIGIBLE_RESPONSIBLE"
+              ? "Ninguém disponível agora — o lead entrou na fila e será redistribuído. Avise o aluno que um atendente falará com ele em breve."
+              : result.reason === "NO_DEPARTMENT"
+                ? "A conversa não está em um departamento com distribuição automática. Chame `transfer_to_department` primeiro."
+                : "Distribuição não realizada. Considere transferir para humano manualmente.",
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao executar distribuição.",
+        );
+      }
+    },
+  });
+}
+
 // ── ToolSet builder ────────────────────────────────────────────
 
 // Usamos `any` pro Tool porque cada tool tem um inputSchema e output
@@ -675,6 +805,8 @@ const FACTORY_MAP: Record<string, (ctx: RunContext) => AnyTool> = {
   create_activity: createActivityTool,
   search_products: searchProductsTool,
   send_whatsapp_template: sendWhatsappTemplateTool,
+  transfer_to_department: transferToDepartmentTool,
+  execute_distribution: executeDistributionTool,
   transfer_to_human: transferToHumanTool,
 };
 
