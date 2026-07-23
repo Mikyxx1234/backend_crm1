@@ -59,6 +59,12 @@ export interface GetResponsiblesOptions {
   distributionType?: string | null;
   /** Momento de referência (simulação/teste). */
   now?: Date;
+  /**
+   * Distribuição por departamento: quando definido, responsáveis que NÃO são
+   * membros deste departamento (`DepartmentMember`) recebem o bloqueio
+   * `DEPARTMENT_MISMATCH` (inelegíveis). `null`/undefined = modo desligado.
+   */
+  departmentId?: string | null;
 }
 
 export async function getDistributionResponsibles(
@@ -75,6 +81,19 @@ export async function getDistributionResponsibles(
   if (users.length === 0) return [];
 
   const userIds = users.map((u) => u.id);
+
+  // Distribuição por departamento: carrega os membros do departamento-alvo
+  // para marcar quem está dentro/fora. Vazio (Set) quando modo desligado.
+  const departmentMemberIds = opts.departmentId
+    ? new Set(
+        (
+          await prisma.departmentMember.findMany({
+            where: { departmentId: opts.departmentId, userId: { in: userIds } },
+            select: { userId: true },
+          })
+        ).map((m) => m.userId),
+      )
+    : null;
 
   const [responsibles, statuses, schedules, queue] = await Promise.all([
     prisma.distributionResponsible.findMany({
@@ -144,6 +163,8 @@ export async function getDistributionResponsibles(
         status,
         schedule,
         queueCount,
+        // undefined = modo desligado (sem restrição); false = fora do depto.
+        inDepartment: departmentMemberIds ? departmentMemberIds.has(u.id) : undefined,
       },
       eligibilityCtx,
     );

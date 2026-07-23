@@ -251,15 +251,21 @@ export async function getConversations(
 
   const q = params.search?.trim() ?? "";
   if (q.length > 0) {
-    conditions.push({
-      OR: [
-        { contact: { name: { contains: q, mode: "insensitive" } } },
-        { contact: { phone: { contains: q, mode: "insensitive" } } },
-        { inboxName: { contains: q, mode: "insensitive" } },
-        { assignedTo: { name: { contains: q, mode: "insensitive" } } },
-        { assignedTo: { email: { contains: q, mode: "insensitive" } } },
-      ],
-    });
+    const or: Prisma.ConversationWhereInput[] = [
+      { contact: { name: { contains: q, mode: "insensitive" } } },
+      { contact: { phone: { contains: q, mode: "insensitive" } } },
+      { inboxName: { contains: q, mode: "insensitive" } },
+      { assignedTo: { name: { contains: q, mode: "insensitive" } } },
+      { assignedTo: { email: { contains: q, mode: "insensitive" } } },
+    ];
+    // Busca pelo #número do ticket ("1234" ou "#1234") — match exato,
+    // usa o índice @@unique([organizationId, number]) (rápido).
+    const numeric = q.replace(/^#/, "");
+    if (/^\d+$/.test(numeric)) {
+      const n = Number(numeric);
+      if (Number.isSafeInteger(n)) or.push({ number: n });
+    }
+    conditions.push({ OR: or });
   } else if (params.tab) {
     if (params.tab === "todos") {
       const orTabs = params.todosCategoryTabs;
@@ -468,7 +474,7 @@ export async function getConversationById(id: string) {
     where: { id },
     include: {
       contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
-      assignedTo: { select: { id: true, name: true, email: true } },
+      assignedTo: { select: { id: true, name: true, email: true, avatarUrl: true } },
     },
   });
   if (conv?.contact) {
@@ -546,7 +552,7 @@ export async function assignConversationAssignedTo(
       },
       include: {
         contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
-        assignedTo: { select: { id: true, name: true, email: true } },
+        assignedTo: { select: { id: true, name: true, email: true, avatarUrl: true } },
       },
     });
     if (conv.contactId) {
@@ -642,7 +648,13 @@ export async function getConversationLite(id: string) {
 export async function updateConversationStatusInDb(
   id: string,
   status: ConversationStatus,
-  extra?: { tabulationId?: string | null },
+  extra?: {
+    tabulationId?: string | null;
+    /** Ao encerrar (RESOLVED), desvincula o atendente (assignedToId=null). */
+    clearAssignedTo?: boolean;
+    /** Ao encerrar (RESOLVED), desvincula o departamento (departmentId=null). */
+    clearDepartment?: boolean;
+  },
 ) {
   // closedAt: preencher quando encerra, limpar quando reabre. Fica em sync
   // com o status pra UI/relatorios sem consultar historico de eventos.
@@ -663,9 +675,20 @@ export async function updateConversationStatusInDb(
         ? { tabulationId: extra.tabulationId ?? null }
         : {};
 
+  // Ao ENCERRAR: respeita as configs "Manter atendente/departamento ao
+  // finalizar". Quando desligadas, o caller passa clearAssignedTo/
+  // clearDepartment=true e desvinculamos os campos aqui.
+  const clearPatch: { assignedToId?: null; departmentId?: null } =
+    status === "RESOLVED"
+      ? {
+          ...(extra?.clearAssignedTo ? { assignedToId: null } : {}),
+          ...(extra?.clearDepartment ? { departmentId: null } : {}),
+        }
+      : {};
+
   return prisma.conversation.update({
     where: { id },
-    data: { status, ...closedAtPatch, ...tabulationPatch },
+    data: { status, ...closedAtPatch, ...tabulationPatch, ...clearPatch },
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 }

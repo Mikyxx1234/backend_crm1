@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
+import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import {
   assignConversationAssignedTo,
@@ -382,8 +383,23 @@ export async function POST(request: Request, context: RouteContext) {
         }
       }
 
+      // Configs "Manter atendente/departamento ao finalizar" (default: NÃO
+      // manter → desvincula ao encerrar). Só relevante quando vai pra RESOLVED.
+      let clearAssignedTo = false;
+      let clearDepartment = false;
+      if (dbStatus === "RESOLVED") {
+        const [keepAgent, keepDepartment] = await Promise.all([
+          getOrgSettingBool("conversation.keepAgentOnEnd", false),
+          getOrgSettingBool("conversation.keepDepartmentOnEnd", false),
+        ]);
+        clearAssignedTo = !keepAgent;
+        clearDepartment = !keepDepartment;
+      }
+
       const updated = await updateConversationStatusInDb(id, dbStatus, {
         tabulationId,
+        clearAssignedTo,
+        clearDepartment,
       });
 
       if (conv.status !== updated.status) {

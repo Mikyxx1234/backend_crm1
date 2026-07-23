@@ -3033,6 +3033,13 @@ model Department {
   /// Apenas um departamento por organização deveria ter isso como true
   /// (garantido no app layer ao ligar a flag).
   isSupport                Boolean      @default(false)
+  /// Se true, este departamento usa a Distribuição Inteligente restrita aos
+  /// seus próprios membros (`DepartmentMember`). Leads roteados para cá só são
+  /// distribuídos entre os membros elegíveis do depto (a regra individual de
+  /// cada um continua valendo). Departamentos com false NÃO auto-distribuem
+  /// (o lead fica na fila). Quando NENHUM depto da org tem isso true, o motor
+  /// mantém o comportamento org-wide (retrocompatível).
+  distributionEnabled      Boolean      @default(false)
   createdAt                DateTime     @default(now())
   updatedAt                DateTime     @updatedAt
 
@@ -3244,6 +3251,12 @@ model MessageTemplate {
   language       String         @default("pt_BR")
   status         TemplateStatus @default(DRAFT)
   channelType    ChannelType?
+  /// URL pública do arquivo de mídia anexado ao modelo (imagem ou vídeo).
+  mediaUrl       String?
+  /// Tipo MIME do anexo (ex.: "image/png"). Null se `mediaUrl` null.
+  mediaType      String?
+  /// Nome original do arquivo (para exibição). Null se `mediaUrl` null.
+  mediaName      String?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 

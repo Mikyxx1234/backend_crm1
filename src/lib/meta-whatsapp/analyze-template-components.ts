@@ -1,9 +1,22 @@
 import { isFlowDefinitionButton } from "@/lib/meta-whatsapp/is-flow-definition-button";
 
+export type TemplateButton = {
+  /** QUICK_REPLY | URL | PHONE_NUMBER | FLOW | COPY_CODE ... */
+  type: string;
+  /** Rótulo visível do botão (ex.: "Quero"). */
+  text: string;
+  /** URL (só para botões URL). */
+  url: string | null;
+};
+
 export type TemplateComponentsAnalysis = {
   hasButtons: boolean;
   /** Tipos distintos de botão (ex.: FLOW, URL, QUICK_REPLY), ordenados. */
   buttonTypes: string[];
+  /** Botões na ordem em que aparecem no template, com rótulo. */
+  buttons: TemplateButton[];
+  /** Texto do componente BODY (para preview). */
+  bodyText: string | null;
   hasVariables: boolean;
   flowAction: string | null;
   flowId: string | null;
@@ -27,6 +40,8 @@ export function analyzeTemplateComponents(
   options?: { parameterFormat?: string | null },
 ): TemplateComponentsAnalysis {
   const buttonTypesSet = new Set<string>();
+  const buttons: TemplateButton[] = [];
+  let bodyText: string | null = null;
   let hasVariables = false;
   let flowAction: string | null = null;
   let flowId: string | null = null;
@@ -39,6 +54,8 @@ export function analyzeTemplateComponents(
     return {
       hasButtons: false,
       buttonTypes: [],
+      buttons: [],
+      bodyText: null,
       hasVariables,
       flowAction: null,
       flowId: null,
@@ -52,6 +69,7 @@ export function analyzeTemplateComponents(
 
     if (type === "BODY" || type === "HEADER") {
       const text = typeof comp.text === "string" ? comp.text : "";
+      if (type === "BODY" && text) bodyText = text;
       if (textHasVariablePlaceholders(text)) hasVariables = true;
       const pf = String(comp.parameter_format ?? comp.parameterFormat ?? "").toUpperCase();
       if (pf === "NAMED") hasVariables = true;
@@ -62,8 +80,11 @@ export function analyzeTemplateComponents(
         const btn = asRecord(b);
         if (!btn) continue;
         const rawType = String(btn.type ?? "").toUpperCase();
+        const label = typeof btn.text === "string" ? btn.text : "";
+        const url = typeof btn.url === "string" ? btn.url : null;
         if (isFlowDefinitionButton(btn)) {
           buttonTypesSet.add("FLOW");
+          buttons.push({ type: "FLOW", text: label, url: null });
           if (flowAction == null) {
             const fa = btn.flow_action ?? btn.flowAction;
             if (typeof fa === "string" && fa.trim()) flowAction = fa.trim();
@@ -74,6 +95,7 @@ export function analyzeTemplateComponents(
           }
         } else if (rawType) {
           buttonTypesSet.add(rawType);
+          buttons.push({ type: rawType, text: label, url });
         }
       }
     }
@@ -83,6 +105,8 @@ export function analyzeTemplateComponents(
   return {
     hasButtons: buttonTypes.length > 0,
     buttonTypes,
+    buttons,
+    bodyText,
     hasVariables,
     flowAction,
     flowId,

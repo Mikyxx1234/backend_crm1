@@ -1679,6 +1679,31 @@ async function executeStep(
         });
       }
 
+      // Roteamento por botão (quick-reply do template): se o nó tem botões
+      // com `gotoStepId`, PAUSA o fluxo e registra contexto — o clique volta
+      // pelo webhook (message.button.text) e o processIncomingMessage casa o
+      // título do botão com `config.buttons[].gotoStepId`. Sem botões
+      // roteados, segue linear (comportamento antigo).
+      const tplButtons = Array.isArray(cfg.buttons)
+        ? (cfg.buttons as { gotoStepId?: string }[])
+        : [];
+      const tplHasRouting = tplButtons.some(
+        (b) => typeof b?.gotoStepId === "string" && b.gotoStepId.trim() !== "",
+      );
+      if (tplHasRouting) {
+        const tplStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
+        const tplTimeoutMs = readNumber(cfg, "timeoutMs");
+        if (tplStepId && rt.contactId) {
+          const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
+          if (existingCtx) {
+            await advanceContext(existingCtx.id, tplStepId, (existingCtx.variables as Record<string, unknown>) ?? {}, tplTimeoutMs);
+          } else {
+            await createContext(rt.automationId, rt.contactId, tplStepId, tplTimeoutMs);
+          }
+        }
+        return { skipRemaining: true };
+      }
+
       return {};
     }
 
