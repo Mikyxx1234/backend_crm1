@@ -180,6 +180,21 @@ export async function updateBranding(
   });
 }
 
+/**
+ * Atualiza apenas o `logoUrl` da organização (ícone da empresa), sem
+ * tocar em `primaryColor`. Usado pela navrail para trocar/remover o ícone
+ * fora do fluxo de onboarding. Passe `null` para remover.
+ */
+export async function setOrganizationLogo(
+  organizationId: string,
+  logoUrl: string | null,
+): Promise<void> {
+  await prismaBase.organization.update({
+    where: { id: organizationId },
+    data: { logoUrl },
+  });
+}
+
 export async function applyPipelineTemplate(
   organizationId: string,
   templateId: PipelineTemplateId,

@@ -49,6 +49,9 @@ export const BUCKETS = [
   "avatars",
   "contact-avatars",
   "inbound-media",
+  // Identidade visual da organização (Organization.logoUrl) — ícone/logo
+  // da empresa exibido na navrail.
+  "branding",
   // PR 4.3 — exports LGPD/GDPR. Auto-deletado pelo job de limpeza
   // depois de DataRequest.expiresAt (default +7 dias).
   "data-exports",
