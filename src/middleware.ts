@@ -233,8 +233,6 @@ export async function middleware(req: NextRequest) {
 export const config = {
   matcher: [
     "/uploads/:path*",
-    // api/uploads excluído: multipart grande (ex.: MP4 ~12MB) não deve
-    // passar pelo buffer do middleware — a auth() já roda dentro da rota.
-    "/((?!_next/static|_next/image|favicon.ico|api/uploads|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };
