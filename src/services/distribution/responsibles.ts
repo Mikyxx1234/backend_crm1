@@ -43,6 +43,8 @@ export interface DistributionResponsibleView {
   type: string | null;
   paused: boolean;
   lastExecutionAt: string | null;
+  /** Departamentos dos quais é membro (dirige o roteamento por departamento). */
+  departments: { id: string; name: string }[];
   /** Presença operacional (null = sem registro). */
   status: AgentOnlineStatus | null;
   /** Tem expediente configurado. */
@@ -95,7 +97,7 @@ export async function getDistributionResponsibles(
       )
     : null;
 
-  const [responsibles, statuses, schedules, queue] = await Promise.all([
+  const [responsibles, statuses, schedules, queue, memberships] = await Promise.all([
     prisma.distributionResponsible.findMany({
       where: { userId: { in: userIds } },
       select: {
@@ -125,7 +127,20 @@ export async function getDistributionResponsibles(
       },
     }),
     getQueueCounts(userIds),
+    prisma.departmentMember.findMany({
+      where: { userId: { in: userIds }, organizationId: orgId },
+      select: { userId: true, department: { select: { id: true, name: true } } },
+    }),
   ]);
+
+  // userId → lista de departamentos (nome), para exibição e roteamento.
+  const deptsByUser = new Map<string, { id: string; name: string }[]>();
+  for (const m of memberships) {
+    if (!m.department) continue;
+    const arr = deptsByUser.get(m.userId) ?? [];
+    arr.push({ id: m.department.id, name: m.department.name });
+    deptsByUser.set(m.userId, arr);
+  }
 
   const respByUser = new Map(responsibles.map((r) => [r.userId, r]));
   const statusByUser = new Map(statuses.map((s) => [s.userId, s.status]));
@@ -182,6 +197,9 @@ export async function getDistributionResponsibles(
       lastExecutionAt: cfg.lastExecutionAt
         ? cfg.lastExecutionAt.toISOString()
         : null,
+      departments: (deptsByUser.get(u.id) ?? []).sort((a, b) =>
+        a.name.localeCompare(b.name),
+      ),
       status,
       hasSchedule: schedule !== null,
       queueCount,

@@ -22,6 +22,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
+import { lookupStudent } from "@/services/academic-records";
 import { createActivity } from "@/services/activities";
 import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
@@ -791,6 +792,97 @@ function executeDistributionTool(ctx: RunContext) {
   });
 }
 
+// ── consultar_matricula ────────────────────────────────────────
+
+/**
+ * Mensagem padrão de transferência quando o aluno pede dado pessoal específico.
+ * Mantida no código para consistência (o agente deve reproduzi-la ao transferir).
+ */
+const MATRICULA_TRANSFER_MESSAGE =
+  "Para garantir a segurança dos seus dados, vou te transferir para um de nossos consultores, que poderá confirmar essas informações com você. Só um instante, por favor. 🙂";
+
+const MATRICULA_POLITICA =
+  "USO INTERNO — NÃO DIVULGUE. Use estes dados apenas como contexto para entender a situação do aluno e rotear/atender melhor. NUNCA repita ou confirme ao aluno dados pessoais/acadêmicos específicos (situação da matrícula, curso, polo, série, documentos, financeiro). Se o aluno pedir informação específica sobre a própria situação/dados, responda EXATAMENTE com a mensagem de transferência e acione a transferência para um consultor humano (transfer_to_department + execute_distribution, ou transfer_to_human).";
+
+function consultarMatriculaTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Consulta, para USO INTERNO do agente, o contexto acadêmico do aluno em conversa (curso, polo, série, situação da matrícula, ciclo) a partir do relatório de matriculados. Serve para você ENTENDER a situação do aluno e rotear/atender melhor — NÃO para repassar esses dados a ele. O casamento é automático por telefone/e-mail do contato. Regra de segurança: se o aluno pedir informação específica sobre os próprios dados/situação, NÃO responda com os dados — envie a mensagem de transferência e encaminhe para um consultor humano. Passe `cpf` apenas se o aluno informar o CPF no chat e o telefone/e-mail não localizar.",
+    inputSchema: z.object({
+      cpf: z
+        .string()
+        .optional()
+        .describe(
+          "CPF informado pelo aluno no chat (opcional). Só use se o telefone/e-mail não localizar a matrícula.",
+        ),
+    }),
+    execute: async ({ cpf }) => {
+      try {
+        const orgId = getOrgIdOrNull();
+        if (!orgId) return fail("Sem organização no contexto.");
+        if (!ctx.contactId) return fail("Sem contato associado à conversa.");
+
+        const contact = await prisma.contact.findUnique({
+          where: { id: ctx.contactId },
+          select: { phone: true, email: true, name: true },
+        });
+        if (!contact) return fail("Contato não encontrado.");
+
+        // Casamento amplo (telefone + e-mail + CPF informado) para maximizar a
+        // chance de ter contexto — sem risco de vazamento, pois o agente NÃO
+        // divulga estes dados ao aluno (uso interno + transferência segura).
+        const records = await lookupStudent(orgId, {
+          phone: contact.phone,
+          email: contact.email,
+          cpf: cpf?.trim() || null,
+        });
+
+        if (records.length === 0) {
+          return ok({
+            found: false,
+            politica: MATRICULA_POLITICA,
+            transferMessage: MATRICULA_TRANSFER_MESSAGE,
+            hint: "Sem contexto de matrícula para este contato. Atenda normalmente; se o aluno pedir dado específico da situação dele, envie a mensagem de transferência e encaminhe para um consultor humano.",
+          });
+        }
+
+        const matriculas = records.map((r) => ({
+          nome: r.nome,
+          curso: r.curso,
+          polo: r.polo,
+          serie: r.serie,
+          ciclo: r.ciclo,
+          situacao: r.situacao,
+          tipoMatricula: r.tipoMatricula,
+          instituicao: r.instituicao,
+          dataMatricula: r.dataMatricula
+            ? r.dataMatricula.toISOString().slice(0, 10)
+            : null,
+        }));
+        const ativo = records.some((r) =>
+          ["EM CURSO", "ATIVO", "CURSANDO"].some((s) =>
+            (r.situacao ?? "").toUpperCase().includes(s),
+          ),
+        );
+
+        return ok({
+          found: true,
+          politica: MATRICULA_POLITICA,
+          transferMessage: MATRICULA_TRANSFER_MESSAGE,
+          nome: records[0]?.nome ?? contact.name,
+          ativo,
+          totalMatriculas: matriculas.length,
+          matriculas,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao consultar matrícula.",
+        );
+      }
+    },
+  });
+}
+
 // ── ToolSet builder ────────────────────────────────────────────
 
 // Usamos `any` pro Tool porque cada tool tem um inputSchema e output
@@ -807,6 +899,7 @@ const FACTORY_MAP: Record<string, (ctx: RunContext) => AnyTool> = {
   send_whatsapp_template: sendWhatsappTemplateTool,
   transfer_to_department: transferToDepartmentTool,
   execute_distribution: executeDistributionTool,
+  consultar_matricula: consultarMatriculaTool,
   transfer_to_human: transferToHumanTool,
 };
 
