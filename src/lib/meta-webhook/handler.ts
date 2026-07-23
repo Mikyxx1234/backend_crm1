@@ -1006,6 +1006,48 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
   };
 }
 
+/**
+ * Rótulo legível para webhook `type: "unsupported"` (erro Meta 131051/131060).
+ * O conteúdo real nunca chega — só o aviso.
+ */
+function labelUnsupportedMessage(message: Record<string, unknown>): string {
+  const u = obj(message.unsupported);
+  const subtype = str(u.type).toLowerCase();
+  const errors = Array.isArray(message.errors) ? message.errors : [];
+  const firstErr = obj(errors[0] as Record<string, unknown> | null);
+  const code = typeof firstErr.code === "number" ? firstErr.code : Number(firstErr.code) || 0;
+
+  if (code === 131060) {
+    return "Mensagem indisponível (limitação da Meta)";
+  }
+
+  const bySubtype: Record<string, string> = {
+    poll_creation: "Enquete (não suportada pela API da Meta)",
+    poll_update: "Atualização de enquete (não suportada pela API da Meta)",
+    edit: "Edição de mensagem (não suportada pela API da Meta)",
+    gif: "GIF (não suportado pela API da Meta)",
+    group_invite: "Convite de grupo (não suportado pela API da Meta)",
+    media_placeholder: "Álbum de mídia (não suportado pela API da Meta)",
+    // Álbum multi-imagem: Meta envia unsupported.type=image e depois as fotos 1 a 1
+    image: "Álbum de imagens (não suportado pela API da Meta)",
+    video: "Álbum de vídeos (não suportado pela API da Meta)",
+    button: "Botão (não suportado neste contexto pela API da Meta)",
+    interactive: "Interativo (não suportado neste contexto pela API da Meta)",
+    list: "Lista (não suportada neste contexto pela API da Meta)",
+    location: "Localização (não suportada neste contexto pela API da Meta)",
+    order: "Pedido (não suportado pela API da Meta)",
+    product: "Produto (não suportado pela API da Meta)",
+    pin: "Mensagem fixada (não suportada pela API da Meta)",
+    reaction: "Reação (formato não suportado pela API da Meta)",
+    keep_in_chat: "Keep in chat (não suportado pela API da Meta)",
+    link_preview: "Prévia de link (não suportada pela API da Meta)",
+    hsm: "Template HSM (não suportado neste contexto)",
+  };
+
+  if (subtype && bySubtype[subtype]) return bySubtype[subtype];
+  return "Tipo de mensagem não suportado pela API da Meta";
+}
+
 function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
   const id = str(message.id);
   const ts = str(message.timestamp);
@@ -1145,6 +1187,16 @@ function parseMessage(message: Record<string, unknown>): ParsedMessage | null {
       } else {
         text = "[Evento do sistema WhatsApp]";
       }
+      break;
+    }
+    case "unsupported": {
+      // Meta Cloud API: tipo que a API não consegue entregar o conteúdo.
+      // Ref: https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/reference/messages/unsupported/
+      // Causas comuns (131051): álbum multi-imagem, enquete, edição, GIF,
+      // convite de grupo. Em álbuns a Meta costuma mandar 1× unsupported e
+      // em seguida as imagens individuais — o conteúdo do álbum em si não
+      // vem. 131060 = mensagem indisponível (1º contato em nº do app WA Business).
+      text = labelUnsupportedMessage(message);
       break;
     }
     default:
@@ -2179,11 +2231,13 @@ async function executePostBody(
           const inboundMsgType =
             isSystemMessage
               ? "system"
-              : parsed.mediaId
-                ? parsed.type
-                : parsed.type === "interactive" || parsed.type === "button"
-                  ? "interactive"
-                  : "text";
+              : parsed.type === "unsupported"
+                ? "unsupported"
+                : parsed.mediaId
+                  ? parsed.type
+                  : parsed.type === "interactive" || parsed.type === "button"
+                    ? "interactive"
+                    : "text";
 
           // Resolve o alvo da citação (reply) ANTES da transação — evita
           // manter a tx aberta pra query custosa e permite fallback silencioso
