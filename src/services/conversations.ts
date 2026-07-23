@@ -21,7 +21,12 @@ export const INBOX_CATEGORY_TABS = [
 ] as const;
 
 export type InboxCategoryTab = (typeof INBOX_CATEGORY_TABS)[number];
-export type InboxTab = InboxCategoryTab | "todos";
+/**
+ * `abertas` = TODAS as conversas em aberto (status OPEN), sem subdividir por
+ * categoria e excluindo as Resolvidas. Igual a `todos`, é um "super-tab" e não
+ * uma categoria (não entra em `INBOX_CATEGORY_TABS`).
+ */
+export type InboxTab = InboxCategoryTab | "todos" | "abertas";
 
 export type GetConversationsParams = {
   contactId?: string;
@@ -228,21 +233,15 @@ function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
   }
 }
 
-export async function getConversations(
-  params: GetConversationsParams = {}
-): Promise<{
-  items: ConversationListItem[];
-  total: number;
-  page: number;
-  perPage: number;
-}> {
-  const page = Math.max(1, params.page ?? 1);
-  // 27/mai/26 — Cap subido de 100 → 200 pra acomodar o infinite scroll
-  // da lista de conversas (operador com 455+ conversas em "Entrada"
-  // travava porque o front pedia 60 e nunca pedia mais).
-  const perPage = Math.min(200, Math.max(1, params.perPage ?? 20));
-  const skip = (page - 1) * perPage;
-
+/**
+ * Monta o `where` da listagem de conversas (visibilidade + busca/aba +
+ * filtros). Extraído de `getConversations` para ser reaproveitado pelo
+ * encerramento em massa "por filtro" (`getResolvableConversationIds`),
+ * garantindo que a seleção "todas do filtro" case exatamente com a lista.
+ */
+export function buildConversationListWhere(
+  params: GetConversationsParams,
+): Prisma.ConversationWhereInput {
   const conditions: Prisma.ConversationWhereInput[] = [];
 
   if (params.visibilityWhere && Object.keys(params.visibilityWhere).length > 0) {
@@ -272,6 +271,8 @@ export async function getConversations(
       if (orTabs && orTabs.length > 0) {
         conditions.push({ OR: orTabs.map((t) => tabToWhere(t)) });
       }
+    } else if (params.tab === "abertas") {
+      conditions.push({ status: "OPEN" });
     } else {
       conditions.push(tabToWhere(params.tab));
     }
@@ -316,8 +317,58 @@ export async function getConversations(
   );
   if (sourceCond) conditions.push(sourceCond);
 
-  const where: Prisma.ConversationWhereInput =
-    conditions.length > 0 ? { AND: conditions } : {};
+  return conditions.length > 0 ? { AND: conditions } : {};
+}
+
+/**
+ * IDs das conversas ENCERRÁVEIS que casam com um filtro de listagem — usado
+ * pelo "selecionar todas do filtro → Encerrar". Aplica o MESMO `where` da
+ * lista, mas restringe a `status != RESOLVED` (já resolvidas são no-op) e
+ * separa as que estão em departamento com tabulação obrigatória no
+ * encerramento (`requireTabulationOnClose`), que NÃO podem ser encerradas em
+ * massa (precisam de tabulação individual).
+ */
+export async function getResolvableConversationIds(
+  params: GetConversationsParams,
+): Promise<{ ids: string[]; skippedIds: string[] }> {
+  const baseWhere = buildConversationListWhere(params);
+  const openWhere: Prisma.ConversationWhereInput = {
+    AND: [baseWhere, { status: { not: "RESOLVED" } }],
+  };
+
+  const rows = await prisma.conversation.findMany({
+    where: openWhere,
+    select: {
+      id: true,
+      department: { select: { requireTabulationOnClose: true } },
+    },
+  });
+
+  const ids: string[] = [];
+  const skippedIds: string[] = [];
+  for (const r of rows) {
+    if (r.department?.requireTabulationOnClose) skippedIds.push(r.id);
+    else ids.push(r.id);
+  }
+  return { ids, skippedIds };
+}
+
+export async function getConversations(
+  params: GetConversationsParams = {}
+): Promise<{
+  items: ConversationListItem[];
+  total: number;
+  page: number;
+  perPage: number;
+}> {
+  const page = Math.max(1, params.page ?? 1);
+  // 27/mai/26 — Cap subido de 100 → 200 pra acomodar o infinite scroll
+  // da lista de conversas (operador com 455+ conversas em "Entrada"
+  // travava porque o front pedia 60 e nunca pedia mais).
+  const perPage = Math.min(200, Math.max(1, params.perPage ?? 20));
+  const skip = (page - 1) * perPage;
+
+  const where = buildConversationListWhere(params);
 
   const sortBy = params.sortBy ?? "updatedAt";
   const sortOrder = params.sortOrder ?? "desc";
@@ -458,6 +509,19 @@ export async function getTabCounts(
     todosMemberCategoryTabs ?? null,
     allowedChannelIds,
   );
+  // "abertas" = todas as conversas em aberto (status OPEN), independentemente
+  // da subcategoria. Contagem própria (não é uma categoria em TAB_LIST).
+  {
+    const conditions: Prisma.ConversationWhereInput[] = [];
+    if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
+      conditions.push(visibilityWhere);
+    }
+    conditions.push({ status: "OPEN" });
+    if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
+    record.abertas = await prisma.conversation.count({
+      where: conditions.length > 0 ? { AND: conditions } : {},
+    });
+  }
   return record;
 }
 

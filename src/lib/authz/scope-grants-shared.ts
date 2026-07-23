@@ -14,10 +14,14 @@ export type InboxTab =
   | "automacao"
   | "finalizados"
   | "erro"
-  | "todos";
+  | "todos"
+  | "abertas";
 
-/** Ordem das categorias na inbox (sem "todos") — manter alinhado a `INBOX_CATEGORY_TABS` no serviço. */
-const INBOX_CATEGORY_TAB_ORDER: readonly Exclude<InboxTab, "todos">[] = [
+/** Super-tabs (não são categorias): agregam várias categorias/estados. */
+type InboxSuperTab = "todos" | "abertas";
+
+/** Ordem das categorias na inbox (sem super-tabs) — manter alinhado a `INBOX_CATEGORY_TABS` no serviço. */
+const INBOX_CATEGORY_TAB_ORDER: readonly Exclude<InboxTab, InboxSuperTab>[] = [
   "entrada",
   "esperando",
   "respondidas",
@@ -659,7 +663,7 @@ const DEFAULT_MEMBER_INBOX_TABS = new Set<InboxTab>(["esperando", "respondidas"]
  * `conversation:view`. Mantido alinhado ao catálogo em
  * `src/lib/authz/permissions.ts` (resource `conversation`).
  */
-const INBOX_TAB_REQUIRED_PERMISSION: Record<Exclude<InboxTab, "todos">, string> = {
+const INBOX_TAB_REQUIRED_PERMISSION: Record<Exclude<InboxTab, InboxSuperTab>, string> = {
   entrada: "conversation:claim",
   esperando: "conversation:view",
   respondidas: "conversation:view",
@@ -685,7 +689,7 @@ function permissionsAllow(perms: ReadonlySet<string>, key: string): boolean {
 
 function memberTabAllowedByPermissions(
   perms: ReadonlySet<string>,
-  tab: Exclude<InboxTab, "todos">,
+  tab: Exclude<InboxTab, InboxSuperTab>,
 ): boolean {
   const required = INBOX_TAB_REQUIRED_PERMISSION[tab];
   if (!required) return false;
@@ -711,7 +715,9 @@ export function canSeeInboxTab(args: {
   tab: InboxTab;
   permissions?: ReadonlySet<string> | readonly string[] | null;
 }): boolean {
-  if (args.tab === "todos") return true;
+  // "todos" e "abertas" são super-tabs sempre visíveis; a visibilidade real
+  // é aplicada pelo `visibilityWhere` na query (MEMBER só vê o que é dele).
+  if (args.tab === "todos" || args.tab === "abertas") return true;
   const role = asRoleKey(args.role);
   if (!role || role === "ADMIN" || role === "MANAGER") return true;
   const scope = args.grants.inbox?.tabs;
