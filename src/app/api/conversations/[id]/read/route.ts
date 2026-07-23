@@ -4,6 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import { channelSendsReadReceipts } from "@/lib/channels/config";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -37,7 +38,10 @@ export async function POST(_request: Request, context: RouteContext) {
         | undefined;
       const metaClient = metaClientFromConfig(channelConfig);
 
-      if (metaClient.configured) {
+      // Respeita o toggle por canal "enviar confirmação de leitura". Quando
+      // desligado, zeramos o unread localmente (acima) mas NÃO mandamos o
+      // "read" pra Meta — o contato não vê o visto azul.
+      if (metaClient.configured && channelSendsReadReceipts(channelConfig)) {
         const lastInbound = await prisma.message.findFirst({
           where: { conversationId: id, direction: "in", externalId: { not: null } },
           orderBy: { createdAt: "desc" },

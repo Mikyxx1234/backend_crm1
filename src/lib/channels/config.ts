@@ -75,3 +75,16 @@ export function getDecryptedChannelConfig(channel: {
   const cfg = (channel.config ?? {}) as Record<string, unknown>;
   return decryptChannelConfig(channel.provider, cfg);
 }
+
+/**
+ * Este canal deve enviar confirmação de leitura (read receipt / "visto azul")
+ * ao WhatsApp/Meta? Controlado pela flag `config.sendReadReceipts`.
+ *
+ * Default = TRUE (retrocompat: canais antigos sem a chave continuam enviando).
+ * Só desativa quando explicitamente `=== false`.
+ */
+export function channelSendsReadReceipts(
+  config: Record<string, unknown> | null | undefined,
+): boolean {
+  return config?.sendReadReceipts !== false;
+}
