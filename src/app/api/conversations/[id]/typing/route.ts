@@ -4,6 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
+import { channelSendsReadReceipts } from "@/lib/channels/config";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -40,6 +41,14 @@ export async function POST(_request: Request, context: RouteContext) {
       const metaClient = metaClientFromConfig(channelConfig);
 
       if (!metaClient.configured) {
+        return NextResponse.json({ ok: false });
+      }
+
+      // O "digitando…" da Meta (sendTypingIndicator) sai no MESMO request que
+      // marca a mensagem como lida (status:"read"). Se o canal está com a
+      // confirmação de leitura desligada, pular o indicador evita vazar o
+      // visto azul — Meta acopla os dois.
+      if (!channelSendsReadReceipts(channelConfig)) {
         return NextResponse.json({ ok: false });
       }
 
