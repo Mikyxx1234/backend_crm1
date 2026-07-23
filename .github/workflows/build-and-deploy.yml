@@ -106,7 +106,16 @@ jobs:
       - name: Trigger Easypanel redeploy
         if: steps.env.outputs.WEBHOOK != ''
         run: |
-          echo "Chamando webhook do Easypanel..."
-          curl -fsSL -X POST "${{ steps.env.outputs.WEBHOOK }}" \
-            -H "User-Agent: github-actions/backend_crm1" \
-            || echo "WARN: webhook falhou (nao bloqueia o job)"
+          echo "Chamando webhook do Easypanel (com retry)..."
+          code=000
+          for i in 1 2 3 4 5; do
+            code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "${{ steps.env.outputs.WEBHOOK }}" \
+              -H "User-Agent: github-actions/backend_crm1" || echo "000")
+            echo "Tentativa $i -> HTTP $code"
+            case "$code" in
+              2*) echo "Webhook aceito pelo Easypanel (HTTP $code)."; exit 0 ;;
+            esac
+            sleep 5
+          done
+          echo "ERRO: webhook do Easypanel falhou apos 5 tentativas (ultimo HTTP $code)."
+          exit 1
