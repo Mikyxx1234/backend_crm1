@@ -253,6 +253,12 @@ export function buildConversationListWhere(
     const or: Prisma.ConversationWhereInput[] = [
       { contact: { name: { contains: q, mode: "insensitive" } } },
       { contact: { phone: { contains: q, mode: "insensitive" } } },
+      { contact: { email: { contains: q, mode: "insensitive" } } },
+      { contact: { whatsappUsername: { contains: q, mode: "insensitive" } } },
+      { contact: { source: { contains: q, mode: "insensitive" } } },
+      { contact: { company: { name: { contains: q, mode: "insensitive" } } } },
+      { contact: { customFields: { some: { value: { contains: q, mode: "insensitive" } } } } },
+      { contact: { deals: { some: { title: { contains: q, mode: "insensitive" } } } } },
       { inboxName: { contains: q, mode: "insensitive" } },
       { assignedTo: { name: { contains: q, mode: "insensitive" } } },
       { assignedTo: { email: { contains: q, mode: "insensitive" } } },
