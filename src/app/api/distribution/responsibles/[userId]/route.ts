@@ -27,6 +27,8 @@ const bodySchema = z
     queueLimit: z.number().int().min(0).max(100_000).optional(),
     volume: z.number().int().min(1).max(100_000).optional(),
     type: z.string().trim().max(100).nullable().optional(),
+    /** Sincroniza os departamentos do responsável (substitui o conjunto). */
+    departmentIds: z.array(z.string().min(1)).max(100).optional(),
   })
   .refine((obj) => Object.keys(obj).length > 0, {
     message: "Nenhum campo para atualizar.",
@@ -92,30 +94,86 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
 
     try {
-      const data = parsed.data;
-      const responsible = await prisma.distributionResponsible.upsert({
-        where: {
-          organizationId_userId: { organizationId: orgId, userId },
-        },
-        update: data,
-        create: { organizationId: orgId, userId, ...data },
-        select: {
-          userId: true,
-          participates: true,
-          queueLimit: true,
-          volume: true,
-          type: true,
-          paused: true,
-          lastExecutionAt: true,
-        },
-      });
+      const { departmentIds, ...respData } = parsed.data;
+
+      // Sincroniza os departamentos do responsável (substitui o conjunto),
+      // validando que pertencem à org. Isolado em try para não derrubar a
+      // rota caso a tabela `department_members` ainda não exista no ambiente.
+      if (departmentIds) {
+        try {
+          const validDepts = await prisma.department.findMany({
+            where: { id: { in: departmentIds }, organizationId: orgId },
+            select: { id: true },
+          });
+          const desired = new Set(validDepts.map((d) => d.id));
+          const current = await prisma.departmentMember.findMany({
+            where: { userId, organizationId: orgId },
+            select: { departmentId: true },
+          });
+          const currentIds = new Set(current.map((c) => c.departmentId));
+          const toAdd = [...desired].filter((id) => !currentIds.has(id));
+          const toRemove = [...currentIds].filter((id) => !desired.has(id));
+          await prisma.$transaction([
+            ...(toRemove.length
+              ? [
+                  prisma.departmentMember.deleteMany({
+                    where: { userId, organizationId: orgId, departmentId: { in: toRemove } },
+                  }),
+                ]
+              : []),
+            ...toAdd.map((departmentId) =>
+              prisma.departmentMember.create({
+                data: { organizationId: orgId, userId, departmentId },
+              }),
+            ),
+          ]);
+        } catch (e) {
+          console.error("[PATCH responsibles] falha ao sincronizar departamentos", e);
+          return NextResponse.json(
+            { message: "Erro ao atualizar departamentos do responsável." },
+            { status: 500 },
+          );
+        }
+      }
+
+      // Só faz upsert da config quando houver campo de config no corpo.
+      let responsible = null as null | {
+        userId: string;
+        participates: boolean;
+        queueLimit: number;
+        volume: number;
+        type: string | null;
+        paused: boolean;
+        lastExecutionAt: Date | null;
+      };
+      if (Object.keys(respData).length > 0) {
+        responsible = await prisma.distributionResponsible.upsert({
+          where: {
+            organizationId_userId: { organizationId: orgId, userId },
+          },
+          update: respData,
+          create: { organizationId: orgId, userId, ...respData },
+          select: {
+            userId: true,
+            participates: true,
+            queueLimit: true,
+            volume: true,
+            type: true,
+            paused: true,
+            lastExecutionAt: true,
+          },
+        });
+      }
+
       return NextResponse.json({
-        responsible: {
-          ...responsible,
-          lastExecutionAt: responsible.lastExecutionAt
-            ? responsible.lastExecutionAt.toISOString()
-            : null,
-        },
+        responsible: responsible
+          ? {
+              ...responsible,
+              lastExecutionAt: responsible.lastExecutionAt
+                ? responsible.lastExecutionAt.toISOString()
+                : null,
+            }
+          : null,
       });
     } catch (e) {
       console.error("[PATCH /api/distribution/responsibles/[userId]]", e);
