@@ -4792,3 +4792,56 @@ model CallProviderConfig {
   @@index([organizationId])
   @@map("call_provider_configs")
 }
+
+/// Registros acadêmicos de alunos (piloto "matriculados"). Origem: relatório
+/// Excel subido manualmente pela org (aba "Dados dos alunos"). Cada linha do
+/// relatório vira um registro (aluno pode ter várias linhas: cursos/ciclos).
+/// Consumido pela tool `consultar_matricula` do agente, casando por telefone,
+/// email ou CPF do contato. NÃO é tenant-scoped via Prisma Extension — filtre
+/// SEMPRE por organizationId explicitamente na camada de serviço.
+model StudentAcademicRecord {
+  id             String    @id @default(cuid())
+  organizationId String    @map("organization_id")
+  /// CPF normalizado (somente dígitos, 11 chars com zero à esquerda).
+  cpf            String?
+  rgm            String?
+  nome           String
+  curso          String?
+  serie          String?
+  polo           String?
+  ciclo          String?
+  instituicao    String?
+  /// Situação da matrícula: EM CURSO, CANCELADO, TRANCADO, etc.
+  situacao       String?
+  tipoMatricula  String?   @map("tipo_matricula")
+  dataMatricula  DateTime? @map("data_matricula")
+  /// Data de nascimento em texto livre (formato do relatório varia).
+  dataNascimento String?   @map("data_nascimento")
+  email          String?
+  emailAcademico String?   @map("email_academico")
+  /// Telefone normalizado (somente dígitos).
+  phone          String?
+  /// Linha original completa do relatório, para depuração / campos extras.
+  raw            Json?
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  @@index([organizationId, cpf])
+  @@index([organizationId, phone])
+  @@index([organizationId, email])
+  @@map("student_academic_records")
+}
+
+/// Histórico de importações de dados acadêmicos (auditoria dos uploads).
+model AcademicImportHistory {
+  id             String   @id @default(cuid())
+  organizationId String   @map("organization_id")
+  /// Tipo do relatório importado (piloto: "matriculados").
+  reportType     String   @default("matriculados") @map("report_type")
+  fileName       String?  @map("file_name")
+  totalRows      Int      @default(0) @map("total_rows")
+  uploadedById   String?  @map("uploaded_by_id")
+  importedAt     DateTime @default(now()) @map("imported_at")
+
+  @@index([organizationId, importedAt])
+  @@map("academic_import_history")
+}

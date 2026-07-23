@@ -22,6 +22,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
+import { lookupStudent } from "@/services/academic-records";
 import { createActivity } from "@/services/activities";
 import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
@@ -791,6 +792,84 @@ function executeDistributionTool(ctx: RunContext) {
   });
 }
 
+// ── consultar_matricula ────────────────────────────────────────
+
+function consultarMatriculaTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Consulta os dados acadêmicos (matrícula) do aluno com quem você está conversando: curso(s), polo, série/período, situação da matrícula (EM CURSO, CANCELADO, TRANCADO), ciclo e tipo de matrícula. O casamento é feito automaticamente pelo telefone/e-mail do contato. Use SEMPRE que o aluno perguntar sobre a própria situação, curso, polo ou status de matrícula, antes de responder — assim você personaliza o atendimento em vez de dar resposta genérica. Só passe `cpf` se o aluno informar o CPF dele no chat e o telefone/e-mail não tiver retornado dados.",
+    inputSchema: z.object({
+      cpf: z
+        .string()
+        .optional()
+        .describe(
+          "CPF informado pelo aluno no chat (opcional). Só use se o telefone/e-mail não localizar a matrícula.",
+        ),
+    }),
+    execute: async ({ cpf }) => {
+      try {
+        const orgId = getOrgIdOrNull();
+        if (!orgId) return fail("Sem organização no contexto.");
+        if (!ctx.contactId) return fail("Sem contato associado à conversa.");
+
+        const contact = await prisma.contact.findUnique({
+          where: { id: ctx.contactId },
+          select: { phone: true, email: true, name: true },
+        });
+        if (!contact) return fail("Contato não encontrado.");
+
+        // Prioriza identidade do próprio contato (telefone/e-mail) para não
+        // expor dados de terceiros. CPF informado só é usado como fallback.
+        let records = await lookupStudent(orgId, {
+          phone: contact.phone,
+          email: contact.email,
+        });
+        if (records.length === 0 && cpf?.trim()) {
+          records = await lookupStudent(orgId, { cpf });
+        }
+
+        if (records.length === 0) {
+          return ok({
+            found: false,
+            hint: "Nenhuma matrícula encontrada para este contato. Confirme com o aluno o CPF ou e-mail cadastrado, ou encaminhe para um atendente.",
+          });
+        }
+
+        const matriculas = records.map((r) => ({
+          nome: r.nome,
+          curso: r.curso,
+          polo: r.polo,
+          serie: r.serie,
+          ciclo: r.ciclo,
+          situacao: r.situacao,
+          tipoMatricula: r.tipoMatricula,
+          instituicao: r.instituicao,
+          dataMatricula: r.dataMatricula
+            ? r.dataMatricula.toISOString().slice(0, 10)
+            : null,
+        }));
+        const ativo = records.some((r) =>
+          ["EM CURSO", "ATIVO", "CURSANDO"].some((s) =>
+            (r.situacao ?? "").toUpperCase().includes(s),
+          ),
+        );
+
+        return ok({
+          found: true,
+          nome: records[0]?.nome ?? contact.name,
+          ativo,
+          totalMatriculas: matriculas.length,
+          matriculas,
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao consultar matrícula.",
+        );
+      }
+    },
+  });
+}
+
 // ── ToolSet builder ────────────────────────────────────────────
 
 // Usamos `any` pro Tool porque cada tool tem um inputSchema e output
@@ -807,6 +886,7 @@ const FACTORY_MAP: Record<string, (ctx: RunContext) => AnyTool> = {
   send_whatsapp_template: sendWhatsappTemplateTool,
   transfer_to_department: transferToDepartmentTool,
   execute_distribution: executeDistributionTool,
+  consultar_matricula: consultarMatriculaTool,
   transfer_to_human: transferToHumanTool,
 };
 
