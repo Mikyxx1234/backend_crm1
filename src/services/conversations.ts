@@ -474,7 +474,7 @@ export async function getConversationById(id: string) {
     where: { id },
     include: {
       contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
-      assignedTo: { select: { id: true, name: true, email: true } },
+      assignedTo: { select: { id: true, name: true, email: true, avatarUrl: true } },
     },
   });
   if (conv?.contact) {
@@ -552,7 +552,7 @@ export async function assignConversationAssignedTo(
       },
       include: {
         contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
-        assignedTo: { select: { id: true, name: true, email: true } },
+        assignedTo: { select: { id: true, name: true, email: true, avatarUrl: true } },
       },
     });
     if (conv.contactId) {
