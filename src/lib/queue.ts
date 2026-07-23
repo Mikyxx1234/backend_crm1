@@ -38,6 +38,7 @@ const AUTOMATION_JOB_NAME = "run" as const;
 export const LEADS_BULK_JOB_NAMES = {
   bulkUpdateFields: "bulk-update-fields",
   bulkMoveStage: "bulk-move-stage",
+  bulkResolveConversations: "bulk-resolve-conversations",
 } as const;
 export type LeadsBulkJobName =
   (typeof LEADS_BULK_JOB_NAMES)[keyof typeof LEADS_BULK_JOB_NAMES];
@@ -162,7 +163,27 @@ export type BulkMoveStagePayload = LeadsBulkBasePayload & {
   lostReason?: string | null;
 };
 
-export type LeadsBulkPayload = BulkUpdateFieldsPayload | BulkMoveStagePayload;
+/**
+ * Encerramento (resolve) em massa de conversas do inbox.
+ *
+ * A rota `POST /api/conversations/bulk` já aplicou o filtro de visibilidade,
+ * removeu os ids de departamentos que exigem tabulação ao encerrar (`skipped`)
+ * e leu as org settings — o handler recebe apenas ids efetivos + flags saneadas
+ * e roda o `updateMany` em chunks (sem reler settings fora de RequestContext).
+ */
+export type BulkResolveConversationsPayload = LeadsBulkBasePayload & {
+  /** IDs das conversas a encerrar (já filtradas por visibilidade + tabulação). */
+  conversationIds: string[];
+  /** Manter atendente vinculado ao encerrar (org setting `conversation.keepAgentOnEnd`). */
+  keepAgent: boolean;
+  /** Manter departamento vinculado ao encerrar (`conversation.keepDepartmentOnEnd`). */
+  keepDepartment: boolean;
+};
+
+export type LeadsBulkPayload =
+  | BulkUpdateFieldsPayload
+  | BulkMoveStagePayload
+  | BulkResolveConversationsPayload;
 
 // ── Import ETL payloads ──────────────────────────────────
 //
