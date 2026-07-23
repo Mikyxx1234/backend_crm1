@@ -1940,17 +1940,52 @@ async function executeStep(
     }
 
     case "webhook": {
-      const url = readString(cfg, "url");
-      if (!url) throw new Error("webhook: url obrigatória");
+      const rawUrl = readString(cfg, "url");
+      if (!rawUrl) throw new Error("webhook: url obrigatória");
       const method = (readString(cfg, "method") ?? "POST").toUpperCase();
       const headers = asRecord(cfg["headers"]) ?? {};
 
-      // Root pra resolver os tokens {{...}} do body/headers custom.
+      // Root pra resolver os tokens {{...}} do body/headers/params custom.
       const root = buildWebhookRoot(rt);
 
       const h = new Headers({ "Content-Type": "application/json" });
       for (const [k, v] of Object.entries(headers)) {
         if (typeof v === "string") h.set(k, interpolateWebhookString(v, root));
+      }
+
+      // Interpola URL (tokens em path/query já digitados pelo operador).
+      let finalUrl = interpolateWebhookString(rawUrl, root);
+
+      // queryParams: aceita array `[{key,value}]` (formato da UI) ou
+      // Record<string,string> (compat). Interpolamos valores e anexamos
+      // via URLSearchParams — preservando qualquer query já presente
+      // na URL (não sobrescreve, só concatena).
+      const rawParams = cfg["queryParams"];
+      const paramPairs: Array<[string, string]> = [];
+      if (Array.isArray(rawParams)) {
+        for (const p of rawParams) {
+          if (
+            p !== null &&
+            typeof p === "object" &&
+            typeof (p as { key?: unknown }).key === "string" &&
+            typeof (p as { value?: unknown }).value === "string"
+          ) {
+            const key = (p as { key: string }).key.trim();
+            if (!key) continue;
+            paramPairs.push([key, interpolateWebhookString((p as { value: string }).value, root)]);
+          }
+        }
+      } else if (rawParams && typeof rawParams === "object") {
+        for (const [k, v] of Object.entries(rawParams as Record<string, unknown>)) {
+          if (typeof v === "string" && k.trim()) {
+            paramPairs.push([k, interpolateWebhookString(v, root)]);
+          }
+        }
+      }
+      if (paramPairs.length > 0) {
+        const sep = finalUrl.includes("?") ? "&" : "?";
+        const qs = new URLSearchParams(paramPairs).toString();
+        finalUrl = `${finalUrl}${sep}${qs}`;
       }
 
       // Body custom (com variáveis) tem prioridade. Sem ele, payload legado.
@@ -1969,7 +2004,7 @@ async function executeStep(
         });
       }
 
-      const res = await fetch(url, {
+      const res = await fetch(finalUrl, {
         method,
         headers: h,
         body: bodyStr,
