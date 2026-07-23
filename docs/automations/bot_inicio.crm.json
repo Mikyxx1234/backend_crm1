@@ -1,0 +1,2172 @@
+{
+  "name": "bot_inicio",
+  "description": "Importado do Digisac (136 steps)",
+  "triggerType": "message_received",
+  "triggerConfig": {
+    "channel": "whatsapp",
+    "_digisacInstanceId": "692a13008721fc1c4000859f"
+  },
+  "active": false,
+  "steps": [
+    {
+      "id": "3495fa13-311f-490e-9447-ba4c60f14045",
+      "type": "condition",
+      "config": {
+        "branches": [
+          {
+            "id": "branch_0",
+            "rules": [
+              {
+                "field": "deal.stageId",
+                "op": "eq",
+                "value": "3016b9c8-3914-4bf5-8f7c-1fee44baea9c"
+              }
+            ],
+            "nextStepId": ""
+          }
+        ],
+        "elseStepId": "f37349d1-c3a1-4c01-a683-1cf935067f9a",
+        "__rfPos": {
+          "x": -2270.488848108949,
+          "y": 207.7286361865009
+        }
+      }
+    },
+    {
+      "id": "f37349d1-c3a1-4c01-a683-1cf935067f9a",
+      "type": "condition",
+      "config": {
+        "branches": [
+          {
+            "id": "branch_0",
+            "rules": [
+              {
+                "field": "contact.tagIds",
+                "op": "has_tag",
+                "value": "89d64f82-bc11-46ec-8896-95fb9a0cf903"
+              }
+            ],
+            "nextStepId": ""
+          }
+        ],
+        "elseStepId": "3526fdef-845d-4d93-a0bb-4f4ca1b7a41f",
+        "__rfPos": {
+          "x": -1882.155514775616,
+          "y": 237.7286361865009
+        },
+        "_reviewNote": "lead-has-tag: originalmente 2 tags (OR). Somente a 1a foi aplicada — configure as demais no CRM."
+      }
+    },
+    {
+      "id": "3526fdef-845d-4d93-a0bb-4f4ca1b7a41f",
+      "type": "condition",
+      "config": {
+        "branches": [
+          {
+            "id": "branch_0",
+            "rules": [
+              {
+                "field": "deal.pipelineId",
+                "op": "eq",
+                "value": "7d1b30e3-b554-4225-8523-d2d21ffc7c35"
+              }
+            ],
+            "nextStepId": "2ae470a4-7690-4035-967b-5ad152abdbbe"
+          }
+        ],
+        "elseStepId": "9b0c5cb1-bd03-4db5-9b9c-519751ea81ca",
+        "__rfPos": {
+          "x": -1467.814331388454,
+          "y": 216.2010794777024
+        }
+      }
+    },
+    {
+      "id": "2ae470a4-7690-4035-967b-5ad152abdbbe",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Olá! Bem vindo ao Suporte ao Aluno *da Cruzeiro do Sul*. 😃",
+        "_nextStepId": "2ae470a4-7690-4035-967b-5ad152abdbbe::m1",
+        "__rfPos": {
+          "x": 610.763233374072,
+          "y": -74.32006391067233
+        }
+      }
+    },
+    {
+      "id": "2ae470a4-7690-4035-967b-5ad152abdbbe::m1",
+      "type": "question",
+      "config": {
+        "content": "Selecione para dar andamento na conversa.\n\n1. Como acessar\n2. Dúvidas Financeiras\n3. Abertura de Solicitações\n4. Falar com atendimento\n5. Acesso a plataforma\n6. Rematrícula\n7. Financeiro",
+        "message": "Selecione para dar andamento na conversa.\n\n1. Como acessar\n2. Dúvidas Financeiras\n3. Abertura de Solicitações\n4. Falar com atendimento\n5. Acesso a plataforma\n6. Rematrícula\n7. Financeiro",
+        "buttons": [
+          {
+            "id": "1",
+            "text": "Como acessar",
+            "title": "Como acessar",
+            "gotoStepId": "44cd27d1-d666-4a67-b567-1f631a989f9b"
+          },
+          {
+            "id": "2",
+            "text": "Dúvidas Financeiras",
+            "title": "Dúvidas Financeiras",
+            "gotoStepId": "0bf85f24-6716-4ef1-8f49-cdcd9cf9dc96"
+          },
+          {
+            "id": "3",
+            "text": "Abertura de Solicitações",
+            "title": "Abertura de Solicita",
+            "gotoStepId": "4c8a5214-3da1-44cb-a508-c14df3b28081"
+          },
+          {
+            "id": "4",
+            "text": "Falar com atendimento",
+            "title": "Falar com atendiment",
+            "gotoStepId": "a44d6ff7-f06c-45c1-87d2-f5e49ea66c79"
+          },
+          {
+            "id": "5",
+            "text": "Acesso a plataforma",
+            "title": "Acesso a plataforma",
+            "gotoStepId": "dfc100c5-c4d4-49a6-9e76-6b2370deee73"
+          },
+          {
+            "id": "6",
+            "text": "Rematrícula",
+            "title": "Rematrícula",
+            "gotoStepId": "50ba16b5-6f23-49b7-9faf-ef1a3f99b97e"
+          },
+          {
+            "id": "7",
+            "text": "Financeiro",
+            "title": "Financeiro",
+            "gotoStepId": "0bf85f24-6716-4ef1-8f49-cdcd9cf9dc96"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 600000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "4c4d9697-6e6e-447b-90cd-e7ada0fb9000",
+        "elseGotoStepId": "eb97dbcf-0e04-472a-ba6c-f2e33bc32d46",
+        "__rfPos": {
+          "x": 610.763233374072,
+          "y": -74.32006391067233
+        },
+        "_reviewNote": "question com 7 opcoes (>3): WhatsApp nao aceita botoes nativos, usando texto numerado. Usuario pode responder com numero ou texto."
+      }
+    },
+    {
+      "id": "9b0c5cb1-bd03-4db5-9b9c-519751ea81ca",
+      "type": "condition",
+      "config": {
+        "branches": [
+          {
+            "id": "branch_0",
+            "rules": [
+              {
+                "field": "deal.pipelineId",
+                "op": "eq",
+                "value": "088b64ae-a2ab-4788-97cd-3c10d87643bb"
+              }
+            ],
+            "nextStepId": ""
+          }
+        ],
+        "elseStepId": "920fbb33-f897-48b4-b39c-0e87481e3b29",
+        "__rfPos": {
+          "x": -508.4496681623215,
+          "y": 620.7354775471813
+        }
+      }
+    },
+    {
+      "id": "eb97dbcf-0e04-472a-ba6c-f2e33bc32d46",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em uma das opções:",
+        "_nextStepId": "2ae470a4-7690-4035-967b-5ad152abdbbe",
+        "__rfPos": {
+          "x": 597.3944809225943,
+          "y": 460.706996575246
+        }
+      }
+    },
+    {
+      "id": "44cd27d1-d666-4a67-b567-1f631a989f9b",
+      "type": "send_whatsapp_interactive",
+      "config": {
+        "body": "Você está tentando acessar pelo *App Duda* ou pela *Área do Aluno*?",
+        "buttons": [
+          {
+            "id": "cadaa861-6b82-4dc6-8292-41e77335507c",
+            "text": "Aplicativo Duda",
+            "title": "Aplicativo Duda",
+            "gotoStepId": "417bd80e-6d25-47b1-95f2-b00fb07308ee"
+          },
+          {
+            "id": "468020ef-fd3d-4180-b2be-79d6dfa219fb",
+            "text": "Área do Aluno (site)",
+            "title": "Área do Aluno (site)",
+            "gotoStepId": "6e7e012e-0f85-49cd-9104-a91108946c0f"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 300000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "e3cc3573-3101-4d71-b73c-90961e8053c6",
+        "elseGotoStepId": "7993f18b-128e-46bd-83ac-8b02f982966e",
+        "__rfPos": {
+          "x": 2326.507373360799,
+          "y": -1342.305782075366
+        }
+      }
+    },
+    {
+      "id": "0bf85f24-6716-4ef1-8f49-cdcd9cf9dc96",
+      "type": "send_whatsapp_interactive",
+      "config": {
+        "body": "Certo, agora me informe a *dúvida*:",
+        "buttons": [
+          {
+            "id": "0fe54517-6b51-4d4a-9f0d-a35f87a62f39",
+            "text": "Regras de pagamento",
+            "title": "Regras de pagamento",
+            "gotoStepId": "7cafb77b-7ec9-4d61-b5e3-591dc1f0d13e"
+          },
+          {
+            "id": "db936db3-324b-4116-bfe8-9d94b577ca7d",
+            "text": "Como pagar",
+            "title": "Como pagar",
+            "gotoStepId": "6e7d55c9-7446-4e7e-a1e7-e04d8325a252"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 300000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "c205e526-7c90-4432-b210-b54b0a52ef52",
+        "elseGotoStepId": "233481b1-d251-4d66-ac13-c917d2641baf",
+        "__rfPos": {
+          "x": 4739.675018612581,
+          "y": -1077.403773417806
+        }
+      }
+    },
+    {
+      "id": "4c8a5214-3da1-44cb-a508-c14df3b28081",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Caso precise abrir alguma solicitação, acesse sua *Área do aluno* 👉 https://novoportal.cruzeirodosul.edu.br/",
+        "_nextStepId": "4c8a5214-3da1-44cb-a508-c14df3b28081::m1",
+        "__rfPos": {
+          "x": 3851.649241818956,
+          "y": 88.22243365971661
+        }
+      }
+    },
+    {
+      "id": "4c8a5214-3da1-44cb-a508-c14df3b28081::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "*1.* Clique na opção *CAA On-line*\n\n*2.* Vá em *Faça sua solicitação*\n\n*3.* Pronto, agora é só selecionar UNICID/CRUZEIRO DO SUL/BRAZ CUBAS e procurar pelo processo desejado.",
+        "_nextStepId": "4c8a5214-3da1-44cb-a508-c14df3b28081::m2",
+        "__rfPos": {
+          "x": 3851.649241818956,
+          "y": 88.22243365971661
+        }
+      }
+    },
+    {
+      "id": "4c8a5214-3da1-44cb-a508-c14df3b28081::m2",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "video",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T14%3A29%3A18.815Z",
+        "caption": "",
+        "filename": "abrir-solicitacao-caa-youtube_adB7jrLn (1) (2).mp4",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 3851.649241818956,
+          "y": 88.22243365971661
+        }
+      }
+    },
+    {
+      "id": "a44d6ff7-f06c-45c1-87d2-f5e49ea66c79",
+      "type": "condition",
+      "config": {
+        "branches": [
+          {
+            "id": "branch_0",
+            "rules": [
+              {
+                "field": "deal.pipelineId",
+                "op": "eq",
+                "value": "088b64ae-a2ab-4788-97cd-3c10d87643bb"
+              }
+            ],
+            "nextStepId": ""
+          }
+        ],
+        "elseStepId": "bf27d569-4385-4e41-bbf3-102048f73c96",
+        "__rfPos": {
+          "x": 3088.564389550346,
+          "y": -3287.351626822862
+        }
+      }
+    },
+    {
+      "id": "dfc100c5-c4d4-49a6-9e76-6b2370deee73",
+      "type": "send_whatsapp_interactive",
+      "config": {
+        "body": "Você está dúvidas em relação a qual *plataforma*?",
+        "buttons": [
+          {
+            "id": "cc1aea43-ba9e-4d54-bc29-355edf47037f",
+            "text": "Aplicativo Duda",
+            "title": "Aplicativo Duda",
+            "gotoStepId": "1db54422-9436-4878-9113-0b8a6a18c7a1"
+          },
+          {
+            "id": "fa130c80-aa2b-43fa-ba1f-b3d09ea413fc",
+            "text": "Área do aluno (site)",
+            "title": "Área do aluno (site)",
+            "gotoStepId": "168066e4-ada6-470f-8ae3-aea97fca76ee"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 300000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "9d5ceb3b-9105-454b-bd82-ce79c7ac01de",
+        "elseGotoStepId": "58788e61-e273-48c2-8e9f-2f0c9baf6f09",
+        "__rfPos": {
+          "x": 4438.324600662362,
+          "y": 523.0408429168673
+        }
+      }
+    },
+    {
+      "id": "50ba16b5-6f23-49b7-9faf-ef1a3f99b97e",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "*PASSO A PASSO PARA FAZER A REMATRÍCULA*\n\n❗ *Importante:*\nSe houver mensalidades ou boletos em aberto, será necessário regularizar os débitos primeiro.",
+        "_nextStepId": "50ba16b5-6f23-49b7-9faf-ef1a3f99b97e::m1",
+        "__rfPos": {
+          "x": 2613.080810502033,
+          "y": -119.0451553925405
+        }
+      }
+    },
+    {
+      "id": "50ba16b5-6f23-49b7-9faf-ef1a3f99b97e::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Acesse o Portal do Aluno:\nEntre pelo site https://novoportal.cruzeirodosul.edu.br/\nFaça login usando seu e-mail acadêmico e sua senha.\n\nClique em *Rematrícula* no menu inicial.\n\nLeia e aceite o Termo de Rematrícula.\nClique em  *Prosseguir*  para continuar com o processo.\nVerifique se está tudo certo com as informações e clique em *Gravar* .\nAssim que gravar a rematrícula, será gerado automaticamente um boleto da taxa de rematrícula.",
+        "_nextStepId": "50ba16b5-6f23-49b7-9faf-ef1a3f99b97e::m2",
+        "__rfPos": {
+          "x": 2613.080810502033,
+          "y": -119.0451553925405
+        }
+      }
+    },
+    {
+      "id": "50ba16b5-6f23-49b7-9faf-ef1a3f99b97e::m2",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Realize o pagamento do boleto.\nA compensação (baixa) do pagamento ocorre em até *3 a 5 dias úteis* após o pagamento.\n\n*Após a baixa do pagamento:*\nAcesse novamente o portal.\nClique novamente em  *Rematrícula*.\nGrave sua rematrícula mais uma vez.",
+        "_nextStepId": "50ba16b5-6f23-49b7-9faf-ef1a3f99b97e::m3",
+        "__rfPos": {
+          "x": 2613.080810502033,
+          "y": -119.0451553925405
+        }
+      }
+    },
+    {
+      "id": "50ba16b5-6f23-49b7-9faf-ef1a3f99b97e::m3",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "*Pronto!* Você estará liberado(a) para acessar suas disciplinas e iniciar os estudos.",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 2613.080810502033,
+          "y": -119.0451553925405
+        }
+      }
+    },
+    {
+      "id": "4c4d9697-6e6e-447b-90cd-e7ada0fb9000",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Essa conversa foi encerrada devido a falta de interação.",
+        "_nextStepId": "1c94aafc-8524-49f9-b8f2-af05982ccc0f",
+        "__rfPos": {
+          "x": 947.5591740819068,
+          "y": 497.556787182853
+        }
+      }
+    },
+    {
+      "id": "920fbb33-f897-48b4-b39c-0e87481e3b29",
+      "type": "condition",
+      "config": {
+        "branches": [
+          {
+            "id": "branch_0",
+            "rules": [
+              {
+                "field": "deal.pipelineId",
+                "op": "eq",
+                "value": "fae865c0-fa41-449b-95a9-22c0a73f633e"
+              }
+            ],
+            "nextStepId": ""
+          }
+        ],
+        "elseStepId": "47c19809-b70d-4294-ac86-ab48385f665a",
+        "__rfPos": {
+          "x": -507.3041365552149,
+          "y": 979.6802139988355
+        }
+      }
+    },
+    {
+      "id": "7993f18b-128e-46bd-83ac-8b02f982966e",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em uma opção disponível.",
+        "_nextStepId": "44cd27d1-d666-4a67-b567-1f631a989f9b",
+        "__rfPos": {
+          "x": 2327.066784035209,
+          "y": -966.985520613592
+        }
+      }
+    },
+    {
+      "id": "417bd80e-6d25-47b1-95f2-b00fb07308ee",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Pelo *App Duda*, clique em *''Aulas e Conteúdo''.*\n\nAo entrar na plataforma, você terá acesso as disciplinas do semestre, *separadas por mês/prazo*.",
+        "_nextStepId": "417bd80e-6d25-47b1-95f2-b00fb07308ee::m1",
+        "__rfPos": {
+          "x": 2883.833927211615,
+          "y": -1881.219887254685
+        }
+      }
+    },
+    {
+      "id": "417bd80e-6d25-47b1-95f2-b00fb07308ee::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Entrando na matéria, poderá acessar o material de estudo na opção *Conteúdo*, cada unidade terá uma apostila, *uma videoaula e uma atividade valendo nota.*",
+        "_nextStepId": "417bd80e-6d25-47b1-95f2-b00fb07308ee::m2",
+        "__rfPos": {
+          "x": 2883.833927211615,
+          "y": -1881.219887254685
+        }
+      }
+    },
+    {
+      "id": "417bd80e-6d25-47b1-95f2-b00fb07308ee::m2",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "video",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T13%3A35%3A36.413Z",
+        "caption": "",
+        "filename": "Academico - Acessar conteudo App Duda (1) (1) (5).mp4",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 2883.833927211615,
+          "y": -1881.219887254685
+        }
+      }
+    },
+    {
+      "id": "6e7e012e-0f85-49cd-9104-a91108946c0f",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Todo o conteúdo de suas disciplinas, assim como atividades e notas obtidas, estão disponíveis no seu Ambiente Virtual, também chamado de BLACKBOARD.",
+        "_nextStepId": "6e7e012e-0f85-49cd-9104-a91108946c0f::m1",
+        "__rfPos": {
+          "x": 3402.88584465904,
+          "y": -1488.938950325839
+        }
+      }
+    },
+    {
+      "id": "6e7e012e-0f85-49cd-9104-a91108946c0f::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Para acessar, entre no seu portal do aluno e clique em \"*AMBIENTE VIRTUAL*\" no canto esquerdo.\n",
+        "_nextStepId": "6e7e012e-0f85-49cd-9104-a91108946c0f::m2",
+        "__rfPos": {
+          "x": 3402.88584465904,
+          "y": -1488.938950325839
+        }
+      }
+    },
+    {
+      "id": "6e7e012e-0f85-49cd-9104-a91108946c0f::m2",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Em seguida, vá para \"CURSOS\" e clique na disciplina desejada. Lá você encontrará\nacesso às vídeoaulas e ao material em PDF da disciplina.",
+        "_nextStepId": "6e7e012e-0f85-49cd-9104-a91108946c0f::m3",
+        "__rfPos": {
+          "x": 3402.88584465904,
+          "y": -1488.938950325839
+        }
+      }
+    },
+    {
+      "id": "6e7e012e-0f85-49cd-9104-a91108946c0f::m3",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "image",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T13%3A37%3A26.274Z",
+        "caption": "",
+        "filename": "Design sem nome (13) (2) (1).png",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 3402.88584465904,
+          "y": -1488.938950325839
+        }
+      }
+    },
+    {
+      "id": "e3cc3573-3101-4d71-b73c-90961e8053c6",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Essa conversa foi encerrada devido a falta de interação.",
+        "_nextStepId": "5bca8c1e-39e8-4116-b1c4-99ce511dfc19",
+        "__rfPos": {
+          "x": 2671.892199366217,
+          "y": -1008.2767141177
+        }
+      }
+    },
+    {
+      "id": "233481b1-d251-4d66-ac13-c917d2641baf",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em umas das opções disponíveis:",
+        "_nextStepId": "0bf85f24-6716-4ef1-8f49-cdcd9cf9dc96",
+        "__rfPos": {
+          "x": 4755.695296078187,
+          "y": -665.5537377710031
+        }
+      }
+    },
+    {
+      "id": "7cafb77b-7ec9-4d61-b5e3-591dc1f0d13e",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Entenda *como fiunciona os pagamentos*: \n🔹 *Primeira mensalidade do semestre*:\nA primeira *mensalidade* após a rematrícula ou matrícula *pode ser paga com desconto até o dia 25 do mês*.",
+        "_nextStepId": "7cafb77b-7ec9-4d61-b5e3-591dc1f0d13e::m1",
+        "__rfPos": {
+          "x": 5442.811203683941,
+          "y": -1113.103370446488
+        }
+      }
+    },
+    {
+      "id": "7cafb77b-7ec9-4d61-b5e3-591dc1f0d13e::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "🔹 *Entenda melhor como funciona*:\n \n* *Pagamento até o dia 10*: 25% de desconto\n* *Pagamento até o dia 25*: 15% de desconto\nEssa informação é fornecida durante o *processo de matrícula* e também na *aula de introdução* realizada pelo polo.",
+        "_nextStepId": "7cafb77b-7ec9-4d61-b5e3-591dc1f0d13e::m2",
+        "__rfPos": {
+          "x": 5442.811203683941,
+          "y": -1113.103370446488
+        }
+      }
+    },
+    {
+      "id": "7cafb77b-7ec9-4d61-b5e3-591dc1f0d13e::m2",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "🔹 Desconto nas demais mensalidades:\nPara garantir o desconto total, o pagamento deve ser feito até o dia 10 do mês.\n⚠️ Importante: Se o pagamento não for realizado até o dia 10, o desconto será reduzido.",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 5442.811203683941,
+          "y": -1113.103370446488
+        }
+      }
+    },
+    {
+      "id": "6e7d55c9-7446-4e7e-a1e7-e04d8325a252",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Para pagar suas mensalidades, siga o passo a passo:\n \n1️⃣ Acesse sua *Área do Aluno.*\n2️⃣ Clique em *Pagar Mensalidade*\n3️⃣ Selecione a título *que deseja pagar* (boleto ou cartão)\n \n_obs_ - _Para pagamentos via boleto, o *desconto sempre fica no corpo* do documento e *todos os titulos são gerados no valor bruto*_",
+        "_nextStepId": "6e7d55c9-7446-4e7e-a1e7-e04d8325a252::m1",
+        "__rfPos": {
+          "x": 5453.410321102281,
+          "y": -728.1211978791216
+        }
+      }
+    },
+    {
+      "id": "6e7d55c9-7446-4e7e-a1e7-e04d8325a252::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Assista ao vídeo para *entender como funciona* para pagamentos pelo seu *Portal do Aluno*.\n",
+        "_nextStepId": "6e7d55c9-7446-4e7e-a1e7-e04d8325a252::m2",
+        "__rfPos": {
+          "x": 5453.410321102281,
+          "y": -728.1211978791216
+        }
+      }
+    },
+    {
+      "id": "6e7d55c9-7446-4e7e-a1e7-e04d8325a252::m2",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "video",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T14%3A23%3A18.860Z",
+        "caption": "",
+        "filename": "como-pagar-suas-mensalidades-youtube-1-copia_qDL1U7e8 (2) (2).mp4",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 5453.410321102281,
+          "y": -728.1211978791216
+        }
+      }
+    },
+    {
+      "id": "c205e526-7c90-4432-b210-b54b0a52ef52",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Essa conversa está sendo encerrada devido a falta de interação.",
+        "_nextStepId": "2fe99662-2515-46d1-9deb-1f5a7616169b",
+        "__rfPos": {
+          "x": 4757.637037628746,
+          "y": -404.7311815525205
+        }
+      }
+    },
+    {
+      "id": "71dff25f-cb20-4b23-a52f-733b38957e65",
+      "type": "send_whatsapp_interactive",
+      "config": {
+        "body": "Teria mais alguma dúvida?",
+        "buttons": [
+          {
+            "id": "5353ece9-4305-4804-9e88-bea29c90f99c",
+            "text": "Preciso de ajuda",
+            "title": "Preciso de ajuda",
+            "gotoStepId": "bf27d569-4385-4e41-bbf3-102048f73c96"
+          },
+          {
+            "id": "8601e027-fc46-4759-9dc8-eebc5ce8342c",
+            "text": "Não!",
+            "title": "Não!",
+            "gotoStepId": "72f1d4af-b0b2-4eee-a169-191b0dd832ef"
+          },
+          {
+            "id": "d973eb7b-ed7d-4916-84a6-e6ce57b3df80",
+            "text": "Voltar para o início",
+            "title": "Voltar para o início",
+            "gotoStepId": "2ae470a4-7690-4035-967b-5ad152abdbbe"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 300000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "b0edb101-5cdc-4797-8a10-12a924775d8c",
+        "elseGotoStepId": "53fb72a2-f59c-4782-bdeb-cd3f4a4578d4",
+        "__rfPos": {
+          "x": 3876.202149516251,
+          "y": -3050.468281527212
+        }
+      }
+    },
+    {
+      "id": "bf27d569-4385-4e41-bbf3-102048f73c96",
+      "type": "business_hours",
+      "config": {
+        "schedule": [
+          {
+            "days": [
+              1,
+              2,
+              3,
+              4,
+              5
+            ],
+            "from": "11:00",
+            "to": "23:00"
+          }
+        ],
+        "timezone": "America/Sao_Paulo",
+        "elseStepId": "c2c4e1ac-30d4-4f71-8605-072a0d8de69a",
+        "__rfPos": {
+          "x": 4316.197476575379,
+          "y": -3364.782317475583
+        }
+      }
+    },
+    {
+      "id": "bf27d569-4385-4e41-bbf3-102048f73c96::goto_true",
+      "type": "goto",
+      "config": {
+        "targetStepId": "36edc373-8ad0-4631-b3df-df6dd2be2f3e",
+        "__rfPos": {
+          "x": 4556.197476575379,
+          "y": -3364.782317475583
+        }
+      }
+    },
+    {
+      "id": "58788e61-e273-48c2-8e9f-2f0c9baf6f09",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em uma das opções para continuar a conversa",
+        "_nextStepId": "dfc100c5-c4d4-49a6-9e76-6b2370deee73",
+        "__rfPos": {
+          "x": 4441.105723261436,
+          "y": 910.1444866278994
+        }
+      }
+    },
+    {
+      "id": "1db54422-9436-4878-9113-0b8a6a18c7a1",
+      "type": "question",
+      "config": {
+        "content": "Agora escolha umas das opções:\n\n1. Primeiro Acesso\n2. Dúvidas Financeiras\n3. Portal de Estudos\n4. Documentos",
+        "message": "Agora escolha umas das opções:\n\n1. Primeiro Acesso\n2. Dúvidas Financeiras\n3. Portal de Estudos\n4. Documentos",
+        "buttons": [
+          {
+            "id": "1",
+            "text": "Primeiro Acesso",
+            "title": "Primeiro Acesso",
+            "gotoStepId": "82ff72a7-e763-49eb-88e0-3869c12ad9d8"
+          },
+          {
+            "id": "2",
+            "text": "Dúvidas Financeiras",
+            "title": "Dúvidas Financeiras",
+            "gotoStepId": "bde9a226-adbd-4813-b38f-c4c81fde4c40"
+          },
+          {
+            "id": "3",
+            "text": "Portal de Estudos",
+            "title": "Portal de Estudos",
+            "gotoStepId": "02a2a7ba-4d28-48fd-8fc5-62c46b587068"
+          },
+          {
+            "id": "4",
+            "text": "Documentos",
+            "title": "Documentos",
+            "gotoStepId": "aaaa3dad-a570-4de4-ae98-aa42a9ac8bd6"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 300000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "506f76c1-54b2-41d1-83b5-e41645473363",
+        "elseGotoStepId": "6a9ede44-2788-4a47-9ded-8930befc0a63",
+        "__rfPos": {
+          "x": 5420.258404262524,
+          "y": -20.37649833643589
+        },
+        "_reviewNote": "question com 4 opcoes (>3): WhatsApp nao aceita botoes nativos, usando texto numerado. Usuario pode responder com numero ou texto."
+      }
+    },
+    {
+      "id": "168066e4-ada6-470f-8ae3-aea97fca76ee",
+      "type": "question",
+      "config": {
+        "content": "Agora escolha umas das opções:\n\n1. Primeiro Acesso\n2. Dúvidas Financeiras\n3. Portal de Estudos\n4. Documentos",
+        "message": "Agora escolha umas das opções:\n\n1. Primeiro Acesso\n2. Dúvidas Financeiras\n3. Portal de Estudos\n4. Documentos",
+        "buttons": [
+          {
+            "id": "1",
+            "text": "Primeiro Acesso",
+            "title": "Primeiro Acesso",
+            "gotoStepId": "ec94dfeb-78d5-485a-b66b-320bf9716bce"
+          },
+          {
+            "id": "2",
+            "text": "Dúvidas Financeiras",
+            "title": "Dúvidas Financeiras",
+            "gotoStepId": "c48b67b7-a15c-4da3-858d-bfceb8ead517"
+          },
+          {
+            "id": "3",
+            "text": "Portal de Estudos",
+            "title": "Portal de Estudos",
+            "gotoStepId": "0098e85c-0a5a-4aad-bd88-558fa194a946"
+          },
+          {
+            "id": "4",
+            "text": "Documentos",
+            "title": "Documentos",
+            "gotoStepId": "39493939-c9dd-46a6-8d85-8a8b79b627ca"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 300000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "8aae58d9-0f77-4df8-94e0-c069783abff9",
+        "elseGotoStepId": "886e7103-f8fc-4c4b-b265-3e93a1c56589",
+        "__rfPos": {
+          "x": 6867.618331558787,
+          "y": 1592.24375796042
+        },
+        "_reviewNote": "question com 4 opcoes (>3): WhatsApp nao aceita botoes nativos, usando texto numerado. Usuario pode responder com numero ou texto."
+      }
+    },
+    {
+      "id": "9d5ceb3b-9105-454b-bd82-ce79c7ac01de",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Essa conversa foi encerrada devido a falta de interação.",
+        "_nextStepId": "402a883a-dfbe-41aa-84e2-e9d8104d03e1",
+        "__rfPos": {
+          "x": 4871.563031366129,
+          "y": 880.4075687511926
+        }
+      }
+    },
+    {
+      "id": "1c94aafc-8524-49f9-b8f2-af05982ccc0f",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 1292.295195614317,
+          "y": 528.3535723334635
+        }
+      }
+    },
+    {
+      "id": "47c19809-b70d-4294-ac86-ab48385f665a",
+      "type": "condition",
+      "config": {
+        "branches": [
+          {
+            "id": "branch_0",
+            "rules": [
+              {
+                "field": "deal.pipelineId",
+                "op": "eq",
+                "value": "b067d289-0963-4593-b7f4-307b967230f4"
+              }
+            ],
+            "nextStepId": ""
+          }
+        ],
+        "elseStepId": "86c28524-26d4-4e6a-aa61-74fb5ddf58d1",
+        "__rfPos": {
+          "x": -410.1855537412196,
+          "y": 1403.537969278197
+        }
+      }
+    },
+    {
+      "id": "5bca8c1e-39e8-4116-b1c4-99ce511dfc19",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 2992.681245525884,
+          "y": -957.4737682088466
+        }
+      }
+    },
+    {
+      "id": "2fe99662-2515-46d1-9deb-1f5a7616169b",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 5101.013686185651,
+          "y": -392.3794961093163
+        }
+      }
+    },
+    {
+      "id": "53fb72a2-f59c-4782-bdeb-cd3f4a4578d4",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em uma das opções disponíveis",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 3870.388235075872,
+          "y": -2654.035202975604
+        }
+      }
+    },
+    {
+      "id": "72f1d4af-b0b2-4eee-a169-191b0dd832ef",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Que bom! \n\nQualquer dúvida é só nos chamar, até mais. 😉",
+        "_nextStepId": "41db73a7-662e-4cb4-aaeb-2bef5a2e6b06",
+        "__rfPos": {
+          "x": 4599.751104995687,
+          "y": -2722.51456385245
+        }
+      }
+    },
+    {
+      "id": "b0edb101-5cdc-4797-8a10-12a924775d8c",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Essa conversa será encerrada devido por falta de interação!",
+        "_nextStepId": "41db73a7-662e-4cb4-aaeb-2bef5a2e6b06",
+        "__rfPos": {
+          "x": 4246.64712498439,
+          "y": -2532.6339435674
+        }
+      }
+    },
+    {
+      "id": "36edc373-8ad0-4631-b3df-df6dd2be2f3e",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Já já um de nossos consultores entra em contato com você 😊\n\nMe conta, por favor, o que você gostaria de conversar ou resolver.\nFique à vontade para explicar da forma que achar mais fácil 💬",
+        "_nextStepId": "d16862e2-a731-4d78-b78d-d66b18e6ac54",
+        "__rfPos": {
+          "x": 4958.736723283697,
+          "y": -3398.214452218332
+        }
+      }
+    },
+    {
+      "id": "c2c4e1ac-30d4-4f71-8605-072a0d8de69a",
+      "type": "business_hours",
+      "config": {
+        "schedule": [
+          {
+            "days": [
+              6
+            ],
+            "from": "12:00",
+            "to": "20:00"
+          }
+        ],
+        "timezone": "America/Sao_Paulo",
+        "elseStepId": "b62852f4-24b6-47a5-acb4-515c21d193a6",
+        "__rfPos": {
+          "x": 4316.197476575379,
+          "y": -3067.782317475583
+        }
+      }
+    },
+    {
+      "id": "c2c4e1ac-30d4-4f71-8605-072a0d8de69a::goto_true",
+      "type": "goto",
+      "config": {
+        "targetStepId": "36edc373-8ad0-4631-b3df-df6dd2be2f3e",
+        "__rfPos": {
+          "x": 4556.197476575379,
+          "y": -3067.782317475583
+        }
+      }
+    },
+    {
+      "id": "6a9ede44-2788-4a47-9ded-8930befc0a63",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em uma das opções para continuar essa conversa!",
+        "_nextStepId": "1db54422-9436-4878-9113-0b8a6a18c7a1",
+        "__rfPos": {
+          "x": 5422.457584113812,
+          "y": 379.8742345980084
+        }
+      }
+    },
+    {
+      "id": "82ff72a7-e763-49eb-88e0-3869c12ad9d8",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Para realizar seu acesso, assista ao vídeo explicativo ☝️\n",
+        "_nextStepId": "82ff72a7-e763-49eb-88e0-3869c12ad9d8::m1",
+        "__rfPos": {
+          "x": 6949.669444186479,
+          "y": -650.2371025396145
+        }
+      }
+    },
+    {
+      "id": "82ff72a7-e763-49eb-88e0-3869c12ad9d8::m1",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "video",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T14%3A34%3A49.876Z",
+        "caption": "",
+        "filename": "WhatsApp Video 2025-03-20 at 17.38.15 (3).mp4",
+        "_nextStepId": "82ff72a7-e763-49eb-88e0-3869c12ad9d8::m2",
+        "__rfPos": {
+          "x": 6949.669444186479,
+          "y": -650.2371025396145
+        }
+      }
+    },
+    {
+      "id": "82ff72a7-e763-49eb-88e0-3869c12ad9d8::m2",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Agora, clique aqui para começar 👉 https://novoportal.cruzeirodosul.edu.br/\n",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 6949.669444186479,
+          "y": -650.2371025396145
+        }
+      }
+    },
+    {
+      "id": "bde9a226-adbd-4813-b38f-c4c81fde4c40",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Dentro do app *Duda*:\n \nClique em *Financeiro* 👉 Selecione a mensalidade desejada 👉 Clique em *Pagar com boleto*",
+        "_nextStepId": "bde9a226-adbd-4813-b38f-c4c81fde4c40::m1",
+        "__rfPos": {
+          "x": 7078.440012133793,
+          "y": -214.1292816426598
+        }
+      }
+    },
+    {
+      "id": "bde9a226-adbd-4813-b38f-c4c81fde4c40::m1",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "video",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T14%3A36%3A21.973Z",
+        "caption": "",
+        "filename": "WhatsApp Video 2025-03-20 at 17.40.03 (1).mp4",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 7078.440012133793,
+          "y": -214.1292816426598
+        }
+      }
+    },
+    {
+      "id": "02a2a7ba-4d28-48fd-8fc5-62c46b587068",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Pelo aplicativo Duda, clique em *''Aulas e Conteúdo''.*\n\nAo entrar na plataforma, você terá acesso as disciplinas do semestre, *separadas por mês/prazo*.",
+        "_nextStepId": "02a2a7ba-4d28-48fd-8fc5-62c46b587068::m1",
+        "__rfPos": {
+          "x": 7550.060895623121,
+          "y": 110.7274453891758
+        }
+      }
+    },
+    {
+      "id": "02a2a7ba-4d28-48fd-8fc5-62c46b587068::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Pelo aplicativo Duda, clique em *''Aulas e Conteúdo''.*\n\nAo entrar na plataforma, você terá acesso as disciplinas do semestre, *separadas por mês/prazo*.",
+        "_nextStepId": "02a2a7ba-4d28-48fd-8fc5-62c46b587068::m2",
+        "__rfPos": {
+          "x": 7550.060895623121,
+          "y": 110.7274453891758
+        }
+      }
+    },
+    {
+      "id": "02a2a7ba-4d28-48fd-8fc5-62c46b587068::m2",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "video",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T14%3A38%3A51.167Z",
+        "caption": "",
+        "filename": "WhatsApp Video 2025-03-20 at 17.41.30 (2).mp4",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 7550.060895623121,
+          "y": 110.7274453891758
+        }
+      }
+    },
+    {
+      "id": "aaaa3dad-a570-4de4-ae98-aa42a9ac8bd6",
+      "type": "send_whatsapp_interactive",
+      "config": {
+        "body": "Clique uma *das opções*:",
+        "buttons": [
+          {
+            "id": "06685ecc-b824-4bf2-b1e2-7c60d98e3d98",
+            "text": "Emitir Declarações",
+            "title": "Emitir Declarações",
+            "gotoStepId": "04895f09-9122-4f36-8584-09f66d28cfee"
+          },
+          {
+            "id": "6a1fa118-4973-4bcf-9d41-d9817e14c3f3",
+            "text": "Enviar Documentos",
+            "title": "Enviar Documentos",
+            "gotoStepId": "3dd0fe83-d9e8-47f8-9433-a3c4f839c962"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 300000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "86df7276-e22d-47ff-b0f6-71d66c729bb6",
+        "elseGotoStepId": "b640f2bb-5140-4d30-9794-52b795c73b49",
+        "__rfPos": {
+          "x": 7722.292623202854,
+          "y": 545.0785933748936
+        }
+      }
+    },
+    {
+      "id": "506f76c1-54b2-41d1-83b5-e41645473363",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Essa conversa foi encerrada devido a falta de interação",
+        "_nextStepId": "f833224f-be3e-4ba6-96ed-d6ec81a506c0",
+        "__rfPos": {
+          "x": 5855.696014817579,
+          "y": 328.1935080927367
+        }
+      }
+    },
+    {
+      "id": "886e7103-f8fc-4c4b-b265-3e93a1c56589",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em um dos botões disponíveis:",
+        "_nextStepId": "168066e4-ada6-470f-8ae3-aea97fca76ee",
+        "__rfPos": {
+          "x": 6876.317641590691,
+          "y": 2004.394696906558
+        }
+      }
+    },
+    {
+      "id": "ec94dfeb-78d5-485a-b66b-320bf9716bce",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "video",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T14%3A48%3A17.456Z",
+        "caption": "Para realizar seu acesso, assista ao vídeo explicativo ☝️",
+        "filename": "video de primeiro acesso (1) (2).mp4",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 7764.274930138032,
+          "y": 1410.739041689986
+        }
+      }
+    },
+    {
+      "id": "c48b67b7-a15c-4da3-858d-bfceb8ead517",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Para pagar suas mensalidades, siga o passo a passo;\n \n1️⃣ Acesse sua *Área do Aluno.*\n2️⃣ Clique em *Pagar Mensalidade*\n3️⃣ Selecione a título *que deseja pagar* (boleto ou cartão)\n_obs_ - _Para pagamentos via boleto, o *desconto sempre fica no corpo* do documento e *todos os titulos são gerados no valor bruto*_",
+        "_nextStepId": "c48b67b7-a15c-4da3-858d-bfceb8ead517::m1",
+        "__rfPos": {
+          "x": 8171.42330308815,
+          "y": 1683.74072823933
+        }
+      }
+    },
+    {
+      "id": "c48b67b7-a15c-4da3-858d-bfceb8ead517::m1",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "video",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T14%3A49%3A46.534Z",
+        "caption": "Assista ao vídeo para *entender como funciona* para pagamentos pelo seu *Portal do Aluno*.",
+        "filename": "como-pagar-suas-mensalidades-youtube-1-copia_qDL1U7e8 (1) (3).mp4",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 8171.42330308815,
+          "y": 1683.74072823933
+        }
+      }
+    },
+    {
+      "id": "0098e85c-0a5a-4aad-bd88-558fa194a946",
+      "type": "send_whatsapp_interactive",
+      "config": {
+        "body": "Clique uma *das opções*:",
+        "buttons": [
+          {
+            "id": "eaa37fe5-122d-4677-8010-065000c4b67e",
+            "text": "Emitir Declarações",
+            "title": "Emitir Declarações",
+            "gotoStepId": "6e812d0e-e4ed-4958-9497-912fc76af865"
+          },
+          {
+            "id": "9f851df5-f36b-4764-ba3c-65b0f7e9bcff",
+            "text": "Enviar Documentos",
+            "title": "Enviar Documentos",
+            "gotoStepId": "fcf68607-ab1f-4f6f-a5e4-13b5e7a61d6e"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 300000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "1da1f77e-0182-423f-94ac-62577cdc6655",
+        "elseGotoStepId": "7de82d35-469e-495e-8ad6-c82e9a75eca2",
+        "__rfPos": {
+          "x": 8566.275669562923,
+          "y": 2608.827231684994
+        }
+      }
+    },
+    {
+      "id": "39493939-c9dd-46a6-8d85-8a8b79b627ca",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Todo o conteúdo de suas disciplinas, assim como atividades e notas obtidas, estão disponíveis no seu *Ambiente Virtual*, também chamado de *BLACKBOARD*.\n",
+        "_nextStepId": "39493939-c9dd-46a6-8d85-8a8b79b627ca::m1",
+        "__rfPos": {
+          "x": 8563.815418972265,
+          "y": 2066.286456705732
+        }
+      }
+    },
+    {
+      "id": "39493939-c9dd-46a6-8d85-8a8b79b627ca::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Para acessar, entre no seu portal do aluno e clique em \"*AMBIENTE VIRTUAL*\" no canto esquerdo.\n",
+        "_nextStepId": "39493939-c9dd-46a6-8d85-8a8b79b627ca::m2",
+        "__rfPos": {
+          "x": 8563.815418972265,
+          "y": 2066.286456705732
+        }
+      }
+    },
+    {
+      "id": "39493939-c9dd-46a6-8d85-8a8b79b627ca::m2",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "image",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T14%3A51%3A28.484Z",
+        "caption": "Em seguida, vá para \"CURSOS\" e clique na disciplina desejada.\n \nLá você encontrará\nacesso às vídeoaulas e ao material em PDF da disciplina.",
+        "filename": "Design sem nome (13) (1) (1).png",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 8563.815418972265,
+          "y": 2066.286456705732
+        }
+      }
+    },
+    {
+      "id": "8aae58d9-0f77-4df8-94e0-c069783abff9",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Essa conversa foi encerrada devido a falta de interação",
+        "_nextStepId": "27decd9e-d9d2-410c-a1a7-dde306523fa2",
+        "__rfPos": {
+          "x": 7241.352714691945,
+          "y": 2018.288765432903
+        }
+      }
+    },
+    {
+      "id": "402a883a-dfbe-41aa-84e2-e9d8104d03e1",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 5228.929757200454,
+          "y": 898.0010075614978
+        }
+      }
+    },
+    {
+      "id": "86c28524-26d4-4e6a-aa61-74fb5ddf58d1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "👋Oi, tudo bem?",
+        "_nextStepId": "a3d10d68-c893-4812-8147-2f5d57440313",
+        "__rfPos": {
+          "x": 568.8728787841744,
+          "y": 1208.499686442171
+        }
+      }
+    },
+    {
+      "id": "41db73a7-662e-4cb4-aaeb-2bef5a2e6b06",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 4741.265556841619,
+          "y": -2317.463452393482
+        }
+      }
+    },
+    {
+      "id": "d16862e2-a731-4d78-b78d-d66b18e6ac54",
+      "type": "condition",
+      "config": {
+        "branches": [
+          {
+            "id": "branch_0",
+            "rules": [
+              {
+                "field": "deal.pipelineId",
+                "op": "eq",
+                "value": "7d1b30e3-b554-4225-8523-d2d21ffc7c35"
+              }
+            ],
+            "nextStepId": "8dd95adf-b3a9-4c45-87a8-893b1686cdc4"
+          }
+        ],
+        "elseStepId": "",
+        "__rfPos": {
+          "x": 6306.455321059441,
+          "y": -2531.114491038021
+        }
+      }
+    },
+    {
+      "id": "b62852f4-24b6-47a5-acb4-515c21d193a6",
+      "type": "send_whatsapp_interactive",
+      "config": {
+        "body": "Olá! Agradecemos o seu contato.\n\nNo momento, estamos fora do nosso horário de atendimento.\n\nNosso horário de funcionamento é:\n\nSegunda a Sexta-feira: 08h às 20h\n\nSábados: 09h às 14h\n\nSelecione uma das opções abaixo:",
+        "buttons": [
+          {
+            "id": "3290fe87-fce1-4756-98ec-758d45e37d64",
+            "text": "Encerrar",
+            "title": "Encerrar",
+            "gotoStepId": "7f94816f-edcf-4b6e-8769-aed17ee9518c"
+          },
+          {
+            "id": "7f4af1eb-cfd2-4b92-9f68-764b9ee488fe",
+            "text": "Aguardar horário de atendimento",
+            "title": "Aguardar horário de ",
+            "gotoStepId": "bf4da9ba-5f48-4a04-9d8e-73ab92d8ce2a"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 300000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "1a964f1a-cecb-4bf6-9379-29857e5e2663",
+        "elseGotoStepId": "01c83f83-f259-4b7d-9801-d016a2c5f551",
+        "__rfPos": {
+          "x": 5014.015310993452,
+          "y": -2943.870368019862
+        }
+      }
+    },
+    {
+      "id": "b640f2bb-5140-4d30-9794-52b795c73b49",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em um dos botões disponíveis para continuar essa conversa!",
+        "_nextStepId": "aaaa3dad-a570-4de4-ae98-aa42a9ac8bd6",
+        "__rfPos": {
+          "x": 7744.570317890105,
+          "y": 912.6291555157837
+        }
+      }
+    },
+    {
+      "id": "04895f09-9122-4f36-8584-09f66d28cfee",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Em seu app, vá na opção ''Perfil'' 👉Clique em ''Emitir Documentos''. \n\nNessa seção, você poderá obter tanto declarações acadêmicas quanto financeiras!",
+        "_nextStepId": "04895f09-9122-4f36-8584-09f66d28cfee::m1",
+        "__rfPos": {
+          "x": 8339.448467663551,
+          "y": 258.3731497575577
+        }
+      }
+    },
+    {
+      "id": "04895f09-9122-4f36-8584-09f66d28cfee::m1",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "video",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T14%3A41%3A53.069Z",
+        "caption": "",
+        "filename": "Academico - Emitir declaraçoes App Duda (1) (4).mp4",
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 8339.448467663551,
+          "y": 258.3731497575577
+        }
+      }
+    },
+    {
+      "id": "3dd0fe83-d9e8-47f8-9433-a3c4f839c962",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Para enviar seus documentos pelo app Duda, selecione a opção Perfil, em seguida, clique 👉 Meus documentos para anexar.",
+        "_nextStepId": "3dd0fe83-d9e8-47f8-9433-a3c4f839c962::m1",
+        "__rfPos": {
+          "x": 8342.747237440482,
+          "y": 592.6484871533572
+        }
+      }
+    },
+    {
+      "id": "3dd0fe83-d9e8-47f8-9433-a3c4f839c962::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Ao tentar enviar, leia as instruções de como encaminhar o documento em questão, ok?\n",
+        "_nextStepId": "3dd0fe83-d9e8-47f8-9433-a3c4f839c962::m2",
+        "__rfPos": {
+          "x": 8342.747237440482,
+          "y": 592.6484871533572
+        }
+      }
+    },
+    {
+      "id": "3dd0fe83-d9e8-47f8-9433-a3c4f839c962::m2",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "video",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T14%3A44%3A29.790Z",
+        "caption": "",
+        "filename": "Enviar documentos no app DUDA (2) (1) (1) (3).mp4",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 8342.747237440482,
+          "y": 592.6484871533572
+        }
+      }
+    },
+    {
+      "id": "86df7276-e22d-47ff-b0f6-71d66c729bb6",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Essa conversa foi encerrada devido a falta de interação.",
+        "_nextStepId": "ed95d692-e35c-414c-bb33-56b76f79978b",
+        "__rfPos": {
+          "x": 8133.825151568108,
+          "y": 935.7205439543094
+        }
+      }
+    },
+    {
+      "id": "f833224f-be3e-4ba6-96ed-d6ec81a506c0",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 6227.357409685277,
+          "y": 334.7910476466012
+        }
+      }
+    },
+    {
+      "id": "7de82d35-469e-495e-8ad6-c82e9a75eca2",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em uma das opções:",
+        "_nextStepId": "0098e85c-0a5a-4aad-bd88-558fa194a946",
+        "__rfPos": {
+          "x": 8571.202095216606,
+          "y": 2970.005202425001
+        }
+      }
+    },
+    {
+      "id": "6e812d0e-e4ed-4958-9497-912fc76af865",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Para emitir alguma declaração referente ao seu curso, entre na sua *Área do Aluno* 👉clique em *Emissão de Documentos*.",
+        "_nextStepId": "6e812d0e-e4ed-4958-9497-912fc76af865::m1",
+        "__rfPos": {
+          "x": 9407.49361182258,
+          "y": 2237.405749796366
+        }
+      }
+    },
+    {
+      "id": "6e812d0e-e4ed-4958-9497-912fc76af865::m1",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "image",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T15%3A03%3A58.167Z",
+        "caption": "",
+        "filename": "WhatsApp Image 2025-11-03 at 12.03.49.jpeg",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 9407.49361182258,
+          "y": 2237.405749796366
+        }
+      }
+    },
+    {
+      "id": "fcf68607-ab1f-4f6f-a5e4-13b5e7a61d6e",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "1️⃣ Acesse sua *Área do Aluno* clicando em 👉 novoportal.cruzeirodosul.edu.br\n\n2️⃣ Clique na seção *Vida Acadêmica 👉 Documentos Pendentes*\n\n3️⃣​Clique no botão vermelho e envie seu documento de forma legível, *frente e verso em uma única via*.\n⚠️ _A pendência de documentos pode bloquear algumas *solicitações*. Regularize o quanto antes_",
+        "_nextStepId": "fcf68607-ab1f-4f6f-a5e4-13b5e7a61d6e::m1",
+        "__rfPos": {
+          "x": 9802.838665981482,
+          "y": 2698.573204401738
+        }
+      }
+    },
+    {
+      "id": "fcf68607-ab1f-4f6f-a5e4-13b5e7a61d6e::m1",
+      "type": "send_whatsapp_media",
+      "config": {
+        "mediaType": "image",
+        "mediaUrl": "https://dc-qqqq2222pb.s3.amazonaws.com/8485d386-ecbe-4f26-a98d-6026d21a0c70/flow-attachments/8485d386-ecbe-4f26-a98d-6026d21a0c70_2025-11-03T15%3A05%3A11.712Z",
+        "caption": "",
+        "filename": "WhatsApp Image 2025-11-03 at 12.04.46.jpeg",
+        "_nextStepId": "71dff25f-cb20-4b23-a52f-733b38957e65",
+        "__rfPos": {
+          "x": 9802.838665981482,
+          "y": 2698.573204401738
+        }
+      }
+    },
+    {
+      "id": "1da1f77e-0182-423f-94ac-62577cdc6655",
+      "type": "set_variable",
+      "config": {
+        "variableName": "_digisac_empty_chat",
+        "value": "",
+        "_nextStepId": "a1cc7368-d726-451c-b5e4-51d73471810f",
+        "__rfPos": {
+          "x": 9019.535428549938,
+          "y": 2910.838535758335
+        }
+      }
+    },
+    {
+      "id": "27decd9e-d9d2-410c-a1a7-dde306523fa2",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 7246.40510324698,
+          "y": 2225.436696189324
+        }
+      }
+    },
+    {
+      "id": "a3d10d68-c893-4812-8147-2f5d57440313",
+      "type": "send_whatsapp_interactive",
+      "config": {
+        "body": "Não localizei este telefone que estamos conversando em nossa base de dados!\n\nPara continuarmos, por favor *digite* uma das opções abaixo:👇",
+        "buttons": [
+          {
+            "id": "27c07930-025d-4b00-99a6-4371cd663114",
+            "text": "Já sou aluno",
+            "title": "Já sou aluno",
+            "gotoStepId": "b028d02b-e4a9-43db-8931-ae46944c98a7"
+          },
+          {
+            "id": "8e4dc2ec-e3de-42c7-b69f-65cf1448ab45",
+            "text": "Quero me matricular",
+            "title": "Quero me matricular",
+            "gotoStepId": "93a7cadd-90fb-400d-8cb2-243ccb14ca15"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 300000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "1cc94c59-223f-4a40-b7f4-d6b74afbe1da",
+        "elseGotoStepId": "066944d6-3de7-4aa4-9154-ab8fc64211ce",
+        "__rfPos": {
+          "x": 1175.488002347206,
+          "y": 982.9363666563369
+        }
+      }
+    },
+    {
+      "id": "8dd95adf-b3a9-4c45-87a8-893b1686cdc4",
+      "type": "move_stage",
+      "config": {
+        "stageId": "742714eb-ac5a-435f-8680-97e6ab8f2f6e",
+        "_pipelineId": "7d1b30e3-b554-4225-8523-d2d21ffc7c35",
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 6798.080183970167,
+          "y": -2458.623496946399
+        }
+      }
+    },
+    {
+      "id": "01c83f83-f259-4b7d-9801-d016a2c5f551",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em uma das opções para continuar a conversa, ok? ",
+        "_nextStepId": "b62852f4-24b6-47a5-acb4-515c21d193a6",
+        "__rfPos": {
+          "x": 5045.596739294333,
+          "y": -2547.196184704816
+        }
+      }
+    },
+    {
+      "id": "7f94816f-edcf-4b6e-8769-aed17ee9518c",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Ok! 😉\n\nAguardamos seu contato, tá bom?\nAté mais! 😊",
+        "_nextStepId": "1a964f1a-cecb-4bf6-9379-29857e5e2663",
+        "__rfPos": {
+          "x": 5517.532286486173,
+          "y": -3009.277435979254
+        }
+      }
+    },
+    {
+      "id": "bf4da9ba-5f48-4a04-9d8e-73ab92d8ce2a",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Certo! Assim que nossos consultores estiverem disponíveis, daremos início ao seu atendimento.\n\nSe preferir, você pode adiantar sua dúvida ou problema por aqui — assim conseguimos agilizar seu atendimento de forma mais rápida e prática. 😊\n\n_Caso você já tenha informado o motivo do contato, pode desconsiderar esta mensagem. Vamos dar andamento assim que retornarmos ao expediente._",
+        "_nextStepId": "d16862e2-a731-4d78-b78d-d66b18e6ac54",
+        "__rfPos": {
+          "x": 5525.396845121241,
+          "y": -2439.940256893851
+        }
+      }
+    },
+    {
+      "id": "1a964f1a-cecb-4bf6-9379-29857e5e2663",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 6011.083918947761,
+          "y": -3049.511046958814
+        }
+      }
+    },
+    {
+      "id": "ed95d692-e35c-414c-bb33-56b76f79978b",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 8495.59023710501,
+          "y": 1010.492658898107
+        }
+      }
+    },
+    {
+      "id": "a1cc7368-d726-451c-b5e4-51d73471810f",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 9403.702095216604,
+          "y": 3070.005202425001
+        }
+      }
+    },
+    {
+      "id": "066944d6-3de7-4aa4-9154-ab8fc64211ce",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique em um dos botões disponíveis:",
+        "_nextStepId": "a3d10d68-c893-4812-8147-2f5d57440313",
+        "__rfPos": {
+          "x": 1154.594068624792,
+          "y": 1538.633200189385
+        }
+      }
+    },
+    {
+      "id": "b028d02b-e4a9-43db-8931-ae46944c98a7",
+      "type": "add_tag",
+      "config": {
+        "tagName": "Lead criado pelo bot",
+        "_nextStepId": "b028d02b-e4a9-43db-8931-ae46944c98a7::a1",
+        "_reviewNote": "create-lead-action: CRM ja cria contato via WA; ajustamos para uma tag marcadora.",
+        "__rfPos": {
+          "x": 1659.731895123462,
+          "y": 795.7004706570114
+        }
+      }
+    },
+    {
+      "id": "b028d02b-e4a9-43db-8931-ae46944c98a7::a1",
+      "type": "create_deal",
+      "config": {
+        "stageId": "7e89e4a3-09ca-4e5a-976b-35f7f041ccf6",
+        "title": "",
+        "_nextStepId": "7b9570da-f253-4070-9241-60376b5152bd",
+        "__rfPos": {
+          "x": 1659.731895123462,
+          "y": 795.7004706570114
+        }
+      }
+    },
+    {
+      "id": "93a7cadd-90fb-400d-8cb2-243ccb14ca15",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Certo!\n\nEste canal é dedicado ao atendimento dos nossos alunos.\n \nVamos transferir esta conversa para nosso time comercial e em breve, você receberá uma mensagem de um(a) de nossos consultores(as) que vai te orientar e tirar todas as suas dúvidas.😉\nAté mais!",
+        "_nextStepId": "93df51fe-a394-49ce-aab5-6aa8f6acd85e",
+        "__rfPos": {
+          "x": 1943.806614090001,
+          "y": 1280.517809105208
+        }
+      }
+    },
+    {
+      "id": "1cc94c59-223f-4a40-b7f4-d6b74afbe1da",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Essa mensagem foi encerrada devido a falta de interação.",
+        "_nextStepId": "27cb5a85-05d4-402f-ad29-a65a0341823c",
+        "__rfPos": {
+          "x": 1619.813011774866,
+          "y": 1439.183395025759
+        }
+      }
+    },
+    {
+      "id": "7b9570da-f253-4070-9241-60376b5152bd",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Certo! Para começarmos, por favor *digite*  seu *CPF* completo.\n\n\n*Exemplo*: Se seu CPF for 123.456.789-10 você deverá digitar 12345678910.",
+        "_nextStepId": "7b9570da-f253-4070-9241-60376b5152bd::m1",
+        "__rfPos": {
+          "x": 2084.784166022025,
+          "y": 809.5646462160269
+        }
+      }
+    },
+    {
+      "id": "7b9570da-f253-4070-9241-60376b5152bd::m1",
+      "type": "wait_for_reply",
+      "config": {
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 600000,
+        "timeoutGotoStepId": "1cc94c59-223f-4a40-b7f4-d6b74afbe1da",
+        "receivedGotoStepId": "b0db8f05-e225-40f2-931b-0c609e67c586",
+        "__rfPos": {
+          "x": 2084.784166022025,
+          "y": 809.5646462160269
+        }
+      }
+    },
+    {
+      "id": "93df51fe-a394-49ce-aab5-6aa8f6acd85e",
+      "type": "add_tag",
+      "config": {
+        "tagName": "Lead criado pelo bot",
+        "_nextStepId": "93df51fe-a394-49ce-aab5-6aa8f6acd85e::a1",
+        "_reviewNote": "create-lead-action: CRM ja cria contato via WA; ajustamos para uma tag marcadora.",
+        "__rfPos": {
+          "x": 2296.21158738254,
+          "y": 1484.996870878227
+        }
+      }
+    },
+    {
+      "id": "93df51fe-a394-49ce-aab5-6aa8f6acd85e::a1",
+      "type": "create_deal",
+      "config": {
+        "stageId": "7e89e4a3-09ca-4e5a-976b-35f7f041ccf6",
+        "title": "",
+        "_nextStepId": "caa73b86-4945-469d-bdd9-8522689a6ab4",
+        "__rfPos": {
+          "x": 2296.21158738254,
+          "y": 1484.996870878227
+        }
+      }
+    },
+    {
+      "id": "27cb5a85-05d4-402f-ad29-a65a0341823c",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "27cb5a85-05d4-402f-ad29-a65a0341823c::a1",
+        "__rfPos": {
+          "x": 2267.867680819909,
+          "y": 1890.585825992106
+        }
+      }
+    },
+    {
+      "id": "27cb5a85-05d4-402f-ad29-a65a0341823c::a1",
+      "type": "move_stage",
+      "config": {
+        "stageId": "7e89e4a3-09ca-4e5a-976b-35f7f041ccf6",
+        "_pipelineId": "7d1b30e3-b554-4225-8523-d2d21ffc7c35",
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 2267.867680819909,
+          "y": 1890.585825992106
+        }
+      }
+    },
+    {
+      "id": "b0db8f05-e225-40f2-931b-0c609e67c586",
+      "type": "webhook",
+      "config": {
+        "url": "https://n8n-new-n8n.ca31ey.easypanel.host/webhook/leads_cpf_csv",
+        "method": "POST",
+        "headers": {},
+        "_nextStepId": "d35a39ef-c891-49d5-aad6-f50095f6ee41",
+        "_query": [
+          {
+            "key": "cpf",
+            "value": "{{contact_taxid}}"
+          },
+          {
+            "key": "telefone",
+            "value": "{{contact_phone}}"
+          },
+          {
+            "key": "id_lead",
+            "value": "{{contact_id}}"
+          },
+          {
+            "key": "id_negocio",
+            "value": "{{deal_id}}"
+          },
+          {
+            "key": "Nome",
+            "value": "{{first_name}}"
+          }
+        ],
+        "__rfPos": {
+          "x": 2452.252941889619,
+          "y": 954.8300125138411
+        },
+        "body": "{\"cpf\": \"{{contact_taxid}}\", \"telefone\": \"{{contact_phone}}\", \"id_lead\": \"{{contact_id}}\", \"id_negocio\": \"{{deal_id}}\", \"Nome\": \"{{first_name}}\"}"
+      }
+    },
+    {
+      "id": "caa73b86-4945-469d-bdd9-8522689a6ab4",
+      "type": "webhook",
+      "config": {
+        "url": "https://n8n-new-n8n.ca31ey.easypanel.host/webhook/enviar_comercial",
+        "method": "POST",
+        "headers": {},
+        "_nextStepId": "20416bde-374c-4b84-b95e-e08e18971b69",
+        "_query": [
+          {
+            "key": "telefone_lead",
+            "value": "{{contact_phone}}"
+          }
+        ],
+        "__rfPos": {
+          "x": 2693.76033566473,
+          "y": 1449.060872851695
+        },
+        "body": "{\"telefone_lead\": \"{{contact_phone}}\"}"
+      }
+    },
+    {
+      "id": "d35a39ef-c891-49d5-aad6-f50095f6ee41",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Certo. Por favor *aguarde* enquanto localizo as informações em nossa base de dados.⌛",
+        "_nextStepId": "a00009ec-6c8b-4770-8bab-61db54fea0ac",
+        "__rfPos": {
+          "x": 2792.754132225425,
+          "y": 1063.827515176809
+        }
+      }
+    },
+    {
+      "id": "20416bde-374c-4b84-b95e-e08e18971b69",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 3119.947174138209,
+          "y": 1727.5968903851
+        }
+      }
+    },
+    {
+      "id": "a00009ec-6c8b-4770-8bab-61db54fea0ac",
+      "type": "wait_for_reply",
+      "config": {
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 60000,
+        "timeoutGotoStepId": "2b9448d3-cc2e-4990-aba3-fa2fe5efb302",
+        "receivedGotoStepId": "90423c40-0083-456f-8f87-052a17a7f3d1",
+        "_invalidResponseMessage": "Poderia repetir, por favor?",
+        "__rfPos": {
+          "x": 3128.179302548151,
+          "y": 1327.665976449409
+        }
+      }
+    },
+    {
+      "id": "90423c40-0083-456f-8f87-052a17a7f3d1",
+      "type": "wait_for_reply",
+      "config": {
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 60000,
+        "timeoutGotoStepId": "2b9448d3-cc2e-4990-aba3-fa2fe5efb302",
+        "receivedGotoStepId": "2b9448d3-cc2e-4990-aba3-fa2fe5efb302",
+        "_invalidResponseMessage": "Poderia repetir, por favor?",
+        "__rfPos": {
+          "x": 3502.235355196388,
+          "y": 1624.476739450743
+        }
+      }
+    },
+    {
+      "id": "2b9448d3-cc2e-4990-aba3-fa2fe5efb302",
+      "type": "condition",
+      "config": {
+        "branches": [
+          {
+            "id": "branch_0",
+            "rules": [
+              {
+                "field": "variables.lastResponse",
+                "op": "includes",
+                "value": "sim"
+              }
+            ],
+            "nextStepId": "51556ae4-a9fb-4294-99de-c20957f14670"
+          }
+        ],
+        "elseStepId": "6b50a2d6-7236-4a85-88c8-493e080d87f4",
+        "__rfPos": {
+          "x": 3788.017640594891,
+          "y": 1381.511789128416
+        },
+        "_reviewNote": "field-contains: parametro Digisac era `Lead Existe?` (custom field). Ajustado para `variables.lastResponse` (resposta do lead). Reveja se o campo alvo eh outro."
+      }
+    },
+    {
+      "id": "51556ae4-a9fb-4294-99de-c20957f14670",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "*Em breve um de nossos consultores irá te chamar!*\n\nMe conta, sobre o que você deseja falar?\nPergunte de maneira simples que eu entendo melhor assim. 😊",
+        "_nextStepId": "cf079a7d-5302-4429-8cd6-c39e05fc4e62",
+        "__rfPos": {
+          "x": 4122.793735356157,
+          "y": 1214.803954576695
+        }
+      }
+    },
+    {
+      "id": "6b50a2d6-7236-4a85-88c8-493e080d87f4",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Não encontramos você em nossa *base de alunos*. \n\nPrestamos suporte para as unidades (polos) 👇",
+        "_nextStepId": "6b50a2d6-7236-4a85-88c8-493e080d87f4::m1",
+        "__rfPos": {
+          "x": 3932.383344183135,
+          "y": 1923.252362519333
+        }
+      }
+    },
+    {
+      "id": "6b50a2d6-7236-4a85-88c8-493e080d87f4::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Barra Funda\nVila Prudente\nVila Mariana\nFreguesia do Ó (Moinho Velho)\nVila Ema (Sapopemba)\nIbirapuera (Indianápolis)\nTaboão da Serra - Jardim Mituzi\nTaboão da Serra - Centro\nCampinas (Ouro Verde) \nItapira (Santo Antônio)\nCapivari (Centro)\nMorumbi (Vila Progedior)\nSantana 2",
+        "_nextStepId": "7d486c61-99c5-4ccc-90ca-2b8f43479456",
+        "__rfPos": {
+          "x": 3932.383344183135,
+          "y": 1923.252362519333
+        }
+      }
+    },
+    {
+      "id": "cf079a7d-5302-4429-8cd6-c39e05fc4e62",
+      "type": "move_stage",
+      "config": {
+        "stageId": "742714eb-ac5a-435f-8680-97e6ab8f2f6e",
+        "_pipelineId": "7d1b30e3-b554-4225-8523-d2d21ffc7c35",
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 5376.481517003117,
+          "y": 1408.788430631997
+        }
+      }
+    },
+    {
+      "id": "7d486c61-99c5-4ccc-90ca-2b8f43479456",
+      "type": "send_whatsapp_interactive",
+      "config": {
+        "body": "Você matriculado em algum dos polos *acima?*",
+        "buttons": [
+          {
+            "id": "ea9a92c5-cd15-48a6-b7b5-565f2327e72e",
+            "text": "Sim",
+            "title": "Sim",
+            "gotoStepId": "3c452e50-6e28-465e-ac58-e05c80efac21"
+          },
+          {
+            "id": "48882854-7ff5-4de9-981e-41416d5d2e65",
+            "text": "Não",
+            "title": "Não",
+            "gotoStepId": "38306eb1-d161-4ab1-a32f-65b025ad0a62"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 600000,
+        "timeoutAction": "goto",
+        "timeoutGotoStepId": "88e18e4a-bcf4-4cea-bcdf-4222e84a110c",
+        "elseGotoStepId": "e56b8739-84b9-4afc-83c5-46e40b7733e5",
+        "__rfPos": {
+          "x": 4333.587617439136,
+          "y": 1663.012081763438
+        },
+        "_errorNextStepId": "88e18e4a-bcf4-4cea-bcdf-4222e84a110c"
+      }
+    },
+    {
+      "id": "e56b8739-84b9-4afc-83c5-46e40b7733e5",
+      "type": "send_whatsapp_interactive",
+      "config": {
+        "body": "Não entendi, vamos tentar novamente:\n\nVocê matriculado em algum dos polos *acima?*",
+        "buttons": [
+          {
+            "id": "1c3832b2-9bb7-4249-9da3-0e691ba14a66",
+            "text": "Sim",
+            "title": "Sim",
+            "gotoStepId": "3c452e50-6e28-465e-ac58-e05c80efac21"
+          },
+          {
+            "id": "317f76dc-42ba-4d44-8c3b-ef999a4f6e95",
+            "text": "Não",
+            "title": "Não",
+            "gotoStepId": "38306eb1-d161-4ab1-a32f-65b025ad0a62"
+          }
+        ],
+        "saveToVariable": "lastResponse",
+        "timeoutMs": 600000,
+        "timeoutAction": "continue",
+        "timeoutGotoStepId": "",
+        "elseGotoStepId": "e56b8739-84b9-4afc-83c5-46e40b7733e5",
+        "__rfPos": {
+          "x": 4318.337474730938,
+          "y": 1973.208989471837
+        },
+        "_errorNextStepId": "88e18e4a-bcf4-4cea-bcdf-4222e84a110c"
+      }
+    },
+    {
+      "id": "88e18e4a-bcf4-4cea-bcdf-4222e84a110c",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Essa mensagem foi encerrada devido a falta de interação.",
+        "_nextStepId": "1e6c3dba-8d54-4db0-b4c2-03108ddbc89d",
+        "__rfPos": {
+          "x": 4736.92333228666,
+          "y": 2516.637193009862
+        }
+      }
+    },
+    {
+      "id": "3c452e50-6e28-465e-ac58-e05c80efac21",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "*Em breve um de nossos consultores irá te chamar!*\n\nMe conta, sobre o que você deseja falar?\nPergunte de maneira simples que eu entendo melhor assim. 😊",
+        "_nextStepId": "cf079a7d-5302-4429-8cd6-c39e05fc4e62",
+        "__rfPos": {
+          "x": 4770.185521320103,
+          "y": 1623.817947306424
+        }
+      }
+    },
+    {
+      "id": "38306eb1-d161-4ab1-a32f-65b025ad0a62",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Certo, nesse caso, como você não é matriculado em nossas unidades, não tenho acesso às suas informações por aqui 🥹.",
+        "_nextStepId": "e8c7944b-3982-4f22-9304-9214a80c182e",
+        "__rfPos": {
+          "x": 4761.594925334437,
+          "y": 1882.505399144083
+        }
+      }
+    },
+    {
+      "id": "1e6c3dba-8d54-4db0-b4c2-03108ddbc89d",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 5302.270368467986,
+          "y": 2540.317472867501
+        }
+      }
+    },
+    {
+      "id": "e8c7944b-3982-4f22-9304-9214a80c182e",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Clique no link abaixo 👇 localize seu polo de apoio e os contatos para conversar *diretamente com sua unidade*:\n\nhttps://www.cruzeirodosulvirtual.com.br/nossos-polos/",
+        "_nextStepId": "e8c7944b-3982-4f22-9304-9214a80c182e::m1",
+        "__rfPos": {
+          "x": 5264.164183733281,
+          "y": 2128.814522997782
+        }
+      }
+    },
+    {
+      "id": "e8c7944b-3982-4f22-9304-9214a80c182e::m1",
+      "type": "send_whatsapp_message",
+      "config": {
+        "content": "Este atendimento está sendo encerrado. 😉",
+        "_nextStepId": "9cf15816-23c7-4912-a1d1-eb772b5debab",
+        "__rfPos": {
+          "x": 5264.164183733281,
+          "y": 2128.814522997782
+        }
+      }
+    },
+    {
+      "id": "9cf15816-23c7-4912-a1d1-eb772b5debab",
+      "type": "update_field",
+      "config": {
+        "entity": "deal",
+        "field": "status",
+        "value": "LOST",
+        "_lossReasonId": "b221873b-0c91-40aa-a7c4-def47871615d",
+        "_justification": "Aluno matriculado em outra unidade",
+        "_reviewNote": "lose-business-action: status=LOST aplicado. Configurar loss reason no CRM se necessario.",
+        "_nextStepId": "792731d8-8cb0-47a5-a5d4-78505ad7fc88",
+        "__rfPos": {
+          "x": 5692.897190554507,
+          "y": 2281.606238604603
+        }
+      }
+    },
+    {
+      "id": "792731d8-8cb0-47a5-a5d4-78505ad7fc88",
+      "type": "condition",
+      "config": {
+        "branches": [
+          {
+            "id": "branch_0",
+            "rules": [
+              {
+                "field": "deal.pipelineId",
+                "op": "eq",
+                "value": "7d1b30e3-b554-4225-8523-d2d21ffc7c35"
+              }
+            ],
+            "nextStepId": "6c08ea34-adde-4562-bd9a-27f8b8669f80"
+          }
+        ],
+        "elseStepId": "",
+        "__rfPos": {
+          "x": 5876.555882582513,
+          "y": 2533.923281455557
+        }
+      }
+    },
+    {
+      "id": "6c08ea34-adde-4562-bd9a-27f8b8669f80",
+      "type": "finish_conversation",
+      "config": {
+        "_nextStepId": "6c08ea34-adde-4562-bd9a-27f8b8669f80::a1",
+        "__rfPos": {
+          "x": 6135.478820624802,
+          "y": 2369.534266049552
+        }
+      }
+    },
+    {
+      "id": "6c08ea34-adde-4562-bd9a-27f8b8669f80::a1",
+      "type": "move_stage",
+      "config": {
+        "stageId": "7e89e4a3-09ca-4e5a-976b-35f7f041ccf6",
+        "_pipelineId": "7d1b30e3-b554-4225-8523-d2d21ffc7c35",
+        "_nextStepId": "",
+        "__rfPos": {
+          "x": 6135.478820624802,
+          "y": 2369.534266049552
+        }
+      }
+    }
+  ]
+}
