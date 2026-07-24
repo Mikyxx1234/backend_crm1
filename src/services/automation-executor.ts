@@ -2099,6 +2099,10 @@ async function executeStep(
         data: rt.data,
         event: rt.event,
         variables: flowVars ?? {},
+        // Campos personalizados (slug → valor). Paths na UI:
+        // `contactCustomFields.<name>` / `dealCustomFields.<name>`.
+        contactCustomFields: rt.contactCustomFields ?? {},
+        dealCustomFields: rt.dealCustomFields ?? {},
       };
 
       const conditionCfg = normalizeConditionConfig(cfg);
