@@ -445,3 +445,44 @@ export async function notifyDealStageChanged(
     );
   }
 }
+
+/**
+ * Ponto ÚNICO para notificar adição de tag (contato e/ou negócio) ao motor
+ * de automações. Chamar SOMENTE quando a tag é efetivamente nova (não
+ * re-aplicada) — o chamador é responsável por esse check. Fire-and-forget,
+ * nunca lança.
+ */
+export async function notifyTagAdded(opts: {
+  contactId?: string | null;
+  dealId?: string | null;
+  tagId: string;
+  tagName: string;
+  depth?: number;
+}): Promise<void> {
+  try {
+    if (!opts.tagId && !opts.tagName) return;
+    let contactId = opts.contactId ?? undefined;
+    let dealId = opts.dealId ?? undefined;
+    // Se só tem dealId, resolve contactId do deal
+    if (!contactId && dealId) {
+      const deal = await prisma.deal.findUnique({
+        where: { id: dealId },
+        select: { contactId: true },
+      });
+      contactId = deal?.contactId ?? undefined;
+    }
+    if (!contactId && !dealId) return;
+
+    await fireTrigger("tag_added", {
+      contactId,
+      dealId,
+      data: { tagId: opts.tagId, tagName: opts.tagName },
+      depth: opts.depth ?? 0,
+    });
+  } catch (err) {
+    console.error(
+      "[notifyTagAdded] falha ao disparar tag_added:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+}

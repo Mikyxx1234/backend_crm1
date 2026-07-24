@@ -5,6 +5,7 @@ import type { AppUserRole } from "@/lib/auth-types";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { notifyTagAdded } from "@/services/automation-triggers";
 import { createDealEvent, getDealById } from "@/services/deals";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -51,6 +52,9 @@ export async function POST(request: Request, ctx: Ctx) {
         }
       }
 
+      const existed = await prisma.tagOnDeal.findUnique({
+        where: { dealId_tagId: { dealId, tagId: resolvedTagId } },
+      });
       await prisma.tagOnDeal.upsert({
         where: { dealId_tagId: { dealId, tagId: resolvedTagId } },
         update: {},
@@ -59,7 +63,15 @@ export async function POST(request: Request, ctx: Ctx) {
 
       const uid = user.id;
       const resolvedTag = await prisma.tag.findUnique({ where: { id: resolvedTagId }, select: { name: true, color: true } });
-      createDealEvent(dealId, uid, "TAG_ADDED", { tagName: resolvedTag?.name ?? tagName, tagColor: resolvedTag?.color ?? tagColor }).catch(() => {});
+      if (!existed) {
+        createDealEvent(dealId, uid, "TAG_ADDED", { tagName: resolvedTag?.name ?? tagName, tagColor: resolvedTag?.color ?? tagColor }).catch(() => {});
+        void notifyTagAdded({
+          dealId,
+          contactId: existing.contactId,
+          tagId: resolvedTagId,
+          tagName: resolvedTag?.name ?? tagName,
+        });
+      }
 
       return NextResponse.json({ ok: true });
     } catch (e) {
