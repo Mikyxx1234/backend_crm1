@@ -199,18 +199,24 @@ export async function getDeals(params: GetDealsParams = {}) {
 
   const search = params.search?.trim();
   if (search) {
+    // Agrupa TODOS os filtros de `contact` sob um único `contact: { OR: [...] }`.
+    // Prisma gera 1 LEFT JOIN de `contacts` em vez de 1 por condição — antes eram
+    // 4 self-joins (j0..j4) que faziam o board de busca custar ~2,4s no Postgres
+    // (24/jul/26). Semanticamente idêntico ao anterior.
     conditions.push({
       OR: [
         { title: { contains: search, mode: "insensitive" } },
-        { contact: { name: { contains: search, mode: "insensitive" } } },
-        { contact: { email: { contains: search, mode: "insensitive" } } },
-        { contact: { phone: { contains: search } } },
-        // Qualquer valor de campo personalizado (RGM, CPF, matrícula, ...),
-        // do negócio ou do contato vinculado.
+        // Campos personalizados do NEGÓCIO (RGM, CPF, matrícula, ...).
         { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
         {
           contact: {
-            customFields: { some: { value: { contains: search, mode: "insensitive" } } },
+            OR: [
+              { name: { contains: search, mode: "insensitive" } },
+              { email: { contains: search, mode: "insensitive" } },
+              { phone: { contains: search } },
+              // Campos personalizados do CONTATO vinculado.
+              { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
+            ],
           },
         },
       ],
@@ -914,8 +920,14 @@ const MAX_BOARD_COLUMN_LIMIT = 500;
  * TTL do cache-aside do board. Curto o bastante pra manter o quadro
  * "fresco" (novos leads via webhook aparecem em ≤ este intervalo), longo
  * o bastante pra colapsar a rajada de cargas idênticas sob carga.
+ *
+ * 30s (antes 8s): a query base do board custa ~2,4s; com TTL de 8s ela
+ * recomputava a cada 8s sob uso contínuo, gerando picos periódicos de CPU
+ * (oscilação 13→140% em 24/jul/26). `moveDeal` invalida explicitamente, então
+ * a ação manual do operador continua refletindo na hora — o TTL só cobre o
+ * fluxo de leitura/webhook, onde 30s de staleness é aceitável.
  */
-const BOARD_CACHE_TTL_SEC = 8;
+const BOARD_CACHE_TTL_SEC = 30;
 
 /**
  * Critério de ordenação dos cards dentro de cada coluna do board.
