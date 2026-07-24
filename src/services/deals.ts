@@ -8,6 +8,8 @@ import { getOrgSettingBool } from "@/lib/org-settings";
 import { logEvent } from "@/services/activity-log";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
+import { cache } from "@/lib/cache";
+import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
 import {
   buildDealWhereFromFilters,
   type AdvancedDealFilters,
@@ -751,6 +753,20 @@ export async function moveDeal(
       });
     }),
   );
+
+  // Invalida o cache-aside do board pra que a ação manual do operador
+  // reflita de imediato (sem esperar o TTL), evitando "flicker" do card
+  // voltando à coluna de origem. Cobre origem e destino (cross-pipeline).
+  try {
+    const orgId = getOrgIdOrThrow();
+    void invalidateBoardData(orgId, targetPeek.pipelineId);
+    if (fromPipelineId && fromPipelineId !== targetPeek.pipelineId) {
+      void invalidateBoardData(orgId, fromPipelineId);
+    }
+  } catch {
+    /* fora de contexto de org (jobs) — TTL curto cobre a atualização */
+  }
+
   return result;
 }
 
@@ -894,6 +910,12 @@ export async function reopenDeal(id: string) {
 /** Limite default de cards exibidos por coluna no board. */
 const DEFAULT_BOARD_COLUMN_LIMIT = 100;
 const MAX_BOARD_COLUMN_LIMIT = 500;
+/**
+ * TTL do cache-aside do board. Curto o bastante pra manter o quadro
+ * "fresco" (novos leads via webhook aparecem em ≤ este intervalo), longo
+ * o bastante pra colapsar a rajada de cargas idênticas sob carga.
+ */
+const BOARD_CACHE_TTL_SEC = 8;
 
 /**
  * Critério de ordenação dos cards dentro de cada coluna do board.
@@ -1136,7 +1158,48 @@ export async function resolveBoardDealIds(
   return { ids: rows.slice(0, cap).map((r) => r.id), capped };
 }
 
+/**
+ * Board com cache-aside de TTL curto (coalescing).
+ *
+ * `computeBoardData` (abaixo) é a query mais cara do app. Sob rajada de
+ * cargas idênticas (mesmo usuário/funil recarregando via invalidações do
+ * react-query enquanto webhooks criam deals), o `cache.wrap` + stampede
+ * lock colapsam N execuções de ~13s numa só por `variant` a cada
+ * `BOARD_CACHE_TTL_SEC`. Staleness ≤ TTL; `moveDeal` invalida
+ * explicitamente pra que a ação manual do operador não sofra flicker.
+ *
+ * O payload cacheado é serializado em JSON (Datas → ISO), exatamente o
+ * mesmo shape que o handler já emite via `NextResponse.json`.
+ */
 export async function getBoardData(
+  pipelineId: string,
+  visibilityOwnerId?: string | null,
+  statusFilter?: DealStatus | "ALL",
+  advancedFilters?: AdvancedDealFilters,
+  limitOptions?: BoardLimitOptions,
+) {
+  const orgId = getOrgIdOrThrow();
+  const variant = JSON.stringify({
+    v: visibilityOwnerId ?? null,
+    s: statusFilter ?? null,
+    f: advancedFilters ?? null,
+    l: limitOptions ?? null,
+  });
+  return cache.wrap(
+    boardDataKey(orgId, pipelineId, variant),
+    BOARD_CACHE_TTL_SEC,
+    () =>
+      computeBoardData(
+        pipelineId,
+        visibilityOwnerId,
+        statusFilter,
+        advancedFilters,
+        limitOptions,
+      ),
+  );
+}
+
+async function computeBoardData(
   pipelineId: string,
   visibilityOwnerId?: string | null,
   statusFilter?: DealStatus | "ALL",
