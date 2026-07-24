@@ -56,7 +56,7 @@ export async function getPendingDistributions(): Promise<
       contactId: true,
       createdAt: true,
       updatedAt: true,
-      contact: { select: { name: true } },
+      contact: { select: { name: true, phone: true } },
     },
   });
 
@@ -64,7 +64,8 @@ export async function getPendingDistributions(): Promise<
     id: c.id,
     dealId: null,
     contactId: c.contactId,
-    label: c.contact?.name || "Atendimento",
+    // Exibe o TELEFONE (mais útil/discreto na fila); cai pro nome se não houver.
+    label: c.contact?.phone || c.contact?.name || "Atendimento",
     distributionType: null,
     triggerSource: "INBOUND",
     attempts: 0,
