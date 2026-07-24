@@ -2528,6 +2528,14 @@ model Conversation {
   lastInboundAt          DateTime?
   lastMessageDirection   String?
   hasAgentReply          Boolean            @default(false)
+  /// TRUE assim que um agente HUMANO responde a conversa (envio manual pelo
+  /// inbox/anexo/encaminhamento/aprovação de rascunho). Fixo — NÃO reseta
+  /// quando o cliente escreve de novo. Diferente de `hasAgentReply`, que também
+  /// é marcado por automação/IA. Usado para classificar as abas do inbox:
+  /// enquanto FALSE, a conversa fica em "Entrada" (atendimento pendente) mesmo
+  /// já auto-distribuída e com aviso da automação — em vez de cair em
+  /// "Respondidas" como se já tivesse sido atendida por um humano.
+  hasHumanReply          Boolean            @default(false)
   hasError               Boolean            @default(false)
   pinnedNoteId           String?
   /// Mensagem fixada no topo da conversa (banner estilo WhatsApp).
@@ -2607,6 +2615,7 @@ model Conversation {
   @@index([contactId, status])
   @@index([hasError])
   @@index([lastMessageDirection, hasAgentReply])
+  @@index([organizationId, status, assignedToId, hasHumanReply])
   @@index([whatsappCallConsentStatus])
   @@index([organizationId, tabulationId])
   @@map("conversations")
@@ -4398,8 +4407,6 @@ enum BulkOperationType {
   CONTACT_IMPORT
   /// Importação de negócios via arquivo (CSV/XLSX) processada pelo etl-worker.
   DEAL_IMPORT
-  /// Encerra (resolve) múltiplas conversas em massa — processada pelo leads-worker.
-  CONVERSATION_BULK_RESOLVE
 }
 
 enum BulkOperationStatus {
