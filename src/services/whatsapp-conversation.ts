@@ -2,21 +2,16 @@
  * Garantia de Conversation WhatsApp associada a um Contact, com `channelId`
  * já vinculado ao canal Meta Cloud API padrão da organização.
  *
- * Motivação: templates e mensagens só sobem se `Conversation.channelId` aponta
- * pra o canal correto — sem isso, o envio cai no `metaClientFromConfig` sem
- * config e usa o env singleton (que hoje traz credenciais da EduIT), quebrando
- * com "Object with ID '...' does not exist or missing permissions" (Meta code
- * 100/33). Esse leak entre tenants é exatamente o que o comentário na rota
- * `POST /api/conversations/[id]/template` já avisa, mas antes disso a
- * Conversation ficava sem `channelId` sempre que o deal nascia solto pelo
- * pipeline (sem inbound WA prévio).
+ * Uso intencional: envio/abertura explícita de chat e automações que precisam
+ * de conversa antes de mandar mensagem. **Não** chamar ao só criar
+ * contato/deal/lead — isso abria ticket no inbox como se o lead tivesse
+ * escrito.
  *
- * Uso: chame após criar contato/deal com telefone. Idempotente:
- *  - Se já existe Conversation WA pro contato e ela tem `channelId`, no-op.
+ * Idempotente:
+ *  - Se já existe Conversation WA ativa pro contato e ela tem `channelId`, no-op.
  *  - Se existe mas está sem `channelId`, faz UPDATE com o default.
  *  - Se não existe, cria com `channelId` do default.
- *  - Se a org não tem canal Meta CONNECTED, retorna `null` (nada quebra;
- *    quando o canal for provisionado, próximas chamadas populam).
+ *  - Se a org não tem canal Meta CONNECTED, retorna skipped (nada quebra).
  */
 
 import type { Prisma } from "@prisma/client";

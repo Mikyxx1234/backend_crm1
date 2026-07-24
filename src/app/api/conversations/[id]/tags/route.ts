@@ -24,6 +24,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { notifyTagAdded } from "@/services/automation-triggers";
 import { createDealEvent } from "@/services/deals";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -61,9 +62,15 @@ async function applyTagToTargets(
 ) {
   let appliedToContact = false;
   let appliedToDeal: string | null = null;
+  let isNewOnContact = false;
+  let isNewOnDeal = false;
 
   if (targets.contactId) {
     if (action === "add") {
+      const existedOnContact = await prisma.tagOnContact.findUnique({
+        where: { contactId_tagId: { contactId: targets.contactId, tagId } },
+      });
+      isNewOnContact = !existedOnContact;
       await prisma.tagOnContact.upsert({
         where: { contactId_tagId: { contactId: targets.contactId, tagId } },
         update: {},
@@ -79,6 +86,10 @@ async function applyTagToTargets(
 
   if (targets.dealId) {
     if (action === "add") {
+      const existedOnDeal = await prisma.tagOnDeal.findUnique({
+        where: { dealId_tagId: { dealId: targets.dealId, tagId } },
+      });
+      isNewOnDeal = !existedOnDeal;
       await prisma.tagOnDeal.upsert({
         where: { dealId_tagId: { dealId: targets.dealId, tagId } },
         update: {},
@@ -100,6 +111,18 @@ async function applyTagToTargets(
       tagName: tag?.name ?? tagId,
       tagColor: tag?.color ?? "",
     }).catch(() => {});
+  }
+
+  // Dispara a automação `tag_added` uma única vez, só quando a tag foi
+  // efetivamente nova em pelo menos um dos alvos (não re-aplicada).
+  if (action === "add" && (isNewOnContact || isNewOnDeal)) {
+    const tag = await prisma.tag.findUnique({ where: { id: tagId }, select: { name: true } });
+    void notifyTagAdded({
+      contactId: targets.contactId,
+      dealId: targets.dealId,
+      tagId,
+      tagName: tag?.name ?? tagId,
+    });
   }
 
   return { appliedToContact, appliedToDeal };

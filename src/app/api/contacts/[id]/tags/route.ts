@@ -6,6 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
+import { notifyTagAdded } from "@/services/automation-triggers";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -72,6 +73,11 @@ export async function POST(request: Request, ctx: Ctx) {
           contactId,
           newValue: tag?.name ?? resolvedTagId,
           meta: { tagId: resolvedTagId, tagName: tag?.name ?? null },
+        });
+        void notifyTagAdded({
+          contactId,
+          tagId: resolvedTagId,
+          tagName: tag?.name ?? tagName,
         });
       }
 

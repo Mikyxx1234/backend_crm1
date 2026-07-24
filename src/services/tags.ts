@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { notifyTagAdded } from "@/services/automation-triggers";
 
 export type CreateTagInput = {
   name: string;
@@ -26,12 +27,14 @@ export async function createTag(data: CreateTagInput) {
 }
 
 export async function addTagToContact(contactId: string, tagId: string) {
-  return prisma.tagOnContact.create({
+  const link = await prisma.tagOnContact.create({
     data: { contactId, tagId },
     include: {
       tag: { select: { id: true, name: true, color: true } },
     },
   });
+  void notifyTagAdded({ contactId, tagId, tagName: link.tag.name });
+  return link;
 }
 
 export async function removeTagFromContact(contactId: string, tagId: string) {
