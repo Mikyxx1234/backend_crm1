@@ -13,6 +13,7 @@
 
 import { Prisma } from "@prisma/client";
 
+import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow, getOrgIdOrNull } from "@/lib/request-context";
@@ -83,6 +84,16 @@ type DepartmentScope =
 async function resolveDepartmentScope(
   input: Pick<ExecuteDistributionInput, "conversationId" | "departmentId">,
 ): Promise<DepartmentScope> {
+  // Opção da org (default DESLIGADO): só respeita o departamento da conversa
+  // quando ligado. Desligado = distribuição CLÁSSICA org-wide (todos os
+  // elegíveis), ignorando departamento — evita que conversas sem roteamento
+  // fiquem presas na fila. Ligue quando existirem regras claras de roteamento.
+  const respectDepartment = await getOrgSettingBool(
+    "distribution.respectDepartment",
+    false,
+  );
+  if (!respectDepartment) return { mode: "org-wide", departmentId: null };
+
   // Feature em uso? Só quando ao menos 1 departamento opta por distribuição.
   const enabledCount = await prisma.department.count({
     where: { distributionEnabled: true },
@@ -98,13 +109,17 @@ async function resolveDepartmentScope(
     });
     departmentId = conv?.departmentId ?? null;
   }
-  if (!departmentId) return { mode: "blocked", departmentId: null };
+  // Conversa SEM departamento identificado → distribui para todos os elegíveis
+  // (comportamento clássico), em vez de bloquear na fila.
+  if (!departmentId) return { mode: "org-wide", departmentId: null };
 
   const dept = await prisma.department.findUnique({
     where: { id: departmentId },
     select: { distributionEnabled: true },
   });
   if (dept?.distributionEnabled) return { mode: "department", departmentId };
+  // Departamento identificado mas que optou por NÃO distribuir automaticamente
+  // → respeita o opt-out: fica na fila (manual).
   return { mode: "blocked", departmentId };
 }
 
