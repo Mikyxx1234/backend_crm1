@@ -522,7 +522,9 @@ export class MetaWhatsAppClient {
   ): Promise<{ messages: Array<{ id: string }> }> {
     const mediaPayload: Record<string, string | boolean> = { id: mediaId };
     if (caption) mediaPayload.caption = caption;
-    if (filename) mediaPayload.filename = filename;
+    // Meta Cloud API: `filename` só é válido em `document`. Em image/video/audio
+    // devolve (#100) Unexpected key "filename" on param "<type>".
+    if (type === "document" && filename) mediaPayload.filename = filename;
     if (type === "audio" && voice) mediaPayload.voice = true;
 
     const dest = MetaWhatsAppClient.recipientFields(to, recipient);

@@ -1779,7 +1779,17 @@ async function executeStep(
         const fName = filename || resolvedFileName;
         const metaMediaId = await mediaMetaClient.uploadMedia(buffer, mimeType, fName);
         const mType = mediaType as "image" | "audio" | "video" | "document";
-        sendResult = await mediaMetaClient.sendMediaById(to, metaMediaId, mType, caption || undefined, fName, false, recipient);
+        // filename só para document — image/video/audio a Meta rejeita (#100).
+        const sendFileName = mType === "document" ? fName : undefined;
+        sendResult = await mediaMetaClient.sendMediaById(
+          to,
+          metaMediaId,
+          mType,
+          caption || undefined,
+          sendFileName,
+          false,
+          recipient,
+        );
         displayContent = caption || fName || `[${mediaType}]`;
       } else {
         switch (mediaType) {
