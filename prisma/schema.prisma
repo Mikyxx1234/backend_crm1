@@ -4838,6 +4838,32 @@ model StudentAcademicRecord {
   @@map("student_academic_records")
 }
 
+/// Preferências pessoais do agente sobre os atalhos "/" (Mensagens prontas):
+/// marcação de favorito e contador de uso por item. Escopo POR AGENTE
+/// (`userId`), isolado por org. `itemKind` casa com o discriminador do
+/// frontend ("internal-template" | "quick-reply" | "meta-template") e
+/// `itemId` é o id usado pelo menu (para meta-template = metaTemplateId).
+/// Sem FK para o item de origem: os ids vêm de tabelas distintas
+/// (message_templates, quick_replies, whatsapp_template_configs) e linhas
+/// órfãs são ignoradas na leitura (o menu só mostra o que existe hoje).
+model AgentMessageShortcut {
+  id             String    @id @default(cuid())
+  organizationId String
+  userId         String
+  itemKind       String
+  itemId         String
+  favorite       Boolean   @default(false)
+  useCount       Int       @default(0)
+  lastUsedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([userId, itemKind, itemId])
+  @@index([organizationId])
+  @@index([userId])
+  @@map("agent_message_shortcuts")
+}
+
 /// Histórico de importações de dados acadêmicos (auditoria dos uploads).
 model AcademicImportHistory {
   id             String   @id @default(cuid())
