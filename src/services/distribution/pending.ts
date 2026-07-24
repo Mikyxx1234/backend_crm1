@@ -71,12 +71,14 @@ export async function getPendingDistributions(): Promise<
   const contactMap = new Map(contacts.map((c) => [c.id, c.name]));
 
   return items.map((i) => {
-    let label = "Lead";
+    // A fila representa ATENDIMENTOS aguardando responsável — o rótulo prioriza
+    // o nome do contato (a pessoa em atendimento), não o título do negócio.
+    let label = "Atendimento";
     if (i.dealId) {
       const d = dealMap.get(i.dealId);
-      label = d?.title || d?.contact?.name || "Negócio";
+      label = d?.contact?.name || d?.title || "Atendimento";
     } else if (i.contactId) {
-      label = contactMap.get(i.contactId) || "Contato";
+      label = contactMap.get(i.contactId) || "Atendimento";
     }
     return {
       id: i.id,
