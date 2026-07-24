@@ -48,9 +48,11 @@ const nextConfig: NextConfig = {
     ignoreDuringBuilds: true,
   },
   experimental: {
+    // Uploads de mídia até 16MB + overhead multipart.
     serverActions: {
-      bodySizeLimit: "2mb",
+      bodySizeLimit: "20mb",
     },
+    middlewareClientMaxBodySize: "20mb",
   },
   serverExternalPackages: [
     "bullmq",
