@@ -1,6 +1,8 @@
 import { Queue, type JobsOptions } from "bullmq";
 import IORedis from "ioredis";
 
+import { debugInfo } from "@/lib/debug-log";
+
 export const AUTOMATION_JOBS_QUEUE_NAME = "automation-jobs" as const;
 export const BAILEYS_OUTBOUND_QUEUE_NAME = "baileys-outbound" as const;
 export const BAILEYS_CONTROL_QUEUE_NAME = "baileys-control" as const;
@@ -253,7 +255,7 @@ function getQueue(): Queue<AutomationJobPayload> | null {
 
 export async function enqueueAutomationJob(payload: AutomationJobPayload) {
   const workerMode = process.env.AUTOMATION_WORKER_MODE?.trim().toLowerCase();
-  console.info(`[queue] enqueueAutomationJob — automationId=${payload.automationId} workerMode=${workerMode ?? "(não definido)"} contactId=${payload.context.contactId ?? "—"} event=${payload.context.event}`);
+  debugInfo(`[queue] enqueueAutomationJob — automationId=${payload.automationId} workerMode=${workerMode ?? "(não definido)"} contactId=${payload.context.contactId ?? "—"} event=${payload.context.event}`);
 
   if (workerMode === "external") {
     const queue = getQueue();
@@ -273,11 +275,11 @@ export async function enqueueAutomationJob(payload: AutomationJobPayload) {
     });
   }
 
-  console.info(`[queue] Executando automação ${payload.automationId} inline (sem worker externo)...`);
+  debugInfo(`[queue] Executando automação ${payload.automationId} inline (sem worker externo)...`);
   const startMs = Date.now();
   try {
     await executeAutomationDirect(payload);
-    console.info(`[queue] Automação ${payload.automationId} executada inline OK (${Date.now() - startMs}ms)`);
+    debugInfo(`[queue] Automação ${payload.automationId} executada inline OK (${Date.now() - startMs}ms)`);
   } catch (err) {
     console.error(`[queue] ✗ Automação ${payload.automationId} FALHOU inline (${Date.now() - startMs}ms):`, err);
   }
