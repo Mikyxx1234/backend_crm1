@@ -62,7 +62,34 @@ export async function GET(req: Request, context: RouteContext) {
       const cursor = parseCursor(sp.get("cursor"));
       const types = parseCsv(sp.get("type"));
 
-      const where: Prisma.ActivityEventWhereInput = { conversationId };
+      // A timeline da conversa mostra eventos ligados diretamente a ela
+      // (conversationId) E as mudancas de etapa/status do(s) negocio(s) do
+      // contato. Estas ultimas sao logadas como eventos de DEAL (com dealId
+      // e SEM conversationId) por createDealEvent — por isso a "troca de
+      // fase do funil" nao aparecia aqui. Resolvemos os deals do contato e
+      // incluimos esses tipos explicitamente (paridade com a timeline do
+      // negocio, que ja puxa eventos contact-scoped).
+      const conv = await prisma.conversation.findUnique({
+        where: { id: conversationId },
+        select: { contactId: true },
+      });
+      let dealIds: string[] = [];
+      if (conv?.contactId) {
+        const deals = await prisma.deal.findMany({
+          where: { contactId: conv.contactId },
+          select: { id: true },
+        });
+        dealIds = deals.map((d) => d.id);
+      }
+
+      const DEAL_SCOPED_TYPES = ["STAGE_CHANGED", "STATUS_CHANGED"];
+
+      const scopeOr: Prisma.ActivityEventWhereInput[] = [{ conversationId }];
+      if (dealIds.length > 0) {
+        scopeOr.push({ dealId: { in: dealIds }, type: { in: DEAL_SCOPED_TYPES } });
+      }
+
+      const where: Prisma.ActivityEventWhereInput = { OR: scopeOr };
       if (types) where.type = { in: types };
 
       // Cursor composto identico ao /api/activity-feed — desempate estavel
