@@ -1259,7 +1259,7 @@ async function executeStep(
           }
         } else {
           const customField = await prisma.customField.findFirst({
-            where: { entity: "deal", name: field },
+            where: { entity: "deal", OR: [{ name: field }, { id: field }] },
             select: { id: true },
           });
           if (!customField) {
@@ -1294,7 +1294,7 @@ async function executeStep(
           await prisma.contact.update({ where: { id: targetContactId }, data });
         } else {
           const customField = await prisma.customField.findFirst({
-            where: { entity: "contact", name: field },
+            where: { entity: "contact", OR: [{ name: field }, { id: field }] },
             select: { id: true },
           });
           if (!customField) {
