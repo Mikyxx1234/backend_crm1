@@ -105,17 +105,34 @@ jobs:
 
       - name: Trigger Easypanel redeploy
         if: steps.env.outputs.WEBHOOK != ''
+        timeout-minutes: 5
         run: |
-          echo "Chamando webhook do Easypanel (com retry)..."
+          echo "Chamando webhook do Easypanel (fire-and-forget, com retry)..."
+          WEBHOOK="${{ steps.env.outputs.WEBHOOK }}"
           code=000
           for i in 1 2 3 4 5; do
-            code=$(curl -sS -o /dev/null -w "%{http_code}" -X POST "${{ steps.env.outputs.WEBHOOK }}" \
-              -H "User-Agent: github-actions/backend_crm1" || echo "000")
-            echo "Tentativa $i -> HTTP $code"
+            # --connect-timeout: falha rapido se o host nao responder.
+            # --max-time: NUNCA pendura — o EasyPanel mantem a conexao aberta
+            #   transmitindo o build, entao limitamos o tempo de leitura.
+            out=$(curl -sS -o /dev/null \
+              -w "%{http_code} %{exitcode} %{time_connect}" \
+              --connect-timeout 15 --max-time 45 \
+              -X POST "$WEBHOOK" \
+              -H "User-Agent: github-actions/backend_crm1") || true
+            code=$(printf '%s' "$out" | awk '{print $1}')
+            ex=$(printf '%s' "$out" | awk '{print $2}')
+            tconn=$(printf '%s' "$out" | awk '{print $3}')
+            echo "Tentativa $i -> HTTP ${code:-000} (curl exit ${ex:-?}, connect ${tconn:-?}s)"
             case "$code" in
               2*) echo "Webhook aceito pelo Easypanel (HTTP $code)."; exit 0 ;;
             esac
+            # Timeout de LEITURA apos conectar (exit 28 + conexao estabelecida):
+            # o EasyPanel ja RECEBEU o POST e faz o redeploy de forma assincrona.
+            if [ "$ex" = "28" ] && [ -n "$tconn" ] && [ "$tconn" != "0.000000" ] && [ "$tconn" != "0" ]; then
+              echo "Timeout de leitura apos envio — redeploy disparado (assincrono). OK."
+              exit 0
+            fi
             sleep 5
           done
-          echo "ERRO: webhook do Easypanel falhou apos 5 tentativas (ultimo HTTP $code)."
+          echo "ERRO: webhook do Easypanel falhou apos 5 tentativas (ultimo HTTP ${code:-000})."
           exit 1
