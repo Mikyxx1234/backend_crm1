@@ -734,6 +734,7 @@ export async function POST(request: Request, context: RouteContext) {
           data: {
             lastMessageDirection: "out",
             hasAgentReply: true,
+            hasHumanReply: true,
             ...(sendRes.failed ? { hasError: true } : { hasError: false }),
           },
         });
@@ -873,6 +874,7 @@ export async function POST(request: Request, context: RouteContext) {
         data: {
           lastMessageDirection: "out",
           hasAgentReply: true,
+          hasHumanReply: true,
           ...(sendFailed ? { hasError: true } : { hasError: false }),
         },
       });

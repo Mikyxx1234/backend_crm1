@@ -214,26 +214,34 @@ function buildConversationSourceCondition(
 function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
   switch (tab) {
     case "entrada":
-      // "Entrada" = NÃO iniciados por humanos: conversa aberta SEM responsável
-      // humano (`assignedToId = null`). Automação/IA pode já ter interagido,
-      // mas enquanto nenhum humano assume, permanece em Entrada. Casa 1:1 com
-      // a fila da Distribuição (atendimentos abertos sem responsável).
-      return { status: "OPEN", assignedToId: null, hasError: false };
+      // "Entrada" (= "Atendimento" no vocabulário do time) = o cliente mandou
+      // mensagem e AINDA NÃO recebeu nenhuma resposta HUMANA (`hasHumanReply =
+      // false`). Cobre tanto os novos sem responsável quanto os já
+      // auto-distribuídos em que só a automação/IA mandou o aviso — antes esses
+      // caíam em "Respondidas" (pareciam atendidos) e se perdiam. Automação/IA
+      // interagir não tira daqui; só a resposta de um humano.
+      return { status: "OPEN", hasHumanReply: false, hasError: false };
     case "esperando":
-      // "Aguardando" = já tem responsável humano e é a vez dele responder
-      // (cliente falou por último). Antes usava `hasAgentReply`, que era
-      // marcado também por automação/IA e não refletia atribuição humana.
+      // "Aguardando" = já teve atendimento humano e o cliente falou por último
+      // (`lastMessageDirection = "in"`) — é a vez do consultor responder. O
+      // guard `hasHumanReply` só evita que conversas sem nenhum atendimento
+      // humano (que agora ficam em "Entrada") apareçam aqui.
       return {
         status: "OPEN",
         assignedToId: { not: null },
+        hasHumanReply: true,
         lastMessageDirection: "in",
         hasError: false,
       };
     case "respondidas":
-      // "Respondidas" = tem responsável e já respondeu (aguardando o cliente).
+      // "Respondidas" = já teve atendimento humano e nós falamos por último
+      // (`lastMessageDirection = "out"`), aguardando o cliente. `hasHumanReply`
+      // garante que o aviso automático da distribuição (sem resposta humana)
+      // não caia aqui — esses vão para "Entrada".
       return {
         status: "OPEN",
         assignedToId: { not: null },
+        hasHumanReply: true,
         lastMessageDirection: "out",
         hasError: false,
       };

@@ -1,17 +1,18 @@
 /**
- * Fila atual de cada responsável = nº de CONVERSAS aguardando a resposta DELE:
- * conversas OPEN ATRIBUÍDAS ao consultor em que o cliente falou por último
- * (`lastMessageDirection = "in"`). É o MESMO recorte da aba "Aguardando" do
- * inbox — o que mantém a "Fila" da Distribuição consistente com o que o
- * operador vê no inbox.
+ * Fila atual de cada responsável = nº de CONVERSAS que ainda são trabalho
+ * pendente DELE: conversas OPEN ATRIBUÍDAS ao consultor em que é a vez do
+ * consultor responder — ou o cliente falou por último (`lastMessageDirection =
+ * "in"`), OU nenhum humano respondeu ainda (`hasHumanReply = false`, caso das
+ * auto-distribuídas em que só a automação/IA mandou o aviso). No inbox isso
+ * corresponde às abas "Entrada" (sem resposta humana) + "Aguardando" (humano
+ * atendeu e o cliente falou por último) das conversas atribuídas a ele.
  *
- * NÃO usamos mais `hasAgentReply = false`: esse campo é marcado também por
- * AUTOMAÇÃO/IA, então uma conversa distribuída em que o bot respondeu deixava
- * de contar na fila do humano (contagem de distribuídos errada). O que importa
- * para "fila do consultor" é: está atribuída a ele E é a vez dele responder.
+ * NÃO usamos `hasAgentReply`: esse campo é marcado também por AUTOMAÇÃO/IA.
+ * Usamos `hasHumanReply` (marcado só por envio humano) para saber se é a vez
+ * do consultor.
  *
- * NÃO contamos conversas paradas aguardando o CLIENTE responder (essas ficam
- * com `lastMessageDirection = "out"`) — não são trabalho pendente do consultor.
+ * NÃO contamos conversas em que o humano já respondeu e aguardam o CLIENTE
+ * (aba "Respondidas": `lastMessageDirection = "out"` + `hasHumanReply = true`).
  *
  * `Conversation` é org-scoped, então o filtro de organização é injetado pela
  * Prisma Extension. Uma única `groupBy` (sem N+1).
@@ -34,7 +35,7 @@ export async function getQueueCounts(
     where: {
       status: "OPEN",
       assignedToId: { in: userIds },
-      lastMessageDirection: "in",
+      OR: [{ lastMessageDirection: "in" }, { hasHumanReply: false }],
     },
     _count: { _all: true },
   });
