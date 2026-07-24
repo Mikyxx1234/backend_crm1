@@ -6,7 +6,6 @@ import { getVisibilityFilter } from "@/lib/visibility";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, getDeals, isValidDealStatus } from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
-import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 
 function parseIntParam(v: string | null, fallback: number) {
   if (v === null || v === "") return fallback;
@@ -202,33 +201,8 @@ export async function POST(request: Request) {
         data: { stageId: b.stageId, toStageId: b.stageId },
       }).catch(() => {});
 
-      // Deal criado pelo pipeline com contato que tem telefone: garante que
-      // exista uma Conversation WhatsApp já com `channelId` correto. Sem
-      // isso, o painel do deal cria conversa "solta" no primeiro clique de
-      // "abrir chat" (via /api/conversations/create com skipSend) e o envio
-      // de template cai no env singleton — leak entre orgs.
-      // Await intencional: precisa rodar dentro do RequestContext ativo
-      // (`runWithApiUserContext`) pra que a Prisma extension escope pela org.
-      // Erros são apenas logados — não bloqueiam o 201 do deal, já que a
-      // conversa é conveniência, não pré-requisito.
-      if (deal.contactId) {
-        try {
-          const res = await ensureWhatsAppConversationForContact(deal.contactId);
-          if (
-            res.status === "created" ||
-            res.status === "backfilled_channel"
-          ) {
-            console.log(
-              `[deals.create] conversation ${res.status} conv=${res.conversationId} channel=${res.channelId} deal=${deal.id}`,
-            );
-          }
-        } catch (e) {
-          console.error(
-            "[deals.create] ensureWhatsAppConversationForContact falhou",
-            e,
-          );
-        }
-      }
+      // Não abre conversa WhatsApp automaticamente ao criar deal/contato.
+      // Sessão só nasce em inbound real, envio explícito ou "abrir chat".
 
       return NextResponse.json(deal, { status: 201 });
     } catch (err: unknown) {
