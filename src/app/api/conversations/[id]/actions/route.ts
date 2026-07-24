@@ -222,7 +222,10 @@ export async function POST(request: Request, context: RouteContext) {
               from: prev?.assignedTo ?? null,
               to: result.conversation.assignedTo ?? null,
             });
-            void logEvent({
+            // AWAIT (nao fire-and-forget): garante que a linha exista ANTES
+            // da resposta, senao o refetch imediato do chatter perde o
+            // evento (mesma corrida do resolve/reopen).
+            await logEvent({
               type: "ASSIGNEE_CHANGED",
               entityType: "CONVERSATION",
               entityId: id,
@@ -237,6 +240,19 @@ export async function POST(request: Request, context: RouteContext) {
                 toUserId: result.conversation.assignedToId ?? null,
               },
             });
+            // Empurra o evento pro chatter em tempo real (mesma via do
+            // resolve/reopen): atualiza a timeline mesmo quando a acao veio
+            // de outro agente.
+            try {
+              sseBus.publish("conversation_timeline_updated", {
+                organizationId: (session.user as { organizationId: string | null })
+                  .organizationId,
+                conversationId: id,
+                type: "ASSIGNEE_CHANGED",
+              });
+            } catch {
+              /* best-effort */
+            }
           }
         }
 
@@ -298,7 +314,9 @@ export async function POST(request: Request, context: RouteContext) {
               where: { id },
               data: { departmentId: newDeptId },
             });
-            void logEvent({
+            // AWAIT (nao fire-and-forget): garante a linha antes da resposta
+            // para o refetch imediato do chatter enxergar o evento.
+            await logEvent({
               type: "CONVERSATION_DEPARTMENT_CHANGED",
               entityType: "CONVERSATION",
               entityId: id,
@@ -311,8 +329,21 @@ export async function POST(request: Request, context: RouteContext) {
               meta: {
                 fromDepartmentId: prevConv.departmentId ?? null,
                 toDepartmentId: newDeptId,
+                fromDepartmentName: prevConv.department?.name ?? null,
+                toDepartmentName: newDept?.name ?? null,
               },
             });
+            // Empurra o evento pro chatter em tempo real.
+            try {
+              sseBus.publish("conversation_timeline_updated", {
+                organizationId: (session.user as { organizationId: string | null })
+                  .organizationId,
+                conversationId: id,
+                type: "CONVERSATION_DEPARTMENT_CHANGED",
+              });
+            } catch {
+              /* best-effort */
+            }
           }
 
           // Aciona a Distribuição Inteligente escopada ao departamento-alvo:
