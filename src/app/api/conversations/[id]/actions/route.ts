@@ -15,6 +15,8 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { fireTrigger } from "@/services/automation-triggers";
 import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
+import { sseBus } from "@/lib/sse-bus";
+import { executeDistribution } from "@/services/distribution";
 import { assertLeafInDepartment, getAncestors } from "@/services/tabulations";
 
 async function logDealEventsForConversationContact(
@@ -44,7 +46,7 @@ async function logDealEventsForConversationContact(
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-const VALID_ACTIONS = new Set(["resolve", "reopen", "toggle_status", "assign"]);
+const VALID_ACTIONS = new Set(["resolve", "reopen", "toggle_status", "assign", "transfer"]);
 const VALID_STATUSES = new Set(["OPEN", "RESOLVED", "PENDING", "SNOOZED"]);
 
 function actionToDbStatus(action: string, rawStatus?: string): ConversationStatus | null {
@@ -75,7 +77,7 @@ export async function POST(request: Request, context: RouteContext) {
 
       if (!VALID_ACTIONS.has(action)) {
         return NextResponse.json(
-          { message: "action inválida (resolve, reopen, toggle_status, assign)." },
+          { message: "action inválida (resolve, reopen, toggle_status, assign, transfer)." },
           { status: 400 }
         );
       }
@@ -151,6 +153,209 @@ export async function POST(request: Request, context: RouteContext) {
             },
           }
         );
+      }
+
+      // Transferência: encaminha a conversa para um AGENTE (assignedToId) e/ou
+      // um DEPARTAMENTO (departmentId). Ao definir departamento, aciona a
+      // Distribuição Inteligente escopada a esse departamento — um agente
+      // elegível do departamento recebe a conversa automaticamente.
+      if (action === "transfer") {
+        const gate = await requireConversationAccess(session, id);
+        if (gate) return gate;
+
+        const hasAgent = "assignedToId" in b;
+        const hasDept = "departmentId" in b;
+        if (!hasAgent && !hasDept) {
+          return NextResponse.json(
+            { message: "Informe assignedToId e/ou departmentId." },
+            { status: 400 },
+          );
+        }
+
+        const user = session.user as {
+          id: string;
+          role: "ADMIN" | "MANAGER" | "MEMBER";
+        };
+
+        // --- Transferência para AGENTE (reusa o fluxo de assign) ---
+        if (hasAgent) {
+          const raw = b.assignedToId;
+          let newAssigneeId: string | null;
+          if (raw === null) {
+            newAssigneeId = null;
+          } else if (typeof raw === "string" && raw.trim() !== "") {
+            newAssigneeId = raw.trim();
+          } else {
+            return NextResponse.json(
+              { message: "assignedToId inválido." },
+              { status: 400 },
+            );
+          }
+          const prev = await prisma.conversation.findUnique({
+            where: { id },
+            select: {
+              assignedToId: true,
+              assignedTo: { select: { id: true, name: true } },
+            },
+          });
+          const result = await assignConversationAssignedTo(id, newAssigneeId, user);
+          if (!result.ok) {
+            const status =
+              result.code === "NOT_FOUND"
+                ? 404
+                : result.code === "USER_NOT_FOUND"
+                  ? 400
+                  : 403;
+            const msg =
+              result.code === "USER_NOT_FOUND"
+                ? "Usuário não encontrado."
+                : result.code === "NOT_FOUND"
+                  ? "Conversa não encontrada."
+                  : "Sem permissão para esta atribuição.";
+            return NextResponse.json({ message: msg }, { status });
+          }
+          if (
+            (prev?.assignedToId ?? null) !==
+            (result.conversation.assignedToId ?? null)
+          ) {
+            await logDealEventsForConversationContact(id, user.id, "ASSIGNEE_CHANGED", {
+              from: prev?.assignedTo ?? null,
+              to: result.conversation.assignedTo ?? null,
+            });
+            void logEvent({
+              type: "ASSIGNEE_CHANGED",
+              entityType: "CONVERSATION",
+              entityId: id,
+              entityLabel: result.conversation.externalId ?? null,
+              conversationId: id,
+              contactId: result.conversation.contactId ?? null,
+              field: "assignedTo",
+              oldValue: prev?.assignedTo?.name ?? null,
+              newValue: result.conversation.assignedTo?.name ?? null,
+              meta: {
+                fromUserId: prev?.assignedToId ?? null,
+                toUserId: result.conversation.assignedToId ?? null,
+              },
+            });
+          }
+        }
+
+        // --- Transferência para DEPARTAMENTO (define departmentId + aciona a
+        // Distribuição Inteligente escopada ao departamento) ---
+        let distribution: {
+          success: boolean;
+          reason: string;
+          selectedUserId: string | null;
+          selectedUserName: string | null;
+        } | null = null;
+        if (hasDept) {
+          const rawDept = b.departmentId;
+          let newDeptId: string | null;
+          if (rawDept === null) {
+            newDeptId = null;
+          } else if (typeof rawDept === "string" && rawDept.trim() !== "") {
+            newDeptId = rawDept.trim();
+          } else {
+            return NextResponse.json(
+              { message: "departmentId inválido." },
+              { status: 400 },
+            );
+          }
+
+          const prevConv = await prisma.conversation.findUnique({
+            where: { id },
+            select: {
+              contactId: true,
+              externalId: true,
+              departmentId: true,
+              department: { select: { id: true, name: true } },
+            },
+          });
+          if (!prevConv) {
+            return NextResponse.json(
+              { message: "Conversa não encontrada." },
+              { status: 404 },
+            );
+          }
+
+          let newDept: { id: string; name: string } | null = null;
+          if (newDeptId) {
+            // findUnique é auto-escopado por organização (extension do prisma).
+            newDept = await prisma.department.findUnique({
+              where: { id: newDeptId },
+              select: { id: true, name: true },
+            });
+            if (!newDept) {
+              return NextResponse.json(
+                { message: "Departamento não encontrado." },
+                { status: 400 },
+              );
+            }
+          }
+
+          if ((prevConv.departmentId ?? null) !== newDeptId) {
+            await prisma.conversation.update({
+              where: { id },
+              data: { departmentId: newDeptId },
+            });
+            void logEvent({
+              type: "CONVERSATION_DEPARTMENT_CHANGED",
+              entityType: "CONVERSATION",
+              entityId: id,
+              entityLabel: prevConv.externalId ?? null,
+              conversationId: id,
+              contactId: prevConv.contactId ?? null,
+              field: "department",
+              oldValue: prevConv.department?.name ?? null,
+              newValue: newDept?.name ?? null,
+              meta: {
+                fromDepartmentId: prevConv.departmentId ?? null,
+                toDepartmentId: newDeptId,
+              },
+            });
+          }
+
+          // Aciona a Distribuição Inteligente escopada ao departamento-alvo:
+          // um agente elegível do departamento recebe a conversa. Só quando há
+          // departamento (transferir p/ "sem departamento" apenas desvincula).
+          if (newDeptId) {
+            try {
+              const result = await executeDistribution({
+                conversationId: id,
+                contactId: prevConv.contactId ?? null,
+                departmentId: newDeptId,
+                triggerSource: "MANUAL",
+              });
+              distribution = {
+                success: result.success,
+                reason: result.reason,
+                selectedUserId: result.selectedUserId,
+                selectedUserName: result.selectedUserName,
+              };
+            } catch (e) {
+              console.error("[transfer] falha ao acionar distribuição", e);
+            }
+          }
+        }
+
+        const updated = await prisma.conversation.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            status: true,
+            externalId: true,
+            assignedToId: true,
+            assignedTo: {
+              select: { id: true, name: true, email: true, avatarUrl: true },
+            },
+            departmentId: true,
+            department: {
+              select: { id: true, name: true, requireTabulationOnClose: true },
+            },
+          },
+        });
+
+        return NextResponse.json({ conversation: updated, distribution });
       }
 
       const gate = await requireConversationAccess(session, id);
@@ -251,7 +456,9 @@ export async function POST(request: Request, context: RouteContext) {
 
         const uid = (session.user as { id: string }).id;
 
-        void logEvent({
+        // AWAIT: o chatter da conversa antiga so ve o CONVERSATION_REOPENED
+        // no refetch imediato se a linha ja existir (mesma corrida do close).
+        await logEvent({
           type: "CONVERSATION_REOPENED",
           entityType: "CONVERSATION",
           entityId: id,
@@ -263,6 +470,15 @@ export async function POST(request: Request, context: RouteContext) {
           newValue: "OPEN",
           meta: { action, newConversationId: created.id, newNumber: created.number },
         });
+        try {
+          sseBus.publish("conversation_timeline_updated", {
+            organizationId: conv.organizationId,
+            conversationId: id,
+            type: "CONVERSATION_REOPENED",
+          });
+        } catch {
+          /* best-effort */
+        }
         if (!alreadyActive) {
           void logEvent({
             type: "CONVERSATION_CREATED",
@@ -425,7 +641,12 @@ export async function POST(request: Request, context: RouteContext) {
         await logDealEventsForConversationContact(id, uid, convEventType, statusMeta);
 
         // Evento da própria conversa (sem dealId) — registra no feed global.
-        void logEvent({
+        // AWAIT (nao fire-and-forget): garante que a linha exista ANTES da
+        // resposta. O chatter (ConversationTimelineTab) e' atualizado via
+        // invalidacao de ["conversation-timeline", id] no onSuccess da
+        // mutation; com `void` havia corrida — a resposta voltava antes do
+        // insert e o refetch imediato nao encontrava o CONVERSATION_CLOSED.
+        await logEvent({
           type: convEventType,
           entityType: "CONVERSATION",
           entityId: id,
@@ -437,6 +658,19 @@ export async function POST(request: Request, context: RouteContext) {
           newValue: updated.status,
           meta: { action, ...(tabulationId ? { tabulationId } : {}) },
         });
+
+        // Empurra o evento pro chatter em tempo real (mesma via do
+        // new_message). Cobre tambem encerramentos por outro agente/automacao,
+        // quando nao ha mutation local pra invalidar a query.
+        try {
+          sseBus.publish("conversation_timeline_updated", {
+            organizationId: conv.organizationId,
+            conversationId: id,
+            type: convEventType,
+          });
+        } catch {
+          /* best-effort */
+        }
       }
 
       // Trigger de automacao conversation_tabulated (soh quando o
