@@ -50,6 +50,24 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
   return undefined;
 }
 
+function readStringArray(obj: Record<string, unknown>, key: string): string[] {
+  const v = obj[key];
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === "string" && x.trim() !== "");
+}
+
+/**
+ * Estágios-alvo de um gatilho. Suporta multi-seleção (`stageIds: string[]`)
+ * mantendo compatibilidade com o formato antigo de estágio único (`stageId`).
+ * Retorna [] quando o operador não restringiu por estágio ("Qualquer estágio").
+ */
+function readTriggerStageIds(cfg: Record<string, unknown>): string[] {
+  const many = readStringArray(cfg, "stageIds");
+  if (many.length > 0) return many;
+  const one = readString(cfg, "stageId");
+  return one ? [one] : [];
+}
+
 const STEP_ID_REF_KEYS = new Set([
   "nextStepId",
   "elseGotoStepId",
@@ -98,12 +116,27 @@ export function evaluateTrigger(
       // (funil/pipeline) salvam a etapa-alvo em `stageId`. Sem esse alias,
       // a automação "quando entra na fase X" configurada por essas telas
       // não casava (o matcher só olhava `toStageId`).
-      const toStageId = readString(cfg, "toStageId") ?? readString(cfg, "stageId");
-      const fromStageId = readString(cfg, "fromStageId");
+      // Multi-seleção: aceita `toStageIds`/`stageIds` (arrays) além do
+      // formato antigo de estágio único (`toStageId`/`stageId`).
+      const toStages = (() => {
+        const arr = [
+          ...readStringArray(cfg, "toStageIds"),
+          ...readStringArray(cfg, "stageIds"),
+        ];
+        if (arr.length > 0) return arr;
+        const single = readString(cfg, "toStageId") ?? readString(cfg, "stageId");
+        return single ? [single] : [];
+      })();
+      const fromStages = (() => {
+        const arr = readStringArray(cfg, "fromStageIds");
+        if (arr.length > 0) return arr;
+        const single = readString(cfg, "fromStageId");
+        return single ? [single] : [];
+      })();
       const dataTo = readString(data, "toStageId") ?? readString(data, "stageId");
       const dataFrom = readString(data, "fromStageId");
-      if (toStageId && dataTo && dataTo !== toStageId) return false;
-      if (fromStageId && dataFrom && dataFrom !== fromStageId) return false;
+      if (toStages.length > 0 && dataTo && !toStages.includes(dataTo)) return false;
+      if (fromStages.length > 0 && dataFrom && !fromStages.includes(dataFrom)) return false;
       return true;
     }
     case "tag_added": {
@@ -136,10 +169,10 @@ export function evaluateTrigger(
       // como alias, pra alinhar com o payload do auto-deal). Antes só
       // filtrava pipeline; agora o operador consegue criar "automação X
       // quando lead/deal entra no estágio Y".
-      const stageId = readString(cfg, "stageId");
+      const stageIds = readTriggerStageIds(cfg);
       const dataStageId = readString(data, "stageId") ?? readString(data, "toStageId");
-      if (stageId && dataStageId && dataStageId !== stageId) return false;
-      if (stageId && !dataStageId) return false;
+      if (stageIds.length > 0 && dataStageId && !stageIds.includes(dataStageId)) return false;
+      if (stageIds.length > 0 && !dataStageId) return false;
       return true;
     }
     case "contact_created": {
@@ -151,13 +184,13 @@ export function evaluateTrigger(
       const dataPipelineId = readString(data, "pipelineId") ?? readString(data, "dealPipelineId");
       if (pipelineId && dataPipelineId && dataPipelineId !== pipelineId) return false;
       if (pipelineId && !dataPipelineId) return false;
-      const stageId = readString(cfg, "stageId");
+      const stageIds = readTriggerStageIds(cfg);
       const dataStageId =
         readString(data, "stageId") ??
         readString(data, "dealStageId") ??
         readString(data, "toStageId");
-      if (stageId && dataStageId && dataStageId !== stageId) return false;
-      if (stageId && !dataStageId) return false;
+      if (stageIds.length > 0 && dataStageId && !stageIds.includes(dataStageId)) return false;
+      if (stageIds.length > 0 && !dataStageId) return false;
       return true;
     }
     case "conversation_created": {
@@ -193,9 +226,9 @@ export function evaluateTrigger(
       const channel = readString(cfg, "channel");
       const dataChannel = readString(data, "channel");
       if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
-      const stageId = readString(cfg, "stageId");
+      const stageIds = readTriggerStageIds(cfg);
       const dataStageId = readString(data, "stageId") ?? readString(data, "dealStageId");
-      if (stageId && dataStageId && dataStageId !== stageId) return false;
+      if (stageIds.length > 0 && dataStageId && !stageIds.includes(dataStageId)) return false;
       const pipelineId = readString(cfg, "pipelineId");
       const dataPipelineId = readString(data, "pipelineId") ?? readString(data, "dealPipelineId");
       if (pipelineId && dataPipelineId && dataPipelineId !== pipelineId) return false;
