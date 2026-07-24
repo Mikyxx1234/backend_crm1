@@ -44,3 +44,8 @@ export {
   type PendingDistributionView,
   type RetryResult,
 } from "./pending";
+
+export {
+  getDistributionLogs,
+  type DistributionLogView,
+} from "./logs";

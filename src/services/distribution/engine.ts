@@ -15,9 +15,7 @@ import { Prisma } from "@prisma/client";
 
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrThrow, getOrgIdOrNull } from "@/lib/request-context";
-import { sseBus } from "@/lib/sse-bus";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
 import {
   assignDealOwner,
@@ -231,42 +229,6 @@ async function resolvePendingFor(
 }
 
 /**
- * Posta uma NOTA INTERNA na conversa (visível no inbox/pipeline, NUNCA
- * enviada ao cliente) para dar visibilidade do que a distribuição fez.
- * Observabilidade — nunca derruba a distribuição se falhar.
- */
-async function postDistributionNote(
-  conversationId: string | null | undefined,
-  content: string,
-): Promise<void> {
-  if (!conversationId) return;
-  try {
-    const saved = await prisma.message.create({
-      data: withOrgFromCtx({
-        conversationId,
-        content,
-        direction: "out",
-        messageType: "note",
-        isPrivate: true,
-        senderName: "Distribuição",
-      }),
-    });
-    await prisma.conversation
-      .update({ where: { id: conversationId }, data: { updatedAt: new Date() } })
-      .catch(() => {});
-    sseBus.publish("new_message", {
-      organizationId: getOrgIdOrNull(),
-      conversationId,
-      direction: "out",
-      content,
-      timestamp: saved.createdAt,
-    });
-  } catch (e) {
-    console.error("[distribution] falha ao postar nota no chat", e);
-  }
-}
-
-/**
  * Grava um evento no feed de atividades (/logs do CRM) para a distribuição.
  * Observabilidade — nunca derruba a distribuição se falhar.
  */
@@ -355,10 +317,6 @@ export async function executeDistribution(
   if (deptScope.mode === "blocked") {
     await writeLog(input, false, "NO_DEPARTMENT", null, []);
     await enqueuePending(input);
-    await postDistributionNote(
-      input.conversationId,
-      "⏳ Este lead ainda não está em um departamento que use distribuição automática. Ele entrou na fila de espera e será distribuído quando for roteado a um departamento habilitado.",
-    );
     await emitDistributionEvent(input, false, "NO_DEPARTMENT", null, null, null);
     return {
       success: false,
@@ -382,10 +340,6 @@ export async function executeDistribution(
     // lead na fila de espera, para redistribuir quando alguém ficar ONLINE.
     await writeLog(input, false, "NO_ELIGIBLE_RESPONSIBLE", null, evaluated);
     await enqueuePending(input);
-    await postDistributionNote(
-      input.conversationId,
-      "⏳ Nenhum responsável disponível para distribuição agora. O lead entrou na fila de espera e será redistribuído automaticamente quando alguém ficar online.",
-    );
     await emitDistributionEvent(
       input,
       false,
@@ -445,10 +399,6 @@ export async function executeDistribution(
 
   await resolvePendingFor(input.dealId, input.contactId, selected.userId);
   await writeLog(input, true, "ASSIGNED", selected.userId, evaluated);
-  await postDistributionNote(
-    input.conversationId,
-    `🔀 Lead distribuído para ${selected.name ?? "responsável"} pela Distribuição Inteligente.`,
-  );
   await emitDistributionEvent(
     input,
     true,
