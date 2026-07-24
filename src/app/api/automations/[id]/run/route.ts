@@ -71,11 +71,11 @@ export async function POST(request: Request, context: RouteContext) {
           { status: 409 },
         );
       }
-      if (automation.triggerType !== "manual") {
+      if (automation.triggerType !== "manual" && !automation.allowManualRun) {
         return NextResponse.json(
           {
             message:
-              "Apenas automacoes com gatilho 'Manual' podem ser disparadas a partir da conversa.",
+              "Esta automacao nao esta habilitada para disparo manual pelo agente.",
           },
           { status: 409 },
         );

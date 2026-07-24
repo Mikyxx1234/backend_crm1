@@ -24,6 +24,8 @@ export interface PendingDistributionView {
   contactId: string | null;
   /** Nome amigável: título do negócio, nome do contato, ou fallback. */
   label: string;
+  /** Canal de origem da conversa (WHATSAPP, INSTAGRAM, FACEBOOK, EMAIL, WEBCHAT). */
+  channel: string;
   distributionType: string | null;
   triggerSource: string;
   attempts: number;
@@ -53,6 +55,7 @@ export async function getPendingDistributions(): Promise<
     orderBy: { createdAt: "asc" },
     select: {
       id: true,
+      channel: true,
       contactId: true,
       createdAt: true,
       updatedAt: true,
@@ -66,6 +69,7 @@ export async function getPendingDistributions(): Promise<
     contactId: c.contactId,
     // Exibe o TELEFONE (mais útil/discreto na fila); cai pro nome se não houver.
     label: c.contact?.phone || c.contact?.name || "Atendimento",
+    channel: c.channel ?? "",
     distributionType: null,
     triggerSource: "INBOUND",
     attempts: 0,

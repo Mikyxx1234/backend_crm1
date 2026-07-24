@@ -742,6 +742,18 @@ export class MetaWhatsAppClient {
     );
   }
 
+  /**
+   * Lista os apps assinados ao WABA (`GET /{waba}/subscribed_apps`). Usado no
+   * health-check pos Embedded Signup para confirmar que o App do CRM esta
+   * recebendo webhooks desse WABA. Retorna `{ data: [...] }`.
+   */
+  async getSubscribedApps(): Promise<{ data?: Array<Record<string, unknown>> }> {
+    const waba = this.wabaOrThrow();
+    return this.graphFetch<{ data?: Array<Record<string, unknown>> }>(
+      `${waba}/subscribed_apps`,
+    );
+  }
+
   // ── Message templates (Business Management API) ─────────────────
   // @see https://developers.facebook.com/docs/graph-api/reference/whats-app-business-account/message_templates/
 

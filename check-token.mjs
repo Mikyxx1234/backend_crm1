@@ -26,7 +26,7 @@ const [ch] = await db.channel.findMany({
 
 const token = decrypt(String(ch.config.accessToken));
 const phoneNumberId = ch.config.phoneNumberId ?? '1078521802020361';
-const wabaId = ch.config.wabaId ?? '945057281691135';
+const wabaId = ch.config.businessAccountId ?? ch.config.wabaId;
 const appId = ch.config.appId;
 
 console.log('=== TOKEN DEBUG ===');

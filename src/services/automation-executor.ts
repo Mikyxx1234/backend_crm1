@@ -2368,13 +2368,31 @@ async function executeStep(
       if (!rt.contactId) return {};
       const convs = await prisma.conversation.findMany({
         where: { contactId: rt.contactId, status: { not: "RESOLVED" } },
-        select: { id: true },
+        select: { id: true, status: true, externalId: true },
       });
       if (convs.length > 0) {
         await prisma.conversation.updateMany({
           where: { id: { in: convs.map((c) => c.id) } },
           data: { status: "RESOLVED" },
         });
+        // Registra o encerramento na timeline de cada conversa (ator =
+        // AUTOMATION, herdado do contexto). Sem isso, um fechamento feito
+        // por automação nao aparecia na timeline/feed — so os feitos
+        // manualmente (rota /actions) ou em massa (job) eram logados.
+        for (const c of convs) {
+          void logEvent({
+            type: "CONVERSATION_CLOSED",
+            entityType: "CONVERSATION",
+            entityId: c.id,
+            entityLabel: c.externalId ?? null,
+            conversationId: c.id,
+            contactId: rt.contactId,
+            field: "status",
+            oldValue: c.status,
+            newValue: "RESOLVED",
+            meta: { from: c.status, to: "RESOLVED", source: "automation" },
+          });
+        }
       }
       return {};
     }

@@ -29,7 +29,7 @@ for (const ch of channels) {
   const cfg = ch.config ?? {};
   const accessToken = cfg.accessToken ? decrypt(String(cfg.accessToken)) : null;
   const phoneNumberId = cfg.phoneNumberId ?? '1078521802020361';
-  const wabaId = cfg.wabaId ?? '945057281691135';
+  const wabaId = cfg.businessAccountId ?? cfg.wabaId;
 
   if (!accessToken) continue;
 

@@ -293,6 +293,7 @@ const automationListSelect = {
   triggerType: true,
   triggerConfig: true,
   active: true,
+  allowManualRun: true,
   createdAt: true,
   updatedAt: true,
   _count: { select: { steps: true } },
@@ -455,6 +456,127 @@ async function buildAutomationListStats(
   return out;
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Picker do agente — automações executáveis manualmente pela conversa.
+// Retorna as ATIVAS que são `triggerType='manual'` OU `allowManualRun=true`,
+// enriquecidas com preview da mensagem e categoria (para agrupar na modal).
+// ─────────────────────────────────────────────────────────────────
+
+export type AgentAutomationItem = {
+  id: string;
+  name: string;
+  description: string | null;
+  stepCount: number;
+  /// Categoria coarse para agrupar na modal (ex.: "message", "product", "flow").
+  category: string;
+  categoryLabel: string;
+  /// Preview do conteúdo enviado (texto da 1ª etapa de mensagem), para o
+  /// agente saber o que está disparando.
+  messagePreview: string | null;
+};
+
+const AGENT_CATEGORY_LABELS: Record<string, string> = {
+  message: "Mensagens",
+  media: "Mídia",
+  template: "Templates",
+  interactive: "Botões",
+  product: "Produtos",
+  email: "E-mail",
+  flow: "Fluxos",
+};
+
+function pickAgentCategory(stepType: string): string | null {
+  switch (stepType) {
+    case "send_whatsapp_message":
+      return "message";
+    case "send_whatsapp_media":
+      return "media";
+    case "send_whatsapp_template":
+      return "template";
+    case "send_whatsapp_interactive":
+      return "interactive";
+    case "send_product":
+      return "product";
+    case "send_email":
+      return "email";
+    default:
+      return null;
+  }
+}
+
+function previewForStep(
+  stepType: string,
+  config: Record<string, unknown>,
+): string | null {
+  const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  switch (stepType) {
+    case "send_whatsapp_message":
+      return str(config.content) || null;
+    case "send_whatsapp_media":
+      return str(config.caption) || AGENT_CATEGORY_LABELS.media;
+    case "send_whatsapp_interactive":
+      return str(config.body) || null;
+    case "send_whatsapp_template":
+      return str(config.templateLabel) || str(config.templateName) || null;
+    case "send_product":
+      return str(config.content) || str(config.productName) || null;
+    case "send_email":
+      return str(config.subject) || null;
+    default:
+      return null;
+  }
+}
+
+export async function getAgentAutomations(): Promise<AgentAutomationItem[]> {
+  const organizationId = getOrgIdOrThrow();
+  const rows = await prisma.automation.findMany({
+    where: {
+      organizationId,
+      active: true,
+      OR: [{ triggerType: "manual" }, { allowManualRun: true }],
+    },
+    orderBy: [{ updatedAt: "desc" }],
+    select: {
+      id: true,
+      name: true,
+      description: true,
+      _count: { select: { steps: true } },
+      steps: {
+        select: { type: true, config: true },
+        orderBy: { position: "asc" },
+      },
+    },
+  });
+
+  return rows.map((a) => {
+    // Primeira etapa que "envia" algo define categoria + preview; senão,
+    // cai em "flow" (automações sem mensagem — ex.: mover estágio, tags).
+    let category = "flow";
+    let messagePreview: string | null = null;
+    for (const s of a.steps) {
+      const cat = pickAgentCategory(s.type);
+      if (cat) {
+        category = cat;
+        const cfg =
+          s.config && typeof s.config === "object" && !Array.isArray(s.config)
+            ? (s.config as Record<string, unknown>)
+            : {};
+        messagePreview = previewForStep(s.type, cfg);
+        break;
+      }
+    }
+    return {
+      id: a.id,
+      name: a.name,
+      description: a.description,
+      stepCount: a._count.steps,
+      category,
+      categoryLabel: AGENT_CATEGORY_LABELS[category] ?? "Outras",
+      messagePreview,
+    };
+  });
+}
+
 export async function getAutomationById(id: string) {
   return prisma.automation.findUnique({
     where: { id },
@@ -476,6 +598,7 @@ export type CreateAutomationInput = {
   triggerType: string;
   triggerConfig: Prisma.InputJsonValue;
   active?: boolean;
+  allowManualRun?: boolean;
   steps?: CreateAutomationStepInput[];
 };
 
@@ -496,6 +619,7 @@ export async function createAutomation(
       triggerType: data.triggerType,
       triggerConfig: data.triggerConfig,
       active: data.active ?? false,
+      allowManualRun: data.allowManualRun ?? false,
       steps: {
         create: (data.steps ?? []).map((s, index) => ({
           ...(s.id ? { id: s.id } : {}),
@@ -516,6 +640,7 @@ export type UpdateAutomationInput = {
   triggerType?: string;
   triggerConfig?: Prisma.InputJsonValue;
   active?: boolean;
+  allowManualRun?: boolean;
   steps?: CreateAutomationStepInput[];
 };
 
@@ -569,6 +694,9 @@ export async function updateAutomation(id: string, data: UpdateAutomationInput) 
     }
     if (data.active !== undefined) {
       updateData.active = data.active;
+    }
+    if (data.allowManualRun !== undefined) {
+      updateData.allowManualRun = data.allowManualRun;
     }
     if (data.steps) {
       const organizationId = getOrgIdOrThrow();

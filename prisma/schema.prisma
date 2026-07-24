@@ -2810,6 +2810,11 @@ model Automation {
   triggerType    String
   triggerConfig  Json
   active         Boolean             @default(false)
+  /// Quando true, a automação fica disponível para o agente executar
+  /// manualmente pela conversa (picker do composer), ALÉM do gatilho
+  /// automático. Independe de `triggerType` — permite que uma automação
+  /// reativa também seja disparável sob demanda pelo operador.
+  allowManualRun Boolean             @default(false)
   steps          AutomationStep[]
   contexts       AutomationContext[]
   campaigns      Campaign[]

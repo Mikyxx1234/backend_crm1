@@ -19,7 +19,6 @@ import {
   upsertDealCustomFieldValues,
 } from "@/services/custom-fields";
 import { createDeal, createDealEvent, isValidDealStatus } from "@/services/deals";
-import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -453,24 +452,12 @@ export async function POST(request: Request) {
         }).catch(() => {});
       }
 
-      // Lead criado (contato + opcionalmente deal) — se o contato tem telefone,
-      // garante Conversation WhatsApp vinculada ao canal Meta default da org.
-      // Sem isso, painel do deal cria conversa "solta" na primeira abertura e
-      // o envio de template cai no env singleton (leak entre orgs).
-      // Ver `services/whatsapp-conversation.ts` pra semântica idempotente.
-      try {
-        const res = await ensureWhatsAppConversationForContact(contactId);
-        if (res.status === "created" || res.status === "backfilled_channel") {
-          console.log(
-            `[leads.POST] conversation ${res.status} conv=${res.conversationId} channel=${res.channelId} contact=${contactId}`,
-          );
-        }
-      } catch (e) {
-        console.error(
-          "[leads.POST] ensureWhatsAppConversationForContact falhou",
-          e,
-        );
-      }
+      // NB (jul/26): NÃO criamos mais Conversation WhatsApp antecipadamente ao
+      // nascer o lead. Isso poluía a fila com conversas OPEN sem nenhuma
+      // mensagem. A conversa é criada sob demanda — com `channelId` resolvido
+      // no momento — nos caminhos de envio: abrir chat (skipSend em
+      // /api/conversations/create), inbound (webhook Meta) e automação
+      // (resolveAutomationSendConv → ensureWhatsAppConversationForContact).
 
       const finalContact = await prisma.contact.findUnique({
         where: { id: contactId },

@@ -99,6 +99,7 @@ export async function PUT(request: Request, context: RouteContext) {
         payload.triggerConfig = b.triggerConfig as Parameters<typeof updateAutomation>[1]["triggerConfig"];
       }
       if (typeof b.active === "boolean") payload.active = b.active;
+      if (typeof b.allowManualRun === "boolean") payload.allowManualRun = b.allowManualRun;
       if (Array.isArray(b.steps)) {
         payload.steps = (b.steps as { id?: string; type: string; config: unknown }[]).map((s) => ({
           id: typeof s.id === "string" ? s.id : undefined,
