@@ -140,33 +140,38 @@ export async function getVisibilityFilter(
     // Fora de RequestContext (ex.: jobs) — mantém comportamento compartilhado.
   }
 
+  // Conversa ATRIBUÍDA ao agente é SEMPRE visível — inclusive sem departamento
+  // ou de outro departamento. Sem isso, uma conversa distribuída para o agente
+  // (que chega sem `departmentId`) era escondida pelo isolamento por
+  // departamento (AND), e o agente "não via a conversa distribuída".
+  const assignedToMe: Prisma.ConversationWhereInput = { assignedToId: user.id };
+
+  if (strictOwnInbox) {
+    return {
+      canSeeAll: false,
+      dealWhere: { ownerId: user.id },
+      conversationWhere: assignedToMe,
+    };
+  }
+
+  // Pool compartilhado (não atribuídas ligadas a contatos que o agente
+  // acompanha): AQUI sim vale o isolamento por departamento.
+  const sharedUnassigned: Prisma.ConversationWhereInput = {
+    assignedToId: null,
+    contact: {
+      OR: [
+        { deals: { some: { ownerId: user.id } } },
+        { assignedToId: user.id },
+      ],
+    },
+  };
+
   return {
     canSeeAll: false,
     dealWhere: { ownerId: user.id },
-    /**
-     * Inbox: conversa atribuída só ao agente indicado; sem atribuição segue a visibilidade por contato
-     * (dono do negócio ou responsável pelo lead). Sobre isso aplica-se ainda
-     * o isolamento por departamento (AND), quando configurado.
-     */
-    conversationWhere: composeDepartmentScope(
-      strictOwnInbox
-        ? { assignedToId: user.id }
-        : {
-            OR: [
-              { assignedToId: user.id },
-              {
-                assignedToId: null,
-                contact: {
-                  OR: [
-                    { deals: { some: { ownerId: user.id } } },
-                    { assignedToId: user.id },
-                  ],
-                },
-              },
-            ],
-          },
-      deptScope
-    ),
+    conversationWhere: {
+      OR: [assignedToMe, composeDepartmentScope(sharedUnassigned, deptScope)],
+    },
   };
 }
 

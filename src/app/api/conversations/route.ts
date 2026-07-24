@@ -6,6 +6,7 @@ import { canSeeInboxTab, getScopeGrants } from "@/lib/authz/scope-grants";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import {
+  buildInboxFilterConditions,
   getConversations,
   getTabCounts,
   INBOX_CATEGORY_TABS,
@@ -58,6 +59,36 @@ export async function GET(request: Request) {
       const inboxPerms: ReadonlySet<string> =
         authz.isSuperAdmin || authz.isAdmin ? new Set(["*"]) : authz.permissions;
 
+      // Filtros do funil — parseados ANTES da contagem para que os badges das
+      // abas reflitam o filtro ativo (bug: contadores não atualizavam).
+      const contactId = searchParams.get("contactId") ?? undefined;
+      const channel = searchParams.get("channel") ?? undefined;
+      const ownerId = searchParams.get("ownerId") ?? undefined;
+      const withoutOwner =
+        searchParams.get("withoutOwner") === "1" ||
+        searchParams.get("withoutOwner") === "true";
+      const stageId = searchParams.get("stageId") ?? undefined;
+      const tagIdsRaw = searchParams.get("tagIds") ?? "";
+      const tagIds = tagIdsRaw ? tagIdsRaw.split(",").filter(Boolean) : undefined;
+      const sourcesRaw = searchParams.get("sources") ?? "";
+      const sources = sourcesRaw
+        ? sourcesRaw.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
+      const withoutSource =
+        searchParams.get("withoutSource") === "1" ||
+        searchParams.get("withoutSource") === "true";
+
+      const filterConditions = buildInboxFilterConditions({
+        contactId,
+        channel,
+        ownerId,
+        withoutOwner,
+        stageId,
+        tagIds,
+        sources,
+        withoutSource,
+      });
+
       if (searchParams.get("counts") === "1") {
         const visibility = await getVisibilityFilter(user);
         const memberCategoryTabs: InboxCategoryTab[] | null =
@@ -73,6 +104,7 @@ export async function GET(request: Request) {
           visibility.conversationWhere,
           memberCategoryTabs,
           allowedChannelIds,
+          filterConditions,
         );
         if (user.role === "MEMBER") {
           const masked = { ...counts };
@@ -86,7 +118,6 @@ export async function GET(request: Request) {
         return NextResponse.json(counts);
       }
 
-      const contactId = searchParams.get("contactId") ?? undefined;
       const tabRaw = searchParams.get("tab") ?? undefined;
       const tab = tabRaw && validTabs.has(tabRaw as InboxTab) ? (tabRaw as InboxTab) : undefined;
 
@@ -97,24 +128,9 @@ export async function GET(request: Request) {
       const status = statusRaw && statuses.has(statusRaw)
         ? (statusRaw as "OPEN" | "RESOLVED" | "PENDING" | "SNOOZED")
         : undefined;
-      const channel = searchParams.get("channel") ?? undefined;
       const page = parseIntParam(searchParams.get("page"), 1);
       const perPage = parseIntParam(searchParams.get("perPage"), 30);
 
-      const ownerId = searchParams.get("ownerId") ?? undefined;
-      const withoutOwner =
-        searchParams.get("withoutOwner") === "1" ||
-        searchParams.get("withoutOwner") === "true";
-      const stageId = searchParams.get("stageId") ?? undefined;
-      const tagIdsRaw = searchParams.get("tagIds") ?? "";
-      const tagIds = tagIdsRaw ? tagIdsRaw.split(",").filter(Boolean) : undefined;
-      const sourcesRaw = searchParams.get("sources") ?? "";
-      const sources = sourcesRaw
-        ? sourcesRaw.split(",").map((s) => s.trim()).filter(Boolean)
-        : undefined;
-      const withoutSource =
-        searchParams.get("withoutSource") === "1" ||
-        searchParams.get("withoutSource") === "true";
       const sortByRaw = searchParams.get("sortBy") ?? undefined;
       const sortBy = sortByRaw && validSortBy.has(sortByRaw)
         ? (sortByRaw as "updatedAt" | "createdAt" | "unreadCount")

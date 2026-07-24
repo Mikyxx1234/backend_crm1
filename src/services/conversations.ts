@@ -214,11 +214,29 @@ function buildConversationSourceCondition(
 function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
   switch (tab) {
     case "entrada":
-      return { status: "OPEN", hasAgentReply: false, hasError: false };
+      // "Entrada" = NÃO iniciados por humanos: conversa aberta SEM responsável
+      // humano (`assignedToId = null`). Automação/IA pode já ter interagido,
+      // mas enquanto nenhum humano assume, permanece em Entrada. Casa 1:1 com
+      // a fila da Distribuição (atendimentos abertos sem responsável).
+      return { status: "OPEN", assignedToId: null, hasError: false };
     case "esperando":
-      return { status: "OPEN", hasAgentReply: true, lastMessageDirection: "in", hasError: false };
+      // "Aguardando" = já tem responsável humano e é a vez dele responder
+      // (cliente falou por último). Antes usava `hasAgentReply`, que era
+      // marcado também por automação/IA e não refletia atribuição humana.
+      return {
+        status: "OPEN",
+        assignedToId: { not: null },
+        lastMessageDirection: "in",
+        hasError: false,
+      };
     case "respondidas":
-      return { status: "OPEN", hasAgentReply: true, lastMessageDirection: "out", hasError: false };
+      // "Respondidas" = tem responsável e já respondeu (aguardando o cliente).
+      return {
+        status: "OPEN",
+        assignedToId: { not: null },
+        lastMessageDirection: "out",
+        hasError: false,
+      };
     case "automacao":
       return {
         status: "OPEN",
@@ -283,12 +301,28 @@ export function buildConversationListWhere(
       conditions.push(tabToWhere(params.tab));
     }
   }
-  if (params.contactId) conditions.push({ contactId: params.contactId });
   if (params.status && !params.tab) conditions.push({ status: params.status });
-  if (params.channel) conditions.push({ channel: params.channel });
   if (params.allowedChannelIds) {
     conditions.push({ channelId: { in: params.allowedChannelIds } });
   }
+  const filterWhere = buildInboxFilterConditions(params);
+  conditions.push(...filterWhere);
+
+  return conditions.length > 0 ? { AND: conditions } : {};
+}
+
+/**
+ * Condições dos FILTROS do inbox (funil): responsável, estágio, tags, origem,
+ * canal e contato. NÃO inclui aba/busca/visibilidade — isso permite reaproveitar
+ * o MESMO recorte tanto na listagem quanto na CONTAGEM por aba (para os
+ * contadores refletirem o filtro ativo). Retorna um array de condições (AND).
+ */
+export function buildInboxFilterConditions(
+  params: GetConversationsParams,
+): Prisma.ConversationWhereInput[] {
+  const conditions: Prisma.ConversationWhereInput[] = [];
+  if (params.contactId) conditions.push({ contactId: params.contactId });
+  if (params.channel) conditions.push({ channel: params.channel });
 
   if (params.withoutOwner) {
     conditions.push({ assignedToId: null });
@@ -322,8 +356,7 @@ export function buildConversationListWhere(
     params.withoutSource,
   );
   if (sourceCond) conditions.push(sourceCond);
-
-  return conditions.length > 0 ? { AND: conditions } : {};
+  return conditions;
 }
 
 /**
@@ -470,6 +503,7 @@ async function countTodosTab(
   visibilityWhere: Prisma.ConversationWhereInput | undefined,
   memberOrTabs: InboxCategoryTab[] | null,
   allowedChannelIds?: string[] | null,
+  filterConditions?: Prisma.ConversationWhereInput[],
 ): Promise<number> {
   const conditions: Prisma.ConversationWhereInput[] = [];
   if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
@@ -480,6 +514,9 @@ async function countTodosTab(
   }
   if (allowedChannelIds) {
     conditions.push({ channelId: { in: allowedChannelIds } });
+  }
+  if (filterConditions && filterConditions.length > 0) {
+    conditions.push(...filterConditions);
   }
   const where: Prisma.ConversationWhereInput =
     conditions.length > 0 ? { AND: conditions } : {};
@@ -492,7 +529,11 @@ export async function getTabCounts(
   todosMemberCategoryTabs?: InboxCategoryTab[] | null,
   /** Escopo de canais por usuário (IDs de `Channel`). `null` = sem restrição. */
   allowedChannelIds?: string[] | null,
+  /** Filtros ativos (funil): responsável, tags, origem, estágio… Aplicados a
+   *  TODAS as contagens para que os badges reflitam o filtro selecionado. */
+  filterConditions?: Prisma.ConversationWhereInput[],
 ): Promise<Record<InboxTab, number>> {
+  const extra = filterConditions ?? [];
   const results = await Promise.all(
     TAB_LIST.map(async (tab) => {
       const conditions: Prisma.ConversationWhereInput[] = [];
@@ -503,6 +544,7 @@ export async function getTabCounts(
       if (allowedChannelIds) {
         conditions.push({ channelId: { in: allowedChannelIds } });
       }
+      if (extra.length > 0) conditions.push(...extra);
       const where: Prisma.ConversationWhereInput =
         conditions.length > 0 ? { AND: conditions } : {};
       const count = await prisma.conversation.count({ where });
@@ -514,6 +556,7 @@ export async function getTabCounts(
     visibilityWhere,
     todosMemberCategoryTabs ?? null,
     allowedChannelIds,
+    extra,
   );
   // "abertas" = todas as conversas em aberto (status OPEN), independentemente
   // da subcategoria. Contagem própria (não é uma categoria em TAB_LIST).
@@ -524,6 +567,7 @@ export async function getTabCounts(
     }
     conditions.push({ status: "OPEN" });
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
+    if (extra.length > 0) conditions.push(...extra);
     record.abertas = await prisma.conversation.count({
       where: conditions.length > 0 ? { AND: conditions } : {},
     });

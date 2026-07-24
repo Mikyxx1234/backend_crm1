@@ -1,13 +1,17 @@
 /**
- * Fila atual de cada responsável = nº de CONVERSAS aguardando a resposta DELE,
- * i.e. a "fila de não iniciados" (padrão DataCrazy): conversas OPEN atribuídas
- * ao consultor em que o cliente falou por último e ninguém respondeu ainda
- * (`lastMessageDirection = "in"` + `hasAgentReply = false`). É o MESMO recorte
- * da aba "Entrada" do inbox e do `pending` das stats do dia.
+ * Fila atual de cada responsável = nº de CONVERSAS aguardando a resposta DELE:
+ * conversas OPEN ATRIBUÍDAS ao consultor em que o cliente falou por último
+ * (`lastMessageDirection = "in"`). É o MESMO recorte da aba "Aguardando" do
+ * inbox — o que mantém a "Fila" da Distribuição consistente com o que o
+ * operador vê no inbox.
  *
- * NÃO contamos negócios/conversas "em aberto" parados aguardando o ALUNO
- * responder (esses ficam com `lastMessageDirection = "out"`), porque não são
- * trabalho pendente do consultor e inflariam a fila indevidamente.
+ * NÃO usamos mais `hasAgentReply = false`: esse campo é marcado também por
+ * AUTOMAÇÃO/IA, então uma conversa distribuída em que o bot respondeu deixava
+ * de contar na fila do humano (contagem de distribuídos errada). O que importa
+ * para "fila do consultor" é: está atribuída a ele E é a vez dele responder.
+ *
+ * NÃO contamos conversas paradas aguardando o CLIENTE responder (essas ficam
+ * com `lastMessageDirection = "out"`) — não são trabalho pendente do consultor.
  *
  * `Conversation` é org-scoped, então o filtro de organização é injetado pela
  * Prisma Extension. Uma única `groupBy` (sem N+1).
@@ -31,7 +35,6 @@ export async function getQueueCounts(
       status: "OPEN",
       assignedToId: { in: userIds },
       lastMessageDirection: "in",
-      hasAgentReply: false,
     },
     _count: { _all: true },
   });
