@@ -32,16 +32,16 @@ export interface PendingDistributionView {
 }
 
 /**
- * Critério da fila = atendimentos da aba "Entrada" SEM responsável:
- * conversa aberta, sem resposta da equipe, sem erro e sem responsável
- * atribuído (a distribuição propaga o responsável para a conversa via
- * `assignedToId`, então `null` = ainda não distribuído). Deriva do mesmo
- * critério da aba Entrada do inbox — a contagem bate com o que o operador vê.
+ * Critério da fila = atendimentos ABERTOS SEM responsável (`assignedToId=null`).
+ *
+ * NÃO usamos `hasAgentReply` de propósito: uma resposta de AUTOMAÇÃO/IA marca
+ * `hasAgentReply=true` e tiraria o lead da aba "Entrada", mas ele continua SEM
+ * responsável humano e PRECISA ser distribuído. A distribuição propaga o
+ * responsável para a conversa (`assignedToId`), então `null` = ainda não
+ * distribuído — independente de automação/IA já ter interagido.
  */
-const ENTRADA_SEM_RESPONSAVEL: Prisma.ConversationWhereInput = {
+const ABERTA_SEM_RESPONSAVEL: Prisma.ConversationWhereInput = {
   status: "OPEN",
-  hasAgentReply: false,
-  hasError: false,
   assignedToId: null,
 };
 
@@ -49,7 +49,7 @@ export async function getPendingDistributions(): Promise<
   PendingDistributionView[]
 > {
   const items = await prisma.conversation.findMany({
-    where: ENTRADA_SEM_RESPONSAVEL,
+    where: ABERTA_SEM_RESPONSAVEL,
     orderBy: { createdAt: "asc" },
     select: {
       id: true,
@@ -93,7 +93,7 @@ export async function retryPendingDistributions(): Promise<RetryResult> {
   // sucesso, a distribuição atribui o responsável (propaga para a conversa),
   // e o item sai naturalmente da fila (assignedToId deixa de ser null).
   const items = await prisma.conversation.findMany({
-    where: ENTRADA_SEM_RESPONSAVEL,
+    where: ABERTA_SEM_RESPONSAVEL,
     orderBy: { createdAt: "asc" },
     select: { id: true, contactId: true },
   });
@@ -112,7 +112,7 @@ export async function retryPendingDistributions(): Promise<RetryResult> {
   }
 
   const pending = await prisma.conversation.count({
-    where: ENTRADA_SEM_RESPONSAVEL,
+    where: ABERTA_SEM_RESPONSAVEL,
   });
 
   return { resolved, cancelled: 0, pending };
