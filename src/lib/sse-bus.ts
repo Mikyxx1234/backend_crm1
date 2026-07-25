@@ -237,9 +237,11 @@ function bootstrapBackgroundServices() {
     .then(({ startTimeoutSweeper }) => startTimeoutSweeper())
     .catch((e) => console.error("[sse-bus] failed to start timeout sweeper:", e));
 
-  import("@/services/presence-reaper")
-    .then(({ startPresenceReaper }) => startPresenceReaper())
-    .catch((e) => console.error("[sse-bus] failed to start presence reaper:", e));
+  import("@/services/system-presence")
+    .then(({ startSystemPresenceSweeper }) => startSystemPresenceSweeper())
+    .catch((e) =>
+      console.error("[sse-bus] failed to start system-presence sweeper:", e),
+    );
 
   import("@/services/scheduled-messages-worker")
     .then(({ startScheduledMessagesWorker }) => startScheduledMessagesWorker())

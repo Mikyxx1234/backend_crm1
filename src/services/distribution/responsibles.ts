@@ -12,6 +12,7 @@ import type { AgentOnlineStatus, UserRole } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getSystemPresenceMap } from "@/services/system-presence";
 
 import {
   evaluateResponsibleEligibility,
@@ -55,6 +56,13 @@ export interface DistributionResponsibleView {
   /** Resultado da regra única. */
   eligible: boolean;
   blockedReasons: DistributionBlockReason[];
+  /**
+   * Presença de USO do CRM ("aba aberta"). Distinta de `status`:
+   * indica apenas se o agente tem o CRM aberto agora — não afeta
+   * elegibilidade da Distribuição.
+   */
+  systemOnline: boolean;
+  lastSeenAt: string | null;
 }
 
 export interface GetResponsiblesOptions {
@@ -98,7 +106,7 @@ export async function getDistributionResponsibles(
       )
     : null;
 
-  const [responsibles, statuses, schedules, queue, memberships] = await Promise.all([
+  const [responsibles, statuses, schedules, queue, memberships, systemPresence] = await Promise.all([
     prisma.distributionResponsible.findMany({
       where: { userId: { in: userIds } },
       select: {
@@ -132,6 +140,9 @@ export async function getDistributionResponsibles(
       where: { userId: { in: userIds }, organizationId: orgId },
       select: { userId: true, department: { select: { id: true, name: true } } },
     }),
+    // Presença de USO (aba do CRM aberta) — falha "aberta": em erro,
+    // devolvemos Map vazio para não bloquear a tela de Distribuição.
+    getSystemPresenceMap({ organizationId: orgId, userIds }).catch(() => new Map()),
   ]);
 
   // userId → lista de departamentos (nome), para exibição e roteamento.
@@ -207,6 +218,9 @@ export async function getDistributionResponsibles(
       queueCount,
       eligible,
       blockedReasons,
+      systemOnline: systemPresence.get(u.id)?.systemOnline ?? false,
+      lastSeenAt:
+        systemPresence.get(u.id)?.lastSeenAt?.toISOString() ?? null,
     };
   });
 }
