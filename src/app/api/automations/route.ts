@@ -102,6 +102,8 @@ export async function POST(request: Request) {
           triggerType: b.triggerType,
           triggerConfig: b.triggerConfig as Parameters<typeof createAutomation>[0]["triggerConfig"],
           active: typeof b.active === "boolean" ? b.active : undefined,
+          allowManualRun:
+            typeof b.allowManualRun === "boolean" ? b.allowManualRun : undefined,
           // BUG 27/abr: o `id` de cada step NAO estava sendo propagado pro
           // service. Resultado: o canvas envia `[{ id: "uuid_a", type, config }]`
           // onde o `config` interno referencia outros steps por esses uuids
@@ -122,6 +124,12 @@ export async function POST(request: Request) {
       } catch (err: unknown) {
         if (err instanceof Error && err.message === "INVALID_NAME") {
           return NextResponse.json({ message: "Nome inválido." }, { status: 400 });
+        }
+        if (err instanceof Error && err.message === "INVALID_TRIGGER_CONFIG") {
+          return NextResponse.json(
+            { message: "Horas antes do encerramento devem ser maiores que 0 e menores que 24." },
+            { status: 400 },
+          );
         }
         throw err;
       }

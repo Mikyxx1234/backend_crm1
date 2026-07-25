@@ -7,6 +7,7 @@ import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import {
   buildInboxFilterConditions,
+  findSessionExpiringConversationIds,
   getConversations,
   getTabCounts,
   INBOX_CATEGORY_TABS,
@@ -64,10 +65,18 @@ export async function GET(request: Request) {
       const contactId = searchParams.get("contactId") ?? undefined;
       const channel = searchParams.get("channel") ?? undefined;
       const ownerId = searchParams.get("ownerId") ?? undefined;
+      const ownerIdsRaw = searchParams.get("ownerIds") ?? "";
+      const ownerIds = ownerIdsRaw
+        ? ownerIdsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
       const withoutOwner =
         searchParams.get("withoutOwner") === "1" ||
         searchParams.get("withoutOwner") === "true";
       const stageId = searchParams.get("stageId") ?? undefined;
+      const stageIdsRaw = searchParams.get("stageIds") ?? "";
+      const stageIds = stageIdsRaw
+        ? stageIdsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
       const tagIdsRaw = searchParams.get("tagIds") ?? "";
       const tagIds = tagIdsRaw ? tagIdsRaw.split(",").filter(Boolean) : undefined;
       const sourcesRaw = searchParams.get("sources") ?? "";
@@ -77,16 +86,40 @@ export async function GET(request: Request) {
       const withoutSource =
         searchParams.get("withoutSource") === "1" ||
         searchParams.get("withoutSource") === "true";
+      const sessionHoursRaw = searchParams.get("sessionExpiresWithinHours");
+      const sessionExpiresWithinHours =
+        sessionHoursRaw !== null && sessionHoursRaw.trim() !== ""
+          ? Number(sessionHoursRaw)
+          : undefined;
+      if (
+        sessionExpiresWithinHours !== undefined &&
+        (!Number.isFinite(sessionExpiresWithinHours) ||
+          sessionExpiresWithinHours <= 0 ||
+          sessionExpiresWithinHours >= 24)
+      ) {
+        return NextResponse.json(
+          { message: "sessionExpiresWithinHours deve ser maior que 0 e menor que 24." },
+          { status: 400 },
+        );
+      }
+      const sessionExpiringConversationIds =
+        sessionExpiresWithinHours !== undefined
+          ? await findSessionExpiringConversationIds(sessionExpiresWithinHours)
+          : undefined;
 
       const filterConditions = buildInboxFilterConditions({
         contactId,
         channel,
         ownerId,
+        ownerIds,
         withoutOwner,
         stageId,
+        stageIds,
         tagIds,
         sources,
         withoutSource,
+        sessionExpiresWithinHours,
+        sessionExpiringConversationIds,
       });
 
       if (searchParams.get("counts") === "1") {
@@ -164,14 +197,18 @@ export async function GET(request: Request) {
         perPage,
         visibilityWhere: visibility.conversationWhere,
         ownerId,
+        ownerIds,
         withoutOwner,
         stageId,
+        stageIds,
         tagIds,
         sources,
         withoutSource,
         sortBy,
         sortOrder,
         allowedChannelIds,
+        sessionExpiresWithinHours,
+        sessionExpiringConversationIds,
       });
 
       return NextResponse.json(result);

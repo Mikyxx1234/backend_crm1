@@ -201,8 +201,13 @@ export async function POST(request: Request) {
         data: { stageId: b.stageId, toStageId: b.stageId },
       }).catch(() => {});
 
-      // Não abre conversa WhatsApp automaticamente ao criar deal/contato.
-      // Sessão só nasce em inbound real, envio explícito ou "abrir chat".
+      // NB (jul/26): NÃO criamos mais Conversation WhatsApp antecipadamente ao
+      // nascer o deal. Isso poluía a fila com conversas OPEN sem nenhuma
+      // mensagem. A conversa passa a ser criada sob demanda — com `channelId`
+      // resolvido no momento — em cada caminho de envio: abrir chat (skipSend
+      // em /api/conversations/create), inbound (webhook Meta) e automação
+      // (resolveAutomationSendConv → ensureWhatsAppConversationForContact).
+      // A proteção contra leak entre orgs vive nesses caminhos, não aqui.
 
       return NextResponse.json(deal, { status: 201 });
     } catch (err: unknown) {

@@ -72,12 +72,15 @@ export async function POST(request: Request) {
         /** Filtros da lista (usados só quando `allInFilter`) — paridade com a listagem. */
         filters?: {
           ownerId?: string;
+          ownerIds?: string[];
           withoutOwner?: boolean;
           channel?: string;
           stageId?: string;
+          stageIds?: string[];
           tagIds?: string[];
           sources?: string[];
           withoutSource?: boolean;
+          sessionExpiresWithinHours?: number;
         };
       };
       const { ids, action, allInFilter } = body;
@@ -126,12 +129,15 @@ export async function POST(request: Request) {
               visibilityWhere: conversationWhere ?? undefined,
               allowedChannelIds,
               ownerId: f.ownerId,
+              ownerIds: f.ownerIds,
               withoutOwner: f.withoutOwner,
               channel: f.channel,
               stageId: f.stageId,
+              stageIds: f.stageIds,
               tagIds: f.tagIds,
               sources: f.sources,
               withoutSource: f.withoutSource,
+              sessionExpiresWithinHours: f.sessionExpiresWithinHours,
             });
             targetIds = resolved.ids;
             skippedIds = resolved.skippedIds;

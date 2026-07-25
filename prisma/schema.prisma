@@ -72,6 +72,7 @@ model Organization {
   automationSteps          AutomationStep[]
   automationLogs           AutomationLog[]
   automationContexts       AutomationContext[]
+  automationSessionExpiryClaims AutomationSessionExpiryClaim[]
   metaWebhookEvents        MetaWebhookEvent[]
   channels                 Channel[]
   baileysAuthKeys          BaileysAuthKey[]
@@ -1059,6 +1060,7 @@ model Contact {
   tags                   TagOnContact[]
   customFields           ContactCustomFieldValue[]
   automationContexts     AutomationContext[]
+  automationSessionExpiryClaims AutomationSessionExpiryClaim[]
   whatsappCallEvents     WhatsappCallEvent[]
   scheduledWhatsappCalls ScheduledWhatsappCall[]
   campaignRecipients     CampaignRecipient[]
@@ -2599,6 +2601,7 @@ model Conversation {
   /// departamento nao exige tabulacao.
   tabulationId String?
   tabulation   Tabulation? @relation(fields: [tabulationId], references: [id], onDelete: SetNull)
+  automationSessionExpiryClaims AutomationSessionExpiryClaim[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2819,8 +2822,14 @@ model Automation {
   triggerType    String
   triggerConfig  Json
   active         Boolean             @default(false)
+  /// Quando true, a automação fica disponível para o agente executar
+  /// manualmente pela conversa (picker do composer), ALÉM do gatilho
+  /// automático. Independe de `triggerType` — permite que uma automação
+  /// reativa também seja disparável sob demanda pelo operador.
+  allowManualRun Boolean             @default(false)
   steps          AutomationStep[]
   contexts       AutomationContext[]
+  sessionExpiryClaims AutomationSessionExpiryClaim[]
   campaigns      Campaign[]
 
   createdAt DateTime @default(now())
@@ -2830,6 +2839,30 @@ model Automation {
   @@index([organizationId, active])
   @@index([organizationId, active, triggerType])
   @@map("automations")
+}
+
+/// Claim durável do trigger temporal da sessão Meta. A chave única usa a
+/// janela real (contato + canal + último inbound), portanto polls/re réplicas
+/// não repetem o disparo; um novo inbound cria uma nova janela elegível.
+model AutomationSessionExpiryClaim {
+  id               String       @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, map: "automation_session_expiry_org_fk")
+  automationId     String
+  automation       Automation   @relation(fields: [automationId], references: [id], onDelete: Cascade, map: "automation_session_expiry_automation_fk")
+  contactId        String
+  contact          Contact      @relation(fields: [contactId], references: [id], onDelete: Cascade, map: "automation_session_expiry_contact_fk")
+  channel          String
+  conversationId   String?
+  conversation     Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull, map: "automation_session_expiry_conversation_fk")
+  windowStartedAt  DateTime
+  sessionExpiresAt DateTime
+  createdAt        DateTime     @default(now())
+
+  @@unique([automationId, contactId, channel, windowStartedAt], map: "automation_session_expiry_claim_window_uq")
+  @@index([organizationId, createdAt], map: "automation_session_expiry_org_created_idx")
+  @@index([contactId, channel, windowStartedAt], map: "automation_session_expiry_contact_channel_window_idx")
+  @@map("automation_session_expiry_claims")
 }
 
 model AutomationStep {
@@ -4838,6 +4871,32 @@ model StudentAcademicRecord {
   @@index([organizationId, phone])
   @@index([organizationId, email])
   @@map("student_academic_records")
+}
+
+/// Preferências pessoais do agente sobre os atalhos "/" (Mensagens prontas):
+/// marcação de favorito e contador de uso por item. Escopo POR AGENTE
+/// (`userId`), isolado por org. `itemKind` casa com o discriminador do
+/// frontend ("internal-template" | "quick-reply" | "meta-template") e
+/// `itemId` é o id usado pelo menu (para meta-template = metaTemplateId).
+/// Sem FK para o item de origem: os ids vêm de tabelas distintas
+/// (message_templates, quick_replies, whatsapp_template_configs) e linhas
+/// órfãs são ignoradas na leitura (o menu só mostra o que existe hoje).
+model AgentMessageShortcut {
+  id             String    @id @default(cuid())
+  organizationId String
+  userId         String
+  itemKind       String
+  itemId         String
+  favorite       Boolean   @default(false)
+  useCount       Int       @default(0)
+  lastUsedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@unique([userId, itemKind, itemId])
+  @@index([organizationId])
+  @@index([userId])
+  @@map("agent_message_shortcuts")
 }
 
 /// Histórico de importações de dados acadêmicos (auditoria dos uploads).

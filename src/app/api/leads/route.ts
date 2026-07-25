@@ -452,8 +452,12 @@ export async function POST(request: Request) {
         }).catch(() => {});
       }
 
-      // Não abre conversa WhatsApp automaticamente ao criar lead/contato.
-      // Sessão só nasce em inbound real, envio explícito ou "abrir chat".
+      // NB (jul/26): NÃO criamos mais Conversation WhatsApp antecipadamente ao
+      // nascer o lead. Isso poluía a fila com conversas OPEN sem nenhuma
+      // mensagem. A conversa é criada sob demanda — com `channelId` resolvido
+      // no momento — nos caminhos de envio: abrir chat (skipSend em
+      // /api/conversations/create), inbound (webhook Meta) e automação
+      // (resolveAutomationSendConv → ensureWhatsAppConversationForContact).
 
       const finalContact = await prisma.contact.findUnique({
         where: { id: contactId },

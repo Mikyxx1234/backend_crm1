@@ -21,7 +21,7 @@ function decrypt(v) {
 const [ch] = await db.channel.findMany({ where: { provider: 'META_CLOUD_API' }, select: { config: true } });
 const token = decrypt(String(ch.config.accessToken));
 const phoneId = ch.config.phoneNumberId ?? '1078521802020361';
-const wabaId = ch.config.wabaId ?? '945057281691135';
+const wabaId = ch.config.businessAccountId ?? ch.config.wabaId;
 const appId = ch.config.appId;
 
 console.log('=== APPS SUBSCRITOS NA WABA ===');

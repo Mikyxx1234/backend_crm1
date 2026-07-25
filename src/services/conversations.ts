@@ -1,4 +1,4 @@
-import type { ConversationStatus, Prisma } from "@prisma/client";
+import { Prisma, type ConversationStatus } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
 import { userHasConversationAccess } from "@/lib/conversation-access";
@@ -9,6 +9,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { SOURCE_NONE } from "@/services/kanban-filters";
+import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
 /** Abas de categoria (filtro OR em "Todos" para membros com escopo limitado). */
 export const INBOX_CATEGORY_TABS = [
@@ -45,9 +46,13 @@ export type GetConversationsParams = {
   perPage?: number;
   visibilityWhere?: Prisma.ConversationWhereInput;
   ownerId?: string;
+  /** Multi-seleção de responsáveis (OR). Preferir sobre `ownerId`. */
+  ownerIds?: string[];
   /** true = só conversas sem responsável (`assignedToId` null). */
   withoutOwner?: boolean;
   stageId?: string;
+  /** Multi-seleção de etapas (OR). Preferir sobre `stageId`. */
+  stageIds?: string[];
   tagIds?: string[];
   /** Origens do contato (Contact.source). Pode incluir `SOURCE_NONE`. */
   sources?: string[];
@@ -60,6 +65,10 @@ export type GetConversationsParams = {
    * restrição; array (mesmo vazio) → restringe conversas a esses canais.
    */
   allowedChannelIds?: string[] | null;
+  /** Sessões Meta ainda abertas que expiram entre agora e agora + X horas. */
+  sessionExpiresWithinHours?: number;
+  /** IDs resolvidos pelo agregador contato+canal antes de montar o where. */
+  sessionExpiringConversationIds?: string[];
 };
 
 const listSelect = {
@@ -331,27 +340,46 @@ export function buildInboxFilterConditions(
   const conditions: Prisma.ConversationWhereInput[] = [];
   if (params.contactId) conditions.push({ contactId: params.contactId });
   if (params.channel) conditions.push({ channel: params.channel });
+  if (params.sessionExpiresWithinHours !== undefined) {
+    conditions.push({ id: { in: params.sessionExpiringConversationIds ?? [] } });
+  }
 
   if (params.withoutOwner) {
     conditions.push({ assignedToId: null });
-  } else if (params.ownerId) {
-    conditions.push({
-      OR: [
-        { assignedToId: params.ownerId },
-        {
-          contact: {
-            OR: [
-              { deals: { some: { ownerId: params.ownerId } } },
-              { assignedToId: params.ownerId },
-            ],
+  } else {
+    const ownerIds = Array.from(
+      new Set(
+        [...(params.ownerIds ?? []), ...(params.ownerId ? [params.ownerId] : [])].filter(
+          Boolean,
+        ),
+      ),
+    );
+    if (ownerIds.length > 0) {
+      conditions.push({
+        OR: [
+          { assignedToId: { in: ownerIds } },
+          {
+            contact: {
+              OR: [
+                { deals: { some: { ownerId: { in: ownerIds } } } },
+                { assignedToId: { in: ownerIds } },
+              ],
+            },
           },
-        },
-      ],
-    });
+        ],
+      });
+    }
   }
-  if (params.stageId) {
+  const stageIds = Array.from(
+    new Set(
+      [...(params.stageIds ?? []), ...(params.stageId ? [params.stageId] : [])].filter(
+        Boolean,
+      ),
+    ),
+  );
+  if (stageIds.length > 0) {
     conditions.push({
-      contact: { deals: { some: { stageId: params.stageId } } },
+      contact: { deals: { some: { stageId: { in: stageIds } } } },
     });
   }
   if (params.tagIds && params.tagIds.length > 0) {
@@ -367,6 +395,65 @@ export function buildInboxFilterConditions(
   return conditions;
 }
 
+export async function findSessionExpiringConversationIds(
+  hoursValue: unknown,
+  now = new Date(),
+): Promise<string[]> {
+  const hours = normalizeHoursBeforeExpiry(hoursValue);
+  if (hours === null) return [];
+  const organizationId = getOrgIdOrThrow();
+  const oldestInbound = new Date(now.getTime() - WHATSAPP_SESSION_WINDOW_MS);
+  const newestInbound = new Date(
+    oldestInbound.getTime() + hours * 60 * 60 * 1000,
+  );
+  const rows = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+    WITH sessions AS (
+      SELECT
+        c."organizationId",
+        c."contactId",
+        c."channel",
+        MAX(m."createdAt") AS "lastInboundAt"
+      FROM "conversations" c
+      JOIN "messages" m
+        ON m."conversationId" = c."id"
+       AND m."direction" = 'in'
+      WHERE c."contactId" IS NOT NULL
+        AND c."organizationId" = ${organizationId}
+        AND LOWER(c."channel") IN ('whatsapp', 'whatsapp_meta', 'meta_whatsapp')
+      GROUP BY c."organizationId", c."contactId", c."channel"
+      HAVING MAX(m."createdAt") > ${oldestInbound}
+         AND MAX(m."createdAt") <= ${newestInbound}
+    )
+    SELECT rep."id"
+    FROM sessions s
+    JOIN LATERAL (
+      SELECT c2."id"
+      FROM "conversations" c2
+      JOIN "channels" ch
+        ON ch."id" = c2."channelId"
+       AND ch."provider" = 'META_CLOUD_API'
+      WHERE c2."organizationId" = s."organizationId"
+        AND c2."contactId" = s."contactId"
+        AND c2."channel" = s."channel"
+      ORDER BY (c2."status" <> 'RESOLVED') DESC, c2."updatedAt" DESC
+      LIMIT 1
+    ) rep ON TRUE
+  `);
+  return rows.map((row) => row.id);
+}
+
+async function withResolvedSessionFilter(
+  params: GetConversationsParams,
+): Promise<GetConversationsParams> {
+  if (params.sessionExpiresWithinHours === undefined) return params;
+  return {
+    ...params,
+    sessionExpiringConversationIds:
+      params.sessionExpiringConversationIds ??
+      (await findSessionExpiringConversationIds(params.sessionExpiresWithinHours)),
+  };
+}
+
 /**
  * IDs das conversas ENCERRÁVEIS que casam com um filtro de listagem — usado
  * pelo "selecionar todas do filtro → Encerrar". Aplica o MESMO `where` da
@@ -378,7 +465,7 @@ export function buildInboxFilterConditions(
 export async function getResolvableConversationIds(
   params: GetConversationsParams,
 ): Promise<{ ids: string[]; skippedIds: string[] }> {
-  const baseWhere = buildConversationListWhere(params);
+  const baseWhere = buildConversationListWhere(await withResolvedSessionFilter(params));
   const openWhere: Prisma.ConversationWhereInput = {
     AND: [baseWhere, { status: { not: "RESOLVED" } }],
   };
@@ -408,6 +495,7 @@ export async function getConversations(
   page: number;
   perPage: number;
 }> {
+  params = await withResolvedSessionFilter(params);
   const page = Math.max(1, params.page ?? 1);
   // 27/mai/26 — Cap subido de 100 → 200 pra acomodar o infinite scroll
   // da lista de conversas (operador com 455+ conversas em "Entrada"
@@ -591,28 +679,73 @@ export async function linkContactToConversation(conversationId: string, contactI
   });
 }
 
+/**
+ * Detalhe de uma conversa no shape da lista (deep-link / GET :id).
+ * Usa `listSelect` (não `include` de todos os escalares) — mesmo padrão do
+ * assign: evita 500 por drift de coluna e devolve department/tags/preview
+ * iguais ao card da inbox.
+ */
 export async function getConversationById(id: string) {
-  const conv = await prisma.conversation.findUnique({
+  const row = await prisma.conversation.findUnique({
     where: { id },
-    include: {
-      contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
-      assignedTo: { select: { id: true, name: true, email: true, avatarUrl: true } },
+    select: {
+      organizationId: true,
+      ...listSelect,
     },
   });
-  if (conv?.contact) {
-    await enrichContactsWithUserAvatarFallback([conv.contact]);
+  if (!row) return null;
+  if (row.contact) {
+    await enrichContactsWithUserAvatarFallback([row.contact]);
   }
-  return conv;
+  const [previewMap, lastInboundMap] = await Promise.all([
+    lastMessagePreviewsBatch([id]),
+    lastInboundBatch([id]),
+  ]);
+  const tagMap = new Map<string, ConversationTag>();
+  for (const t of row.contact?.tags ?? []) {
+    if (t.tag) tagMap.set(t.tag.id, t.tag);
+  }
+  return {
+    ...row,
+    lastInboundAt: lastInboundMap.get(id) ?? row.lastInboundAt,
+    lastMessagePreview: previewMap.get(id)?.preview ?? null,
+    lastMessageAt: previewMap.get(id)?.createdAt ?? null,
+    tags: Array.from(tagMap.values()),
+  };
 }
 
+/** Campos mínimos do assign/transfer — evita RETURNING de colunas novas
+ *  (ex.: hasHumanReply) que ainda não existem em DBs com drift de migração. */
+const ASSIGN_CONVERSATION_SELECT = {
+  id: true,
+  status: true,
+  externalId: true,
+  contactId: true,
+  assignedToId: true,
+  contact: {
+    select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true },
+  },
+  assignedTo: {
+    select: { id: true, name: true, email: true, avatarUrl: true },
+  },
+} as const;
+
+export type AssignConversationPayload = Prisma.ConversationGetPayload<{
+  select: typeof ASSIGN_CONVERSATION_SELECT;
+}>;
+
 export type AssignConversationResult =
-  | { ok: true; conversation: NonNullable<Awaited<ReturnType<typeof getConversationById>>> }
+  | { ok: true; conversation: AssignConversationPayload }
   | { ok: false; code: "NOT_FOUND" | "FORBIDDEN" | "USER_NOT_FOUND" };
 
 export async function assignConversationAssignedTo(
   conversationId: string,
   newAssigneeId: string | null,
-  actor: { id: string; role: AppUserRole }
+  actor: {
+    id: string;
+    role: AppUserRole;
+    canReassignOthers?: boolean;
+  }
 ): Promise<AssignConversationResult> {
   const conv = await prisma.conversation.findUnique({
     where: { id: conversationId },
@@ -622,9 +755,12 @@ export async function assignConversationAssignedTo(
 
   const isAdmin = actor.role === "ADMIN";
   const isManager = actor.role === "MANAGER";
-  const isAdminOrManager = isAdmin || isManager;
+  // `canReassignOthers` vem do RBAC efetivo na rota de assign. O fallback
+  // por role preserva os demais callsites legados (ex.: transfer).
+  const canReassignOthers =
+    actor.canReassignOthers ?? (isAdmin || isManager);
 
-  if (!isAdminOrManager) {
+  if (!canReassignOthers) {
     if (newAssigneeId === null) return { ok: false, code: "FORBIDDEN" };
     if (newAssigneeId !== actor.id) return { ok: false, code: "FORBIDDEN" };
     if (conv.assignedToId && conv.assignedToId !== actor.id) {
@@ -665,6 +801,11 @@ export async function assignConversationAssignedTo(
   // negócios abertos do contato. Sem isso, "Remover responsável" limpava só
   // a conversa e o contato/negócio continuavam atribuídos (inconsistente) —
   // dava a impressão de que não removeu. Tudo numa transação (atômico).
+  //
+  // `select` explícito (não `include`): Prisma com include devolve TODOS os
+  // escalares no RETURNING — incluindo hasHumanReply. Em DBs sem a coluna
+  // (drift de migração), o assign/bulk-reassign quebrava mesmo sem tocar no
+  // campo. O select lista só o que a rota de actions precisa.
   const updated = await prisma.$transaction(async (tx) => {
     const conv = await tx.conversation.update({
       where: { id: conversationId },
@@ -672,10 +813,7 @@ export async function assignConversationAssignedTo(
         assignedToId: newAssigneeId,
         ...(shouldResetGreeted ? { aiGreetedAt: null } : {}),
       },
-      include: {
-        contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
-        assignedTo: { select: { id: true, name: true, email: true, avatarUrl: true } },
-      },
+      select: ASSIGN_CONVERSATION_SELECT,
     });
     if (conv.contactId) {
       await tx.contact.update({

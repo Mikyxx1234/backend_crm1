@@ -28,9 +28,13 @@ const channels = await db.channel.findMany({
 for (const ch of channels) {
   const cfg = ch.config ?? {};
   const accessToken = cfg.accessToken ? decrypt(String(cfg.accessToken)) : null;
-  const wabaId = cfg.wabaId ?? '945057281691135';
+  // O provisionamento grava a WABA em `businessAccountId` (ver
+  // src/services/channels-meta-provision.ts). Mantemos `wabaId` como
+  // back-compat para configs antigos.
+  const wabaId = cfg.businessAccountId ?? cfg.wabaId;
 
   if (!accessToken) { console.log('Sem accessToken'); continue; }
+  if (!wabaId) { console.log('Sem businessAccountId/wabaId no config'); continue; }
 
   console.log('\nSubscrevendo app à WABA:', wabaId);
 

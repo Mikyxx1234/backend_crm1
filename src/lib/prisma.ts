@@ -146,6 +146,10 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   // acima: sem entrar aqui, create() falha (nao injeta) e findMany()
   // leakaria favoritos de outra org.
   "FavoriteMessage",
+  // Favoritos + contador de uso dos atalhos "/" por agente. organizationId
+  // NOT NULL — mesma razao do FavoriteMessage: sem entrar aqui create() nao
+  // injeta org e findMany() leakaria preferencias de outra org.
+  "AgentMessageShortcut",
 ]);
 
 type AnyArgs = Record<string, unknown>;

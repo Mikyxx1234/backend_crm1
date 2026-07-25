@@ -692,7 +692,33 @@ A forma mais comum é fazer a automação ouvir um trigger nativo (`message_rece
 | POST | `/api/channels/[id]/connect` | — | Inicia conexão (Baileys = pede QR; Meta = valida creds). |
 | POST | `/api/channels/[id]/disconnect` | — | Desconecta (não remove). |
 | GET | `/api/channels/[id]/qr` | `?prefilled_message=` | QR code Baileys (PNG). Em Meta retorna deeplink wa.me. |
-| POST | `/api/channels/embedded-signup` | `{ code, redirectUri }` | Conclui Embedded Signup da Meta (OAuth). |
+| GET | `/api/channels/[id]/meta-health` | — | Health-check Meta Cloud: assinatura do WABA (`subscribed_apps`) + saúde do número. |
+| POST | `/api/channels/embedded-signup` | `{ code, phoneNumberId, wabaId, name?, channelId?, appSecret? }` | Conclui Embedded Signup da Meta (OAuth). `channelId` reconecta canal existente; sem ele cria um novo. |
+
+Resposta do `POST /api/channels/embedded-signup`:
+```json
+{
+  "channel": { "id": "...", "provider": "META_CLOUD_API", "status": "CONNECTED" },
+  "webhookSubscribed": true,
+  "phoneRegistered": true,
+  "displayPhone": "+55 11 99999-9999",
+  "verifiedName": "Minha Empresa"
+}
+```
+- `webhookSubscribed`: `true` se o app do CRM foi assinado ao WABA (webhooks entregues). Se `false`, a chamada retorna erro 400.
+- `phoneRegistered`: `false` é não-fatal — o número pode precisar de registro/PIN manual no painel Meta para enviar mensagens.
+
+Resposta do `GET /api/channels/[id]/meta-health`:
+```json
+{
+  "channelId": "...",
+  "status": "CONNECTED",
+  "webhookSubscribed": true,
+  "subscribedAppsError": null,
+  "phone": { "display_phone_number": "...", "code_verification_status": "VERIFIED", "quality_rating": "GREEN" },
+  "phoneError": null
+}
+```
 
 ### 10.2. API Tokens (criação para n8n)
 
@@ -1036,6 +1062,7 @@ POST    /api/channels/[id]/connect
 POST    /api/channels/[id]/disconnect
 GET     /api/channels/[id]/qr
 GET     /api/channels/[id]/status
+GET     /api/channels/[id]/meta-health
 GET     /api/companies*
 POST    /api/companies*
 GET     /api/companies/[id]

@@ -15,7 +15,7 @@ for (const ch of channels) {
   console.log('  accessToken:', cfg.accessToken ? `SIM (${String(cfg.accessToken).substring(0, 10)}...)` : 'NAO DEFINIDO');
   console.log('  verifyToken:', cfg.verifyToken ? `SIM (${String(cfg.verifyToken).substring(0, 10)}...)` : 'NAO DEFINIDO');
   console.log('  phoneNumberId:', cfg.phoneNumberId ?? 'NAO DEFINIDO');
-  console.log('  wabaId:', cfg.wabaId ?? 'NAO DEFINIDO');
+  console.log('  businessAccountId:', cfg.businessAccountId ?? cfg.wabaId ?? 'NAO DEFINIDO');
 }
 
 await db.$disconnect();

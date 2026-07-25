@@ -99,6 +99,7 @@ export async function PUT(request: Request, context: RouteContext) {
         payload.triggerConfig = b.triggerConfig as Parameters<typeof updateAutomation>[1]["triggerConfig"];
       }
       if (typeof b.active === "boolean") payload.active = b.active;
+      if (typeof b.allowManualRun === "boolean") payload.allowManualRun = b.allowManualRun;
       if (Array.isArray(b.steps)) {
         payload.steps = (b.steps as { id?: string; type: string; config: unknown }[]).map((s) => ({
           id: typeof s.id === "string" ? s.id : undefined,
@@ -121,6 +122,12 @@ export async function PUT(request: Request, context: RouteContext) {
           }
           if (err.message === "INVALID_NAME") {
             return NextResponse.json({ message: "Nome inválido." }, { status: 400 });
+          }
+          if (err.message === "INVALID_TRIGGER_CONFIG") {
+            return NextResponse.json(
+              { message: "Horas antes do encerramento devem ser maiores que 0 e menores que 24." },
+              { status: 400 },
+            );
           }
         }
         throw err;

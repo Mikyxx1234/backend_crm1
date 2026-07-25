@@ -916,11 +916,16 @@ async function executeStep(
       // — mesma regra do moveDeal manual no Kanban.
       const targetStage = await prisma.stage.findUnique({
         where: { id: stageId },
-        select: { isWon: true, isLost: true },
+        select: { isWon: true, isLost: true, name: true },
       });
       const currentDeal = await prisma.deal.findUnique({
         where: { id: targetDealId },
-        select: { status: true, stageId: true, contactId: true },
+        select: {
+          status: true,
+          stageId: true,
+          contactId: true,
+          stage: { select: { name: true } },
+        },
       });
       const statusPatch = targetStage?.isWon
         ? currentDeal?.status === "WON"
@@ -934,6 +939,15 @@ async function executeStep(
             ? {}
             : { status: "OPEN" as const, closedAt: null, lostReason: null };
       await prisma.deal.update({ where: { id: targetDealId }, data: { stageId, ...statusPatch } });
+      // Loga STAGE_CHANGED na timeline do negócio (paridade com o move
+      // manual/kanban/bulk). Antes o move por automação não registrava o
+      // evento — só disparava o trigger encadeado abaixo.
+      if (currentDeal?.stageId && currentDeal.stageId !== stageId) {
+        createDealEvent(targetDealId, null, "STAGE_CHANGED", {
+          from: { id: currentDeal.stageId, name: currentDeal.stage?.name ?? currentDeal.stageId },
+          to: { id: stageId, name: targetStage?.name ?? stageId },
+        }).catch(() => {});
+      }
       // Dispara "mudança de fase" (encadeado, com guarda anti-loop) pra que
       // automações "quando entra na fase X" também rodem quando OUTRA
       // automação move o negócio. Antes esse caminho não disparava nada.
@@ -2382,13 +2396,31 @@ async function executeStep(
       if (!rt.contactId) return {};
       const convs = await prisma.conversation.findMany({
         where: { contactId: rt.contactId, status: { not: "RESOLVED" } },
-        select: { id: true },
+        select: { id: true, status: true, externalId: true },
       });
       if (convs.length > 0) {
         await prisma.conversation.updateMany({
           where: { id: { in: convs.map((c) => c.id) } },
           data: { status: "RESOLVED" },
         });
+        // Registra o encerramento na timeline de cada conversa (ator =
+        // AUTOMATION, herdado do contexto). Sem isso, um fechamento feito
+        // por automação nao aparecia na timeline/feed — so os feitos
+        // manualmente (rota /actions) ou em massa (job) eram logados.
+        for (const c of convs) {
+          void logEvent({
+            type: "CONVERSATION_CLOSED",
+            entityType: "CONVERSATION",
+            entityId: c.id,
+            entityLabel: c.externalId ?? null,
+            conversationId: c.id,
+            contactId: rt.contactId,
+            field: "status",
+            oldValue: c.status,
+            newValue: "RESOLVED",
+            meta: { from: c.status, to: "RESOLVED", source: "automation" },
+          });
+        }
       }
       return {};
     }

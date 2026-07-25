@@ -109,3 +109,30 @@ export async function invalidateStageMetrics(
 ): Promise<void> {
   await cache.del(stageMetricsKey(orgId, pipelineId));
 }
+
+// ── Board (getBoardData) ────────────────────────────────────────
+//
+// getBoardData é a query MAIS cara do app: varre deals do pipeline com
+// includes + last-message por contato + products + metrics. Sob rajada
+// (o mesmo usuário/funil recarregando o board via invalidações do
+// react-query enquanto webhooks criam deals a cada segundo), dezenas de
+// execuções IDÊNTICAS de ~13s empilhavam e estouravam a CPU do container.
+//
+// Cache-aside com TTL curto + stampede-lock colapsa a rajada numa única
+// query por `variant` (visibilidade + status + filtros + paginação/sort).
+// `variant` deve ser um hash estável desses parâmetros (ver deals.ts).
+export function boardDataKey(
+  orgId: string,
+  pipelineId: string,
+  variant: string,
+): string {
+  return `board:${orgId}:${pipelineId}:${variant}`;
+}
+
+/** Invalida TODAS as variantes do board de um pipeline (todos os filtros). */
+export async function invalidateBoardData(
+  orgId: string,
+  pipelineId: string,
+): Promise<void> {
+  await cache.delPattern(`board:${orgId}:${pipelineId}:*`);
+}

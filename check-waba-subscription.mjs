@@ -28,7 +28,7 @@ const channels = await db.channel.findMany({
 for (const ch of channels) {
   const cfg = ch.config ?? {};
   const accessToken = cfg.accessToken ? decrypt(String(cfg.accessToken)) : null;
-  const wabaId = cfg.wabaId ?? '945057281691135';
+  const wabaId = cfg.businessAccountId ?? cfg.wabaId;
 
   if (!accessToken) { console.log('Sem accessToken'); continue; }
 

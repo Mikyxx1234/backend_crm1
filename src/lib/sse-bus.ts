@@ -258,5 +258,13 @@ function bootstrapBackgroundServices() {
     .catch((e) =>
       console.error("[sse-bus] failed to start ai-agent inactivity worker:", e),
     );
+
+  import("@/services/whatsapp-session-expiry-sweeper")
+    .then(({ startWhatsappSessionExpirySweeper }) =>
+      startWhatsappSessionExpirySweeper(),
+    )
+    .catch((e) =>
+      console.error("[sse-bus] failed to start session-expiry sweeper:", e),
+    );
 }
 bootstrapBackgroundServices();

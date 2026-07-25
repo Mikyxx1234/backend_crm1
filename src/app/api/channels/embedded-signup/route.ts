@@ -96,7 +96,13 @@ export async function POST(request: Request) {
       });
 
       return NextResponse.json(
-        { channel: result.channel },
+        {
+          channel: result.channel,
+          webhookSubscribed: result.webhookSubscribed,
+          phoneRegistered: result.phoneRegistered,
+          displayPhone: result.displayPhone,
+          verifiedName: result.verifiedName,
+        },
         { status: result.created ? 201 : 200 },
       );
     } catch (e: unknown) {

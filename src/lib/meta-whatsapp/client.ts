@@ -1,4 +1,5 @@
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
+import { isVerboseLogging } from "@/lib/debug-log";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import { metaErrorReason } from "@/lib/meta-whatsapp/error-catalog";
 import { metrics, templatizeRoute } from "@/lib/metrics";
@@ -305,10 +306,16 @@ export class MetaWhatsAppClient {
       throw err;
     }
 
-    console.log(
-      "[meta-graph]",
-      JSON.stringify({ path, httpStatus: res.status, body: data }),
-    );
+    // [meta-graph] loga o corpo INTEIRO de cada chamada Graph. Para
+    // `message_templates?limit=500` isso é um JSON.stringify de centenas de
+    // templates com todos os componentes — caro em CPU e ruidoso em prod.
+    // Gate por verbosidade (ver lib/debug-log). Erros continuam sempre logados.
+    if (isVerboseLogging()) {
+      console.log(
+        "[meta-graph]",
+        JSON.stringify({ path, httpStatus: res.status, body: data }),
+      );
+    }
     return data as T;
   }
 
@@ -741,6 +748,18 @@ export class MetaWhatsAppClient {
     ].join(",");
     return this.graphFetch<MetaPhoneNumberHealth>(
       `${this.phoneNumberId}?fields=${fields}`,
+    );
+  }
+
+  /**
+   * Lista os apps assinados ao WABA (`GET /{waba}/subscribed_apps`). Usado no
+   * health-check pos Embedded Signup para confirmar que o App do CRM esta
+   * recebendo webhooks desse WABA. Retorna `{ data: [...] }`.
+   */
+  async getSubscribedApps(): Promise<{ data?: Array<Record<string, unknown>> }> {
+    const waba = this.wabaOrThrow();
+    return this.graphFetch<{ data?: Array<Record<string, unknown>> }>(
+      `${waba}/subscribed_apps`,
     );
   }
 

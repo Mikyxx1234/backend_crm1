@@ -33,16 +33,34 @@ import {
 // + `runWithContext`. Checagem de role passa a ser inline (admin pra escrita,
 // admin/manager pra leitura) — mesmo padrão de `/api/deals/bulk` etc.
 
+// Feature flags de UI legíveis por QUALQUER membro autenticado da org
+// (ex.: composer precisa saber se a assinatura do agente está habilitada).
+// São chaves não sensíveis — nunca segredos (`ai.*`, `whatsapp_call_secret`
+// etc.), que continuam restritos a ADMIN/MANAGER.
+const MEMBER_READABLE_PREFIXES = ["conversation."] as const;
+
+function isMemberReadable(target: string): boolean {
+  return MEMBER_READABLE_PREFIXES.some(
+    (p) => target === p || target.startsWith(p),
+  );
+}
+
 export async function GET(request: Request) {
   return withOrgContext(async (session) => {
     const role = session.user.role;
-    if (role !== "ADMIN" && role !== "MANAGER") {
-      return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
-    }
+    const isPrivileged = role === "ADMIN" || role === "MANAGER";
 
     const url = new URL(request.url);
     const key = url.searchParams.get("key");
     const prefix = url.searchParams.get("prefix");
+
+    // MEMBER só pode ler o whitelist de feature flags não sensíveis.
+    if (!isPrivileged) {
+      const target = key ?? prefix ?? "";
+      if (!target || !isMemberReadable(target)) {
+        return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
+      }
+    }
 
     try {
       if (key) {

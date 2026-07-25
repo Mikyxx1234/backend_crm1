@@ -8,6 +8,8 @@ import { getOrgSettingBool } from "@/lib/org-settings";
 import { logEvent } from "@/services/activity-log";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
+import { cache } from "@/lib/cache";
+import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
 import {
   buildDealWhereFromFilters,
   type AdvancedDealFilters,
@@ -197,18 +199,24 @@ export async function getDeals(params: GetDealsParams = {}) {
 
   const search = params.search?.trim();
   if (search) {
+    // Agrupa TODOS os filtros de `contact` sob um único `contact: { OR: [...] }`.
+    // Prisma gera 1 LEFT JOIN de `contacts` em vez de 1 por condição — antes eram
+    // 4 self-joins (j0..j4) que faziam o board de busca custar ~2,4s no Postgres
+    // (24/jul/26). Semanticamente idêntico ao anterior.
     conditions.push({
       OR: [
         { title: { contains: search, mode: "insensitive" } },
-        { contact: { name: { contains: search, mode: "insensitive" } } },
-        { contact: { email: { contains: search, mode: "insensitive" } } },
-        { contact: { phone: { contains: search } } },
-        // Qualquer valor de campo personalizado (RGM, CPF, matrícula, ...),
-        // do negócio ou do contato vinculado.
+        // Campos personalizados do NEGÓCIO (RGM, CPF, matrícula, ...).
         { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
         {
           contact: {
-            customFields: { some: { value: { contains: search, mode: "insensitive" } } },
+            OR: [
+              { name: { contains: search, mode: "insensitive" } },
+              { email: { contains: search, mode: "insensitive" } },
+              { phone: { contains: search } },
+              // Campos personalizados do CONTATO vinculado.
+              { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
+            ],
           },
         },
       ],
@@ -751,6 +759,20 @@ export async function moveDeal(
       });
     }),
   );
+
+  // Invalida o cache-aside do board pra que a ação manual do operador
+  // reflita de imediato (sem esperar o TTL), evitando "flicker" do card
+  // voltando à coluna de origem. Cobre origem e destino (cross-pipeline).
+  try {
+    const orgId = getOrgIdOrThrow();
+    void invalidateBoardData(orgId, targetPeek.pipelineId);
+    if (fromPipelineId && fromPipelineId !== targetPeek.pipelineId) {
+      void invalidateBoardData(orgId, fromPipelineId);
+    }
+  } catch {
+    /* fora de contexto de org (jobs) — TTL curto cobre a atualização */
+  }
+
   return result;
 }
 
@@ -894,6 +916,18 @@ export async function reopenDeal(id: string) {
 /** Limite default de cards exibidos por coluna no board. */
 const DEFAULT_BOARD_COLUMN_LIMIT = 100;
 const MAX_BOARD_COLUMN_LIMIT = 500;
+/**
+ * TTL do cache-aside do board. Curto o bastante pra manter o quadro
+ * "fresco" (novos leads via webhook aparecem em ≤ este intervalo), longo
+ * o bastante pra colapsar a rajada de cargas idênticas sob carga.
+ *
+ * 30s (antes 8s): a query base do board custa ~2,4s; com TTL de 8s ela
+ * recomputava a cada 8s sob uso contínuo, gerando picos periódicos de CPU
+ * (oscilação 13→140% em 24/jul/26). `moveDeal` invalida explicitamente, então
+ * a ação manual do operador continua refletindo na hora — o TTL só cobre o
+ * fluxo de leitura/webhook, onde 30s de staleness é aceitável.
+ */
+const BOARD_CACHE_TTL_SEC = 30;
 
 /**
  * Critério de ordenação dos cards dentro de cada coluna do board.
@@ -1136,7 +1170,48 @@ export async function resolveBoardDealIds(
   return { ids: rows.slice(0, cap).map((r) => r.id), capped };
 }
 
+/**
+ * Board com cache-aside de TTL curto (coalescing).
+ *
+ * `computeBoardData` (abaixo) é a query mais cara do app. Sob rajada de
+ * cargas idênticas (mesmo usuário/funil recarregando via invalidações do
+ * react-query enquanto webhooks criam deals), o `cache.wrap` + stampede
+ * lock colapsam N execuções de ~13s numa só por `variant` a cada
+ * `BOARD_CACHE_TTL_SEC`. Staleness ≤ TTL; `moveDeal` invalida
+ * explicitamente pra que a ação manual do operador não sofra flicker.
+ *
+ * O payload cacheado é serializado em JSON (Datas → ISO), exatamente o
+ * mesmo shape que o handler já emite via `NextResponse.json`.
+ */
 export async function getBoardData(
+  pipelineId: string,
+  visibilityOwnerId?: string | null,
+  statusFilter?: DealStatus | "ALL",
+  advancedFilters?: AdvancedDealFilters,
+  limitOptions?: BoardLimitOptions,
+) {
+  const orgId = getOrgIdOrThrow();
+  const variant = JSON.stringify({
+    v: visibilityOwnerId ?? null,
+    s: statusFilter ?? null,
+    f: advancedFilters ?? null,
+    l: limitOptions ?? null,
+  });
+  return cache.wrap(
+    boardDataKey(orgId, pipelineId, variant),
+    BOARD_CACHE_TTL_SEC,
+    () =>
+      computeBoardData(
+        pipelineId,
+        visibilityOwnerId,
+        statusFilter,
+        advancedFilters,
+        limitOptions,
+      ),
+  );
+}
+
+async function computeBoardData(
   pipelineId: string,
   visibilityOwnerId?: string | null,
   statusFilter?: DealStatus | "ALL",
@@ -1178,6 +1253,13 @@ export async function getBoardData(
   // + branch de "Carregar mais"). Default cai em `position asc` =
   // comportamento histórico.
   const dealOrderBy = buildBoardDealOrderBy(sortField, sortDirection);
+
+  // ⚡ [jul/26] Métricas de etapa dependem SÓ do pipelineId (não das
+  // colunas/cards). Disparamos aqui, ANTES do findMany de stages, pra que
+  // rodem em paralelo com a query mais pesada do board. Já é cache-aside
+  // (TTL 60s), então normalmente resolve "de graça"; aguardamos no
+  // Promise.all lá embaixo. Não usar `await` aqui — a promise fica em voo.
+  const metricsPromise = getStageMetrics(pipelineId);
 
   let stages: BoardStageWithDeals[];
 
@@ -1228,47 +1310,54 @@ export async function getBoardData(
     }
   }
 
-  // 3) Contagem TOTAL por etapa (independente do limit) — usada pra exibir
-  //    "+N mais" e os totais reais por coluna.
-  const totalsByStage = new Map<string, number>();
-  if (stages.length > 0) {
-    const groups = await prisma.deal.groupBy({
-      by: ["stageId"],
-      where: { ...dealWhere, stageId: { in: stages.map((s) => s.id) } },
-      _count: { _all: true },
-    });
-    for (const g of groups) totalsByStage.set(g.stageId, g._count._all);
-  }
-
+  // IDs/contatos derivados das colunas já carregadas — insumo das
+  // consultas de enriquecimento abaixo.
   const allDealIds = stages.flatMap((s) => s.deals.map((d) => d.id));
   const allContactIds = stages
     .flatMap((s) => s.deals)
     .map((d) => d.contactId)
     .filter((id): id is string => !!id);
+  const allContacts = stages
+    .flatMap((s) => s.deals)
+    .map((d) => d.contact)
+    .filter((c): c is NonNullable<typeof c> => c !== null);
 
-  // Product names per deal
-  const productMap = new Map<string, string>();
-  const productTypeMap = new Map<string, string>();
-  if (allDealIds.length > 0) {
-    const orgId = getOrgIdOrThrow();
-    const dealProducts = await prisma.$queryRaw<{ dealId: string; name: string; type: string }[]>`
-      SELECT dp."dealId", p.name, p.type
-      FROM deal_products dp
-      INNER JOIN products p ON p.id = dp."productId"
-      WHERE dp."dealId" = ANY(${allDealIds})
-        AND dp."organizationId" = ${orgId}
-        AND p."organizationId" = ${orgId}
-      ORDER BY dp."createdAt" ASC
-    `;
-    for (const dp of dealProducts) {
-      if (!productMap.has(dp.dealId)) {
-        productMap.set(dp.dealId, dp.name);
-        productTypeMap.set(dp.dealId, dp.type);
-      }
-    }
-  }
+  // ⚡ [jul/26] Antes estas etapas eram AWAITADAS em série (totais →
+  // produtos → última mensagem → métricas → avatares): a latência do board
+  // virava a SOMA de ~5 round-trips ao Postgres. São todas independentes
+  // entre si (só dependem de stages/IDs já resolvidos, ou apenas do
+  // pipelineId), então rodam em paralelo com Promise.all — a latência passa
+  // a ser ~o MAIOR round-trip, não a soma. Semanticamente idêntico: são
+  // leituras sem efeito colateral entre si. `metricsPromise` já foi
+  // disparada antes do findMany de stages (cache-aside 60s).
+  const orgIdForBoard = getOrgIdOrThrow();
 
-  // Last message + unread + channel per contact.
+  // 3) Contagem TOTAL por etapa (independente do limit) — usada pra exibir
+  //    "+N mais" e os totais reais por coluna.
+  const totalsPromise: Promise<{ stageId: string; _count: { _all: number } }[]> =
+    stages.length > 0
+      ? prisma.deal.groupBy({
+          by: ["stageId"],
+          where: { ...dealWhere, stageId: { in: stages.map((s) => s.id) } },
+          _count: { _all: true },
+        })
+      : Promise.resolve([]);
+
+  // Nome/tipo do produto por deal.
+  const productsPromise: Promise<{ dealId: string; name: string; type: string }[]> =
+    allDealIds.length > 0
+      ? prisma.$queryRaw<{ dealId: string; name: string; type: string }[]>`
+          SELECT dp."dealId", p.name, p.type
+          FROM deal_products dp
+          INNER JOIN products p ON p.id = dp."productId"
+          WHERE dp."dealId" = ANY(${allDealIds})
+            AND dp."organizationId" = ${orgIdForBoard}
+            AND p."organizationId" = ${orgIdForBoard}
+          ORDER BY dp."createdAt" ASC
+        `
+      : Promise.resolve([]);
+
+  // Última mensagem + não lidas + canal por contato.
   // Obs.: o "responsável" do contato e do chat são derivados de
   // `Deal.owner` via regra de herança (ver `propagateOwnerToContactAndChat`),
   // então não precisamos carregá-los separadamente aqui.
@@ -1277,64 +1366,77 @@ export async function getBoardData(
   // (ex.: bolinha verde do WhatsApp). Quando o contato tem múltiplas
   // conversas, vence o canal da MAIS RECENTE — segue a mesma escolha
   // de `lastMessage` pra manter consistência visual.
-  const lastMsgMap = new Map<string, { content: string; createdAt: Date; direction: string }>();
-  const unreadMap = new Map<string, number>();
-  const channelMap = new Map<string, { channel: string; updatedAt: Date }>();
+  const convsPromise =
+    allContactIds.length > 0
+      ? prisma.conversation.findMany({
+          where: { contactId: { in: allContactIds } },
+          select: {
+            contactId: true,
+            unreadCount: true,
+            channel: true,
+            updatedAt: true,
+            messages: {
+              orderBy: { createdAt: "desc" },
+              take: 1,
+              select: { content: true, createdAt: true, direction: true },
+            },
+          },
+        })
+      : Promise.resolve([]);
 
-  if (allContactIds.length > 0) {
-    const convs = await prisma.conversation.findMany({
-      where: { contactId: { in: allContactIds } },
-      select: {
-        contactId: true,
-        unreadCount: true,
-        channel: true,
-        updatedAt: true,
-        messages: {
-          orderBy: { createdAt: "desc" },
-          take: 1,
-          select: { content: true, createdAt: true, direction: true },
-        },
-      },
-    });
+  const [totalsGroups, dealProducts, convs, metrics] = await Promise.all([
+    totalsPromise,
+    productsPromise,
+    convsPromise,
+    metricsPromise,
+    // Enriquecimento de avatar (fallback PURAMENTE VISUAL — foto do User
+    // homônimo quando o Contact não tem avatarUrl). Independe das demais;
+    // roda no mesmo lote. Muta `allContacts` em memória e resolve void.
+    enrichContactsWithUserAvatarFallback(allContacts),
+  ]);
 
-    for (const conv of convs) {
-      if (!conv.contactId) continue;
+  const totalsByStage = new Map<string, number>();
+  for (const g of totalsGroups) totalsByStage.set(g.stageId, g._count._all);
 
-      if (conv.messages.length > 0) {
-        const msg = conv.messages[0];
-        const existing = lastMsgMap.get(conv.contactId);
-        if (!existing || msg.createdAt > existing.createdAt) {
-          lastMsgMap.set(conv.contactId, msg);
-        }
-      }
-
-      const prev = unreadMap.get(conv.contactId) ?? 0;
-      unreadMap.set(conv.contactId, prev + conv.unreadCount);
-
-      // Se ainda não temos canal pra este contato, ou esta conv é mais
-      // recente que a já registrada, atualiza. Garante que o badge no
-      // card reflita o canal da conversa "ativa" do contato.
-      const prevCh = channelMap.get(conv.contactId);
-      if (!prevCh || conv.updatedAt > prevCh.updatedAt) {
-        channelMap.set(conv.contactId, {
-          channel: conv.channel,
-          updatedAt: conv.updatedAt,
-        });
-      }
+  const productMap = new Map<string, string>();
+  const productTypeMap = new Map<string, string>();
+  for (const dp of dealProducts) {
+    if (!productMap.has(dp.dealId)) {
+      productMap.set(dp.dealId, dp.name);
+      productTypeMap.set(dp.dealId, dp.type);
     }
   }
 
-  const metrics = await getStageMetrics(pipelineId);
-  const metricsMap = new Map(metrics.map((m) => [m.stageId, m]));
+  const lastMsgMap = new Map<string, { content: string; createdAt: Date; direction: string }>();
+  const unreadMap = new Map<string, number>();
+  const channelMap = new Map<string, { channel: string; updatedAt: Date }>();
+  for (const conv of convs) {
+    if (!conv.contactId) continue;
 
-  // Enriquece contatos sem avatarUrl com a foto do User homônimo (se
-  // existir). Caso típico: agente testando com seu próprio número.
-  // É um fallback PURAMENTE VISUAL — ver `contact-avatar-fallback.ts`.
-  const allContacts = stages
-    .flatMap((s) => s.deals)
-    .map((d) => d.contact)
-    .filter((c): c is NonNullable<typeof c> => c !== null);
-  await enrichContactsWithUserAvatarFallback(allContacts);
+    if (conv.messages.length > 0) {
+      const msg = conv.messages[0];
+      const existing = lastMsgMap.get(conv.contactId);
+      if (!existing || msg.createdAt > existing.createdAt) {
+        lastMsgMap.set(conv.contactId, msg);
+      }
+    }
+
+    const prev = unreadMap.get(conv.contactId) ?? 0;
+    unreadMap.set(conv.contactId, prev + conv.unreadCount);
+
+    // Se ainda não temos canal pra este contato, ou esta conv é mais
+    // recente que a já registrada, atualiza. Garante que o badge no
+    // card reflita o canal da conversa "ativa" do contato.
+    const prevCh = channelMap.get(conv.contactId);
+    if (!prevCh || conv.updatedAt > prevCh.updatedAt) {
+      channelMap.set(conv.contactId, {
+        channel: conv.channel,
+        updatedAt: conv.updatedAt,
+      });
+    }
+  }
+
+  const metricsMap = new Map(metrics.map((m) => [m.stageId, m]));
 
   // Stage `isIncoming` (Leads de entrada) é a fase de captura e DEVE
   // ficar sempre visível. Antes filtrávamos por `stage.deals.length > 0`,

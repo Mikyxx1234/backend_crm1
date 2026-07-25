@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { userOrgFilter } from "@/lib/auth-helpers";
+import { debugLog } from "@/lib/debug-log";
 import type { AppUserRole } from "@/lib/auth-types";
 import {
   canDoChannelAction,
@@ -237,7 +238,9 @@ export async function GET(request: Request, context: RouteContext) {
       ? new Date(lastInboundAt.getTime() + SESSION_WINDOW_MS).toISOString()
       : null;
 
-    console.log(
+    // Este GET é chamado a cada 5s por conversa aberta (refetchInterval do
+    // inbox). Logar por request gera spam/CPU em prod — gate por verbosidade.
+    debugLog(
       `[session] conv=${conv.id} lastInbound=${lastInboundAt?.toISOString() ?? "NULL"} diffH=${diffMs !== null ? (diffMs / 3_600_000).toFixed(2) : "N/A"} active=${sessionActive}`
     );
 
