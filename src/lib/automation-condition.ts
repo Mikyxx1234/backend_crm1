@@ -43,7 +43,13 @@ export type ConditionOp =
   // populados em `resolveRuntimeContext`. `value` pode ser nome OU ID
   // — o avaliador faz match contra ambos os arrays.
   | "has_tag"
-  | "not_has_tag";
+  | "not_has_tag"
+  // 25/jul/26 — Regra de expediente dentro do bloco Condição. `value`
+  // é JSON serializado com `{ schedule: [{days,from,to}], timezone }`.
+  // O avaliador curto-circuita antes de `evalCondition` (comparação
+  // não é escalar).
+  | "in_business_hours"
+  | "not_in_business_hours";
 
 export type ConditionRule = {
   field: string;
