@@ -611,18 +611,39 @@ export async function linkContactToConversation(conversationId: string, contactI
   });
 }
 
+/**
+ * Detalhe de uma conversa no shape da lista (deep-link / GET :id).
+ * Usa `listSelect` (não `include` de todos os escalares) — mesmo padrão do
+ * assign: evita 500 por drift de coluna e devolve department/tags/preview
+ * iguais ao card da inbox.
+ */
 export async function getConversationById(id: string) {
-  const conv = await prisma.conversation.findUnique({
+  const row = await prisma.conversation.findUnique({
     where: { id },
-    include: {
-      contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
-      assignedTo: { select: { id: true, name: true, email: true, avatarUrl: true } },
+    select: {
+      organizationId: true,
+      ...listSelect,
     },
   });
-  if (conv?.contact) {
-    await enrichContactsWithUserAvatarFallback([conv.contact]);
+  if (!row) return null;
+  if (row.contact) {
+    await enrichContactsWithUserAvatarFallback([row.contact]);
   }
-  return conv;
+  const [previewMap, lastInboundMap] = await Promise.all([
+    lastMessagePreviewsBatch([id]),
+    lastInboundBatch([id]),
+  ]);
+  const tagMap = new Map<string, ConversationTag>();
+  for (const t of row.contact?.tags ?? []) {
+    if (t.tag) tagMap.set(t.tag.id, t.tag);
+  }
+  return {
+    ...row,
+    lastInboundAt: lastInboundMap.get(id) ?? row.lastInboundAt,
+    lastMessagePreview: previewMap.get(id)?.preview ?? null,
+    lastMessageAt: previewMap.get(id)?.createdAt ?? null,
+    tags: Array.from(tagMap.values()),
+  };
 }
 
 /** Campos mínimos do assign/transfer — evita RETURNING de colunas novas
