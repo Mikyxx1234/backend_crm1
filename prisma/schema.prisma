@@ -100,6 +100,7 @@ model Organization {
   agentSchedules           AgentSchedule[]
   agentStatuses            AgentStatus[]
   agentPresenceLogs        AgentPresenceLog[]
+  systemUsageSessions      SystemUsageSession[]
   aiAgentConfigs           AIAgentConfig[]
   aiAgentKnowledgeDocs     AIAgentKnowledgeDoc[]
   auditLogs                AuditLog[]
@@ -507,6 +508,7 @@ model User {
   schedule                       AgentSchedule?
   agentStatus                    AgentStatus?
   presenceLogs                   AgentPresenceLog[]
+  systemUsageSessions            SystemUsageSession[]
   assignedConversations          Conversation[]            @relation("ConversationAssignedTo")
   scheduledWhatsappCallsAssigned ScheduledWhatsappCall[]   @relation("ScheduledWhatsappCallAssignee")
   dealEvents                     DealEvent[]
@@ -3664,6 +3666,34 @@ model AgentPresenceLog {
   @@index([userId, endedAt])
   @@index([userId, status, startedAt])
   @@map("agent_presence_logs")
+}
+
+/// Sessão de USO do CRM ("aba aberta") — independente do status manual de
+/// disponibilidade da Distribuição (AgentStatus).
+///
+/// Uma linha por sessão de uso. Enquanto `endedAt IS NULL` a sessão está
+/// aberta; o heartbeat do cliente atualiza `lastHeartbeatAt`. Um sweeper
+/// fecha sessões cujo último heartbeat expirou.
+///
+/// O partial unique index (userId) WHERE "endedAt" IS NULL garante que um
+/// usuário nunca tem mais de uma sessão aberta ao mesmo tempo — múltiplas
+/// abas convergem para a mesma sessão (upsert idempotente).
+model SystemUsageSession {
+  id              String    @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  startedAt       DateTime  @default(now())
+  lastHeartbeatAt DateTime  @default(now())
+  endedAt         DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([organizationId, userId, endedAt])
+  @@index([organizationId, startedAt])
+  @@index([userId, startedAt])
+  @@map("system_usage_sessions")
 }
 
 /// Callback de voz WhatsApp agendado (ex.: após template pós-chamada perdida).

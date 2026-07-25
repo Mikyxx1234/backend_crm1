@@ -114,6 +114,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "AgentSchedule",
   "AgentStatus",
   "AgentPresenceLog",
+  "SystemUsageSession",
   "AIAgentConfig",
   "AIAgentKnowledgeDoc",
   "AIAgentKnowledgeChunk",

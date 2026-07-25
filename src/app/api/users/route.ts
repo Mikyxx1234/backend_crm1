@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { requireAdmin, requireAuth, userOrgFilter } from "@/lib/auth-helpers";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
+import { getSystemPresenceMap } from "@/services/system-presence";
 
 const VALID_ROLES = ["ADMIN", "MANAGER", "MEMBER"] as const;
 
@@ -45,12 +46,31 @@ export async function GET() {
       },
     });
 
+    // Presença de USO (aba do CRM aberta) — SEPARADA de agentStatus.
+    // agentStatus continua refletindo apenas a disponibilidade manual
+    // da Distribuição. Nunca combinar esses dois conceitos.
+    const orgId = r.session.user.organizationId;
+    let presence: Awaited<ReturnType<typeof getSystemPresenceMap>> = new Map();
+    if (orgId) {
+      try {
+        presence = await getSystemPresenceMap({
+          organizationId: orgId,
+          userIds: users.map((u) => u.id),
+        });
+      } catch {
+        // Migration ainda não aplicada / erro transiente: seguimos sem presença.
+      }
+    }
+
     // Achata `roleAssignments` em `assignedRoles` (lista limpa pra UI).
     const shaped = users.map((u) => {
       const { roleAssignments, ...rest } = u;
+      const p = presence.get(u.id);
       return {
         ...rest,
         assignedRoles: roleAssignments.map((a) => a.role),
+        systemOnline: p?.systemOnline ?? false,
+        lastSeenAt: p?.lastSeenAt ? p.lastSeenAt.toISOString() : null,
       };
     });
 

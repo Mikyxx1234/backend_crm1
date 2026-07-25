@@ -21,30 +21,20 @@ const OFFLINE_THRESHOLD_MIN = Number(process.env.PRESENCE_OFFLINE_MINUTES) || 15
 
 let started = false;
 
+/**
+ * DEPRECATED (jul/26): a "presença por ping" foi separada da disponibilidade
+ * da Distribuição. O sweeper que fecha sessões de USO vive agora em
+ * `system-presence.ts` (`startSystemPresenceSweeper`).
+ *
+ * A função é mantida como no-op para preservar compat com quem ainda
+ * a importe. `reapOnce()` continua exportado para usos ad-hoc/testes,
+ * mas NÃO é agendado automaticamente.
+ */
 export function startPresenceReaper() {
   if (started) return;
   started = true;
-
-  const tick = async () => {
-    try {
-      await reapOnce();
-    } catch (err) {
-      // Mais comum: migration lastActivityAt ainda não rodou em prod → log silencioso.
-      console.warn(
-        "[presence-reaper] tick falhou:",
-        err instanceof Error ? err.message : err
-      );
-    }
-  };
-
-  // Primeiro tick em 10s (dá tempo do servidor estabilizar), depois a cada 60s.
-  setTimeout(() => {
-    void tick();
-    setInterval(() => void tick(), INTERVAL_MS);
-  }, 10_000);
-
   console.info(
-    `[presence-reaper] iniciado (AWAY>${AWAY_THRESHOLD_MIN}min, OFFLINE>${OFFLINE_THRESHOLD_MIN}min)`
+    "[presence-reaper] DEPRECATED — nenhum tick agendado. Use system-presence sweeper.",
   );
 }
 
