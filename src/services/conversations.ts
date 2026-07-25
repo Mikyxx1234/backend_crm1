@@ -45,9 +45,13 @@ export type GetConversationsParams = {
   perPage?: number;
   visibilityWhere?: Prisma.ConversationWhereInput;
   ownerId?: string;
+  /** Multi-seleção de responsáveis (OR). Preferir sobre `ownerId`. */
+  ownerIds?: string[];
   /** true = só conversas sem responsável (`assignedToId` null). */
   withoutOwner?: boolean;
   stageId?: string;
+  /** Multi-seleção de etapas (OR). Preferir sobre `stageId`. */
+  stageIds?: string[];
   tagIds?: string[];
   /** Origens do contato (Contact.source). Pode incluir `SOURCE_NONE`. */
   sources?: string[];
@@ -334,24 +338,40 @@ export function buildInboxFilterConditions(
 
   if (params.withoutOwner) {
     conditions.push({ assignedToId: null });
-  } else if (params.ownerId) {
-    conditions.push({
-      OR: [
-        { assignedToId: params.ownerId },
-        {
-          contact: {
-            OR: [
-              { deals: { some: { ownerId: params.ownerId } } },
-              { assignedToId: params.ownerId },
-            ],
+  } else {
+    const ownerIds = Array.from(
+      new Set(
+        [...(params.ownerIds ?? []), ...(params.ownerId ? [params.ownerId] : [])].filter(
+          Boolean,
+        ),
+      ),
+    );
+    if (ownerIds.length > 0) {
+      conditions.push({
+        OR: [
+          { assignedToId: { in: ownerIds } },
+          {
+            contact: {
+              OR: [
+                { deals: { some: { ownerId: { in: ownerIds } } } },
+                { assignedToId: { in: ownerIds } },
+              ],
+            },
           },
-        },
-      ],
-    });
+        ],
+      });
+    }
   }
-  if (params.stageId) {
+  const stageIds = Array.from(
+    new Set(
+      [...(params.stageIds ?? []), ...(params.stageId ? [params.stageId] : [])].filter(
+        Boolean,
+      ),
+    ),
+  );
+  if (stageIds.length > 0) {
     conditions.push({
-      contact: { deals: { some: { stageId: params.stageId } } },
+      contact: { deals: { some: { stageId: { in: stageIds } } } },
     });
   }
   if (params.tagIds && params.tagIds.length > 0) {
