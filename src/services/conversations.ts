@@ -625,8 +625,28 @@ export async function getConversationById(id: string) {
   return conv;
 }
 
+/** Campos mínimos do assign/transfer — evita RETURNING de colunas novas
+ *  (ex.: hasHumanReply) que ainda não existem em DBs com drift de migração. */
+const ASSIGN_CONVERSATION_SELECT = {
+  id: true,
+  status: true,
+  externalId: true,
+  contactId: true,
+  assignedToId: true,
+  contact: {
+    select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true },
+  },
+  assignedTo: {
+    select: { id: true, name: true, email: true, avatarUrl: true },
+  },
+} as const;
+
+export type AssignConversationPayload = Prisma.ConversationGetPayload<{
+  select: typeof ASSIGN_CONVERSATION_SELECT;
+}>;
+
 export type AssignConversationResult =
-  | { ok: true; conversation: NonNullable<Awaited<ReturnType<typeof getConversationById>>> }
+  | { ok: true; conversation: AssignConversationPayload }
   | { ok: false; code: "NOT_FOUND" | "FORBIDDEN" | "USER_NOT_FOUND" };
 
 export async function assignConversationAssignedTo(
@@ -692,6 +712,11 @@ export async function assignConversationAssignedTo(
   // negócios abertos do contato. Sem isso, "Remover responsável" limpava só
   // a conversa e o contato/negócio continuavam atribuídos (inconsistente) —
   // dava a impressão de que não removeu. Tudo numa transação (atômico).
+  //
+  // `select` explícito (não `include`): Prisma com include devolve TODOS os
+  // escalares no RETURNING — incluindo hasHumanReply. Em DBs sem a coluna
+  // (drift de migração), o assign/bulk-reassign quebrava mesmo sem tocar no
+  // campo. O select lista só o que a rota de actions precisa.
   const updated = await prisma.$transaction(async (tx) => {
     const conv = await tx.conversation.update({
       where: { id: conversationId },
@@ -699,10 +724,7 @@ export async function assignConversationAssignedTo(
         assignedToId: newAssigneeId,
         ...(shouldResetGreeted ? { aiGreetedAt: null } : {}),
       },
-      include: {
-        contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } },
-        assignedTo: { select: { id: true, name: true, email: true, avatarUrl: true } },
-      },
+      select: ASSIGN_CONVERSATION_SELECT,
     });
     if (conv.contactId) {
       await tx.contact.update({
