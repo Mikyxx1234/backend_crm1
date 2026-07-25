@@ -2,6 +2,7 @@ import type { ConversationStatus } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { checkPermission } from "@/lib/authz";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
@@ -100,7 +101,25 @@ export async function POST(request: Request, context: RouteContext) {
         } else {
           return NextResponse.json({ message: "assignedToId inválido." }, { status: 400 });
         }
-        const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
+        const sessionUser = session.user as {
+          id: string;
+          role: "ADMIN" | "MANAGER" | "MEMBER";
+          organizationId: string | null;
+          isSuperAdmin: boolean;
+        };
+        const canReassignOthers = await checkPermission(
+          {
+            userId: sessionUser.id,
+            organizationId: sessionUser.organizationId,
+            isSuperAdmin: sessionUser.isSuperAdmin,
+          },
+          "conversation:reassign_others",
+        );
+        const user = {
+          id: sessionUser.id,
+          role: sessionUser.role,
+          canReassignOthers,
+        };
         const prev = await prisma.conversation.findUnique({
           where: { id },
           select: { assignedToId: true, assignedTo: { select: { id: true, name: true } } },

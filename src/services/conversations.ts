@@ -632,7 +632,11 @@ export type AssignConversationResult =
 export async function assignConversationAssignedTo(
   conversationId: string,
   newAssigneeId: string | null,
-  actor: { id: string; role: AppUserRole }
+  actor: {
+    id: string;
+    role: AppUserRole;
+    canReassignOthers?: boolean;
+  }
 ): Promise<AssignConversationResult> {
   const conv = await prisma.conversation.findUnique({
     where: { id: conversationId },
@@ -642,9 +646,12 @@ export async function assignConversationAssignedTo(
 
   const isAdmin = actor.role === "ADMIN";
   const isManager = actor.role === "MANAGER";
-  const isAdminOrManager = isAdmin || isManager;
+  // `canReassignOthers` vem do RBAC efetivo na rota de assign. O fallback
+  // por role preserva os demais callsites legados (ex.: transfer).
+  const canReassignOthers =
+    actor.canReassignOthers ?? (isAdmin || isManager);
 
-  if (!isAdminOrManager) {
+  if (!canReassignOthers) {
     if (newAssigneeId === null) return { ok: false, code: "FORBIDDEN" };
     if (newAssigneeId !== actor.id) return { ok: false, code: "FORBIDDEN" };
     if (conv.assignedToId && conv.assignedToId !== actor.id) {
