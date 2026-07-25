@@ -35,6 +35,7 @@ export interface DistributionResponsibleView {
   userId: string;
   name: string | null;
   email: string | null;
+  avatarUrl: string | null;
   role: UserRole;
   /** Config administrativa. */
   participates: boolean;
@@ -78,7 +79,7 @@ export async function getDistributionResponsibles(
   const users = await prisma.user.findMany({
     where: { type: "HUMAN", organizationId: orgId },
     orderBy: { name: "asc" },
-    select: { id: true, name: true, email: true, role: true },
+    select: { id: true, name: true, email: true, avatarUrl: true, role: true },
   });
   if (users.length === 0) return [];
 
@@ -188,6 +189,7 @@ export async function getDistributionResponsibles(
       userId: u.id,
       name: u.name,
       email: u.email,
+      avatarUrl: u.avatarUrl,
       role: u.role,
       participates: cfg.participates,
       queueLimit: cfg.queueLimit,
