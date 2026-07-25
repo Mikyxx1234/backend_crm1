@@ -123,6 +123,12 @@ export async function PUT(request: Request, context: RouteContext) {
           if (err.message === "INVALID_NAME") {
             return NextResponse.json({ message: "Nome inválido." }, { status: 400 });
           }
+          if (err.message === "INVALID_TRIGGER_CONFIG") {
+            return NextResponse.json(
+              { message: "Horas antes do encerramento devem ser maiores que 0 e menores que 24." },
+              { status: 400 },
+            );
+          }
         }
         throw err;
       }

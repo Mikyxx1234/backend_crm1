@@ -7,6 +7,7 @@ import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { getVisibilityFilter } from "@/lib/visibility";
 import {
   buildInboxFilterConditions,
+  findSessionExpiringConversationIds,
   getConversations,
   getTabCounts,
   INBOX_CATEGORY_TABS,
@@ -85,6 +86,26 @@ export async function GET(request: Request) {
       const withoutSource =
         searchParams.get("withoutSource") === "1" ||
         searchParams.get("withoutSource") === "true";
+      const sessionHoursRaw = searchParams.get("sessionExpiresWithinHours");
+      const sessionExpiresWithinHours =
+        sessionHoursRaw !== null && sessionHoursRaw.trim() !== ""
+          ? Number(sessionHoursRaw)
+          : undefined;
+      if (
+        sessionExpiresWithinHours !== undefined &&
+        (!Number.isFinite(sessionExpiresWithinHours) ||
+          sessionExpiresWithinHours <= 0 ||
+          sessionExpiresWithinHours >= 24)
+      ) {
+        return NextResponse.json(
+          { message: "sessionExpiresWithinHours deve ser maior que 0 e menor que 24." },
+          { status: 400 },
+        );
+      }
+      const sessionExpiringConversationIds =
+        sessionExpiresWithinHours !== undefined
+          ? await findSessionExpiringConversationIds(sessionExpiresWithinHours)
+          : undefined;
 
       const filterConditions = buildInboxFilterConditions({
         contactId,
@@ -97,6 +118,8 @@ export async function GET(request: Request) {
         tagIds,
         sources,
         withoutSource,
+        sessionExpiresWithinHours,
+        sessionExpiringConversationIds,
       });
 
       if (searchParams.get("counts") === "1") {
@@ -184,6 +207,8 @@ export async function GET(request: Request) {
         sortBy,
         sortOrder,
         allowedChannelIds,
+        sessionExpiresWithinHours,
+        sessionExpiringConversationIds,
       });
 
       return NextResponse.json(result);

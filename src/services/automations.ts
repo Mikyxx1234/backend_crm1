@@ -5,6 +5,7 @@ import { enqueueAutomationJob, type AutomationJobContext } from "@/lib/queue";
 export type { AutomationJobContext } from "@/lib/queue";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { normalizeHoursBeforeExpiry } from "@/services/whatsapp-session-expiry";
 
 export const AUTOMATION_TRIGGER_TYPES = [
   "stage_changed",
@@ -22,6 +23,7 @@ export const AUTOMATION_TRIGGER_TYPES = [
   "call_received",
   "call_made",
   "conversation_tabulated",
+  "whatsapp_session_expiring",
 ] as const;
 
 export type AutomationTriggerType = (typeof AUTOMATION_TRIGGER_TYPES)[number];
@@ -267,6 +269,8 @@ export function evaluateTrigger(
       }
       return true;
     }
+    case "whatsapp_session_expiring":
+      return normalizeHoursBeforeExpiry(cfg.hoursBeforeExpiry) !== null;
     case "manual": {
       // 27/mai/26 — Gatilho imperativo. O operador escolheu rodar a
       // automacao explicitamente pelo botao "Rodar automacao" na
@@ -635,12 +639,24 @@ export type CreateAutomationInput = {
   steps?: CreateAutomationStepInput[];
 };
 
+export function validateAutomationTriggerConfig(
+  triggerType: string,
+  triggerConfig: unknown,
+): boolean {
+  if (triggerType !== "whatsapp_session_expiring") return true;
+  const cfg = asRecord(triggerConfig);
+  return cfg !== null && normalizeHoursBeforeExpiry(cfg.hoursBeforeExpiry) !== null;
+}
+
 export async function createAutomation(
   data: CreateAutomationInput,
 ): Promise<Prisma.AutomationGetPayload<{ include: { steps: true } }>> {
   const name = data.name?.trim();
   if (!name) {
     throw new Error("INVALID_NAME");
+  }
+  if (!validateAutomationTriggerConfig(data.triggerType, data.triggerConfig)) {
+    throw new Error("INVALID_TRIGGER_CONFIG");
   }
 
   const organizationId = getOrgIdOrThrow();
@@ -681,6 +697,11 @@ export async function updateAutomation(id: string, data: UpdateAutomationInput) 
   const existing = await prisma.automation.findUnique({ where: { id } });
   if (!existing) {
     throw new Error("NOT_FOUND");
+  }
+  const effectiveTriggerType = data.triggerType ?? existing.triggerType;
+  const effectiveTriggerConfig = data.triggerConfig ?? existing.triggerConfig;
+  if (!validateAutomationTriggerConfig(effectiveTriggerType, effectiveTriggerConfig)) {
+    throw new Error("INVALID_TRIGGER_CONFIG");
   }
 
   return prisma.$transaction(async (tx) => {

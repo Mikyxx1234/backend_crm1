@@ -20,6 +20,7 @@ export type AutomationTriggerType =
   | "call_received"
   | "call_made"
   | "conversation_tabulated"
+  | "whatsapp_session_expiring"
   | "manual";
 
 export type AutomationStep = {
@@ -44,6 +45,7 @@ export const AUTOMATION_TRIGGER_TYPES: AutomationTriggerType[] = [
   "call_received",
   "call_made",
   "conversation_tabulated",
+  "whatsapp_session_expiring",
   "manual",
 ];
 
@@ -100,6 +102,7 @@ export function triggerTypeLabel(t: string): string {
     call_received: "Ligação recebida",
     call_made: "Ligação realizada",
     conversation_tabulated: "Conversa tabulada (encerramento)",
+    whatsapp_session_expiring: "Sessão do WhatsApp prestes a encerrar",
     manual: "Manual (executar pela conversa)",
   };
   return map[t] ?? t;
@@ -215,6 +218,8 @@ export function summarizeTriggerConfig(
       if (c.departmentId) return `Departamento: ${String(c.departmentId).slice(0, 8)}…`;
       return "Qualquer tabulação";
     }
+    case "whatsapp_session_expiring":
+      return `${String(c.hoursBeforeExpiry ?? 1)}h antes do encerramento`;
     default:
       return "—";
   }
@@ -652,6 +657,8 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
       // Matching considera ancestrais (mirar categoria pai vale pra
       // descendentes — ver evaluateTrigger em services/automations.ts).
       return { departmentId: "", tabulationId: "", tabulationLabel: "" };
+    case "whatsapp_session_expiring":
+      return { hoursBeforeExpiry: 1 };
     default:
       return {};
   }

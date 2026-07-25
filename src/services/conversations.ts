@@ -1,4 +1,4 @@
-import type { ConversationStatus, Prisma } from "@prisma/client";
+import { Prisma, type ConversationStatus } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
 import { userHasConversationAccess } from "@/lib/conversation-access";
@@ -9,6 +9,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { SOURCE_NONE } from "@/services/kanban-filters";
+import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
 /** Abas de categoria (filtro OR em "Todos" para membros com escopo limitado). */
 export const INBOX_CATEGORY_TABS = [
@@ -64,6 +65,10 @@ export type GetConversationsParams = {
    * restrição; array (mesmo vazio) → restringe conversas a esses canais.
    */
   allowedChannelIds?: string[] | null;
+  /** Sessões Meta ainda abertas que expiram entre agora e agora + X horas. */
+  sessionExpiresWithinHours?: number;
+  /** IDs resolvidos pelo agregador contato+canal antes de montar o where. */
+  sessionExpiringConversationIds?: string[];
 };
 
 const listSelect = {
@@ -335,6 +340,9 @@ export function buildInboxFilterConditions(
   const conditions: Prisma.ConversationWhereInput[] = [];
   if (params.contactId) conditions.push({ contactId: params.contactId });
   if (params.channel) conditions.push({ channel: params.channel });
+  if (params.sessionExpiresWithinHours !== undefined) {
+    conditions.push({ id: { in: params.sessionExpiringConversationIds ?? [] } });
+  }
 
   if (params.withoutOwner) {
     conditions.push({ assignedToId: null });
@@ -387,6 +395,65 @@ export function buildInboxFilterConditions(
   return conditions;
 }
 
+export async function findSessionExpiringConversationIds(
+  hoursValue: unknown,
+  now = new Date(),
+): Promise<string[]> {
+  const hours = normalizeHoursBeforeExpiry(hoursValue);
+  if (hours === null) return [];
+  const organizationId = getOrgIdOrThrow();
+  const oldestInbound = new Date(now.getTime() - WHATSAPP_SESSION_WINDOW_MS);
+  const newestInbound = new Date(
+    oldestInbound.getTime() + hours * 60 * 60 * 1000,
+  );
+  const rows = await prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+    WITH sessions AS (
+      SELECT
+        c."organizationId",
+        c."contactId",
+        c."channel",
+        MAX(m."createdAt") AS "lastInboundAt"
+      FROM "conversations" c
+      JOIN "messages" m
+        ON m."conversationId" = c."id"
+       AND m."direction" = 'in'
+      WHERE c."contactId" IS NOT NULL
+        AND c."organizationId" = ${organizationId}
+        AND LOWER(c."channel") IN ('whatsapp', 'whatsapp_meta', 'meta_whatsapp')
+      GROUP BY c."organizationId", c."contactId", c."channel"
+      HAVING MAX(m."createdAt") > ${oldestInbound}
+         AND MAX(m."createdAt") <= ${newestInbound}
+    )
+    SELECT rep."id"
+    FROM sessions s
+    JOIN LATERAL (
+      SELECT c2."id"
+      FROM "conversations" c2
+      JOIN "channels" ch
+        ON ch."id" = c2."channelId"
+       AND ch."provider" = 'META_CLOUD_API'
+      WHERE c2."organizationId" = s."organizationId"
+        AND c2."contactId" = s."contactId"
+        AND c2."channel" = s."channel"
+      ORDER BY (c2."status" <> 'RESOLVED') DESC, c2."updatedAt" DESC
+      LIMIT 1
+    ) rep ON TRUE
+  `);
+  return rows.map((row) => row.id);
+}
+
+async function withResolvedSessionFilter(
+  params: GetConversationsParams,
+): Promise<GetConversationsParams> {
+  if (params.sessionExpiresWithinHours === undefined) return params;
+  return {
+    ...params,
+    sessionExpiringConversationIds:
+      params.sessionExpiringConversationIds ??
+      (await findSessionExpiringConversationIds(params.sessionExpiresWithinHours)),
+  };
+}
+
 /**
  * IDs das conversas ENCERRÁVEIS que casam com um filtro de listagem — usado
  * pelo "selecionar todas do filtro → Encerrar". Aplica o MESMO `where` da
@@ -398,7 +465,7 @@ export function buildInboxFilterConditions(
 export async function getResolvableConversationIds(
   params: GetConversationsParams,
 ): Promise<{ ids: string[]; skippedIds: string[] }> {
-  const baseWhere = buildConversationListWhere(params);
+  const baseWhere = buildConversationListWhere(await withResolvedSessionFilter(params));
   const openWhere: Prisma.ConversationWhereInput = {
     AND: [baseWhere, { status: { not: "RESOLVED" } }],
   };
@@ -428,6 +495,7 @@ export async function getConversations(
   page: number;
   perPage: number;
 }> {
+  params = await withResolvedSessionFilter(params);
   const page = Math.max(1, params.page ?? 1);
   // 27/mai/26 — Cap subido de 100 → 200 pra acomodar o infinite scroll
   // da lista de conversas (operador com 455+ conversas em "Entrada"

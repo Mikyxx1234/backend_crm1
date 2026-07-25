@@ -125,6 +125,12 @@ export async function POST(request: Request) {
         if (err instanceof Error && err.message === "INVALID_NAME") {
           return NextResponse.json({ message: "Nome inválido." }, { status: 400 });
         }
+        if (err instanceof Error && err.message === "INVALID_TRIGGER_CONFIG") {
+          return NextResponse.json(
+            { message: "Horas antes do encerramento devem ser maiores que 0 e menores que 24." },
+            { status: 400 },
+          );
+        }
         throw err;
       }
     } catch (e: unknown) {
