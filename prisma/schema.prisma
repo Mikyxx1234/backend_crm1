@@ -101,6 +101,7 @@ model Organization {
   agentStatuses            AgentStatus[]
   agentPresenceLogs        AgentPresenceLog[]
   systemUsageSessions      SystemUsageSession[]
+  systemActivitySessions   SystemActivitySession[]
   aiAgentConfigs           AIAgentConfig[]
   aiAgentKnowledgeDocs     AIAgentKnowledgeDoc[]
   auditLogs                AuditLog[]
@@ -509,6 +510,7 @@ model User {
   agentStatus                    AgentStatus?
   presenceLogs                   AgentPresenceLog[]
   systemUsageSessions            SystemUsageSession[]
+  systemActivitySessions         SystemActivitySession[]
   assignedConversations          Conversation[]            @relation("ConversationAssignedTo")
   scheduledWhatsappCallsAssigned ScheduledWhatsappCall[]   @relation("ScheduledWhatsappCallAssignee")
   dealEvents                     DealEvent[]
@@ -3694,6 +3696,33 @@ model SystemUsageSession {
   @@index([organizationId, startedAt])
   @@index([userId, startedAt])
   @@map("system_usage_sessions")
+}
+
+/// Sessão de USO REAL do CRM — mede blocos de atividade efetiva do usuário
+/// (interação humana visível). Independente do heartbeat de presença
+/// (SystemUsageSession), que apenas indica "CRM aberto".
+///
+/// Uma sessão é aberta na primeira interação, renovada em ações dentro de
+/// 5 minutos e fechada em `lastActivityAt + 5 minutos` por um sweeper.
+/// O partial unique (organizationId, userId) WHERE endedAt IS NULL garante
+/// no máximo uma sessão aberta por (org, usuário).
+model SystemActivitySession {
+  id               String    @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  startedAt        DateTime  @default(now())
+  lastActivityAt   DateTime  @default(now())
+  endedAt          DateTime?
+  interactionCount Int       @default(1)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([organizationId, userId, endedAt])
+  @@index([organizationId, startedAt])
+  @@index([organizationId, lastActivityAt])
+  @@map("system_activity_sessions")
 }
 
 /// Callback de voz WhatsApp agendado (ex.: após template pós-chamada perdida).
