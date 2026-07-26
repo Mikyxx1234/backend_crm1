@@ -818,6 +818,52 @@ function coerceForCompare(
   return { l: left, r: right };
 }
 
+/**
+ * Avalia se `now` (default: agora) cai dentro de alguma faixa da schedule.
+ * Aceita schedule como array direto OU envelopado em { schedule, timezone }.
+ * Usado pelo step `business_hours` e pela regra `in_business_hours` do
+ * bloco Condição.
+ */
+function evaluateBusinessHoursValue(raw: unknown, now: Date = new Date()): boolean {
+  let schedule: Array<{ days?: number[]; from?: string; to?: string }> = [];
+  let tz = "America/Sao_Paulo";
+
+  // Aceita: array direto, objeto { schedule, timezone }, ou JSON string.
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try { parsed = JSON.parse(raw); } catch { parsed = null; }
+  }
+  if (Array.isArray(parsed)) {
+    schedule = parsed as typeof schedule;
+  } else if (parsed && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    if (Array.isArray(obj.schedule)) schedule = obj.schedule as typeof schedule;
+    if (typeof obj.timezone === "string" && obj.timezone.trim()) tz = obj.timezone.trim();
+  }
+  if (schedule.length === 0) return false;
+
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false, weekday: "short",
+  });
+  const parts = formatter.formatToParts(now);
+  const hh = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+  const mm = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+  const dayName = parts.find((p) => p.type === "weekday")?.value ?? "";
+  const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const dayOfWeek = dayMap[dayName] ?? now.getDay();
+  const nowMinutes = hh * 60 + mm;
+
+  for (const slot of schedule) {
+    if (!slot.days?.includes(dayOfWeek)) continue;
+    const [fh, fm] = (slot.from ?? "00:00").split(":").map(Number);
+    const [th, tm] = (slot.to ?? "23:59").split(":").map(Number);
+    const fromMin = fh * 60 + fm;
+    const toMin = th * 60 + tm;
+    if (nowMinutes >= fromMin && nowMinutes <= toMin) return true;
+  }
+  return false;
+}
+
 function evalCondition(leftRaw: unknown, op: string, rightRaw: unknown): boolean {
   const { l: left, r: right } = coerceForCompare(leftRaw, rightRaw);
   const lStr = typeof left === "string" ? left.toLowerCase() : left;
@@ -2163,6 +2209,17 @@ async function executeStep(
             typeof rightRaw === "string" && flowVars
               ? interpolateVariables(rightRaw, flowVars)
               : rightRaw;
+
+          // ── Regra de expediente (independente de field) ─────────
+          // Ops `in_business_hours` / `not_in_business_hours` esperam
+          // `value` = JSON string com `{ schedule, timezone }` (mesma
+          // forma do step `business_hours`). Curto-circuito antes de
+          // `evalCondition` porque a comparação não é escalar.
+          if (rule.op === "in_business_hours" || rule.op === "not_in_business_hours") {
+            const isOpen = evaluateBusinessHoursValue(right);
+            return rule.op === "in_business_hours" ? isOpen : !isOpen;
+          }
+
           return evalCondition(left, rule.op, right);
         });
         if (allMatch) {
@@ -2485,26 +2542,10 @@ async function executeStep(
     }
 
     case "business_hours": {
-      const schedule = Array.isArray(cfg.schedule) ? cfg.schedule as { days: number[]; from: string; to: string }[] : [];
-      const tz = readString(cfg, "timezone") ?? "America/Sao_Paulo";
-      const now = new Date();
-      const formatter = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false, weekday: "short" });
-      const parts = formatter.formatToParts(now);
-      const hh = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
-      const mm = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
-      const dayName = parts.find((p) => p.type === "weekday")?.value ?? "";
-      const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-      const dayOfWeek = dayMap[dayName] ?? now.getDay();
-      const nowMinutes = hh * 60 + mm;
-      let isOpen = false;
-      for (const slot of schedule) {
-        if (!slot.days?.includes(dayOfWeek)) continue;
-        const [fh, fm] = (slot.from ?? "00:00").split(":").map(Number);
-        const [th, tm] = (slot.to ?? "23:59").split(":").map(Number);
-        const fromMin = fh * 60 + fm;
-        const toMin = th * 60 + tm;
-        if (nowMinutes >= fromMin && nowMinutes <= toMin) { isOpen = true; break; }
-      }
+      const isOpen = evaluateBusinessHoursValue({
+        schedule: Array.isArray(cfg.schedule) ? cfg.schedule : [],
+        timezone: readString(cfg, "timezone") ?? "America/Sao_Paulo",
+      });
       if (!isOpen) {
         const elseStepId = readString(cfg, "elseStepId");
         if (elseStepId) return { skipRemaining: true, gotoStepId: elseStepId };
