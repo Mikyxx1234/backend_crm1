@@ -2,11 +2,32 @@ import { NextResponse } from "next/server";
 
 import { withApiAuthContext } from "@/lib/api-auth";
 import type { AppUserRole } from "@/lib/auth-types";
+import { invalidateBoardData } from "@/lib/cache/keys";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { notifyTagAdded } from "@/services/automation-triggers";
 import { createDealEvent, getDealById } from "@/services/deals";
+
+/**
+ * Invalida o cache-aside do board do funil do deal.
+ * Sem isso, o refetch do React Query (onSettled das mutações de tag)
+ * devolve o board stale (TTL 30s) e o card reverte o update otimista.
+ * Await obrigatório antes do 200 — senão o GET /board do front ainda
+ * lê a variante cacheada.
+ */
+async function invalidateDealBoardCache(deal: {
+  stage?: { pipeline?: { id?: string } | null } | null;
+}): Promise<void> {
+  try {
+    const pipelineId = deal.stage?.pipeline?.id;
+    if (!pipelineId) return;
+    const orgId = getOrgIdOrThrow();
+    await invalidateBoardData(orgId, pipelineId);
+  } catch {
+    /* fora de contexto de org — TTL curto cobre */
+  }
+}
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -73,6 +94,7 @@ export async function POST(request: Request, ctx: Ctx) {
         });
       }
 
+      await invalidateDealBoardCache(existing);
       return NextResponse.json({ ok: true });
     } catch (e) {
       return NextResponse.json({ message: e instanceof Error ? e.message : "Erro." }, { status: 500 });
@@ -101,6 +123,7 @@ export async function DELETE(request: Request, ctx: Ctx) {
       const uid = user.id;
       createDealEvent(dealId, uid, "TAG_REMOVED", { tagName: tagInfo?.name ?? tagId, tagColor: tagInfo?.color ?? "" }).catch(() => {});
 
+      await invalidateDealBoardCache(existing);
       return NextResponse.json({ ok: true });
     } catch (e) {
       return NextResponse.json({ message: e instanceof Error ? e.message : "Erro." }, { status: 500 });
