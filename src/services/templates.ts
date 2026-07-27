@@ -7,6 +7,8 @@ export type TemplateAttachment = {
   url: string;
   mimeType?: string | null;
   name?: string | null;
+  /** Texto enviado ANTES deste arquivo. Só faz sentido para índice >= 1. */
+  messageBefore?: string | null;
 };
 
 export const MAX_TEMPLATE_ATTACHMENTS = 5;
@@ -26,10 +28,13 @@ export function normalizeTemplateAttachments(raw: unknown): TemplateAttachment[]
     if (typeof url !== "string" || !url.trim()) continue;
     const mimeType = (item as Record<string, unknown>).mimeType;
     const name = (item as Record<string, unknown>).name;
+    const messageBefore = (item as Record<string, unknown>).messageBefore;
     out.push({
       url: url.trim(),
       mimeType: typeof mimeType === "string" && mimeType ? mimeType : null,
       name: typeof name === "string" && name ? name : null,
+      messageBefore:
+        typeof messageBefore === "string" && messageBefore.trim() ? messageBefore.trim() : null,
     });
   }
   return out;
