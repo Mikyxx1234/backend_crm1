@@ -9,6 +9,7 @@ import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { getLogger } from "@/lib/logger";
 import { logEvent } from "@/services/activity-log";
+import { findContactIdsByPhoneDigits } from "@/services/kanban-filters";
 
 const log = getLogger("contacts-service");
 
@@ -107,7 +108,7 @@ export async function getContacts(params: GetContactsParams = {}) {
   const where: Prisma.ContactWhereInput = {};
 
   if (search) {
-    where.OR = [
+    const or: Prisma.ContactWhereInput[] = [
       { name: { contains: search, mode: "insensitive" } },
       { email: { contains: search, mode: "insensitive" } },
       { phone: { contains: search, mode: "insensitive" } },
@@ -119,6 +120,15 @@ export async function getContacts(params: GetContactsParams = {}) {
         },
       },
     ];
+    // Parcial por dígitos: "11945" encontra "+5511945…" sem precisar de +/DDI.
+    const digits = search.replace(/\D+/g, "");
+    if (digits.length >= 3) {
+      const ids = await findContactIdsByPhoneDigits(digits);
+      if (ids.length > 0) {
+        or.push({ id: { in: ids } });
+      }
+    }
+    where.OR = or;
   }
 
   if (params.customFieldFilters && params.customFieldFilters.length > 0) {

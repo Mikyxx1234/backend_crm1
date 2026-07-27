@@ -20,7 +20,8 @@ import { getRequestContext } from "@/lib/request-context";
  * comum: usuário digita "11945010493" mas telefone está salvo como
  * "+55 (11) 94501-0493" ou variações.
  */
-async function findContactIdsByPhoneDigits(
+/** Exposto para listagens (`getDeals`/`getContacts`) reutilizarem a mesma regra. */
+export async function findContactIdsByPhoneDigits(
   digits: string,
 ): Promise<string[]> {
   if (digits.length < 3) return [];

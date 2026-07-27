@@ -12,6 +12,7 @@ import { cache } from "@/lib/cache";
 import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
 import {
   buildDealWhereFromFilters,
+  findContactIdsByPhoneDigits,
   type AdvancedDealFilters,
 } from "@/services/kanban-filters";
 
@@ -204,24 +205,40 @@ export async function getDeals(params: GetDealsParams = {}) {
     // Prisma gera 1 LEFT JOIN de `contacts` em vez de 1 por condição — antes eram
     // 4 self-joins (j0..j4) que faziam o board de busca custar ~2,4s no Postgres
     // (24/jul/26). Semanticamente idêntico ao anterior.
-    conditions.push({
-      OR: [
-        { title: { contains: search, mode: "insensitive" } },
-        // Campos personalizados do NEGÓCIO (RGM, CPF, matrícula, ...).
-        { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
-        {
-          contact: {
-            OR: [
-              { name: { contains: search, mode: "insensitive" } },
-              { email: { contains: search, mode: "insensitive" } },
-              { phone: { contains: search } },
-              // Campos personalizados do CONTATO vinculado.
-              { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
-            ],
-          },
+    const or: Prisma.DealWhereInput[] = [
+      { title: { contains: search, mode: "insensitive" } },
+      // Campos personalizados do NEGÓCIO (RGM, CPF, matrícula, ...).
+      { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
+      {
+        contact: {
+          OR: [
+            { name: { contains: search, mode: "insensitive" } },
+            { email: { contains: search, mode: "insensitive" } },
+            { phone: { contains: search } },
+            // Campos personalizados do CONTATO vinculado.
+            { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
+          ],
         },
-      ],
-    });
+      },
+    ];
+
+    // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
+    // "+55 11 94501-0493". Mesma regra do kanban (`findContactIdsByPhoneDigits`).
+    const digits = search.replace(/\D+/g, "");
+    if (digits.length >= 3) {
+      const contactIds = await findContactIdsByPhoneDigits(digits);
+      if (contactIds.length > 0) {
+        or.push({ contactId: { in: contactIds } });
+      }
+      if (/^\d+$/.test(search)) {
+        const asNumber = Number(search);
+        if (Number.isInteger(asNumber) && asNumber >= 0 && asNumber <= 2147483647) {
+          or.push({ number: asNumber });
+        }
+      }
+    }
+
+    conditions.push({ OR: or });
   }
 
   if (params.contactId) {
