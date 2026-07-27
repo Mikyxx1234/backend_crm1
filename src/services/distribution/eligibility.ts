@@ -12,6 +12,7 @@
  *  - `ON_PAUSE`             → pausa temporária (`paused = true` OU AgentStatus AWAY).
  *  - `OFFLINE`              → presença offline (AgentStatus OFFLINE OU sem registro).
  *  - `OUTSIDE_WORKING_HOURS`→ fora do expediente (AgentSchedule).
+ *  - `PRE_LUNCH`            → pré-almoço / almoço (`lunchStart - N` até `lunchEnd`).
  *  - `QUEUE_LIMIT_REACHED`  → fila cheia (`queueLimit > 0 && filaAtual >= queueLimit`).
  *  - `TYPE_INCOMPATIBLE`    → tipo/segmento do responsável != tipo solicitado.
  *
@@ -27,6 +28,7 @@ export type DistributionBlockReason =
   | "OFFLINE"
   | "ON_PAUSE"
   | "OUTSIDE_WORKING_HOURS"
+  | "PRE_LUNCH"
   | "QUEUE_LIMIT_REACHED"
   | "TYPE_INCOMPATIBLE"
   | "DEPARTMENT_MISMATCH";
@@ -54,6 +56,12 @@ export interface ResponsibleEligibilityInput {
   status: AgentOnlineStatus | null;
   /** Expediente. `null` = sem restrição de horário. */
   schedule: ScheduleLike | null;
+  /**
+   * Minutos antes do almoço em que para de receber leads.
+   * 0 = só bloqueia no intervalo `[lunchStart, lunchEnd)`.
+   * Default 30 quando omitido.
+   */
+  preLunchStopMinutes?: number;
   /** Fila atual (deals OPEN com este owner). */
   queueCount: number;
   /**
@@ -92,12 +100,10 @@ const WEEKDAY_MAP: Record<string, number> = {
   Sat: 6,
 };
 
-/**
- * True se `now` está dentro do expediente do `schedule` (timezone-aware,
- * respeitando dias da semana e intervalo de almoço). Espelha o legado
- * `isAgentAvailable`.
- */
-export function isWithinWorkingHours(schedule: ScheduleLike, now: Date): boolean {
+function localClockParts(
+  schedule: ScheduleLike,
+  now: Date,
+): { currentWeekday: number; currentMinutes: number } {
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: schedule.timezone,
     hour: "2-digit",
@@ -111,10 +117,41 @@ export function isWithinWorkingHours(schedule: ScheduleLike, now: Date): boolean
   const minute = parts.find((p) => p.type === "minute")?.value ?? "00";
   const weekdayStr = parts.find((p) => p.type === "weekday")?.value ?? "";
   const currentWeekday = WEEKDAY_MAP[weekdayStr] ?? now.getDay();
+  const currentMinutes = parseInt(hour, 10) * 60 + parseInt(minute, 10);
+  return { currentWeekday, currentMinutes };
+}
+
+/**
+ * True se `now` está no intervalo `[lunchStart - N, lunchEnd)`.
+ * `N = preLunchStopMinutes` (0 = só o almoço).
+ */
+export function isInPreLunchOrLunchWindow(
+  schedule: ScheduleLike,
+  now: Date,
+  preLunchStopMinutes = 30,
+): boolean {
+  const { currentWeekday, currentMinutes } = localClockParts(schedule, now);
+  if (!schedule.weekdays.includes(currentWeekday)) return false;
+
+  const lunchStartMinutes = parseTime(schedule.lunchStart);
+  const lunchEndMinutes = parseTime(schedule.lunchEnd);
+  const n = Math.max(0, Math.floor(preLunchStopMinutes));
+  const cutoff = lunchStartMinutes - n;
+
+  return currentMinutes >= cutoff && currentMinutes < lunchEndMinutes;
+}
+
+/**
+ * True se `now` está dentro do expediente do `schedule` (timezone-aware,
+ * respeitando dias da semana e intervalo de almoço). Espelha o legado
+ * `isAgentAvailable`. Não aplica o corte pré-almoço — use
+ * `isInPreLunchOrLunchWindow` / `evaluateResponsibleEligibility`.
+ */
+export function isWithinWorkingHours(schedule: ScheduleLike, now: Date): boolean {
+  const { currentWeekday, currentMinutes } = localClockParts(schedule, now);
 
   if (!schedule.weekdays.includes(currentWeekday)) return false;
 
-  const currentMinutes = parseInt(hour, 10) * 60 + parseInt(minute, 10);
   const startMinutes = parseTime(schedule.startTime);
   const endMinutes = parseTime(schedule.endTime);
   const lunchStartMinutes = parseTime(schedule.lunchStart);
@@ -137,6 +174,7 @@ export function evaluateResponsibleEligibility(
   ctx: EligibilityContext = {},
 ): EligibilityResult {
   const reasons: DistributionBlockReason[] = [];
+  const now = ctx.now ?? new Date();
 
   if (!input.participates) reasons.push("INACTIVE");
 
@@ -149,8 +187,13 @@ export function evaluateResponsibleEligibility(
     reasons.push("OFFLINE");
   }
 
-  if (input.schedule && !isWithinWorkingHours(input.schedule, ctx.now ?? new Date())) {
-    reasons.push("OUTSIDE_WORKING_HOURS");
+  if (input.schedule) {
+    const n = input.preLunchStopMinutes ?? 30;
+    if (isInPreLunchOrLunchWindow(input.schedule, now, n)) {
+      reasons.push("PRE_LUNCH");
+    } else if (!isWithinWorkingHours(input.schedule, now)) {
+      reasons.push("OUTSIDE_WORKING_HOURS");
+    }
   }
 
   if (input.queueLimit > 0 && input.queueCount >= input.queueLimit) {

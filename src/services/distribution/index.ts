@@ -12,6 +12,7 @@ export {
 export {
   evaluateResponsibleEligibility,
   isWithinWorkingHours,
+  isInPreLunchOrLunchWindow,
   type DistributionBlockReason,
   type EligibilityContext,
   type EligibilityResult,

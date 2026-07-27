@@ -3505,6 +3505,8 @@ model DistributionResponsible {
   type            String?
   /// Pausa temporaria dedicada (alem de AgentStatus.AWAY).
   paused          Boolean      @default(false)
+  /// Minutos antes do almoco em que para de receber leads (0 = so no intervalo).
+  preLunchStopMinutes Int       @default(30)
   /// Ultima vez que recebeu lead pelo motor (desempate da selecao).
   lastExecutionAt DateTime?
   createdAt       DateTime     @default(now())
