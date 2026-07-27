@@ -607,7 +607,8 @@ export async function POST(request: Request, context: RouteContext) {
       // arvore do dept) -> 400 (defesa; UI ja bloqueia o botao).
       let tabulationId: string | null = null;
       let tabulationAncestors: string[] = [];
-      let tabulationDepartmentId: string | null = null;
+      /** Departamento no momento do encerramento (antes do clearDepartment). */
+      let resolvedDepartmentId: string | null = null;
       if (dbStatus === "RESOLVED") {
         const dept = await prisma.conversation.findUnique({
           where: { id },
@@ -616,6 +617,7 @@ export async function POST(request: Request, context: RouteContext) {
             department: { select: { id: true, requireTabulationOnClose: true } },
           },
         });
+        resolvedDepartmentId = dept?.departmentId ?? null;
         const rawTab = typeof b.tabulationId === "string" ? b.tabulationId.trim() : "";
         const requires = !!dept?.department?.requireTabulationOnClose;
         if (requires && !rawTab) {
@@ -644,7 +646,6 @@ export async function POST(request: Request, context: RouteContext) {
             );
           }
           tabulationId = rawTab;
-          tabulationDepartmentId = dept.departmentId;
           tabulationAncestors = await getAncestors(rawTab);
         }
       }
@@ -723,22 +724,28 @@ export async function POST(request: Request, context: RouteContext) {
         }
       }
 
-      // Trigger de automacao conversation_tabulated (soh quando o
-      // encerramento gravou tabulacao). Roda depois de logs, fire-and-forget.
-      if (dbStatus === "RESOLVED" && tabulationId) {
-        void logEvent({
-          type: "CONVERSATION_TABULATED",
-          entityType: "CONVERSATION",
-          entityId: id,
-          entityLabel: updated.externalId ?? null,
-          conversationId: id,
-          contactId: conv.contact?.id ?? null,
-          meta: {
-            tabulationId,
-            ancestorIds: tabulationAncestors,
-            departmentId: tabulationDepartmentId,
-          },
-        });
+      // Trigger conversation_tabulated: dispara em TODO encerramento (RESOLVED).
+      // Antes só rodava com tabulationId — conversas sem departamento / sem
+      // diálogo de tabulação (requireTabulationOnClose=false) nunca acionavam
+      // automações configuradas como "Qualquer tabulação". Automações que
+      // filtram tabulação específica continuam sem match quando tabulationId
+      // é null (ver matchesTriggerConfig). Só no primeiro encerramento.
+      if (dbStatus === "RESOLVED" && conv.status !== "RESOLVED") {
+        if (tabulationId) {
+          void logEvent({
+            type: "CONVERSATION_TABULATED",
+            entityType: "CONVERSATION",
+            entityId: id,
+            entityLabel: updated.externalId ?? null,
+            conversationId: id,
+            contactId: conv.contact?.id ?? null,
+            meta: {
+              tabulationId,
+              ancestorIds: tabulationAncestors,
+              departmentId: resolvedDepartmentId,
+            },
+          });
+        }
         // Resolve dealId (primeiro deal aberto do contato) para automacoes
         // que dependem de contexto de negocio (mover card, mudar funil).
         let dealId: string | undefined;
@@ -756,7 +763,7 @@ export async function POST(request: Request, context: RouteContext) {
           data: {
             tabulationId,
             ancestorIds: tabulationAncestors,
-            departmentId: tabulationDepartmentId,
+            departmentId: resolvedDepartmentId,
             conversationId: id,
           },
         }).catch(() => {
