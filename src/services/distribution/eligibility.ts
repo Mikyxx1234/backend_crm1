@@ -13,6 +13,7 @@
  *  - `OFFLINE`              → presença offline (AgentStatus OFFLINE OU sem registro).
  *  - `OUTSIDE_WORKING_HOURS`→ fora do expediente (AgentSchedule).
  *  - `PRE_LUNCH`            → pré-almoço / almoço (`lunchStart - N` até `lunchEnd`).
+ *  - `PRE_END`              → pré-fim de expediente (`endTime - N` até `endTime`).
  *  - `QUEUE_LIMIT_REACHED`  → fila cheia (`queueLimit > 0 && filaAtual >= queueLimit`).
  *  - `TYPE_INCOMPATIBLE`    → tipo/segmento do responsável != tipo solicitado.
  *
@@ -29,6 +30,7 @@ export type DistributionBlockReason =
   | "ON_PAUSE"
   | "OUTSIDE_WORKING_HOURS"
   | "PRE_LUNCH"
+  | "PRE_END"
   | "QUEUE_LIMIT_REACHED"
   | "TYPE_INCOMPATIBLE"
   | "DEPARTMENT_MISMATCH";
@@ -57,9 +59,9 @@ export interface ResponsibleEligibilityInput {
   /** Expediente. `null` = sem restrição de horário. */
   schedule: ScheduleLike | null;
   /**
-   * Minutos antes do almoço em que para de receber leads.
-   * 0 = só bloqueia no intervalo `[lunchStart, lunchEnd)`.
-   * Default 30 quando omitido.
+   * Minutos de antecedência aplicados ao almoço E ao fim do expediente.
+   * 0 = só bloqueia no intervalo `[lunchStart, lunchEnd)` (sem pré-corte
+   * nem pré-fim). Default 30 quando omitido.
    */
   preLunchStopMinutes?: number;
   /** Fila atual (deals OPEN com este owner). */
@@ -142,10 +144,32 @@ export function isInPreLunchOrLunchWindow(
 }
 
 /**
+ * True se `now` está no intervalo `[endTime - N, endTime)`.
+ * Mesmo `N` do pré-almoço (`preLunchStopMinutes`). 0 = desliga o pré-fim
+ * (o bloqueio duro em `endTime` continua via `OUTSIDE_WORKING_HOURS`).
+ */
+export function isInPreEndWindow(
+  schedule: ScheduleLike,
+  now: Date,
+  preEndStopMinutes = 30,
+): boolean {
+  const n = Math.max(0, Math.floor(preEndStopMinutes));
+  if (n <= 0) return false;
+
+  const { currentWeekday, currentMinutes } = localClockParts(schedule, now);
+  if (!schedule.weekdays.includes(currentWeekday)) return false;
+
+  const endMinutes = parseTime(schedule.endTime);
+  const cutoff = endMinutes - n;
+  return currentMinutes >= cutoff && currentMinutes < endMinutes;
+}
+
+/**
  * True se `now` está dentro do expediente do `schedule` (timezone-aware,
  * respeitando dias da semana e intervalo de almoço). Espelha o legado
- * `isAgentAvailable`. Não aplica o corte pré-almoço — use
- * `isInPreLunchOrLunchWindow` / `evaluateResponsibleEligibility`.
+ * `isAgentAvailable`. Não aplica o corte pré-almoço / pré-fim — use
+ * `isInPreLunchOrLunchWindow` / `isInPreEndWindow` /
+ * `evaluateResponsibleEligibility`.
  */
 export function isWithinWorkingHours(schedule: ScheduleLike, now: Date): boolean {
   const { currentWeekday, currentMinutes } = localClockParts(schedule, now);
@@ -191,6 +215,8 @@ export function evaluateResponsibleEligibility(
     const n = input.preLunchStopMinutes ?? 30;
     if (isInPreLunchOrLunchWindow(input.schedule, now, n)) {
       reasons.push("PRE_LUNCH");
+    } else if (isInPreEndWindow(input.schedule, now, n)) {
+      reasons.push("PRE_END");
     } else if (!isWithinWorkingHours(input.schedule, now)) {
       reasons.push("OUTSIDE_WORKING_HOURS");
     }

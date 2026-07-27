@@ -4,6 +4,11 @@ import IORedis from "ioredis";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrNull } from "@/lib/request-context";
+import { sseBus } from "@/lib/sse-bus";
+import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
+import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 import {
   CAMPAIGN_DISPATCH_QUEUE_NAME,
   CAMPAIGN_SEND_QUEUE_NAME,
@@ -303,6 +308,9 @@ async function handleSend(
 
 async function sendViaMetaCloudApi(
   campaign: {
+    id: string;
+    name: string;
+    organizationId: string;
     type: string;
     templateName: string | null;
     templateLanguage: string | null;
@@ -332,6 +340,10 @@ async function sendViaMetaCloudApi(
   await waitForMetaThrottle(phoneNumberId, campaign.sendRate);
 
   let metaMessageId: string | null = null;
+  let messageType: "template" | "text" = "text";
+  let content = "";
+  let templateConfigId: string | null = null;
+  let flowToken: string | null = null;
 
   if (campaign.type === "TEMPLATE") {
     if (!campaign.templateName) throw new Error("Template não definido na campanha.");
@@ -339,12 +351,22 @@ async function sendViaMetaCloudApi(
       ? (campaign.templateComponents as unknown[])
       : undefined;
     let templateGraphId: string | null = null;
+    let bodyPreview: string | null = null;
+    let category: string | null = null;
     try {
       const row = await prisma.whatsAppTemplateConfig.findFirst({
         where: { metaTemplateName: campaign.templateName },
-        select: { metaTemplateId: true },
+        select: {
+          id: true,
+          metaTemplateId: true,
+          bodyPreview: true,
+          category: true,
+        },
       });
       templateGraphId = row?.metaTemplateId?.trim() || null;
+      templateConfigId = row?.id ?? null;
+      bodyPreview = row?.bodyPreview ?? null;
+      category = row?.category ?? null;
     } catch {
       /* ignore */
     }
@@ -355,7 +377,10 @@ async function sendViaMetaCloudApi(
         components,
         templateGraphId,
       });
-    void campaignFlowToken; // Campanhas não criam `Message`; token só no payload Cloud API (ver logs [meta-flow-enrich]).
+    flowToken =
+      typeof campaignFlowToken === "string" && campaignFlowToken.trim()
+        ? campaignFlowToken.trim()
+        : null;
     const result = await client.sendTemplate(
       phone,
       campaign.templateName,
@@ -364,6 +389,13 @@ async function sendViaMetaCloudApi(
       bsuid,
     );
     metaMessageId = result.messages?.[0]?.id ?? null;
+    messageType = "template";
+    content = buildOutboundTemplateMessageContent(
+      campaign.templateName,
+      "generic",
+      category,
+      bodyPreview,
+    );
   } else if (campaign.type === "TEXT") {
     if (!campaign.textContent) throw new Error("Conteúdo de texto não definido na campanha.");
     const withinWindow = await isWithinMetaWindow(contactId, campaign.channel.id);
@@ -372,6 +404,8 @@ async function sendViaMetaCloudApi(
     }
     const result = await client.sendText(phone, campaign.textContent, bsuid);
     metaMessageId = result.messages?.[0]?.id ?? null;
+    messageType = "text";
+    content = campaign.textContent;
   }
 
   await prisma.campaignRecipient.update({
@@ -382,7 +416,106 @@ async function sendViaMetaCloudApi(
     where: { id: campaignId },
     data: { sentCount: { increment: 1 } },
   });
+
+  // Grava no chat (Message) — sem isso a campanha some do histórico do inbox.
+  try {
+    await persistCampaignOutboundMessage({
+      contactId,
+      channelId: campaign.channel.id,
+      campaignName: campaign.name,
+      content,
+      messageType,
+      externalId: metaMessageId,
+      templateConfigId,
+      flowToken,
+    });
+  } catch (err) {
+    console.error(
+      `[campaign-send] Falha ao gravar Message no chat (envio Meta ok) recipient=${recipientId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+
   await checkCampaignCompletion(campaignId);
+}
+
+/**
+ * Garante conversa OPEN e grava a mensagem outbound da campanha no histórico.
+ * Idempotente por `externalId` (wamid Meta).
+ */
+async function persistCampaignOutboundMessage(input: {
+  contactId: string;
+  channelId: string;
+  campaignName: string;
+  content: string;
+  messageType: "template" | "text";
+  externalId: string | null;
+  templateConfigId?: string | null;
+  flowToken?: string | null;
+  createdAt?: Date;
+  sendStatus?: string;
+}) {
+  if (input.externalId) {
+    const existing = await prisma.message.findFirst({
+      where: { externalId: input.externalId },
+      select: { id: true },
+    });
+    if (existing) return existing.id;
+  }
+
+  const ensured = await ensureWhatsAppConversationForContact(input.contactId);
+  if (
+    ensured.status === "skipped_contact_missing" ||
+    ensured.status === "skipped_no_channel" ||
+    ensured.status === "skipped_no_phone"
+  ) {
+    console.warn(
+      `[campaign-send] Sem conversa para contact=${input.contactId} status=${ensured.status}`,
+    );
+    return null;
+  }
+
+  const conversationId = ensured.conversationId;
+  const channelId = ensured.channelId ?? input.channelId;
+
+  const saved = await prisma.message.create({
+    data: withOrgFromCtx({
+      conversationId,
+      content: input.content || `[Campanha: ${input.campaignName}]`,
+      direction: "out",
+      messageType: input.messageType,
+      authorType: "bot" as const,
+      senderName: `Campanha: ${input.campaignName}`,
+      sendStatus: input.sendStatus ?? "sent",
+      ...(input.externalId ? { externalId: input.externalId } : {}),
+      ...(input.templateConfigId ? { templateConfigId: input.templateConfigId } : {}),
+      ...(input.flowToken ? { flowToken: input.flowToken } : {}),
+      ...(channelId ? { channelId } : {}),
+      ...(input.createdAt ? { createdAt: input.createdAt } : {}),
+    }),
+  });
+
+  await prisma.conversation
+    .update({
+      where: { id: conversationId },
+      data: {
+        lastMessageDirection: "out",
+        hasAgentReply: true,
+        updatedAt: new Date(),
+      },
+    })
+    .catch(() => {});
+
+  sseBus.publish("new_message", {
+    organizationId: getOrgIdOrNull(),
+    conversationId,
+    contactId: input.contactId,
+    direction: "out",
+    content: saved.content,
+    timestamp: saved.createdAt,
+  });
+
+  return saved.id;
 }
 
 async function sendViaBaileys(
