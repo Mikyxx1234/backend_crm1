@@ -186,7 +186,13 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
     if (existing) {
       await prisma.distributionPending.update({
         where: { id: existing.id },
-        data: { attempts: existing.attempts + 1, lastAttemptAt: new Date() },
+        data: {
+          attempts: existing.attempts + 1,
+          lastAttemptAt: new Date(),
+          ...(input.conversationId
+            ? { conversationId: input.conversationId }
+            : {}),
+        },
       });
       return;
     }
@@ -308,6 +314,30 @@ export async function executeDistribution(
       selectedUserName: null,
       evaluated: [],
     };
+  }
+
+  // Idempotente: se a conversa já tem responsável (ex.: inbound acabou de
+  // distribuir e a automação dispara execute_distribution de novo), não
+  // reatribui.
+  if (input.conversationId) {
+    const already = await prisma.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { assignedToId: true },
+    });
+    if (already?.assignedToId) {
+      await resolvePendingFor(
+        input.dealId,
+        input.contactId,
+        already.assignedToId,
+      );
+      return {
+        success: true,
+        reason: "ASSIGNED",
+        selectedUserId: already.assignedToId,
+        selectedUserName: null,
+        evaluated: [],
+      };
+    }
   }
 
   // Distribuição por departamento (flag por depto). A org usa o recurso mas

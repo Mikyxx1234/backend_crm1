@@ -41,6 +41,7 @@ export {
 export {
   getPendingDistributions,
   retryPendingDistributions,
+  maybeDistributeNewInboundTicket,
   type PendingDistributionView,
   type RetryResult,
 } from "./pending";

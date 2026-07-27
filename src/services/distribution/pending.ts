@@ -85,6 +85,46 @@ export interface RetryResult {
 }
 
 /**
+ * Após criar um NOVO ticket OPEN inbound (modelo: RESOLVED não reabre),
+ * tenta distribuir imediatamente se ainda não há responsável.
+ *
+ * Cobre o caso Anna: distribuição falhou de manhã → ticket RESOLVED sem
+ * assign → aluno volta → novo #N sem `execute_distribution` da automação.
+ * Remapeia `distribution_pending` órfãs para o conversationId novo.
+ *
+ * Nunca propaga erro ao webhook — falha só loga.
+ */
+export async function maybeDistributeNewInboundTicket(input: {
+  conversationId: string;
+  contactId: string;
+  assignedToId?: string | null;
+}): Promise<void> {
+  if (input.assignedToId) return;
+
+  try {
+    if (!(await hasOrganizationWidget("smart_distribution"))) return;
+
+    await prisma.distributionPending.updateMany({
+      where: { status: "PENDING", contactId: input.contactId },
+      data: {
+        conversationId: input.conversationId,
+        lastAttemptAt: new Date(),
+      },
+    });
+
+    await executeDistribution({
+      dealId: null,
+      contactId: input.contactId,
+      conversationId: input.conversationId,
+      distributionType: null,
+      triggerSource: "SYSTEM",
+    });
+  } catch (e) {
+    console.error("[distribution] maybeDistributeNewInboundTicket failed", e);
+  }
+}
+
+/**
  * Drena a fila de espera: re-tenta distribuir cada pendência. Chamada quando
  * alguém fica ONLINE (e exposta via POST /api/distribution/pending/retry).
  * Idempotente e segura: se o módulo estiver desabilitado, não faz nada.

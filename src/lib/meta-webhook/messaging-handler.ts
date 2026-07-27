@@ -29,6 +29,7 @@ import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
+import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { nextContactNumber } from "@/services/contacts";
 import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
@@ -455,7 +456,7 @@ async function findOrCreateConversation(
   });
 
   try {
-    return await withConversationNumberRetry((number) =>
+    const created = await withConversationNumberRetry((number) =>
       prisma.conversation.create({
         data: withOrgFromCtx({
           number,
@@ -468,6 +469,12 @@ async function findOrCreateConversation(
         select: { id: true },
       }),
     );
+    await maybeDistributeNewInboundTicket({
+      conversationId: created.id,
+      contactId,
+      assignedToId: contact?.assignedToId ?? null,
+    });
+    return created;
   } catch (err) {
     if (isActiveConversationUniqueViolation(err)) {
       const won = await findActive();
