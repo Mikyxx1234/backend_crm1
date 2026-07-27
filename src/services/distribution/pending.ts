@@ -99,12 +99,29 @@ export async function maybeDistributeNewInboundTicket(input: {
   contactId: string;
   assignedToId?: string | null;
 }): Promise<void> {
+  // #region agent log
+  console.warn(
+    "[DBG-e46688 maybeDist] entry",
+    JSON.stringify({
+      convId: input.conversationId,
+      contactId: input.contactId,
+      alreadyAssigned: !!input.assignedToId,
+    }),
+  );
+  // #endregion
   if (input.assignedToId) return;
 
   try {
-    if (!(await hasOrganizationWidget("smart_distribution"))) return;
+    const widgetActive = await hasOrganizationWidget("smart_distribution");
+    // #region agent log
+    console.warn(
+      "[DBG-e46688 maybeDist] widget check",
+      JSON.stringify({ widgetActive, convId: input.conversationId }),
+    );
+    // #endregion
+    if (!widgetActive) return;
 
-    await prisma.distributionPending.updateMany({
+    const remapped = await prisma.distributionPending.updateMany({
       where: { status: "PENDING", contactId: input.contactId },
       data: {
         conversationId: input.conversationId,
@@ -112,15 +129,36 @@ export async function maybeDistributeNewInboundTicket(input: {
       },
     });
 
-    await executeDistribution({
+    const result = await executeDistribution({
       dealId: null,
       contactId: input.contactId,
       conversationId: input.conversationId,
       distributionType: null,
       triggerSource: "SYSTEM",
     });
+    // #region agent log
+    console.warn(
+      "[DBG-e46688 maybeDist] result",
+      JSON.stringify({
+        convId: input.conversationId,
+        remappedPending: remapped.count,
+        success: result.success,
+        reason: result.reason,
+        selectedUserId: result.selectedUserId,
+      }),
+    );
+    // #endregion
   } catch (e) {
     console.error("[distribution] maybeDistributeNewInboundTicket failed", e);
+    // #region agent log
+    console.warn(
+      "[DBG-e46688 maybeDist] threw",
+      JSON.stringify({
+        convId: input.conversationId,
+        err: e instanceof Error ? e.message : String(e),
+      }),
+    );
+    // #endregion
   }
 }
 
@@ -130,7 +168,14 @@ export async function maybeDistributeNewInboundTicket(input: {
  * Idempotente e segura: se o módulo estiver desabilitado, não faz nada.
  */
 export async function retryPendingDistributions(): Promise<RetryResult> {
-  if (!(await hasOrganizationWidget("smart_distribution"))) {
+  const widgetActive = await hasOrganizationWidget("smart_distribution");
+  // #region agent log
+  console.warn(
+    "[DBG-e46688 retry] widget check",
+    JSON.stringify({ widgetActive }),
+  );
+  // #endregion
+  if (!widgetActive) {
     return { resolved: 0, cancelled: 0, pending: 0 };
   }
 
@@ -143,6 +188,16 @@ export async function retryPendingDistributions(): Promise<RetryResult> {
     select: { id: true, contactId: true },
   });
 
+  // #region agent log
+  console.warn(
+    "[DBG-e46688 retry] items found",
+    JSON.stringify({
+      count: items.length,
+      firstIds: items.slice(0, 5).map((i) => i.id),
+    }),
+  );
+  // #endregion
+
   let resolved = 0;
 
   for (const it of items) {
@@ -153,6 +208,17 @@ export async function retryPendingDistributions(): Promise<RetryResult> {
       distributionType: null,
       triggerSource: "SYSTEM",
     });
+    // #region agent log
+    console.warn(
+      "[DBG-e46688 retry] executeDistribution",
+      JSON.stringify({
+        convId: it.id,
+        success: result.success,
+        reason: result.reason,
+        selectedUserId: result.selectedUserId,
+      }),
+    );
+    // #endregion
     if (result.success) resolved++;
   }
 
