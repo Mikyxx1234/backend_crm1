@@ -168,7 +168,8 @@ const listInclude = {
 
 export async function getDeals(params: GetDealsParams = {}) {
   const page = Math.max(1, params.page ?? 1);
-  const perPage = Math.min(100, Math.max(1, params.perPage ?? 20));
+  // Lista do Pipeline permite até 1000/página para seleção em massa.
+  const perPage = Math.min(1000, Math.max(1, params.perPage ?? 20));
   const skip = (page - 1) * perPage;
 
   const conditions: Prisma.DealWhereInput[] = [];
