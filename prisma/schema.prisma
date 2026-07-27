@@ -3303,6 +3303,8 @@ model MessageTemplate {
   mediaType      String?
   /// Nome original do arquivo (para exibição). Null se `mediaUrl` null.
   mediaName      String?
+  /// Anexos extras do modelo. Array de { url, mimeType?, name? }. Índice 0 espelhado em mediaUrl/mediaType/mediaName.
+  attachments    Json?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -3505,6 +3507,8 @@ model DistributionResponsible {
   type            String?
   /// Pausa temporaria dedicada (alem de AgentStatus.AWAY).
   paused          Boolean      @default(false)
+  /// Minutos antes do almoco em que para de receber leads (0 = so no intervalo).
+  preLunchStopMinutes Int       @default(30)
   /// Ultima vez que recebeu lead pelo motor (desempate da selecao).
   lastExecutionAt DateTime?
   createdAt       DateTime     @default(now())

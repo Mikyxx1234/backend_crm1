@@ -1,7 +1,13 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { deleteTemplate, getTemplateById, updateTemplate } from "@/services/templates";
+import {
+  deleteTemplate,
+  getTemplateById,
+  updateTemplate,
+  normalizeTemplateAttachments,
+  MAX_TEMPLATE_ATTACHMENTS,
+} from "@/services/templates";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -32,6 +38,24 @@ export async function PUT(request: Request, ctx: Ctx) {
     try {
       const { id } = await ctx.params;
       const body = (await request.json()) as Record<string, unknown>;
+
+      let attachments: ReturnType<typeof normalizeTemplateAttachments> | undefined;
+      if ("attachments" in body) {
+        if (!Array.isArray(body.attachments)) {
+          return NextResponse.json(
+            { message: "attachments deve ser uma lista." },
+            { status: 400 },
+          );
+        }
+        if (body.attachments.length > MAX_TEMPLATE_ATTACHMENTS) {
+          return NextResponse.json(
+            { message: `Máximo de ${MAX_TEMPLATE_ATTACHMENTS} anexos por modelo.` },
+            { status: 400 },
+          );
+        }
+        attachments = normalizeTemplateAttachments(body.attachments);
+      }
+
       const template = await updateTemplate(id, {
         name: typeof body.name === "string" ? body.name.trim() : undefined,
         content: typeof body.content === "string" ? body.content.trim() : undefined,
@@ -65,6 +89,7 @@ export async function PUT(request: Request, ctx: Ctx) {
           "mediaName" in body
             ? (typeof body.mediaName === "string" && body.mediaName ? body.mediaName : null)
             : undefined,
+        attachments,
       });
       return NextResponse.json(template);
     } catch (e) {

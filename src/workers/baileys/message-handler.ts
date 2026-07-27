@@ -12,6 +12,7 @@ import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
+import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -257,7 +258,7 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
   });
 
   try {
-    return await withConversationNumberRetry((number) =>
+    const created = await withConversationNumberRetry((number) =>
       prisma.conversation.create({
         data: withOrgFromCtx({
           number,
@@ -271,6 +272,12 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
         select: CONV_SELECT,
       }),
     );
+    await maybeDistributeNewInboundTicket({
+      conversationId: created.id,
+      contactId,
+      assignedToId: contact?.assignedToId ?? null,
+    });
+    return created;
   } catch (err) {
     // Corrida: mensagens simultaneas do mesmo numero disparam dois
     // findOrCreate; o indice unico parcial (1 conversa ativa por

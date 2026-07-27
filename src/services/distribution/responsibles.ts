@@ -29,8 +29,18 @@ const DEFAULT_RESPONSIBLE = {
   volume: 1,
   type: null as string | null,
   paused: false,
+  preLunchStopMinutes: 30,
   lastExecutionAt: null as Date | null,
 };
+
+export interface ResponsibleScheduleView {
+  startTime: string;
+  lunchStart: string;
+  lunchEnd: string;
+  endTime: string;
+  timezone: string;
+  weekdays: number[];
+}
 
 export interface DistributionResponsibleView {
   userId: string;
@@ -44,6 +54,8 @@ export interface DistributionResponsibleView {
   volume: number;
   type: string | null;
   paused: boolean;
+  /** Minutos antes do almoço em que para de receber leads. */
+  preLunchStopMinutes: number;
   lastExecutionAt: string | null;
   /** Departamentos dos quais é membro (dirige o roteamento por departamento). */
   departments: { id: string; name: string }[];
@@ -51,6 +63,8 @@ export interface DistributionResponsibleView {
   status: AgentOnlineStatus | null;
   /** Tem expediente configurado. */
   hasSchedule: boolean;
+  /** Expediente (null se não configurado). */
+  schedule: ResponsibleScheduleView | null;
   /** Fila atual (deals OPEN). */
   queueCount: number;
   /** Resultado da regra única. */
@@ -116,6 +130,7 @@ export async function getDistributionResponsibles(
         volume: true,
         type: true,
         paused: true,
+        preLunchStopMinutes: true,
         lastExecutionAt: true,
       },
     }),
@@ -189,6 +204,7 @@ export async function getDistributionResponsibles(
         type: cfg.type,
         status,
         schedule,
+        preLunchStopMinutes: cfg.preLunchStopMinutes,
         queueCount,
         // undefined = modo desligado (sem restrição); false = fora do depto.
         inDepartment: departmentMemberIds ? departmentMemberIds.has(u.id) : undefined,
@@ -207,6 +223,7 @@ export async function getDistributionResponsibles(
       volume: cfg.volume,
       type: cfg.type,
       paused: cfg.paused,
+      preLunchStopMinutes: cfg.preLunchStopMinutes,
       lastExecutionAt: cfg.lastExecutionAt
         ? cfg.lastExecutionAt.toISOString()
         : null,
@@ -215,6 +232,7 @@ export async function getDistributionResponsibles(
       ),
       status,
       hasSchedule: schedule !== null,
+      schedule,
       queueCount,
       eligible,
       blockedReasons,

@@ -11,6 +11,7 @@ import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
+import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -743,7 +744,7 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
   });
 
   try {
-    return await withConversationNumberRetry((number) =>
+    const created = await withConversationNumberRetry((number) =>
       prisma.conversation.create({
         data: withOrgFromCtx({
           number,
@@ -756,6 +757,13 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
         select: convSelect,
       }),
     );
+    // Novo ticket após RESOLVED: redistribui se ainda sem responsável.
+    await maybeDistributeNewInboundTicket({
+      conversationId: created.id,
+      contactId,
+      assignedToId: contact?.assignedToId ?? null,
+    });
+    return created;
   } catch (err) {
     // Corrida: dois webhooks/mensagens simultaneos do mesmo numero. O
     // indice unico parcial rejeita o 2o create com P2002 — reusa o

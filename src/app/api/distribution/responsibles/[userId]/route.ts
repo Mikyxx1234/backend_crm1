@@ -1,8 +1,9 @@
 /**
  * PATCH /api/distribution/responsibles/[userId]
  * Atualiza a config administrativa de um responsável (participa, limite de
- * fila, volume, tipo, pausa). Online/offline NÃO é alterado aqui — isso vai
- * por `PUT /api/agents/[id]/status`. Exige `distribution:manage` e o widget
+ * fila, volume, tipo, pausa, pré-almoço) e, opcionalmente, o expediente
+ * (`AgentSchedule`). Online/offline NÃO é alterado aqui — isso vai por
+ * `PUT /api/agents/[id]/status`. Exige `distribution:manage` e o widget
  * `smart_distribution` ativo.
  */
 
@@ -12,6 +13,7 @@ import { z } from "zod";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import {
   assertSmartDistributionEnabled,
@@ -20,6 +22,10 @@ import {
 
 type RouteContext = { params: Promise<{ userId: string }> };
 
+const hhmm = z
+  .string()
+  .regex(/^\d{1,2}:\d{2}$/, "Horário inválido (use HH:MM).");
+
 const bodySchema = z
   .object({
     participates: z.boolean().optional(),
@@ -27,8 +33,21 @@ const bodySchema = z
     queueLimit: z.number().int().min(0).max(100_000).optional(),
     volume: z.number().int().min(1).max(100_000).optional(),
     type: z.string().trim().max(100).nullable().optional(),
+    /** Minutos antes do almoço em que para de receber leads (0–180). */
+    preLunchStopMinutes: z.number().int().min(0).max(180).optional(),
     /** Sincroniza os departamentos do responsável (substitui o conjunto). */
     departmentIds: z.array(z.string().min(1)).max(100).optional(),
+    /** Upsert parcial do AgentSchedule (almoço / expediente). */
+    schedule: z
+      .object({
+        startTime: hhmm.optional(),
+        lunchStart: hhmm.optional(),
+        lunchEnd: hhmm.optional(),
+        endTime: hhmm.optional(),
+        timezone: z.string().min(1).max(64).optional(),
+        weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7).optional(),
+      })
+      .optional(),
   })
   .refine((obj) => Object.keys(obj).length > 0, {
     message: "Nenhum campo para atualizar.",
@@ -94,7 +113,7 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
 
     try {
-      const { departmentIds, ...respData } = parsed.data;
+      const { departmentIds, schedule: schedulePatch, ...respData } = parsed.data;
 
       // Sincroniza os departamentos do responsável (substitui o conjunto),
       // validando que pertencem à org. Isolado em try para não derrubar a
@@ -136,6 +155,50 @@ export async function PATCH(request: Request, context: RouteContext) {
         }
       }
 
+      let schedule = null as null | {
+        startTime: string;
+        lunchStart: string;
+        lunchEnd: string;
+        endTime: string;
+        timezone: string;
+        weekdays: number[];
+      };
+      if (schedulePatch) {
+        const existing = await prisma.agentSchedule.findUnique({
+          where: { userId },
+          select: {
+            startTime: true,
+            lunchStart: true,
+            lunchEnd: true,
+            endTime: true,
+            timezone: true,
+            weekdays: true,
+          },
+        });
+        const data = {
+          startTime: schedulePatch.startTime ?? existing?.startTime ?? "08:00",
+          lunchStart: schedulePatch.lunchStart ?? existing?.lunchStart ?? "12:00",
+          lunchEnd: schedulePatch.lunchEnd ?? existing?.lunchEnd ?? "13:00",
+          endTime: schedulePatch.endTime ?? existing?.endTime ?? "18:00",
+          timezone:
+            schedulePatch.timezone ?? existing?.timezone ?? "America/Sao_Paulo",
+          weekdays: schedulePatch.weekdays ?? existing?.weekdays ?? [1, 2, 3, 4, 5],
+        };
+        schedule = await prisma.agentSchedule.upsert({
+          where: { userId },
+          create: withOrgFromCtx({ userId, ...data }),
+          update: data,
+          select: {
+            startTime: true,
+            lunchStart: true,
+            lunchEnd: true,
+            endTime: true,
+            timezone: true,
+            weekdays: true,
+          },
+        });
+      }
+
       // Só faz upsert da config quando houver campo de config no corpo.
       let responsible = null as null | {
         userId: string;
@@ -144,6 +207,7 @@ export async function PATCH(request: Request, context: RouteContext) {
         volume: number;
         type: string | null;
         paused: boolean;
+        preLunchStopMinutes: number;
         lastExecutionAt: Date | null;
       };
       if (Object.keys(respData).length > 0) {
@@ -160,6 +224,7 @@ export async function PATCH(request: Request, context: RouteContext) {
             volume: true,
             type: true,
             paused: true,
+            preLunchStopMinutes: true,
             lastExecutionAt: true,
           },
         });
@@ -174,6 +239,7 @@ export async function PATCH(request: Request, context: RouteContext) {
                 : null,
             }
           : null,
+        schedule,
       });
     } catch (e) {
       console.error("[PATCH /api/distribution/responsibles/[userId]]", e);
