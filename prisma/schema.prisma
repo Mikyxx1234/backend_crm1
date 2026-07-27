@@ -3303,6 +3303,8 @@ model MessageTemplate {
   mediaType      String?
   /// Nome original do arquivo (para exibição). Null se `mediaUrl` null.
   mediaName      String?
+  /// Anexos extras do modelo. Array de { url, mimeType?, name? }. Índice 0 espelhado em mediaUrl/mediaType/mediaName.
+  attachments    Json?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 

@@ -1,7 +1,48 @@
-import type { ChannelType, TemplateStatus } from "@prisma/client";
+import { Prisma, type ChannelType, type TemplateStatus } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+
+export type TemplateAttachment = {
+  url: string;
+  mimeType?: string | null;
+  name?: string | null;
+};
+
+export const MAX_TEMPLATE_ATTACHMENTS = 5;
+
+/**
+ * Valida e normaliza o array de anexos recebido do client. Itens inválidos
+ * (sem `url` string não vazia) são descartados silenciosamente — o limite de
+ * quantidade (`MAX_TEMPLATE_ATTACHMENTS`) é responsabilidade do caller (rota),
+ * que deve rejeitar com 400 antes de chamar o service.
+ */
+export function normalizeTemplateAttachments(raw: unknown): TemplateAttachment[] {
+  if (!Array.isArray(raw)) return [];
+  const out: TemplateAttachment[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const url = (item as Record<string, unknown>).url;
+    if (typeof url !== "string" || !url.trim()) continue;
+    const mimeType = (item as Record<string, unknown>).mimeType;
+    const name = (item as Record<string, unknown>).name;
+    out.push({
+      url: url.trim(),
+      mimeType: typeof mimeType === "string" && mimeType ? mimeType : null,
+      name: typeof name === "string" && name ? name : null,
+    });
+  }
+  return out;
+}
+
+/** Serializa o array de anexos pro formato Json aceito pelo Prisma (`null` vira `Prisma.JsonNull`). */
+function attachmentsToJsonInput(
+  attachments: TemplateAttachment[] | null,
+): Prisma.InputJsonValue | typeof Prisma.JsonNull {
+  return attachments === null
+    ? Prisma.JsonNull
+    : (attachments as unknown as Prisma.InputJsonValue);
+}
 
 export async function getTemplates() {
   return prisma.messageTemplate.findMany({ orderBy: { name: "asc" } });
@@ -20,7 +61,25 @@ export async function createTemplate(data: {
   mediaUrl?: string | null;
   mediaType?: string | null;
   mediaName?: string | null;
+  /** Anexos extras (máx. `MAX_TEMPLATE_ATTACHMENTS`, validado na rota). Quando
+   *  fornecido (mesmo vazio), espelha o índice 0 em mediaUrl/mediaType/mediaName. */
+  attachments?: TemplateAttachment[];
 }) {
+  let mediaUrl = data.mediaUrl ?? null;
+  let mediaType = data.mediaType ?? null;
+  let mediaName = data.mediaName ?? null;
+  let attachments: TemplateAttachment[] | null = null;
+
+  if (data.attachments !== undefined) {
+    attachments = data.attachments.length > 0 ? data.attachments : null;
+    const first = data.attachments[0] ?? null;
+    mediaUrl = first?.url ?? null;
+    mediaType = first?.mimeType ?? null;
+    mediaName = first?.name ?? null;
+  } else if (mediaUrl) {
+    attachments = [{ url: mediaUrl, mimeType: mediaType, name: mediaName }];
+  }
+
   return prisma.messageTemplate.create({
     data: withOrgFromCtx({
       name: data.name,
@@ -28,9 +87,10 @@ export async function createTemplate(data: {
       category: data.category ?? null,
       language: data.language ?? "pt_BR",
       channelType: data.channelType ?? null,
-      mediaUrl: data.mediaUrl ?? null,
-      mediaType: data.mediaType ?? null,
-      mediaName: data.mediaName ?? null,
+      mediaUrl,
+      mediaType,
+      mediaName,
+      attachments: attachmentsToJsonInput(attachments),
     }),
   });
 }
@@ -47,9 +107,44 @@ export async function updateTemplate(
     mediaUrl?: string | null;
     mediaType?: string | null;
     mediaName?: string | null;
+    /** Quando fornecido (mesmo vazio), sincroniza mediaUrl/mediaType/mediaName
+     *  a partir do índice 0. Quando ausente, comportamento legado é mantido:
+     *  se `mediaUrl` vier na chamada, espelha em `attachments` (nice-to-have). */
+    attachments?: TemplateAttachment[];
   }
 ) {
-  return prisma.messageTemplate.update({ where: { id }, data });
+  let mediaUrl = data.mediaUrl;
+  let mediaType = data.mediaType;
+  let mediaName = data.mediaName;
+  let attachments: TemplateAttachment[] | null | undefined;
+
+  if (data.attachments !== undefined) {
+    attachments = data.attachments.length > 0 ? data.attachments : null;
+    const first = data.attachments[0] ?? null;
+    mediaUrl = first?.url ?? null;
+    mediaType = first?.mimeType ?? null;
+    mediaName = first?.name ?? null;
+  } else if (mediaUrl !== undefined) {
+    attachments = mediaUrl
+      ? [{ url: mediaUrl, mimeType: mediaType ?? null, name: mediaName ?? null }]
+      : null;
+  }
+
+  return prisma.messageTemplate.update({
+    where: { id },
+    data: {
+      name: data.name,
+      content: data.content,
+      category: data.category,
+      language: data.language,
+      status: data.status,
+      channelType: data.channelType,
+      mediaUrl,
+      mediaType,
+      mediaName,
+      attachments: attachments === undefined ? undefined : attachmentsToJsonInput(attachments),
+    },
+  });
 }
 
 export async function deleteTemplate(id: string) {
