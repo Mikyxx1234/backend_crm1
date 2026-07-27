@@ -216,7 +216,7 @@ export function summarizeTriggerConfig(
       if (c.tabulationLabel) return `Tabulação: ${String(c.tabulationLabel)}`;
       if (c.tabulationId) return `Tabulação ID: ${String(c.tabulationId).slice(0, 8)}…`;
       if (c.departmentId) return `Departamento: ${String(c.departmentId).slice(0, 8)}…`;
-      return "Qualquer tabulação";
+      return "Qualquer encerramento";
     }
     case "whatsapp_session_expiring":
       return `${String(c.hoursBeforeExpiry ?? 1)}h antes do encerramento`;

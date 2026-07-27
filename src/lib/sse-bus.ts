@@ -243,6 +243,14 @@ function bootstrapBackgroundServices() {
       console.error("[sse-bus] failed to start system-presence sweeper:", e),
     );
 
+  // Sweeper independente do de presença — fecha SystemActivitySession vencidas
+  // (uso real). NÃO interfere no fluxo de presença ao vivo acima.
+  import("@/services/system-activity")
+    .then(({ startSystemActivitySweeper }) => startSystemActivitySweeper())
+    .catch((e) =>
+      console.error("[sse-bus] failed to start system-activity sweeper:", e),
+    );
+
   import("@/services/scheduled-messages-worker")
     .then(({ startScheduledMessagesWorker }) => startScheduledMessagesWorker())
     .catch((e) =>
