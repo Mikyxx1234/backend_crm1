@@ -1,5 +1,6 @@
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { isVerboseLogging } from "@/lib/debug-log";
+import { CRM_META_APP_ID } from "@/lib/meta-constants";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import { metaErrorReason } from "@/lib/meta-whatsapp/error-catalog";
 import { metrics, templatizeRoute } from "@/lib/metrics";
@@ -514,6 +515,127 @@ export class MetaWhatsAppClient {
       throw err;
     }
     return parsed.id;
+  }
+
+  // ── Resumable Upload API (header_handle p/ criação de template) ─
+  // @see https://developers.facebook.com/docs/graph-api/guides/upload
+  //
+  // A Meta NÃO aceita `link`/`id` de mídia comum como exemplo de header
+  // ao CRIAR um template — exige um `header_handle` obtido via Resumable
+  // Upload API (fluxo em 2 passos: cria sessão no App, depois envia os
+  // bytes). O handle (`h`) resultante vai em `example.header_handle`.
+
+  /**
+   * Sobe um arquivo via Resumable Upload API e devolve o `header_handle`
+   * (campo `h`) exigido por `example.header_handle` no HEADER de mídia
+   * ao criar um template.
+   */
+  async uploadResumableHandle(
+    buffer: Buffer,
+    mimeType: string,
+    fileName: string,
+  ): Promise<string> {
+    const appId = CRM_META_APP_ID?.trim();
+    if (!appId) {
+      throw new Error(
+        "Meta: App ID não configurado (CRM_META_APP_ID) — necessário para enviar a mídia de exemplo do cabeçalho.",
+      );
+    }
+
+    // Passo 1 — cria a sessão de upload.
+    const sessionParams = new URLSearchParams({
+      file_name: fileName,
+      file_length: String(buffer.length),
+      file_type: mimeType,
+    });
+    const sessionUrl = MetaWhatsAppClient.buildGraphUrl(
+      `${appId}/uploads?${sessionParams.toString()}`,
+    );
+    let sessionRes: Response;
+    try {
+      sessionRes = await fetch(sessionUrl, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${this.accessToken}` },
+        cache: "no-store",
+        signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw new Error(
+        `Falha ao iniciar upload da mídia de exemplo do cabeçalho: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    const sessionText = await sessionRes.text();
+    let sessionData: unknown;
+    try { sessionData = JSON.parse(sessionText); } catch { sessionData = sessionText; }
+
+    if (!sessionRes.ok) {
+      const payload =
+        sessionData && typeof sessionData === "object"
+          ? ((sessionData as GraphErrorEnvelope).error ?? null)
+          : null;
+      const err = new MetaGraphError({
+        httpStatus: sessionRes.status,
+        path: `${appId}/uploads`,
+        payload,
+      });
+      console.error(
+        `[MetaWA] resumable-upload sessão ${sessionRes.status} code=${err.code ?? "?"} fbtrace=${err.fbtraceId ?? "?"}: ${err.details ?? err.message}`,
+      );
+      throw err;
+    }
+    const sessionId = (sessionData as { id?: string } | undefined)?.id?.trim();
+    if (!sessionId) {
+      throw new Error(
+        "Meta: resposta inesperada ao criar sessão de upload da mídia de exemplo (sem id de sessão).",
+      );
+    }
+
+    // Passo 2 — envia os bytes do arquivo.
+    const uploadUrl = MetaWhatsAppClient.buildGraphUrl(sessionId);
+    let uploadRes: Response;
+    try {
+      uploadRes = await fetch(uploadUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+          file_offset: "0",
+          "Content-Type": "application/octet-stream",
+        },
+        body: new Uint8Array(buffer),
+        cache: "no-store",
+        signal: AbortSignal.timeout(GRAPH_TIMEOUT_MS),
+      });
+    } catch (err) {
+      throw new Error(
+        `Falha ao enviar os bytes da mídia de exemplo do cabeçalho: ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    const uploadText = await uploadRes.text();
+    let uploadData: unknown;
+    try { uploadData = JSON.parse(uploadText); } catch { uploadData = uploadText; }
+
+    if (!uploadRes.ok) {
+      const payload =
+        uploadData && typeof uploadData === "object"
+          ? ((uploadData as GraphErrorEnvelope).error ?? null)
+          : null;
+      const err = new MetaGraphError({
+        httpStatus: uploadRes.status,
+        path: sessionId,
+        payload,
+      });
+      console.error(
+        `[MetaWA] resumable-upload bytes ${uploadRes.status} code=${err.code ?? "?"} fbtrace=${err.fbtraceId ?? "?"}: ${err.details ?? err.message}`,
+      );
+      throw err;
+    }
+    const handle = (uploadData as { h?: string } | undefined)?.h?.trim();
+    if (!handle) {
+      throw new Error(
+        "Meta: resposta inesperada ao enviar a mídia de exemplo do cabeçalho (sem handle 'h').",
+      );
+    }
+    return handle;
   }
 
   // ── Send media by ID ──────────────────────────
