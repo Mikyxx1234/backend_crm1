@@ -19,7 +19,7 @@ type RouteContext = { params: Promise<{ userId: string }> };
 
 const bodySchema = z
   .object({
-    mode: z.enum(["equal", "specific"]),
+    mode: z.enum(["equal", "specific", "to_pending"]),
     recipientUserIds: z.array(z.string().min(1)).max(50).optional(),
     queueScope: z.enum(["all", "entrada", "aguardando"]).optional(),
   })

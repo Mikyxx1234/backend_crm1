@@ -11,7 +11,8 @@ import { assignConversationAssignedTo } from "@/services/conversations";
 import { getDistributionResponsibles } from "./responsibles";
 
 export type RedistributeQueueScope = "all" | "entrada" | "aguardando";
-export type RedistributeMode = "equal" | "specific";
+/** equal = online; specific = escolhidos; to_pending = Fila de espera (sem responsável). */
+export type RedistributeMode = "equal" | "specific" | "to_pending";
 
 export type RedistributeInput = {
   sourceUserId: string;
@@ -80,6 +81,34 @@ export async function redistributeResponsibleQueue(
     return { moved: 0, skipped: 0, total: 0, recipients: [] };
   }
 
+  // Sem responsável → entra na Fila de espera; quando alguém fica ONLINE,
+  // retryPendingDistributions redistribui automaticamente.
+  if (input.mode === "to_pending") {
+    let moved = 0;
+    let skipped = 0;
+    for (const conv of conversations) {
+      const result = await assignConversationAssignedTo(conv.id, null, {
+        id: input.actor.id,
+        role: input.actor.role,
+        canReassignOthers: true,
+      });
+      if (result.ok) moved += 1;
+      else skipped += 1;
+    }
+    return {
+      moved,
+      skipped,
+      total: conversations.length,
+      recipients: [
+        {
+          userId: "",
+          name: "Fila de espera",
+          received: moved,
+        },
+      ],
+    };
+  }
+
   const all = await getDistributionResponsibles();
   let recipients = all.filter((r) => r.userId !== input.sourceUserId);
 
@@ -98,7 +127,7 @@ export async function redistributeResponsibleQueue(
     if (recipients.length === 0) {
       throw Object.assign(
         new Error(
-          "Nenhum consultor ONLINE elegível para receber a redistribuição.",
+          "Nenhum consultor ONLINE elegível para receber a redistribuição. Use a opção “Fila de espera”.",
         ),
         { code: "NO_RECIPIENTS", status: 400 },
       );
