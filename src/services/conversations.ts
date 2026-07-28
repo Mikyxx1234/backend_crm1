@@ -377,19 +377,13 @@ export function buildInboxFilterConditions(
       ),
     );
     if (ownerIds.length > 0) {
-      conditions.push({
-        OR: [
-          { assignedToId: { in: ownerIds } },
-          {
-            contact: {
-              OR: [
-                { deals: { some: { ownerId: { in: ownerIds } } } },
-                { assignedToId: { in: ownerIds } },
-              ],
-            },
-          },
-        ],
-      });
+      // Filtro da aba "Conversa > Responsável" corresponde ao responsável
+      // exibido no card (Conversation.assignedTo). Antes usávamos um OR que
+      // também incluía contatos cujo deal fosse do usuário ou cujo owner
+      // padrão fosse o usuário — isso trazia conversas atribuídas a outros
+      // agentes só porque o contato tinha algum vínculo com o filtrado,
+      // gerando o bug do inbox (Breno trazia conversas de Beatriz/Julia).
+      conditions.push({ assignedToId: { in: ownerIds } });
     }
   }
   const stageIds = Array.from(
