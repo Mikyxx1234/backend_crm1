@@ -8,6 +8,10 @@ import {
 } from "@prisma/client";
 
 import { normalizeConditionConfig } from "@/lib/automation-condition";
+import {
+  normalizeRoundRobinConfig,
+  roundRobinOptionsSignature,
+} from "@/lib/automation-round-robin";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 import {
@@ -2235,6 +2239,74 @@ async function executeStep(
       if (conditionCfg.elseStepId) {
         return { skipRemaining: true, gotoStepId: conditionCfg.elseStepId };
       }
+      return { skipRemaining: true };
+    }
+
+    case "round_robin": {
+      // Estilo Kommo: NÃO atribui agente — só escolhe qual caminho do
+      // fluxo seguir, em rodízio circular entre execuções da mesma
+      // automação+step. Cursor persistido em AutomationRoundRobinState
+      // (chave [automationId, stepId]); ver @/lib/automation-round-robin.
+      const rrCfg = normalizeRoundRobinConfig(cfg);
+      const options = rrCfg.options;
+      const n = options.length;
+      if (n === 0) return { skipRemaining: true };
+
+      const rrStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
+      if (!rrStepId) throw new Error("round_robin: __stepId ausente no contexto de execução");
+
+      const signature = roundRobinOptionsSignature(options);
+
+      const chosenIndex = await prisma.$transaction(async (tx) => {
+        const existing = await tx.automationRoundRobinState.findUnique({
+          where: { automationId_stepId: { automationId: rt.automationId, stepId: rrStepId } },
+        });
+
+        if (!existing) {
+          await tx.automationRoundRobinState.create({
+            data: withOrgFromCtx({
+              automationId: rt.automationId,
+              stepId: rrStepId,
+              lastIndex: -1,
+              optionsSignature: signature,
+            }),
+          });
+        } else if (existing.optionsSignature !== signature) {
+          // Lista de opções mudou (opção adicionada/removida) — reseta
+          // a fila pro início, conforme o texto de ajuda do card.
+          await tx.automationRoundRobinState.update({
+            where: { automationId_stepId: { automationId: rt.automationId, stepId: rrStepId } },
+            data: { lastIndex: -1, optionsSignature: signature },
+          });
+        }
+
+        // UPDATE atômico: calcula o próximo índice em uma única
+        // instrução (o UPDATE toma lock de linha no Postgres —
+        // execuções concorrentes da mesma automação+step serializam
+        // aqui em vez de lerem o mesmo lastIndex "velho").
+        const rows = await tx.$queryRaw<{ lastIndex: number }[]>`
+          UPDATE automation_round_robin_states
+          SET "lastIndex" = ("lastIndex" + 1) % ${n}, "updatedAt" = NOW()
+          WHERE "automationId" = ${rt.automationId} AND "stepId" = ${rrStepId}
+          RETURNING "lastIndex"
+        `;
+        return rows[0]?.lastIndex ?? 0;
+      });
+
+      // Escolhe options[chosenIndex]. Sem "else" obrigatória: se a
+      // opção sorteada não tiver destino, avança o cursor de LEITURA
+      // (sem persistir) e tenta a próxima em ordem circular, no
+      // máximo 1 volta completa. O `lastIndex` persistido fica no
+      // índice ESCOLHIDO nesta execução (chosenIndex) independente de
+      // qual destino tenha efetivamente sido usado.
+      for (let i = 0; i < n; i++) {
+        const opt = options[(chosenIndex + i) % n];
+        if (opt.nextStepId) {
+          return { skipRemaining: true, gotoStepId: opt.nextStepId };
+        }
+      }
+
+      // Nenhuma opção tem destino configurado — encerra o ramo sem erro.
       return { skipRemaining: true };
     }
 
