@@ -73,6 +73,7 @@ model Organization {
   automationLogs           AutomationLog[]
   automationContexts       AutomationContext[]
   automationSessionExpiryClaims AutomationSessionExpiryClaim[]
+  automationRoundRobinStates AutomationRoundRobinState[]
   metaWebhookEvents        MetaWebhookEvent[]
   channels                 Channel[]
   baileysAuthKeys          BaileysAuthKey[]
@@ -2834,6 +2835,7 @@ model Automation {
   steps          AutomationStep[]
   contexts       AutomationContext[]
   sessionExpiryClaims AutomationSessionExpiryClaim[]
+  roundRobinStates AutomationRoundRobinState[]
   campaigns      Campaign[]
 
   createdAt DateTime @default(now())
@@ -2867,6 +2869,31 @@ model AutomationSessionExpiryClaim {
   @@index([organizationId, createdAt], map: "automation_session_expiry_org_created_idx")
   @@index([contactId, channel, windowStartedAt], map: "automation_session_expiry_contact_channel_window_idx")
   @@map("automation_session_expiry_claims")
+}
+
+/// Cursor persistido do node "Round Robin de caminhos" (estilo Kommo).
+/// NÃO atribui agente — só guarda o índice da última opção escolhida
+/// pra rodízio circular entre execuções da mesma automação+step. Ver
+/// `@/lib/automation-round-robin.ts` e `case "round_robin"` em
+/// `automation-executor.ts`. `optionsSignature` (ids das opções, join
+/// por vírgula) detecta add/remove de opção e reseta `lastIndex` pro
+/// início (-1) na próxima execução.
+model AutomationRoundRobinState {
+  id               String       @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, map: "automation_round_robin_state_org_fk")
+  automationId     String
+  automation       Automation   @relation(fields: [automationId], references: [id], onDelete: Cascade, map: "automation_round_robin_state_automation_fk")
+  stepId           String
+  /// -1 = ainda não rodou nenhuma vez; próxima escolha = índice 0.
+  lastIndex        Int          @default(-1)
+  optionsSignature String
+  updatedAt        DateTime     @updatedAt
+  createdAt        DateTime     @default(now())
+
+  @@unique([automationId, stepId], map: "automation_round_robin_state_automation_step_uq")
+  @@index([organizationId], map: "automation_round_robin_state_org_idx")
+  @@map("automation_round_robin_states")
 }
 
 model AutomationStep {

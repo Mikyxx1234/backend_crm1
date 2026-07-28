@@ -3,6 +3,11 @@ import {
   summarizeConditionConfig,
   type ConditionConfig,
 } from "@/lib/automation-condition";
+import {
+  newRoundRobinOptionId,
+  summarizeRoundRobinConfig,
+  type RoundRobinConfig,
+} from "@/lib/automation-round-robin";
 
 export type AutomationTriggerType =
   | "stage_changed"
@@ -65,6 +70,7 @@ export const ACTION_STEP_TYPES = [
   "webhook",
   "delay",
   "condition",
+  "round_robin",
   "update_lead_score",
   "question",
   "wait_for_reply",
@@ -125,6 +131,7 @@ export function stepTypeLabel(t: string): string {
     webhook: "Webhook",
     delay: "Atraso",
     condition: "Condição",
+    round_robin: "Round Robin de caminhos",
     update_lead_score: "Atualizar lead score",
     question: "Pergunta ao lead",
     wait_for_reply: "Aguardar resposta",
@@ -282,6 +289,8 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
     }
     case "condition":
       return summarizeConditionConfig(c);
+    case "round_robin":
+      return summarizeRoundRobinConfig(c);
     case "update_lead_score":
       return "Recalcular score";
     case "question": {
@@ -434,6 +443,12 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
             rules: [{ field: "", op: "eq", value: "" }],
           },
         ],
+      };
+      return cfg as unknown as Record<string, unknown>;
+    }
+    case "round_robin": {
+      const cfg: RoundRobinConfig = {
+        options: [{ id: newRoundRobinOptionId() }, { id: newRoundRobinOptionId() }],
       };
       return cfg as unknown as Record<string, unknown>;
     }

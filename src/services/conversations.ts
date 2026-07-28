@@ -8,8 +8,14 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
-import { SOURCE_NONE } from "@/services/kanban-filters";
+import {
+  findContactIdsByPhoneDigits,
+  SOURCE_NONE,
+} from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
+
+/** Int4 Postgres — ticket `number` não pode ultrapassar isso na query. */
+const PG_INT4_MAX = 2_147_483_647;
 
 /** Abas de categoria (filtro OR em "Todos" para membros com escopo limitado). */
 export const INBOX_CATEGORY_TABS = [
@@ -274,9 +280,9 @@ function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
  * encerramento em massa "por filtro" (`getResolvableConversationIds`),
  * garantindo que a seleção "todas do filtro" case exatamente com a lista.
  */
-export function buildConversationListWhere(
+export async function buildConversationListWhere(
   params: GetConversationsParams,
-): Prisma.ConversationWhereInput {
+): Promise<Prisma.ConversationWhereInput> {
   const conditions: Prisma.ConversationWhereInput[] = [];
 
   if (params.visibilityWhere && Object.keys(params.visibilityWhere).length > 0) {
@@ -298,12 +304,28 @@ export function buildConversationListWhere(
       { assignedTo: { name: { contains: q, mode: "insensitive" } } },
       { assignedTo: { email: { contains: q, mode: "insensitive" } } },
     ];
-    // Busca pelo #número do ticket ("1234" ou "#1234") — match exato,
-    // usa o índice @@unique([organizationId, number]) (rápido).
+    // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
+    // "+55 11 94501-0493". Mesma regra de deals/contatos/kanban.
+    const digits = q.replace(/\D+/g, "");
+    if (digits.length >= 3) {
+      const contactIds = await findContactIdsByPhoneDigits(digits);
+      if (contactIds.length > 0) {
+        or.push({ contactId: { in: contactIds } });
+      }
+    }
+    // Busca pelo #número do ticket ("1234" ou "#1234") — match exato.
+    // Só Int4 válido: telefone completo (11 dígitos) estoura o Int e quebrava
+    // a query inteira (loading longo + zero resultados).
     const numeric = q.replace(/^#/, "");
     if (/^\d+$/.test(numeric)) {
       const n = Number(numeric);
-      if (Number.isSafeInteger(n)) or.push({ number: n });
+      if (
+        Number.isInteger(n) &&
+        n >= 0 &&
+        n <= PG_INT4_MAX
+      ) {
+        or.push({ number: n });
+      }
     }
     conditions.push({ OR: or });
   } else if (params.tab) {
@@ -465,7 +487,9 @@ async function withResolvedSessionFilter(
 export async function getResolvableConversationIds(
   params: GetConversationsParams,
 ): Promise<{ ids: string[]; skippedIds: string[] }> {
-  const baseWhere = buildConversationListWhere(await withResolvedSessionFilter(params));
+  const baseWhere = await buildConversationListWhere(
+    await withResolvedSessionFilter(params),
+  );
   const openWhere: Prisma.ConversationWhereInput = {
     AND: [baseWhere, { status: { not: "RESOLVED" } }],
   };
@@ -503,7 +527,7 @@ export async function getConversations(
   const perPage = Math.min(200, Math.max(1, params.perPage ?? 20));
   const skip = (page - 1) * perPage;
 
-  const where = buildConversationListWhere(params);
+  const where = await buildConversationListWhere(params);
 
   const sortBy = params.sortBy ?? "updatedAt";
   const sortOrder = params.sortOrder ?? "desc";
