@@ -54,6 +54,12 @@ export interface ExecuteDistributionInput {
    * automações de transferência).
    */
   departmentId?: string | null;
+  /**
+   * Pool explícito de departamentos (automação `execute_distribution`).
+   * Quando preenchido, ignora o toggle org `respectDepartment` e distribui
+   * apenas entre membros de qualquer um desses departamentos.
+   */
+  departmentIds?: string[] | null;
   /** Momento de referência (testes). Default: agora. */
   now?: Date;
 }
@@ -340,28 +346,56 @@ export async function executeDistribution(
     }
   }
 
-  // Distribuição por departamento (flag por depto). A org usa o recurso mas
-  // este lead não está num departamento habilitado (ou sem departamento) →
-  // não distribui (fallback = fila), respeitando a fronteira do departamento.
-  const deptScope = await resolveDepartmentScope(input);
-  if (deptScope.mode === "blocked") {
-    await writeLog(input, false, "NO_DEPARTMENT", null, []);
-    await enqueuePending(input);
-    await emitDistributionEvent(input, false, "NO_DEPARTMENT", null, null, null);
-    return {
-      success: false,
-      reason: "NO_DEPARTMENT",
-      selectedUserId: null,
-      selectedUserName: null,
-      evaluated: [],
-    };
-  }
+  // Pool explícito da automação (1+ departamentos no card) — força escopo
+  // mesmo com respectDepartment=false na org.
+  const explicitDeptIds = Array.from(
+    new Set(
+      [
+        ...(input.departmentIds ?? []),
+        ...(input.departmentId ? [input.departmentId] : []),
+      ].filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  );
 
-  const responsibles = await getDistributionResponsibles({
-    distributionType: input.distributionType ?? null,
-    now: input.now,
-    departmentId: deptScope.mode === "department" ? deptScope.departmentId : null,
-  });
+  let responsibles;
+  if (explicitDeptIds.length > 0) {
+    // Marca a conversa com o 1º departamento (contexto/inbox); o pool
+    // de elegíveis usa TODOS os IDs selecionados.
+    if (input.conversationId) {
+      await prisma.conversation.update({
+        where: { id: input.conversationId },
+        data: { departmentId: explicitDeptIds[0]! },
+      });
+    }
+    responsibles = await getDistributionResponsibles({
+      distributionType: input.distributionType ?? null,
+      now: input.now,
+      departmentIds: explicitDeptIds,
+    });
+  } else {
+    // Distribuição por departamento (flag por depto). A org usa o recurso mas
+    // este lead não está num departamento habilitado (ou sem departamento) →
+    // não distribui (fallback = fila), respeitando a fronteira do departamento.
+    const deptScope = await resolveDepartmentScope(input);
+    if (deptScope.mode === "blocked") {
+      await writeLog(input, false, "NO_DEPARTMENT", null, []);
+      await enqueuePending(input);
+      await emitDistributionEvent(input, false, "NO_DEPARTMENT", null, null, null);
+      return {
+        success: false,
+        reason: "NO_DEPARTMENT",
+        selectedUserId: null,
+        selectedUserName: null,
+        evaluated: [],
+      };
+    }
+
+    responsibles = await getDistributionResponsibles({
+      distributionType: input.distributionType ?? null,
+      now: input.now,
+      departmentId: deptScope.mode === "department" ? deptScope.departmentId : null,
+    });
+  }
   const evaluated = toSummary(responsibles);
   const eligible = responsibles.filter((r) => r.eligible);
 

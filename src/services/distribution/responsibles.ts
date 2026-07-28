@@ -90,6 +90,12 @@ export interface GetResponsiblesOptions {
    * `DEPARTMENT_MISMATCH` (inelegíveis). `null`/undefined = modo desligado.
    */
   departmentId?: string | null;
+  /**
+   * Pool de departamentos (OR): membro de qualquer um dos IDs é elegível
+   * quanto a departamento. Tem prioridade sobre `departmentId` quando ambos
+   * vêm preenchidos.
+   */
+  departmentIds?: string[] | null;
 }
 
 export async function getDistributionResponsibles(
@@ -107,18 +113,30 @@ export async function getDistributionResponsibles(
 
   const userIds = users.map((u) => u.id);
 
-  // Distribuição por departamento: carrega os membros do departamento-alvo
-  // para marcar quem está dentro/fora. Vazio (Set) quando modo desligado.
-  const departmentMemberIds = opts.departmentId
-    ? new Set(
-        (
-          await prisma.departmentMember.findMany({
-            where: { departmentId: opts.departmentId, userId: { in: userIds } },
-            select: { userId: true },
-          })
-        ).map((m) => m.userId),
-      )
-    : null;
+  // Distribuição por departamento: carrega os membros do(s) departamento(s)
+  // alvo para marcar quem está dentro/fora. Vazio (Set) quando modo desligado.
+  const scopeDeptIds = Array.from(
+    new Set(
+      [
+        ...(opts.departmentIds ?? []),
+        ...(opts.departmentId ? [opts.departmentId] : []),
+      ].filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  );
+  const departmentMemberIds =
+    scopeDeptIds.length > 0
+      ? new Set(
+          (
+            await prisma.departmentMember.findMany({
+              where: {
+                departmentId: { in: scopeDeptIds },
+                userId: { in: userIds },
+              },
+              select: { userId: true },
+            })
+          ).map((m) => m.userId),
+        )
+      : null;
 
   const [responsibles, statuses, schedules, queue, memberships, systemPresence] = await Promise.all([
     prisma.distributionResponsible.findMany({
