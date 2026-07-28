@@ -348,7 +348,15 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
         : "Selecionar agente IA";
     }
     case "execute_distribution": {
+      const names = Array.isArray(c.departmentNames)
+        ? c.departmentNames.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+        : [];
       const t = c.distributionType ? String(c.distributionType) : "";
+      if (names.length > 0) {
+        const deptLabel =
+          names.length <= 2 ? names.join(", ") : `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
+        return t ? `${deptLabel} · ${t}` : deptLabel;
+      }
       return t ? `Distribuição: ${t}` : "Distribuição padrão";
     }
     case "send_product": {
@@ -509,9 +517,8 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
         target: "deal",
       };
     case "execute_distribution":
-      // v1: "executar distribuição padrão". distributionType opcional
-      // (avalia TYPE_INCOMPATIBLE no motor). Sem fallback complexo.
-      return { distributionType: "" };
+      // distributionType opcional; departmentIds = pool opcional de departamentos.
+      return { distributionType: "", departmentIds: [], departmentNames: [] };
     default:
       return {};
   }
