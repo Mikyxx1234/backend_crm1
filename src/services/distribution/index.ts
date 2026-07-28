@@ -51,3 +51,11 @@ export {
   getDistributionLogs,
   type DistributionLogView,
 } from "./logs";
+
+export {
+  redistributeResponsibleQueue,
+  type RedistributeInput,
+  type RedistributeMode,
+  type RedistributeQueueScope,
+  type RedistributeResult,
+} from "./redistribute";
