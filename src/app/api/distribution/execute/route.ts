@@ -1,9 +1,16 @@
 /**
  * POST /api/distribution/execute
  * Executa a distribuição REAL (atribui owner + propaga + log). Trigger
- * manual. Exige `distribution:execute` e o widget `smart_distribution`.
+ * manual. Exige `distribution:execute` (gestores) **ou**
+ * `conversation:claim` (consultor redistribuindo do inbox) e o widget
+ * `smart_distribution`.
  *
- * Body: { dealId?, contactId?, conversationId?, distributionType? }
+ * Body: {
+ *   dealId?, contactId?, conversationId?,
+ *   distributionType?,
+ *   departmentId?, departmentIds?,
+ *   reassign?  // true = redistribui mesmo com responsável atual
+ * }
  */
 
 import { NextResponse } from "next/server";
@@ -22,6 +29,9 @@ const bodySchema = z.object({
   contactId: z.string().min(1).optional(),
   conversationId: z.string().min(1).optional(),
   distributionType: z.string().trim().max(100).nullable().optional(),
+  departmentId: z.string().min(1).optional(),
+  departmentIds: z.array(z.string().min(1)).max(50).optional(),
+  reassign: z.boolean().optional(),
 });
 
 export async function POST(request: Request) {
@@ -31,9 +41,14 @@ export async function POST(request: Request) {
       organizationId: session.user.organizationId,
       isSuperAdmin: session.user.isSuperAdmin,
     });
-    if (!can(ctx, "distribution:execute")) {
+    const canExecute =
+      can(ctx, "distribution:execute") || can(ctx, "conversation:claim");
+    if (!canExecute) {
       return NextResponse.json(
-        { message: "Acesso negado.", required: "distribution:execute" },
+        {
+          message: "Acesso negado.",
+          required: "distribution:execute|conversation:claim",
+        },
         { status: 403 },
       );
     }
@@ -67,9 +82,23 @@ export async function POST(request: Request) {
       );
     }
 
+    const departmentIds = Array.from(
+      new Set(
+        [
+          ...(parsed.data.departmentIds ?? []),
+          ...(parsed.data.departmentId ? [parsed.data.departmentId] : []),
+        ].filter(Boolean),
+      ),
+    );
+
     try {
       const result = await executeDistribution({
-        ...parsed.data,
+        dealId: parsed.data.dealId,
+        contactId: parsed.data.contactId,
+        conversationId: parsed.data.conversationId,
+        distributionType: parsed.data.distributionType ?? null,
+        departmentIds: departmentIds.length > 0 ? departmentIds : null,
+        reassign: parsed.data.reassign === true,
         triggerSource: "MANUAL",
       });
       return NextResponse.json(result);

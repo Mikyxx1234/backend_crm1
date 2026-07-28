@@ -60,6 +60,11 @@ export interface ExecuteDistributionInput {
    * apenas entre membros de qualquer um desses departamentos.
    */
   departmentIds?: string[] | null;
+  /**
+   * Quando true, redistribui mesmo se a conversa já tiver responsável
+   * (uso manual no inbox / handoff entre departamentos).
+   */
+  reassign?: boolean;
   /** Momento de referência (testes). Default: agora. */
   now?: Date;
 }
@@ -324,8 +329,8 @@ export async function executeDistribution(
 
   // Idempotente: se a conversa já tem responsável (ex.: inbound acabou de
   // distribuir e a automação dispara execute_distribution de novo), não
-  // reatribui.
-  if (input.conversationId) {
+  // reatribui — salvo `reassign` (handoff manual para departamento).
+  if (input.conversationId && !input.reassign) {
     const already = await prisma.conversation.findUnique({
       where: { id: input.conversationId },
       select: { assignedToId: true },
@@ -343,6 +348,34 @@ export async function executeDistribution(
         selectedUserName: null,
         evaluated: [],
       };
+    }
+  }
+
+  // Handoff: libera o responsável atual antes de redistribuir — se ninguém
+  // estiver elegível, o lead fica na fila de espera (sem dono antigo).
+  if (input.reassign && input.conversationId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { assignedToId: true, contactId: true },
+    });
+    if (conv?.assignedToId) {
+      const contactId = conv.contactId ?? input.contactId ?? null;
+      await prisma.$transaction(async (tx) => {
+        await tx.conversation.update({
+          where: { id: input.conversationId! },
+          data: { assignedToId: null },
+        });
+        if (contactId) {
+          await tx.contact.update({
+            where: { id: contactId },
+            data: { assignedToId: null },
+          });
+          await tx.deal.updateMany({
+            where: { contactId, status: "OPEN" },
+            data: { ownerId: null },
+          });
+        }
+      });
     }
   }
 
