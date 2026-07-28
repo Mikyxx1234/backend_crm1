@@ -20,6 +20,7 @@ import { logEvent } from "@/services/activity-log";
 import {
   assignDealOwner,
   propagateOwnerToContactAndChat,
+  syncOwnershipForContact,
 } from "@/services/deals";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
@@ -205,21 +206,32 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
             : {}),
         },
       });
-      return;
+    } else {
+      await prisma.distributionPending.create({
+        data: {
+          organizationId: getOrgIdOrThrow(),
+          dealId: input.dealId ?? null,
+          contactId: input.contactId ?? null,
+          conversationId: input.conversationId ?? null,
+          distributionType: input.distributionType ?? null,
+          triggerSource: input.triggerSource,
+          status: "PENDING",
+          attempts: 1,
+          lastAttemptAt: new Date(),
+        },
+      });
     }
-    await prisma.distributionPending.create({
-      data: {
-        organizationId: getOrgIdOrThrow(),
-        dealId: input.dealId ?? null,
-        contactId: input.contactId ?? null,
-        conversationId: input.conversationId ?? null,
-        distributionType: input.distributionType ?? null,
-        triggerSource: input.triggerSource,
-        status: "PENDING",
-        attempts: 1,
-        lastAttemptAt: new Date(),
-      },
-    });
+    // A UI da fila deriva de conversas OPEN sem assignee — agenda drenagem
+    // (import dinâmico evita ciclo engine ↔ pending). Útil em corrida com
+    // presença/horário: alguém fica elegível milissegundos depois.
+    void import("./pending")
+      .then((m) =>
+        m.scheduleProcessPendingDistributionQueue({
+          trigger: "new_item",
+          delayMs: 2000,
+        }),
+      )
+      .catch(() => {});
   } catch (e) {
     console.error("[distribution] falha ao enfileirar pendência", e);
   }
@@ -282,6 +294,34 @@ async function emitDistributionEvent(
   }
 }
 
+/** Janela para juntar retries do mesmo lead (automação + drenagem SYSTEM). */
+const LOG_COALESCE_WINDOW_MS = 45_000;
+
+const TRIGGER_MERGE_ORDER: DistributionTriggerSource[] = [
+  "AUTOMATION",
+  "MANUAL",
+  "SYSTEM",
+  "SIMULATION",
+];
+
+function mergeTriggerSources(
+  existing: string,
+  next: DistributionTriggerSource,
+): string {
+  const parts = new Set(
+    existing
+      .split("+")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  parts.add(next);
+  const ordered = TRIGGER_MERGE_ORDER.filter((t) => parts.has(t));
+  for (const t of parts) {
+    if (!ordered.includes(t as DistributionTriggerSource)) ordered.push(t);
+  }
+  return ordered.join("+");
+}
+
 async function writeLog(
   input: ExecuteDistributionInput,
   success: boolean,
@@ -290,9 +330,53 @@ async function writeLog(
   evaluated: EvaluatedResponsibleSummary[],
 ): Promise<void> {
   try {
+    const orgId = getOrgIdOrThrow();
+    const since = new Date(Date.now() - LOG_COALESCE_WINDOW_MS);
+
+    // Mesmo atendimento/contato/deal + mesmo resultado em janela curta →
+    // atualiza o log existente (junta AUTOMATION+SYSTEM) em vez de duplicar.
+    const identity: Prisma.DistributionLogWhereInput | null =
+      input.conversationId
+        ? { conversationId: input.conversationId }
+        : input.contactId
+          ? { contactId: input.contactId }
+          : input.dealId
+            ? { dealId: input.dealId }
+            : null;
+
+    if (identity) {
+      const recent = await prisma.distributionLog.findFirst({
+        where: {
+          ...identity,
+          success,
+          reason,
+          createdAt: { gte: since },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, triggerSource: true },
+      });
+      if (recent) {
+        await prisma.distributionLog.update({
+          where: { id: recent.id },
+          data: {
+            triggerSource: mergeTriggerSources(
+              recent.triggerSource,
+              input.triggerSource,
+            ),
+            selectedUserId,
+            dealId: input.dealId ?? undefined,
+            contactId: input.contactId ?? undefined,
+            conversationId: input.conversationId ?? undefined,
+            evaluated: evaluated as unknown as Prisma.InputJsonValue,
+          },
+        });
+        return;
+      }
+    }
+
     await prisma.distributionLog.create({
       data: {
-        organizationId: getOrgIdOrThrow(),
+        organizationId: orgId,
         triggerSource: input.triggerSource,
         dealId: input.dealId ?? null,
         contactId: input.contactId ?? null,
@@ -330,15 +414,30 @@ export async function executeDistribution(
   // Idempotente: se a conversa já tem responsável (ex.: inbound acabou de
   // distribuir e a automação dispara execute_distribution de novo), não
   // reatribui — salvo `reassign` (handoff manual para departamento).
+  // Antes de sair, cura deal/contato sem owner (pipeline "Sem responsável").
   if (input.conversationId && !input.reassign) {
     const already = await prisma.conversation.findUnique({
       where: { id: input.conversationId },
-      select: { assignedToId: true },
+      select: { assignedToId: true, contactId: true },
     });
     if (already?.assignedToId) {
+      const contactId = input.contactId ?? already.contactId ?? null;
+      if (contactId) {
+        await syncOwnershipForContact(contactId);
+      } else if (input.dealId) {
+        const deal = await prisma.deal.findUnique({
+          where: { id: input.dealId },
+          select: { ownerId: true, contactId: true },
+        });
+        if (deal && !deal.ownerId) {
+          await assignDealOwner(input.dealId, already.assignedToId);
+        } else if (deal?.contactId) {
+          await syncOwnershipForContact(deal.contactId);
+        }
+      }
       await resolvePendingFor(
         input.dealId,
-        input.contactId,
+        contactId,
         already.assignedToId,
       );
       return {
@@ -348,6 +447,48 @@ export async function executeDistribution(
         selectedUserName: null,
         evaluated: [],
       };
+    }
+  }
+
+  // Conversa sem assignee mas deal/contato já tem dono → espelha pro chat
+  // antes de tentar redistribuir (evita "já tem owner no pipeline" + inbox vazio).
+  if (!input.reassign) {
+    const contactId =
+      input.contactId ??
+      (input.conversationId
+        ? (
+            await prisma.conversation.findUnique({
+              where: { id: input.conversationId },
+              select: { contactId: true },
+            })
+          )?.contactId
+        : null) ??
+      (input.dealId
+        ? (
+            await prisma.deal.findUnique({
+              where: { id: input.dealId },
+              select: { contactId: true },
+            })
+          )?.contactId
+        : null);
+    if (contactId) {
+      const healed = await syncOwnershipForContact(contactId);
+      if (healed && input.conversationId) {
+        const again = await prisma.conversation.findUnique({
+          where: { id: input.conversationId },
+          select: { assignedToId: true },
+        });
+        if (again?.assignedToId) {
+          await resolvePendingFor(input.dealId, contactId, again.assignedToId);
+          return {
+            success: true,
+            reason: "ASSIGNED",
+            selectedUserId: again.assignedToId,
+            selectedUserName: null,
+            evaluated: [],
+          };
+        }
+      }
     }
   }
 

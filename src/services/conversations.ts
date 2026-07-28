@@ -964,11 +964,26 @@ export async function updateConversationStatusInDb(
         }
       : {};
 
-  return prisma.conversation.update({
+  const updated = await prisma.conversation.update({
     where: { id },
     data: { status, ...closedAtPatch, ...tabulationPatch, ...clearPatch },
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
+
+  // Encerrou atendimento → liberou capacidade na fila do responsável.
+  // Agenda drenagem da Distribuição (best-effort, sem ciclo de import).
+  if (status === "RESOLVED") {
+    void import("@/services/distribution/pending")
+      .then((m) =>
+        m.scheduleProcessPendingDistributionQueue({
+          trigger: "capacity_released",
+          delayMs: 400,
+        }),
+      )
+      .catch(() => {});
+  }
+
+  return updated;
 }
 
 /**

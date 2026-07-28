@@ -15,6 +15,7 @@ import { can, loadAuthzContext } from "@/lib/authz";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { scheduleProcessPendingDistributionQueue } from "@/services/distribution";
 import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
@@ -210,6 +211,21 @@ export async function PATCH(request: Request, context: RouteContext) {
         preLunchStopMinutes: number;
         lastExecutionAt: Date | null;
       };
+
+      const prev =
+        Object.keys(respData).length > 0 || departmentIds || schedulePatch
+          ? await prisma.distributionResponsible.findUnique({
+              where: {
+                organizationId_userId: { organizationId: orgId, userId },
+              },
+              select: {
+                participates: true,
+                paused: true,
+                queueLimit: true,
+              },
+            })
+          : null;
+
       if (Object.keys(respData).length > 0) {
         responsible = await prisma.distributionResponsible.upsert({
           where: {
@@ -227,6 +243,26 @@ export async function PATCH(request: Request, context: RouteContext) {
             preLunchStopMinutes: true,
             lastExecutionAt: true,
           },
+        });
+      }
+
+      // Voltou a ficar elegível (despausa / passa a participar / sobe limite /
+      // ganha departamento / muda expediente) → drena a fila de espera.
+      const becameEligible =
+        (typeof respData.paused === "boolean" &&
+          respData.paused === false &&
+          prev?.paused !== false) ||
+        (typeof respData.participates === "boolean" &&
+          respData.participates === true &&
+          prev?.participates !== true) ||
+        (typeof respData.queueLimit === "number" &&
+          respData.queueLimit > (prev?.queueLimit ?? 0)) ||
+        Boolean(departmentIds) ||
+        Boolean(schedulePatch);
+      if (becameEligible) {
+        scheduleProcessPendingDistributionQueue({
+          trigger: "agent_eligible",
+          delayMs: 300,
         });
       }
 

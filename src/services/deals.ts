@@ -602,6 +602,73 @@ export async function assignDealOwner(
   });
 }
 
+/**
+ * Cura inconsistência Deal ↔ Contato ↔ Conversa: preenche só lados
+ * vazios a partir de um responsável já existente (não sobrescreve donos
+ * diferentes). Preferência: conversa → contato → deal aberto.
+ *
+ * Cobre o gap em que a distribuição/inbound atribui a conversa e o
+ * early-return da automação deixa o deal com `ownerId = null` → pipeline
+ * mostra "Sem responsável" mesmo com chat atribuído.
+ */
+export async function syncOwnershipForContact(
+  contactId: string,
+): Promise<string | null> {
+  const [contact, openDeals, openConvs] = await Promise.all([
+    prisma.contact.findUnique({
+      where: { id: contactId },
+      select: { assignedToId: true },
+    }),
+    prisma.deal.findMany({
+      where: { contactId, status: "OPEN" },
+      select: { id: true, ownerId: true },
+    }),
+    prisma.conversation.findMany({
+      where: { contactId, status: { not: "RESOLVED" } },
+      select: { id: true, assignedToId: true },
+      orderBy: { updatedAt: "desc" },
+    }),
+  ]);
+
+  const fromConv =
+    openConvs.find((c) => c.assignedToId)?.assignedToId ?? null;
+  const fromContact = contact?.assignedToId ?? null;
+  const fromDeal = openDeals.find((d) => d.ownerId)?.ownerId ?? null;
+  const ownerId = fromConv ?? fromContact ?? fromDeal;
+  if (!ownerId) return null;
+
+  const nullDealIds = openDeals.filter((d) => !d.ownerId).map((d) => d.id);
+  const nullConvIds = openConvs.filter((c) => !c.assignedToId).map((c) => c.id);
+  const contactNeeds = !fromContact;
+
+  if (!contactNeeds && nullDealIds.length === 0 && nullConvIds.length === 0) {
+    return ownerId;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    if (contactNeeds) {
+      await tx.contact.update({
+        where: { id: contactId },
+        data: { assignedToId: ownerId },
+      });
+    }
+    if (nullDealIds.length > 0) {
+      await tx.deal.updateMany({
+        where: { id: { in: nullDealIds } },
+        data: { ownerId },
+      });
+    }
+    if (nullConvIds.length > 0) {
+      await tx.conversation.updateMany({
+        where: { id: { in: nullConvIds } },
+        data: { assignedToId: ownerId },
+      });
+    }
+  });
+
+  return ownerId;
+}
+
 export async function deleteDeal(id: string) {
   await prisma.deal.delete({ where: { id } });
 }
@@ -1203,14 +1270,22 @@ export async function resolveBoardDealIds(
  */
 export async function getBoardData(
   pipelineId: string,
-  visibilityOwnerId?: string | null,
+  /**
+   * Filtro de visibilidade (preferido). Aceita também o legado
+   * `visibilityOwnerId: string` — convertido para `{ ownerId }`.
+   */
+  visibilityWhere?: Prisma.DealWhereInput | string | null,
   statusFilter?: DealStatus | "ALL",
   advancedFilters?: AdvancedDealFilters,
   limitOptions?: BoardLimitOptions,
 ) {
   const orgId = getOrgIdOrThrow();
+  const normalizedWhere =
+    typeof visibilityWhere === "string"
+      ? { ownerId: visibilityWhere }
+      : visibilityWhere ?? null;
   const variant = JSON.stringify({
-    v: visibilityOwnerId ?? null,
+    v: normalizedWhere ?? null,
     s: statusFilter ?? null,
     f: advancedFilters ?? null,
     l: limitOptions ?? null,
@@ -1221,7 +1296,7 @@ export async function getBoardData(
     () =>
       computeBoardData(
         pipelineId,
-        visibilityOwnerId,
+        normalizedWhere,
         statusFilter,
         advancedFilters,
         limitOptions,
@@ -1231,7 +1306,7 @@ export async function getBoardData(
 
 async function computeBoardData(
   pipelineId: string,
-  visibilityOwnerId?: string | null,
+  visibilityWhere?: Prisma.DealWhereInput | null,
   statusFilter?: DealStatus | "ALL",
   advancedFilters?: AdvancedDealFilters,
   limitOptions?: BoardLimitOptions,
@@ -1245,8 +1320,8 @@ async function computeBoardData(
   } else if (!statusFilter) {
     conditions.push({ status: "OPEN" });
   }
-  if (visibilityOwnerId) {
-    conditions.push({ ownerId: visibilityOwnerId });
+  if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
+    conditions.push(visibilityWhere);
   }
 
   if (advancedFilters && Object.keys(advancedFilters).length > 0) {

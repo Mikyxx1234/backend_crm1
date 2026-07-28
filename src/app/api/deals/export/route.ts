@@ -2,27 +2,24 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
-import { csvDate, toCsv } from "@/lib/csv-stringify";
+import { csvDate, escapeCsvCell, DEFAULT_CSV_DELIMITER } from "@/lib/csv-stringify";
 import { resolveContactDisplayName } from "@/lib/display-name";
 import { prisma } from "@/lib/prisma";
 import { getVisibilityFilter } from "@/lib/visibility";
 
 const MAX_ROWS = 100_000;
+const BATCH_SIZE = 400;
 
 /**
  * GET /api/deals/export?pipelineId=<id>
  *
- * Exporta negócios em CSV. Sem `pipelineId` (ou `pipelineId=all`) exporta
- * todos os pipelines da org. Cada linha = um negócio, com colunas de
- * negócio + contato + pipeline/estágio + tags + campos personalizados
- * (`cf_*` do negócio e `contact_cf_*` do contato).
- *
- * Os nomes de coluna seguem o formato aceito pelo importador
- * (`/api/deals/import`) onde aplicável, permitindo round-trip.
- *
- * Apenas ADMIN/MANAGER (mesma regra do import). Respeita a visibilidade
- * por usuário (dealWhere) — embora gestores normalmente vejam tudo.
+ * Exporta negócios em CSV (streaming em lotes) para não estourar memória/
+ * timeout em pipelines grandes (ex.: ACADÊMICO). Sem `pipelineId` (ou
+ * `pipelineId=all`) exporta todos os pipelines da org.
  */
+
+export const maxDuration = 300;
+
 export async function GET(request: Request) {
   try {
     const authResult = await authenticateApiRequest(request);
@@ -48,7 +45,6 @@ export async function GET(request: Request) {
         authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" },
       );
 
-      // Definições de campos personalizados → colunas estáveis.
       const fieldDefs = await prisma.customField.findMany({
         where: { entity: { in: ["deal", "contact"] } },
         select: { id: true, name: true, entity: true },
@@ -57,41 +53,10 @@ export async function GET(request: Request) {
       const dealFields = fieldDefs.filter((f) => f.entity === "deal");
       const contactFields = fieldDefs.filter((f) => f.entity === "contact");
 
-      // Fallback de email: alguns relatórios (matriculados) gravam o email
-      // apenas no campo personalizado do negócio. Se o contato não tiver email
-      // base, preenchemos a coluna "E-mail do contato" com o cf `email`
-      // (pessoal). `email_academico` é um campo DIFERENTE e sai na sua própria
-      // coluna de cf — nunca é usado como fallback do email pessoal.
       const emailCfIds = ["email"]
         .map((n) => dealFields.find((f) => f.name === n)?.id)
         .filter((id): id is string => Boolean(id));
 
-      const deals = await prisma.deal.findMany({
-        where: {
-          ...visibility.dealWhere,
-          ...(pipelineId ? { stage: { pipelineId } } : {}),
-        },
-        take: MAX_ROWS,
-        orderBy: [{ createdAt: "asc" }],
-        include: {
-          stage: { include: { pipeline: { select: { id: true, name: true } } } },
-          owner: { select: { id: true, name: true, email: true } },
-          tags: { include: { tag: { select: { name: true } } } },
-          customFields: { select: { customFieldId: true, value: true } },
-          contact: {
-            include: {
-              company: { select: { name: true } },
-              customFields: { select: { customFieldId: true, value: true } },
-            },
-          },
-        },
-      });
-
-      // Headers em PT-BR natural. Custom fields exportados com o NOME do
-      // campo (sem prefixo cf_) — o auto-mapping do import casa por nome.
-      // Para evitar colisão com campos do sistema (ex.: campo customizado
-      // chamado "Origem" colidindo com `source`), os custom fields ficam
-      // ao final da lista de colunas.
       const baseHeaders = [
         "Número do negócio",
         "Título",
@@ -118,74 +83,153 @@ export async function GET(request: Request) {
       const dealCfHeaders = dealFields.map((f) => f.name);
       const contactCfHeaders = contactFields.map((f) => `Contato — ${f.name}`);
       const headers = [...baseHeaders, ...dealCfHeaders, ...contactCfHeaders];
+      const delimiter = DEFAULT_CSV_DELIMITER;
 
-      const rows = deals.map((deal) => {
-        const dealCfMap = new Map(
-          deal.customFields.map((v) => [v.customFieldId, v.value]),
-        );
-        const contactCfMap = new Map(
-          (deal.contact?.customFields ?? []).map((v) => [v.customFieldId, v.value]),
-        );
+      const where = {
+        ...visibility.dealWhere,
+        ...(pipelineId ? { stage: { pipelineId } } : {}),
+      };
 
-        const row: Record<string, unknown> = {
-          "Número do negócio": deal.number,
-          "Título": deal.title,
-          "Valor": deal.value != null ? deal.value.toString() : "",
-          "Status": deal.status,
-          "Pipeline": deal.stage.pipeline.name,
-          "Etapa": deal.stage.name,
-          "Responsável": deal.owner?.name ?? "",
-          "E-mail do responsável": deal.owner?.email ?? "",
-          // Se o nome do contato for placeholder (telefone/"Lead ..."), cai
-          // no título do negócio quando este for um nome real — garante que a
-          // coluna "Nome do contato" nunca traga telefone se houver nome.
-          "Nome do contato": resolveContactDisplayName(
-            deal.contact?.name,
-            deal.title,
-          ),
-          "E-mail do contato":
-            deal.contact?.email ||
-            emailCfIds
-              .map((id) => dealCfMap.get(id))
-              .find((v) => typeof v === "string" && v.includes("@")) ||
-            "",
-          "Telefone do contato": (deal.contact?.phone ?? "").replace(/^\+/, ""),
-          "Empresa do contato": deal.contact?.company?.name ?? "",
-          "Ciclo de vida do contato": deal.contact?.lifecycleStage ?? "",
-          "Origem do contato": deal.contact?.source ?? "",
-          "Tags": deal.tags.map((t) => t.tag.name).join("; "),
-          "Previsão de fechamento": csvDate(deal.expectedClose),
-          "Motivo da perda": deal.lostReason ?? "",
-          "Posição": deal.position,
-          "Criado em": csvDate(deal.createdAt),
-          "Atualizado em": csvDate(deal.updatedAt),
-          "Fechado em": csvDate(deal.closedAt),
-        };
-        for (const f of dealFields) {
-          row[f.name] = dealCfMap.get(f.id) ?? "";
-        }
-        for (const f of contactFields) {
-          row[`Contato — ${f.name}`] = contactCfMap.get(f.id) ?? "";
-        }
-        return row;
-      });
-
-      const csv = toCsv(headers, rows);
       const stamp = new Date().toISOString().slice(0, 10);
       const filename = `negocios-${stamp}.csv`;
+      const encoder = new TextEncoder();
 
-      // BOM UTF-8 para o Excel reconhecer acentuação.
-      return new NextResponse("\ufeff" + csv, {
+      const stream = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          const write = (s: string) => controller.enqueue(encoder.encode(s));
+          try {
+            write("\ufeff");
+            write(
+              headers.map((h) => escapeCsvCell(h, delimiter)).join(delimiter) +
+                "\r\n",
+            );
+
+            let cursor: string | undefined;
+            let exported = 0;
+
+            while (exported < MAX_ROWS) {
+              const take = Math.min(BATCH_SIZE, MAX_ROWS - exported);
+              const batch = await prisma.deal.findMany({
+                where,
+                take,
+                orderBy: { id: "asc" },
+                ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
+                include: {
+                  stage: {
+                    include: { pipeline: { select: { id: true, name: true } } },
+                  },
+                  owner: { select: { id: true, name: true, email: true } },
+                  tags: { include: { tag: { select: { name: true } } } },
+                  customFields: { select: { customFieldId: true, value: true } },
+                  contact: {
+                    include: {
+                      company: { select: { name: true } },
+                      customFields: {
+                        select: { customFieldId: true, value: true },
+                      },
+                    },
+                  },
+                },
+              });
+
+              if (batch.length === 0) break;
+
+              for (const deal of batch) {
+                try {
+                  const dealCfMap = new Map(
+                    deal.customFields.map((v) => [v.customFieldId, v.value]),
+                  );
+                  const contactCfMap = new Map(
+                    (deal.contact?.customFields ?? []).map((v) => [
+                      v.customFieldId,
+                      v.value,
+                    ]),
+                  );
+
+                  const values: unknown[] = [
+                    deal.number,
+                    deal.title,
+                    deal.value != null ? String(deal.value) : "",
+                    deal.status,
+                    deal.stage?.pipeline?.name ?? "",
+                    deal.stage?.name ?? "",
+                    deal.owner?.name ?? "",
+                    deal.owner?.email ?? "",
+                    resolveContactDisplayName(deal.contact?.name, deal.title),
+                    deal.contact?.email ||
+                      emailCfIds
+                        .map((id) => dealCfMap.get(id))
+                        .find((v) => typeof v === "string" && v.includes("@")) ||
+                      "",
+                    (deal.contact?.phone ?? "").replace(/^\+/, ""),
+                    deal.contact?.company?.name ?? "",
+                    deal.contact?.lifecycleStage ?? "",
+                    deal.contact?.source ?? "",
+                    deal.tags
+                      .map((t) => t.tag?.name)
+                      .filter((n): n is string => !!n)
+                      .join("; "),
+                    csvDate(deal.expectedClose),
+                    deal.lostReason ?? "",
+                    deal.position,
+                    csvDate(deal.createdAt),
+                    csvDate(deal.updatedAt),
+                    csvDate(deal.closedAt),
+                  ];
+                  for (const f of dealFields) {
+                    values.push(dealCfMap.get(f.id) ?? "");
+                  }
+                  for (const f of contactFields) {
+                    values.push(contactCfMap.get(f.id) ?? "");
+                  }
+
+                  write(
+                    values
+                      .map((v) => escapeCsvCell(v, delimiter))
+                      .join(delimiter) + "\r\n",
+                  );
+                  exported += 1;
+                } catch (rowErr) {
+                  console.error(
+                    "[deals/export] linha ignorada",
+                    deal.id,
+                    rowErr,
+                  );
+                }
+              }
+
+              cursor = batch[batch.length - 1]!.id;
+              if (batch.length < take) break;
+            }
+          } catch (e) {
+            console.error("[deals/export] stream error", e);
+            try {
+              controller.error(e);
+              return;
+            } catch {
+              /* already closed */
+            }
+          }
+          controller.close();
+        },
+      });
+
+      return new NextResponse(stream, {
         status: 200,
         headers: {
           "Content-Type": "text/csv; charset=utf-8",
           "Content-Disposition": `attachment; filename="${filename}"`,
           "Cache-Control": "no-store",
+          "X-Content-Type-Options": "nosniff",
         },
       });
     });
   } catch (e) {
-    console.error(e);
-    return NextResponse.json({ message: "Erro ao exportar negócios." }, { status: 500 });
+    console.error("[deals/export]", e);
+    const detail = e instanceof Error ? e.message : "Erro desconhecido";
+    return NextResponse.json(
+      { message: `Erro ao exportar negócios: ${detail}` },
+      { status: 500 },
+    );
   }
 }

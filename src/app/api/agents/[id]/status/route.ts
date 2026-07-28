@@ -6,7 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
-import { retryPendingDistributions } from "@/services/distribution";
+import { processPendingDistributionQueue } from "@/services/distribution";
 import { drainSupportQueue } from "@/services/support/distribution";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -96,7 +96,9 @@ export async function PUT(req: Request, ctx: Ctx) {
           );
           // #endregion
           try {
-            const drain = await retryPendingDistributions();
+            const drain = await processPendingDistributionQueue({
+              trigger: "agent_online",
+            });
             // #region agent log
             console.warn(
               "[DBG-e46688 status-put] retry result",
@@ -116,7 +118,7 @@ export async function PUT(req: Request, ctx: Ctx) {
             }
           } catch (e) {
             console.warn(
-              "[/api/agents/[id]/status] retryPendingDistributions falhou:",
+              "[/api/agents/[id]/status] processPendingDistributionQueue falhou:",
               e instanceof Error ? e.message : e,
             );
             // #region agent log

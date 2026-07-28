@@ -42,9 +42,12 @@ export {
 export {
   getPendingDistributions,
   retryPendingDistributions,
+  processPendingDistributionQueue,
+  scheduleProcessPendingDistributionQueue,
   maybeDistributeNewInboundTicket,
   type PendingDistributionView,
   type RetryResult,
+  type PendingQueueTrigger,
 } from "./pending";
 
 export {

@@ -8,6 +8,7 @@ import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { assignConversationAssignedTo } from "@/services/conversations";
+import { scheduleProcessPendingDistributionQueue } from "./pending";
 import { getDistributionResponsibles } from "./responsibles";
 
 export type RedistributeQueueScope = "all" | "entrada" | "aguardando";
@@ -81,8 +82,8 @@ export async function redistributeResponsibleQueue(
     return { moved: 0, skipped: 0, total: 0, recipients: [] };
   }
 
-  // Sem responsável → entra na Fila de espera; quando alguém fica ONLINE,
-  // retryPendingDistributions redistribui automaticamente.
+  // Sem responsável → entra na Fila de espera; processPending drena quando
+  // houver elegível (online / capacidade / cron / botão).
   if (input.mode === "to_pending") {
     let moved = 0;
     let skipped = 0;
@@ -94,6 +95,12 @@ export async function redistributeResponsibleQueue(
       });
       if (result.ok) moved += 1;
       else skipped += 1;
+    }
+    if (moved > 0) {
+      scheduleProcessPendingDistributionQueue({
+        trigger: "new_item",
+        delayMs: 500,
+      });
     }
     return {
       moved,
