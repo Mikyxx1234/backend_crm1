@@ -243,8 +243,13 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
       if (sid && lookup?.[sid]) return lookup[sid];
       return sid ? `Estágio: ${sid.slice(0, 12)}…` : "Definir estágio";
     }
-    case "assign_owner":
-      return c.userId ? `Usuário: ${String(c.userId)}` : "Definir usuário";
+    case "assign_owner": {
+      const target = c.target ? String(c.target) : "deal";
+      const targetLabel = target === "both" ? "negócio e contato" : target === "contact" ? "contato" : "negócio";
+      const userId = c.userId ? String(c.userId).trim() : "";
+      if (!userId) return `Limpar responsável (${targetLabel})`;
+      return `Usuário: ${userId} (${targetLabel})`;
+    }
     case "transfer_department":
       return c.departmentName
         ? String(c.departmentName)
@@ -417,7 +422,7 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
     case "move_stage":
       return { stageId: "" };
     case "assign_owner":
-      return { userId: "" };
+      return { userId: "", target: "deal" };
     case "transfer_department":
       return { departmentId: "", departmentName: "" };
     case "add_tag":

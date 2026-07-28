@@ -20,7 +20,11 @@ import {
   formatMetaSendError,
   type MetaWhatsAppClient,
 } from "@/lib/meta-whatsapp/client";
-import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
+import {
+  enrichTemplateComponentsForFlowSend,
+  resolveTemplateHeaderMediaFormat,
+} from "@/lib/meta-whatsapp/enrich-template-flow";
+import { toAbsolutePublicMediaUrl } from "@/lib/meta-whatsapp/to-absolute-public-media-url";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, runWithActor } from "@/lib/request-context";
@@ -201,6 +205,120 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
     return Number.isFinite(n) ? n : undefined;
   }
   return undefined;
+}
+
+/**
+ * Injeta o componente `header` de mídia (IMAGE/VIDEO/DOCUMENT) exigido pela
+ * Meta ao enviar templates cujo HEADER não é texto (erro `132012: header
+ * component parameter should not be empty` quando o parâmetro falta).
+ *
+ * Fluxo (opção "link" + fallback id para uploads internos):
+ *  1. Descobre o `headerFormat` na Graph (fonte da verdade); `headerMediaType`
+ *     do passo só entra se a Graph não responder.
+ *  2. Se não for mídia (TEXT/NONE/null), não faz nada — comportamento atual.
+ *  3. Se for mídia, exige `headerMediaUrl` (falha cedo, antes de chamar a Meta).
+ *  4. URL HTTPS pública → `{ link }`. Upload interno (`/api/storage/...` ou
+ *     `/uploads/...`) → sobe o arquivo na Meta e usa `{ id }` (storage exige
+ *     sessão; a Meta não consegue baixar o link).
+ *  5. Monta `{ type: "header", parameters: [...] }`, substituindo qualquer
+ *     header já presente em `components` (nunca duplica).
+ */
+async function injectTemplateHeaderMediaComponent(
+  client: MetaWhatsAppClient,
+  args: {
+    templateName: string;
+    languageCode: string;
+    templateGraphId: string | null;
+    components: unknown[] | undefined;
+    headerMediaUrl: string | null;
+    headerMediaType: "image" | "video" | "document" | null;
+  },
+): Promise<unknown[] | undefined> {
+  const fromGraph = await resolveTemplateHeaderMediaFormat(client, {
+    templateName: args.templateName,
+    languageCode: args.languageCode,
+    templateGraphId: args.templateGraphId,
+  });
+  const headerFormat = fromGraph ?? args.headerMediaType?.toUpperCase() ?? null;
+
+  if (headerFormat !== "IMAGE" && headerFormat !== "VIDEO" && headerFormat !== "DOCUMENT") {
+    return args.components;
+  }
+
+  if (!args.headerMediaUrl) {
+    throw new Error(
+      `send_whatsapp_template: template "${args.templateName}" exige header ${headerFormat}; configure headerMediaUrl no passo.`,
+    );
+  }
+
+  const mediaType = headerFormat.toLowerCase() as "image" | "video" | "document";
+  const mediaParam = await resolveTemplateHeaderMediaParam(client, args.headerMediaUrl, mediaType);
+  const headerComponent: Record<string, unknown> = {
+    type: "header",
+    parameters: [{ type: mediaType, [mediaType]: mediaParam }],
+  };
+
+  const withoutExistingHeader = (args.components ?? []).filter((c) => {
+    const o = asRecord(c);
+    return String(o?.type ?? "").toLowerCase() !== "header";
+  });
+
+  return [headerComponent, ...withoutExistingHeader];
+}
+
+/** Resolve `{ link }` (URL pública) ou `{ id }` (upload interno → Meta media). */
+async function resolveTemplateHeaderMediaParam(
+  client: MetaWhatsAppClient,
+  mediaUrl: string,
+  mediaType: "image" | "video" | "document",
+): Promise<{ link: string } | { id: string }> {
+  const trimmed = mediaUrl.trim();
+  const { parseStoragePath, readStoredFile, mimeFromFilename } = await import(
+    "@/lib/storage/local"
+  );
+  const parsedStorage = parseStoragePath(trimmed);
+  const isLegacyLocal = !parsedStorage && trimmed.startsWith("/uploads/");
+
+  if (parsedStorage || isLegacyLocal) {
+    let buffer: Buffer;
+    let resolvedFileName: string;
+    let mimeType: string;
+
+    if (parsedStorage) {
+      const stored = await readStoredFile(
+        parsedStorage.orgId,
+        parsedStorage.bucket,
+        parsedStorage.fileName,
+      );
+      if (!stored) {
+        throw new Error(
+          `send_whatsapp_template: arquivo do header não encontrado em storage (${trimmed})`,
+        );
+      }
+      buffer = stored.buffer;
+      mimeType = stored.mimeType;
+      resolvedFileName = parsedStorage.fileName;
+    } else {
+      const { readFile } = await import("fs/promises");
+      const { join, basename } = await import("path");
+      const filePath = join(process.cwd(), "public", trimmed);
+      buffer = await readFile(filePath);
+      resolvedFileName = basename(trimmed);
+      mimeType = mimeFromFilename(resolvedFileName);
+    }
+
+    const metaMediaId = await client.uploadMedia(buffer, mimeType, resolvedFileName);
+    return { id: metaMediaId };
+  }
+
+  // URL pública HTTPS — opção 1 pura. Relativa sem storage: expandir base.
+  if (trimmed.startsWith("https://") || trimmed.startsWith("/")) {
+    return { link: toAbsolutePublicMediaUrl(trimmed) };
+  }
+
+  throw new Error(
+    `send_whatsapp_template: headerMediaUrl inválida para ${mediaType} (use HTTPS público ou upload interno): ${trimmed}`,
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -1011,25 +1129,48 @@ async function executeStep(
     }
 
     case "assign_owner": {
-      const userId = readString(cfg, "userId");
-      if (!userId) throw new Error("assign_owner: userId obrigatório");
+      // userId vazio/whitespace = desatribuir (ownerId null), não erro.
+      const rawUserId = readString(cfg, "userId");
+      const ownerId = rawUserId?.trim() ? rawUserId.trim() : null;
       const target = readString(cfg, "target") ?? (rt.dealId ? "deal" : "contact");
+      const targetDealId = rt.dealId ?? readString(cfg, "dealId");
+      const targetContactId = rt.contactId ?? readString(cfg, "contactId");
+
       if (target === "deal") {
-        const targetDealId = rt.dealId ?? readString(cfg, "dealId");
         if (!targetDealId) throw new Error("assign_owner: dealId ausente");
         // Responsável único: muda o owner do deal e propaga para o
         // contato + conversas do contato (helper no service).
-        await assignDealOwner(targetDealId, userId);
-      } else {
-        const targetContactId = rt.contactId ?? readString(cfg, "contactId");
+        await assignDealOwner(targetDealId, ownerId);
+      } else if (target === "contact") {
         if (!targetContactId) throw new Error("assign_owner: contactId ausente");
         // Mesma regra de herança do deal: ao atribuir pelo contato,
         // propagamos pras conversas abertas — isso é o que faz o agente
         // de IA assumir automaticamente quando o `userId` aponta pra um
         // User type=AI (`maybeReplyAsAIAgent` lê `conversation.assignedToId`).
         await prisma.$transaction((tx) =>
-          propagateOwnerToContactAndChat(tx, targetContactId, userId),
+          propagateOwnerToContactAndChat(tx, targetContactId, ownerId),
         );
+      } else if (target === "both") {
+        if (!targetDealId && !targetContactId) {
+          throw new Error("assign_owner: nem dealId nem contactId disponíveis");
+        }
+        if (targetDealId) {
+          // assignDealOwner já cobre deal + contato do deal + chats. Se o
+          // rt.contactId vier de outra origem (ex.: divergente do contato
+          // do deal), propagamos também — idempotente se for o mesmo contato.
+          await assignDealOwner(targetDealId, ownerId);
+          if (rt.contactId) {
+            await prisma.$transaction((tx) =>
+              propagateOwnerToContactAndChat(tx, rt.contactId, ownerId),
+            );
+          }
+        } else if (targetContactId) {
+          await prisma.$transaction((tx) =>
+            propagateOwnerToContactAndChat(tx, targetContactId, ownerId),
+          );
+        }
+      } else {
+        throw new Error(`assign_owner: target inválido "${target}"`);
       }
       return {};
     }
@@ -1692,11 +1833,26 @@ async function executeStep(
         flowActionData,
         templateGraphId,
       });
+
+      const headerMediaUrlCfg = readString(cfg, "headerMediaUrl")?.trim() || null;
+      const headerMediaTypeCfg = readString(cfg, "headerMediaType")?.trim().toLowerCase();
+      const finalTplComponents = await injectTemplateHeaderMediaComponent(tplMetaClient, {
+        templateName,
+        languageCode: langCode,
+        templateGraphId,
+        components: enrichTpl.components,
+        headerMediaUrl: headerMediaUrlCfg,
+        headerMediaType:
+          headerMediaTypeCfg === "image" || headerMediaTypeCfg === "video" || headerMediaTypeCfg === "document"
+            ? headerMediaTypeCfg
+            : null,
+      });
+
       const tplResult = await tplMetaClient.sendTemplate(
         to,
         templateName,
         langCode,
-        enrichTpl.components,
+        finalTplComponents,
         recipient,
       );
       const tplExternalId = tplResult?.messages?.[0]?.id ?? null;

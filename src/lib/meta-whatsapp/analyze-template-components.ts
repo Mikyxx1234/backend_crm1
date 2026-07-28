@@ -20,6 +20,8 @@ export type TemplateComponentsAnalysis = {
   hasVariables: boolean;
   flowAction: string | null;
   flowId: string | null;
+  /** `format` do componente HEADER (Graph). `null` quando o template não tem header. */
+  headerFormat: "NONE" | "TEXT" | "IMAGE" | "VIDEO" | "DOCUMENT" | null;
 };
 
 function asRecord(v: unknown): Record<string, unknown> | null {
@@ -45,6 +47,7 @@ export function analyzeTemplateComponents(
   let hasVariables = false;
   let flowAction: string | null = null;
   let flowId: string | null = null;
+  let headerFormat: TemplateComponentsAnalysis["headerFormat"] = null;
 
   if (options?.parameterFormat?.trim().toUpperCase() === "NAMED") {
     hasVariables = true;
@@ -59,6 +62,7 @@ export function analyzeTemplateComponents(
       hasVariables,
       flowAction: null,
       flowId: null,
+      headerFormat: null,
     };
   }
 
@@ -73,6 +77,17 @@ export function analyzeTemplateComponents(
       if (textHasVariablePlaceholders(text)) hasVariables = true;
       const pf = String(comp.parameter_format ?? comp.parameterFormat ?? "").toUpperCase();
       if (pf === "NAMED") hasVariables = true;
+
+      if (type === "HEADER") {
+        const format = String(comp.format ?? "").toUpperCase();
+        if (format === "TEXT" || format === "IMAGE" || format === "VIDEO" || format === "DOCUMENT") {
+          headerFormat = format;
+        } else if (text) {
+          headerFormat = "TEXT";
+        } else {
+          headerFormat = "NONE";
+        }
+      }
     }
 
     if (type === "BUTTONS" && Array.isArray(comp.buttons)) {
@@ -110,5 +125,6 @@ export function analyzeTemplateComponents(
     hasVariables,
     flowAction,
     flowId,
+    headerFormat,
   };
 }
