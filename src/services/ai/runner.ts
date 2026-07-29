@@ -240,6 +240,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       where: { id: run.id },
       data: {
         status,
+        handoffReason: hadTransfer ? "tool_transfer" : null,
         responsePreview: result.text.slice(0, 500),
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,

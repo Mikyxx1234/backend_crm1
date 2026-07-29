@@ -421,6 +421,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
     const parsed = parseAgentConfidence(result.text.trim());
     let text = parsed.text;
+    // Persiste a confiança auto-declarada no run (métrica de qualidade).
+    if (parsed.confidence !== null) {
+      await prisma.aIAgentRun
+        .update({
+          where: { id: result.runId },
+          data: { confidence: parsed.confidence },
+        })
+        .catch(() => null);
+    }
     if (!text && !shouldHandoffOnLowConfidence(parsed.confidence)) {
       logAi("empty_reply", {
         conversationId: args.conversationId,
@@ -467,6 +476,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         specificUserId: cfg.inactivityHandoffUserId ?? null,
         reason: `Baixa confiança da IA (${parsed.confidence?.toFixed(2)})`,
       });
+      await prisma.aIAgentRun
+        .update({
+          where: { id: result.runId },
+          data: { status: "HANDOFF", handoffReason: "low_confidence" },
+        })
+        .catch(() => null);
       logAi("handoff", {
         conversationId: args.conversationId,
         reason: "low_confidence",

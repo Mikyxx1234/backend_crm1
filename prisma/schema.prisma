@@ -4321,6 +4321,12 @@ model AIAgentRun {
   /// Custo estimado em USD baseado em pricing.ts no momento do run.
   costUsd         Float            @default(0)
   status          AIAgentRunStatus @default(RUNNING)
+  /// Confiança auto-declarada pelo LLM ([CONFIANCA:X.X]), 0–1. Null se
+  /// o modelo não emitiu o marcador. Base pra métricas de qualidade.
+  confidence      Float?
+  /// Motivo do handoff quando status=HANDOFF:
+  /// "keyword" | "low_confidence" | "tool_transfer" | "inactivity".
+  handoffReason   String?
   errorMessage    String?
   createdAt       DateTime         @default(now())
   finishedAt      DateTime?
