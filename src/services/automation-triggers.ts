@@ -333,6 +333,35 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
     }
   }
 
+  // 29/jul/26 — Rotas de API disparam deal_created/won/lost sem pipelineId
+  // no payload; o evaluateTrigger é fail-closed nesse filtro.
+  if (
+    (event === "deal_created" || event === "deal_won" || event === "deal_lost") &&
+    context.dealId &&
+    readString(data, "pipelineId") === undefined
+  ) {
+    const deal = await prisma.deal.findUnique({
+      where: { id: context.dealId },
+      select: {
+        stageId: true,
+        contactId: true,
+        stage: { select: { pipelineId: true } },
+      },
+    });
+    if (deal) {
+      return {
+        ...context,
+        contactId: context.contactId ?? deal.contactId ?? undefined,
+        data: {
+          ...data,
+          pipelineId: deal.stage.pipelineId,
+          stageId: readString(data, "stageId") ?? deal.stageId,
+          toStageId: readString(data, "toStageId") ?? deal.stageId,
+        },
+      };
+    }
+  }
+
   return context;
 }
 
