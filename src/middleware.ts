@@ -120,6 +120,9 @@ const PUBLIC_PATHS = new Set([
   "/register",
   "/health",
   "/accept-invite",
+  // Cockpit do Agente: shell estático sem dados sensíveis. Os dados vêm de
+  // /api/public/agent-cockpit autenticado por Bearer token (não por cookie).
+  "/cockpit-agente.html",
 ]);
 
 const PUBLIC_API_PATHS = new Set(["/api/signup"]);
