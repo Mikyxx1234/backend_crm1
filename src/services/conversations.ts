@@ -96,7 +96,7 @@ const listSelect = {
   department: { select: { id: true, name: true, requireTabulationOnClose: true } },
   tabulationId: true,
   assignedTo: {
-    select: { id: true, name: true, email: true, avatarUrl: true },
+    select: { id: true, name: true, email: true, avatarUrl: true, type: true },
   },
   contact: {
     select: {
@@ -744,7 +744,7 @@ const ASSIGN_CONVERSATION_SELECT = {
     select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true },
   },
   assignedTo: {
-    select: { id: true, name: true, email: true, avatarUrl: true },
+    select: { id: true, name: true, email: true, avatarUrl: true, type: true },
   },
 } as const;
 

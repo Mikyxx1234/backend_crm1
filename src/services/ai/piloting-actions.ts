@@ -90,17 +90,34 @@ export async function sendAgentMessage(args: {
   /// Comportamento humano opcional: simula digitando + read receipts.
   /// Só tem efeito em AUTONOMOUS + meta + phoneNumberId válido.
   humanBehavior?: HumanBehaviorConfig;
+  generationId?: string;
 }): Promise<SendAgentMessageResult> {
   const text = args.text.trim();
   if (!text) return { status: "skipped", reason: "empty" };
 
+  // Revalida autorização imediatamente antes de qualquer envio.
+  const { assertAiStillAuthorized } = await import("@/services/ai/inbox-handler");
+  const auth = await assertAiStillAuthorized({
+    conversationId: args.conversationId,
+    expectedAgentUserId: args.agentUserId,
+    generationId: args.generationId,
+  });
+  if (!auth.ok) {
+    return { status: "skipped", reason: auth.reason };
+  }
+
   const isMeta = args.channel === "meta" || args.channel == null;
+  const isBaileys = args.channel === "baileys";
 
   // Resolve cliente Meta DESTE canal (token/phoneId do tenant). Sem isso,
   // o agente IA da DNA enviava via numero da Eduit (singleton global env).
   const conv = await prisma.conversation.findUnique({
     where: { id: args.conversationId },
-    select: { channelRef: { select: { id: true, config: true } } },
+    select: {
+      channelId: true,
+      channelRef: { select: { id: true, config: true, provider: true } },
+      waJid: true,
+    },
   });
   const channelConfig = conv?.channelRef?.config as
     | Record<string, unknown>
@@ -118,17 +135,12 @@ export async function sendAgentMessage(args: {
     }
 
     // ── Comportamento humano: typing + read ANTES de enviar ─────
-    // Falhas aqui nunca bloqueiam o envio da resposta (os helpers do
-    // MetaWhatsAppClient já engolem `sendTypingIndicator`; pra
-    // `markAsRead` adicionamos try/catch local).
     if (args.humanBehavior) {
       const { simulateTyping, typingPerCharMs, markMessagesRead } =
         args.humanBehavior;
       const inboundWamid = await getLatestInboundWamid(args.conversationId);
 
       if (inboundWamid && simulateTyping) {
-        // sendTypingIndicator implica status=read, então atende os
-        // dois requisitos com UMA chamada.
         await metaClient.sendTypingIndicator(inboundWamid);
         const delayMs = computeTypingDelayMs(text.length, typingPerCharMs);
         await sleep(delayMs);
@@ -142,6 +154,15 @@ export async function sendAgentMessage(args: {
           );
         }
       }
+    }
+
+    const auth2 = await assertAiStillAuthorized({
+      conversationId: args.conversationId,
+      expectedAgentUserId: args.agentUserId,
+      generationId: args.generationId,
+    });
+    if (!auth2.ok) {
+      return { status: "skipped", reason: auth2.reason };
     }
 
     let externalId: string | null = null;
@@ -188,6 +209,80 @@ export async function sendAgentMessage(args: {
       timestamp: saved.createdAt,
     });
     return { status: "sent", messageId: saved.id };
+  }
+
+  // Baileys: cria Message e enfileira no worker de outbound.
+  if (args.autonomyMode === "AUTONOMOUS" && isBaileys) {
+    try {
+      const { enqueueBaileysOutbound } = await import("@/lib/queue");
+      const contact = await prisma.contact.findUnique({
+        where: { id: args.contactId },
+        select: { phone: true },
+      });
+      const channelId = conv?.channelId ?? conv?.channelRef?.id ?? null;
+      const target = conv?.waJid || contact?.phone || null;
+      if (!channelId || !target) {
+        return saveDraft(args.conversationId, args.agentUserId, text);
+      }
+
+      const authB = await assertAiStillAuthorized({
+        conversationId: args.conversationId,
+        expectedAgentUserId: args.agentUserId,
+        generationId: args.generationId,
+      });
+      if (!authB.ok) {
+        return { status: "skipped", reason: authB.reason };
+      }
+
+      const saved = await prisma.message.create({
+        data: withOrgFromCtx({
+          conversationId: args.conversationId,
+          channelId,
+          content: text,
+          direction: "out",
+          messageType: "text",
+          authorType: "bot",
+          aiAgentUserId: args.agentUserId,
+          senderName: "Agente IA",
+          sendStatus: "pending",
+        }),
+      });
+
+      await enqueueBaileysOutbound({
+        channelId,
+        to: target,
+        content: text,
+        messageType: "text",
+        conversationId: args.conversationId,
+        messageId: saved.id,
+      });
+
+      await prisma.conversation
+        .update({
+          where: { id: args.conversationId },
+          data: {
+            lastMessageDirection: "out",
+            hasAgentReply: true,
+            updatedAt: new Date(),
+          },
+        })
+        .catch(() => null);
+      sseBus.publish("new_message", {
+        organizationId: getOrgIdOrNull(),
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        direction: "out",
+        content: text,
+        timestamp: saved.createdAt,
+      });
+      return { status: "sent", messageId: saved.id };
+    } catch (err) {
+      console.warn(
+        `[ai-piloting] Baileys send falhou conv=${args.conversationId}:`,
+        err instanceof Error ? err.message : err,
+      );
+      return saveDraft(args.conversationId, args.agentUserId, text);
+    }
   }
 
   return saveDraft(args.conversationId, args.agentUserId, text);

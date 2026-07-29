@@ -802,7 +802,7 @@ const MATRICULA_TRANSFER_MESSAGE =
   "Para garantir a segurança dos seus dados, vou te transferir para um de nossos consultores, que poderá confirmar essas informações com você. Só um instante, por favor. 🙂";
 
 const MATRICULA_POLITICA =
-  "USO INTERNO — NÃO DIVULGUE. Use estes dados apenas como contexto para entender a situação do aluno e rotear/atender melhor. NUNCA repita ou confirme ao aluno dados pessoais/acadêmicos específicos (situação da matrícula, curso, polo, série, documentos, financeiro). Se o aluno pedir informação específica sobre a própria situação/dados, responda EXATAMENTE com a mensagem de transferência e acione a transferência para um consultor humano (transfer_to_department + execute_distribution, ou transfer_to_human).";
+  "USO INTERNO — NÃO DIVULGUE. Use estes dados apenas como contexto para entender a situação do aluno e atender melhor. NUNCA repita ou confirme ao aluno dados pessoais/acadêmicos específicos (situação da matrícula, curso, polo, série, documentos, financeiro). Se o aluno pedir informação específica sobre a própria situação/dados, responda EXATAMENTE com a mensagem de transferência e acione transfer_to_human. NÃO acione distribuição automática sem o aluno pedir humano.";
 
 function consultarMatriculaTool(ctx: RunContext) {
   return tool({

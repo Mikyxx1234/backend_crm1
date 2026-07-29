@@ -11,6 +11,8 @@
 
 import type { AIAgentArchetype } from "@prisma/client";
 
+import { ACADEMIC_ATENDIMENTO_RULES } from "@/lib/ai-agents/academic-atendimento-prompt";
+
 export type ArchetypeId = AIAgentArchetype;
 
 export type ArchetypeDescriptor = {
@@ -78,29 +80,30 @@ Qualificar leads recém-chegados, descobrir o que eles precisam e, quando houver
     shortDescription:
       "Responde dúvidas frequentes e abre chamados quando necessário.",
     longDescription:
-      "Atende leads e clientes existentes, responde perguntas corriqueiras usando a base de conhecimento, registra a solicitação quando precisar escalar, e transfere pra um humano sempre que o tema sair do escopo.",
-    defaultTools: ["add_tag", "create_activity", "transfer_to_human"],
-    defaultTone: "empático, paciente e profissional",
-    suggestedModel: "gpt-4o-mini",
-    systemPromptTemplate: `Você é {{agent_name}}, assistente de atendimento virtual da {{company_name}}.
+      "Atende leads e clientes existentes, responde perguntas corriqueiras usando a base de conhecimento, registra a solicitação quando precisar escalar, e transfere pra um humano sempre que o tema sair do escopo. Inclui regras acadêmicas (matrícula, portal, Blackboard).",
+    defaultTools: [
+      "add_tag",
+      "create_activity",
+      "consultar_matricula",
+      "transfer_to_human",
+    ],
+    defaultTone: "simpática, paciente e natural (WhatsApp)",
+    suggestedModel: "gpt-4.1-mini",
+    systemPromptTemplate: `Você é {{agent_name}}, consultora de suporte virtual da {{company_name}}. Seu nome não importa — você conversa como pessoa real pelo WhatsApp.
 
 ## Sua missão
-Resolver dúvidas simples de primeiro nível com base na documentação da empresa. Escalar para humano quando o tema sair do escopo ou o cliente expressar frustração.
+Resolver dúvidas de primeiro nível com base na documentação e tools. Escalar para humano quando o tema sair do escopo, a confiança for baixa ou as regras acadêmicas exigirem.
 
 ## Tom de voz
 {{tone}}. Responda em {{language}}.
 
-## Regras
-- Use APENAS informações da base de conhecimento fornecida. Nunca invente.
-- Se não souber a resposta ou estiver em dúvida, chame transfer_to_human em vez de chutar.
-- Se detectar frustração, pedido de gerência, ou reclamação formal, transfira.
-- Registre atividades (create_activity) sempre que prometer retorno ou agendar algo.
-- Nunca prometa prazos específicos — deixe isso pra equipe humana.
+${ACADEMIC_ATENDIMENTO_RULES}
 
 ## Contexto da conversa
-- Cliente: {{contact_name}}
+- Cliente: {{contact_name}} ({{contact_phone}})
 - Histórico de deals: {{deal_summary}}
-- Tags: {{contact_tags}}`,
+- Tags: {{contact_tags}}
+- Última interação humana: {{last_human_interaction}}`,
   },
   {
     id: "VENDEDOR",

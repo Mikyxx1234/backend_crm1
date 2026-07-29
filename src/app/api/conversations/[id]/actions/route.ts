@@ -19,6 +19,7 @@ import { logEvent } from "@/services/activity-log";
 import { sseBus } from "@/lib/sse-bus";
 import { executeDistribution } from "@/services/distribution";
 import { assertLeafInDepartment, getAncestors } from "@/services/tabulations";
+import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 
 async function logDealEventsForConversationContact(
   conversationId: string,
@@ -159,6 +160,8 @@ export async function POST(request: Request, context: RouteContext) {
               toUserId: result.conversation.assignedToId ?? null,
             },
           });
+          // Assumir / reassign: cancela debounce IA pendente.
+          cancelAiReplyDebounce(id, "assignee_changed");
         }
 
         return NextResponse.json(

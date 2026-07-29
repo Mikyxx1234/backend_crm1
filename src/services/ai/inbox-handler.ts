@@ -37,6 +37,7 @@ import {
   renderTemplate,
   type HandoffMode,
 } from "@/lib/ai-agents/piloting";
+import { cache } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -47,6 +48,11 @@ import {
   markAgentGreetedNow,
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
+import {
+  LOW_CONFIDENCE_HANDOFF_MESSAGE,
+  parseAgentConfidence,
+  shouldHandoffOnLowConfidence,
+} from "@/services/ai/confidence";
 import { runAgent } from "@/services/ai/runner";
 
 export type InboundAIArgs = {
@@ -54,9 +60,88 @@ export type InboundAIArgs = {
   contactId: string;
   userMessage: string;
   channel: "meta" | "baileys";
+  /** Geração do debounce — se supersedida, aborta antes do envio. */
+  generationId?: string;
+  inboundMessageIds?: string[];
 };
 
+function logAi(event: string, payload: Record<string, unknown>) {
+  console.info(
+    "[ai-attend]",
+    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
+  );
+}
+
+/**
+ * Confirma que a conversa ainda está com um agente IA ativo e que
+ * nenhum humano respondeu depois do início do processamento.
+ */
+export async function assertAiStillAuthorized(args: {
+  conversationId: string;
+  expectedAgentUserId: string;
+  generationId?: string;
+  since?: Date;
+}): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (args.generationId) {
+    const current = await cache.get<string>(`ai:gen:${args.conversationId}`);
+    if (current && current !== args.generationId) {
+      return { ok: false, reason: "generation_superseded" };
+    }
+  }
+
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: {
+      assignedToId: true,
+      hasHumanReply: true,
+      assignedTo: { select: { type: true } },
+    },
+  });
+  if (!conversation?.assignedToId) {
+    return { ok: false, reason: "unassigned" };
+  }
+  if (conversation.assignedToId !== args.expectedAgentUserId) {
+    return { ok: false, reason: "assignee_changed" };
+  }
+  if (conversation.assignedTo?.type !== "AI") {
+    return { ok: false, reason: "assignee_not_ai" };
+  }
+
+  // Humano falou depois do início deste processamento?
+  if (args.since) {
+    const humanOut = await prisma.message.findFirst({
+      where: {
+        conversationId: args.conversationId,
+        direction: "out",
+        authorType: "human",
+        isPrivate: false,
+        createdAt: { gte: args.since },
+      },
+      select: { id: true },
+    });
+    if (humanOut) return { ok: false, reason: "human_replied_during_run" };
+  } else if (conversation.hasHumanReply) {
+    // Heurística: se a última outbound é humana, bloqueia.
+    const lastOut = await prisma.message.findFirst({
+      where: {
+        conversationId: args.conversationId,
+        direction: "out",
+        isPrivate: false,
+        messageType: { not: "note" },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { authorType: true },
+    });
+    if (lastOut?.authorType === "human") {
+      return { ok: false, reason: "human_last_outbound" };
+    }
+  }
+
+  return { ok: true };
+}
+
 export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
+  const startedAt = new Date();
   try {
     const conversation = await prisma.conversation.findUnique({
       where: { id: args.conversationId },
@@ -64,13 +149,17 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         id: true,
         assignedToId: true,
         contactId: true,
-        // Trazemos o canal pra resolver o cliente Meta correto desse tenant.
-        // Sem isso, o agente IA da DNA respondia via numero da Eduit (singleton
-        // global do env). Cross-tenant leak critico.
+        hasHumanReply: true,
         channelRef: { select: { id: true, config: true } },
       },
     });
-    if (!conversation?.assignedToId) return;
+    if (!conversation?.assignedToId) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "no_assignee",
+      });
+      return;
+    }
 
     const channelConfig = conversation.channelRef?.config as
       | Record<string, unknown>
@@ -97,12 +186,46 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             simulateTyping: true,
             typingPerCharMs: true,
             markMessagesRead: true,
+            model: true,
           },
         },
       },
     });
-    if (!assignee || assignee.type !== "AI") return;
-    if (!assignee.aiAgentConfig?.active) return;
+    if (!assignee || assignee.type !== "AI") {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "assignee_not_ai",
+      });
+      return;
+    }
+    if (!assignee.aiAgentConfig?.active) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "agent_inactive",
+        agentUserId: assignee.id,
+      });
+      return;
+    }
+
+    // Se a última outbound é humana, não compete com o atendente.
+    const lastOut = await prisma.message.findFirst({
+      where: {
+        conversationId: args.conversationId,
+        direction: "out",
+        isPrivate: false,
+        messageType: { not: "note" },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { authorType: true, createdAt: true },
+    });
+    if (lastOut?.authorType === "human") {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "human_last_outbound",
+        agentUserId: assignee.id,
+      });
+      return;
+    }
 
     const cfg = assignee.aiAgentConfig;
     const humanBehavior = {
@@ -110,6 +233,16 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       typingPerCharMs: cfg.typingPerCharMs,
       markMessagesRead: cfg.markMessagesRead,
     };
+
+    logAi("run_start", {
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+      channel: args.channel,
+      generationId: args.generationId ?? null,
+      inboundMessageIds: args.inboundMessageIds ?? [],
+      model: cfg.model,
+      agentUserId: assignee.id,
+    });
 
     const openDeal = await prisma.deal.findFirst({
       where: { contactId: args.contactId, status: "OPEN" },
@@ -128,6 +261,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         const text = renderTemplate(businessHours.offHoursMessage, {
           contactName: contact?.name ?? null,
         });
+        const auth = await assertAiStillAuthorized({
+          conversationId: args.conversationId,
+          expectedAgentUserId: assignee.id,
+          generationId: args.generationId,
+          since: startedAt,
+        });
+        if (!auth.ok) {
+          logAi("blocked", {
+            conversationId: args.conversationId,
+            reason: auth.reason,
+            phase: "pre_off_hours_send",
+          });
+          return;
+        }
         await sendAgentMessage({
           conversationId: args.conversationId,
           contactId: args.contactId,
@@ -137,6 +284,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           channel: args.channel,
           kind: "off_hours",
           humanBehavior,
+          generationId: args.generationId,
         }).catch(() => null);
       }
       return;
@@ -158,13 +306,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         specificUserId: cfg.inactivityHandoffUserId ?? null,
         reason: `Palavra-chave disparou handoff: "${keyword}"`,
       });
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "keyword",
+        keyword,
+      });
       return;
     }
 
     // ── 3. Opening message (primeira resposta da conversa) ────
-    // Usa `Conversation.aiGreetedAt` em vez do histórico de mensagens
-    // pra que saudações disparem a cada nova atribuição ao agente IA,
-    // mesmo que ele já tenha respondido algo nesta mesma conversa antes.
     if (cfg.openingMessage?.trim()) {
       const alreadyGreeted = await hasAgentGreetedInCurrentAssignment(
         args.conversationId,
@@ -193,6 +343,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         if (cfg.openingDelayMs > 0) {
           await delay(Math.min(cfg.openingDelayMs, 10_000));
         }
+        const authGreet = await assertAiStillAuthorized({
+          conversationId: args.conversationId,
+          expectedAgentUserId: assignee.id,
+          generationId: args.generationId,
+          since: startedAt,
+        });
+        if (!authGreet.ok) {
+          logAi("blocked", {
+            conversationId: args.conversationId,
+            reason: authGreet.reason,
+            phase: "pre_greeting_send",
+          });
+          return;
+        }
         const greetResult = await sendAgentMessage({
           conversationId: args.conversationId,
           contactId: args.contactId,
@@ -202,10 +366,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           channel: args.channel,
           kind: "greeting",
           humanBehavior,
+          generationId: args.generationId,
         }).catch(() => null);
-        // Marca que cumprimentou tanto em envio real quanto em rascunho
-        // — o rascunho é decisão do humano mandar, mas do ponto de vista
-        // do agente "já cumprimentou" pra não duplicar.
         if (greetResult && greetResult.status !== "skipped") {
           await markAgentGreetedNow(args.conversationId);
         }
@@ -223,16 +385,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     });
 
     if (result.status === "FAILED") {
-      console.warn(
-        `[ai-inbox] runner falhou conv=${args.conversationId}: ${result.error}`,
-      );
+      logAi("run_failed", {
+        conversationId: args.conversationId,
+        error: result.error ?? "unknown",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
       return;
     }
 
-    // Handoff: o runner já desatribuiu a conversa dentro da tool. Nada
-    // mais a fazer aqui; o atendente humano receberá via SSE.
     if (result.status === "HANDOFF") {
-      // Registra uma nota privada pra contextualizar o operador.
       if (result.text) {
         await prisma.message
           .create({
@@ -250,11 +411,95 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           })
           .catch(() => null);
       }
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "tool_transfer",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
       return;
     }
 
-    const text = result.text.trim();
-    if (!text) return;
+    const parsed = parseAgentConfidence(result.text.trim());
+    let text = parsed.text;
+    if (!text && !shouldHandoffOnLowConfidence(parsed.confidence)) {
+      logAi("empty_reply", {
+        conversationId: args.conversationId,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    // Paridade DataCrazy: confiança < 0.40 → mensagem neutra + handoff
+    // (não envia chute do LLM; não usa execute_distribution).
+    if (shouldHandoffOnLowConfidence(parsed.confidence)) {
+      const authLow = await assertAiStillAuthorized({
+        conversationId: args.conversationId,
+        expectedAgentUserId: assignee.id,
+        generationId: args.generationId,
+        since: startedAt,
+      });
+      if (!authLow.ok) {
+        logAi("blocked", {
+          conversationId: args.conversationId,
+          reason: authLow.reason,
+          phase: "pre_low_conf_handoff",
+        });
+        return;
+      }
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: LOW_CONFIDENCE_HANDOFF_MESSAGE,
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+      }).catch(() => null);
+      await executeAgentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        agentId: cfg.id,
+        agentUserId: assignee.id,
+        mode: (cfg.inactivityHandoffMode as HandoffMode) ?? "KEEP_OWNER",
+        specificUserId: cfg.inactivityHandoffUserId ?? null,
+        reason: `Baixa confiança da IA (${parsed.confidence?.toFixed(2)})`,
+      });
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "low_confidence",
+        confidence: parsed.confidence,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    if (!text) {
+      logAi("empty_reply", {
+        conversationId: args.conversationId,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    // Revalida ANTES de enviar (humano pode ter assumido durante o LLM).
+    const auth = await assertAiStillAuthorized({
+      conversationId: args.conversationId,
+      expectedAgentUserId: assignee.id,
+      generationId: args.generationId,
+      since: startedAt,
+    });
+    if (!auth.ok) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: auth.reason,
+        phase: "pre_send",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
 
     if (result.autonomyMode === "AUTONOMOUS" && args.channel === "meta") {
       if (!metaClient.configured) {
@@ -271,16 +516,28 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         return;
       }
 
-      // ── Comportamento humano: typing/read antes da resposta do LLM ──
-      // Mesma lógica de sendAgentMessage — duplicada aqui porque o
-      // fluxo autônomo final grava Message direto (não passa pelo
-      // piloting-actions).
       await applyHumanBehaviorBeforeSend({
         conversationId: args.conversationId,
         text,
         humanBehavior,
         metaClient,
       });
+
+      // Segunda revalidação após typing delay.
+      const auth2 = await assertAiStillAuthorized({
+        conversationId: args.conversationId,
+        expectedAgentUserId: assignee.id,
+        generationId: args.generationId,
+        since: startedAt,
+      });
+      if (!auth2.ok) {
+        logAi("blocked", {
+          conversationId: args.conversationId,
+          reason: auth2.reason,
+          phase: "pre_send_after_typing",
+        });
+        return;
+      }
 
       let externalId: string | null = null;
       try {
@@ -290,6 +547,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         console.error(
           `[ai-inbox] Falha ao enviar resposta autônoma: ${err}. Salvando rascunho pro humano revisar.`,
         );
+        logAi("send_failed", {
+          conversationId: args.conversationId,
+          error: err instanceof Error ? err.message : String(err),
+        });
         await saveDraft(assignee.id, args.conversationId, text);
         return;
       }
@@ -324,12 +585,48 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         content: text,
         timestamp: saved.createdAt,
       });
+      logAi("send_ok", {
+        conversationId: args.conversationId,
+        messageId: saved.id,
+        channel: "meta",
+        model: cfg.model,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    // Baileys / draft path via sendAgentMessage (com revalidação interna).
+    if (result.autonomyMode === "AUTONOMOUS" && args.channel === "baileys") {
+      const sendResult = await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text,
+        channel: "baileys",
+        humanBehavior,
+        generationId: args.generationId,
+      });
+      logAi("send_result", {
+        conversationId: args.conversationId,
+        status: sendResult.status,
+        channel: "baileys",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
       return;
     }
 
     await saveDraft(assignee.id, args.conversationId, text);
+    logAi("draft_saved", {
+      conversationId: args.conversationId,
+      durationMs: Date.now() - startedAt.getTime(),
+    });
   } catch (err) {
     console.error("[ai-inbox] erro não-fatal:", err);
+    logAi("run_error", {
+      conversationId: args.conversationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

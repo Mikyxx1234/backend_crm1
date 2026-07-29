@@ -42,7 +42,7 @@ import {
 } from "@/services/whatsapp-call-consent-webhook";
 import { fireTrigger } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
-import { maybeReplyAsAIAgent } from "@/services/ai/inbox-handler";
+import { scheduleAiReply } from "@/services/ai/inbound-debounce";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
@@ -2510,13 +2510,12 @@ async function executePostBody(
               log.error("Falha ao disparar gatilho message_received:", err);
             }
 
-            // Agente de IA atribuído à conversa? Dispara resposta
-            // (autônoma ou como rascunho, conforme config). Background:
-            // não atrasamos o 200 OK pra Meta (LLM pode demorar 2-6s).
+            // Agente de IA: agenda resposta com debounce (agrupa msgs consecutivas).
             if (!isSystemMessage && parsed.text) {
-              void maybeReplyAsAIAgent({
+              void scheduleAiReply({
                 conversationId: conversation.id,
                 contactId: contact.id,
+                messageId: msgCreated.id,
                 userMessage: parsed.text,
                 channel: "meta",
               });

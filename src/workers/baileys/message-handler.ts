@@ -13,6 +13,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
+import { scheduleAiReply } from "@/services/ai/inbound-debounce";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -537,14 +538,14 @@ export async function handleBaileysMessage(
       log.debug("Falha ao sincronizar avatar (não-fatal):", err),
     );
 
-    await prisma.$transaction(async (tx) => {
+    const msgCreated = await prisma.$transaction(async (tx) => {
       const dup = await tx.message.findFirst({
         where: { externalId: parsed.externalId },
         select: { id: true },
       });
-      if (dup) return;
+      if (dup) return null;
 
-      await tx.message.create({
+      return tx.message.create({
         data: withOrgFromCtx({
           conversationId: conversation.id,
           channelId,
@@ -557,6 +558,8 @@ export async function handleBaileysMessage(
         }),
       });
     });
+
+    if (!msgCreated) return;
 
     await prisma.conversation.update({
       where: { id: conversation.id },
@@ -609,6 +612,16 @@ export async function handleBaileysMessage(
       });
     } catch (err) {
       log.error("Falha ao disparar gatilho message_received:", err);
+    }
+
+    if (parsed.text) {
+      void scheduleAiReply({
+        conversationId: conversation.id,
+        contactId: contact.id,
+        messageId: msgCreated.id,
+        userMessage: parsed.text,
+        channel: "baileys",
+      });
     }
 
     log.info(`Mensagem de ${contact.name}: ${parsed.text.substring(0, 60)}`);

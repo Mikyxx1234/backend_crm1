@@ -25,6 +25,7 @@ import { sseBus } from "@/lib/sse-bus";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { logEvent } from "@/services/activity-log";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -935,6 +936,8 @@ export async function POST(request: Request, context: RouteContext) {
           err,
         ),
     );
+    // Humano respondeu: invalida debounce do Agente IA pendente.
+    cancelAiReplyDebounce(conv.id, "human_outbound");
 
     return NextResponse.json({
       message: {
