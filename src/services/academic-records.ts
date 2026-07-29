@@ -180,21 +180,27 @@ export async function importMatriculados(params: {
   }));
 
   const CHUNK = 1000;
-  await prisma.$transaction(async (tx) => {
-    await tx.studentAcademicRecord.deleteMany({ where: { organizationId } });
-    for (let i = 0; i < data.length; i += CHUNK) {
-      await tx.studentAcademicRecord.createMany({ data: data.slice(i, i + CHUNK) });
-    }
-    await tx.academicImportHistory.create({
-      data: {
-        organizationId,
-        reportType: "matriculados",
-        fileName,
-        totalRows: data.length,
-        uploadedById: uploadedById ?? null,
-      },
-    });
-  });
+  await prisma.$transaction(
+    async (tx) => {
+      await tx.studentAcademicRecord.deleteMany({ where: { organizationId } });
+      for (let i = 0; i < data.length; i += CHUNK) {
+        await tx.studentAcademicRecord.createMany({ data: data.slice(i, i + CHUNK) });
+      }
+      await tx.academicImportHistory.create({
+        data: {
+          organizationId,
+          reportType: "matriculados",
+          fileName,
+          totalRows: data.length,
+          uploadedById: uploadedById ?? null,
+        },
+      });
+    },
+    // Relatórios de matriculados são grandes (dezenas de milhares de linhas):
+    // o delete + createMany em chunks passa dos 5s padrão do Prisma. Damos
+    // uma folga generosa para não abortar a transação no meio do import.
+    { timeout: 120_000, maxWait: 20_000 },
+  );
 
   return { totalRows: data.length, skipped };
 }
