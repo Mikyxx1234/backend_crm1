@@ -50,7 +50,9 @@ function queueWhere(
     // Cliente falou por último depois de atendimento humano.
     return { ...base, hasHumanReply: true, lastMessageDirection: "in" };
   }
-  // Mesma regra de getQueueCounts.
+  // Escopo "all" da redistribuição = conversas pendentes de resposta do
+  // consultor (Entrada + Aguardando). Distinto de `getQueueCounts`, que agora
+  // mede a CARGA total (toda conversa OPEN) para limite/seleção.
   return {
     ...base,
     OR: [{ lastMessageDirection: "in" }, { hasHumanReply: false }],

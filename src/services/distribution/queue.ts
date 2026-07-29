@@ -1,18 +1,16 @@
 /**
- * Fila atual de cada responsável = nº de CONVERSAS que ainda são trabalho
- * pendente DELE: conversas OPEN ATRIBUÍDAS ao consultor em que é a vez do
- * consultor responder — ou o cliente falou por último (`lastMessageDirection =
- * "in"`), OU nenhum humano respondeu ainda (`hasHumanReply = false`, caso das
- * auto-distribuídas em que só a automação/IA mandou o aviso). No inbox isso
- * corresponde às abas "Entrada" (sem resposta humana) + "Aguardando" (humano
- * atendeu e o cliente falou por último) das conversas atribuídas a ele.
+ * Fila (carga) de cada responsável = nº TOTAL de CONVERSAS OPEN atribuídas a
+ * ele, tenha ele respondido ou não. É a carga real do consultor e serve de base
+ * tanto para o LIMITE (`queueLimit` = teto de conversas abertas simultâneas)
+ * quanto para a SELEÇÃO ("menor carga" no `engine.selectResponsible`).
  *
- * NÃO usamos `hasAgentReply`: esse campo é marcado também por AUTOMAÇÃO/IA.
- * Usamos `hasHumanReply` (marcado só por envio humano) para saber se é a vez
- * do consultor.
- *
- * NÃO contamos conversas em que o humano já respondeu e aguardam o CLIENTE
- * (aba "Respondidas": `lastMessageDirection = "out"` + `hasHumanReply = true`).
+ * IMPORTANTE (correção do caso "50 leads pra uma pessoa"): antes contávamos só
+ * as conversas AGUARDANDO resposta do consultor (`lastMessageDirection = "in"`
+ * OU `hasHumanReply = false`). Um consultor que respondia rápido zerava esse
+ * pendente e continuava sendo "a menor fila" — recebendo leads sem parar e
+ * furando o limite, que também olhava só o pendente. Passamos a contar TODA
+ * conversa OPEN atribuída, para que o limite e o balanceamento reflitam a carga
+ * total. A regra de "pendente" segue existindo para o inbox/redistribuição.
  *
  * `Conversation` é org-scoped, então o filtro de organização é injetado pela
  * Prisma Extension. Uma única `groupBy` (sem N+1).
@@ -21,8 +19,8 @@
 import { prisma } from "@/lib/prisma";
 
 /**
- * Mapa userId → quantidade de conversas aguardando resposta do consultor.
- * Usuários sem fila não aparecem no mapa (o caller assume 0).
+ * Mapa userId → total de conversas OPEN atribuídas ao consultor.
+ * Usuários sem conversas não aparecem no mapa (o caller assume 0).
  */
 export async function getQueueCounts(
   userIds: string[],
@@ -35,7 +33,6 @@ export async function getQueueCounts(
     where: {
       status: "OPEN",
       assignedToId: { in: userIds },
-      OR: [{ lastMessageDirection: "in" }, { hasHumanReply: false }],
     },
     _count: { _all: true },
   });
