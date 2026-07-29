@@ -292,3 +292,23 @@ export async function getImportHistory(organizationId: string, limit = 20) {
 export async function getRecordCount(organizationId: string): Promise<number> {
   return prisma.studentAcademicRecord.count({ where: { organizationId } });
 }
+
+/**
+ * Remove TODOS os registros acadêmicos da org (e o histórico de importações).
+ * Usado para limpar dados de teste sem deixar peso no banco.
+ */
+export async function clearAcademicRecords(
+  organizationId: string,
+): Promise<{ deleted: number }> {
+  const deleted = await prisma.$transaction(
+    async (tx) => {
+      const res = await tx.studentAcademicRecord.deleteMany({
+        where: { organizationId },
+      });
+      await tx.academicImportHistory.deleteMany({ where: { organizationId } });
+      return res.count;
+    },
+    { timeout: 120_000, maxWait: 20_000 },
+  );
+  return { deleted };
+}
