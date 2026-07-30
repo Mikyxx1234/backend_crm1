@@ -20,6 +20,12 @@ import {
 } from "@/lib/request-context";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
+import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
+import {
+  clearOwnershipForRedistribution,
+  isAssigneeCurrentlyEligible,
+} from "@/services/distribution/assignee-eligibility";
+
 import { executeDistribution } from "./engine";
 import { getDistributionResponsibles } from "./responsibles";
 
@@ -229,12 +235,6 @@ async function cancelStalePendingOrphans(orgId: string): Promise<number> {
  *
  * Nunca propaga erro ao webhook — falha só loga.
  */
-import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
-import {
-  clearOwnershipForRedistribution,
-  isAssigneeCurrentlyEligible,
-} from "@/services/distribution/assignee-eligibility";
-
 export async function maybeDistributeNewInboundTicket(input: {
   conversationId: string;
   contactId: string;
