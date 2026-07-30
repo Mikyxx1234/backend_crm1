@@ -201,8 +201,7 @@ async function assignConversationToHuman(args: {
 /**
  * Se a conversa está sem assignee humano e está no pipe acadêmico,
  * atribui ao agente de 1º atendimento.
- * Contatos na allowlist de teste: força IA (ignora herança de responsável
- * e heurística de pipe) enquanto ninguém humano respondeu nesta conversa.
+ * Se já há humano responsável (e respondeu / está no chat), não rouba.
  * @returns userId da IA se atribuiu; null se não aplicável.
  */
 export async function tryAssignFirstAttendanceAi(args: {
@@ -217,11 +216,9 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
-  // Segurança: não atribui IA a nenhum telefone fora da allowlist.
-  let onAllowlist = false;
   try {
-    onAllowlist = await isContactAllowedForAi(args.contactId);
-    if (!onAllowlist) {
+    const allowed = await isContactAllowedForAi(args.contactId);
+    if (!allowed) {
       logAi("first_attendance_skip_allowlist", {
         conversationId: args.conversationId,
         contactId: args.contactId,
@@ -231,6 +228,16 @@ export async function tryAssignFirstAttendanceAi(args: {
   } catch (e) {
     console.error("[ai] first_attendance allowlist failed — skipping", e);
     return null;
+  }
+
+  // Roster de depts (Wesley/Danúbia/Marília/…) — best-effort.
+  try {
+    const { ensureAcademicDepartmentRoster } = await import(
+      "@/services/ai/ensure-academic-dept-roster"
+    );
+    await ensureAcademicDepartmentRoster();
+  } catch {
+    /* ignore */
   }
 
   const conv = await prisma.conversation.findUnique({
@@ -261,39 +268,7 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
-  // Allowlist de teste: força 1º atendimento IA (não herda Joyce/etc.).
-  if (onAllowlist && !conv.hasHumanReply) {
-    const agent = await resolveFirstAttendanceAgent();
-    if (!agent) {
-      logAi("first_attendance_no_agent", {
-        conversationId: args.conversationId,
-      });
-      return null;
-    }
-    const aiUserId = agent.userId;
-    await prisma.$transaction(async (tx) => {
-      await tx.conversation.update({
-        where: { id: args.conversationId },
-        data: { assignedToId: aiUserId, aiGreetedAt: null },
-      });
-      await tx.contact.update({
-        where: { id: contactId },
-        data: { assignedToId: aiUserId },
-      });
-      await tx.deal.updateMany({
-        where: { contactId, status: "OPEN" },
-        data: { ownerId: aiUserId },
-      });
-    });
-    logAi("first_attendance_assigned_allowlist", {
-      conversationId: args.conversationId,
-      contactId,
-      aiUserId,
-    });
-    return aiUserId;
-  }
-
-  // Já tem humano no chat → não mexe.
+  // Já tem humano no chat (ainda sem reply) → não mexe.
   if (conv.assignedToId && conv.assignedTo?.type === "HUMAN") {
     logAi("first_attendance_skip_human_on_chat", {
       conversationId: args.conversationId,
@@ -302,7 +277,7 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
-  // Humano no contato/deal → devolve o chat a ele (mesmo se chat estava na IA).
+  // Humano no contato/deal → devolve o chat a ele.
   const humanOwner =
     (args.assignedToId
       ? (

@@ -125,6 +125,15 @@ export async function executeAcademicDepartmentHandoff(args: {
   departmentName: string | null;
   distribution: Awaited<ReturnType<typeof executeDistribution>> | null;
 }> {
+  try {
+    const { ensureAcademicDepartmentRoster } = await import(
+      "@/services/ai/ensure-academic-dept-roster"
+    );
+    await ensureAcademicDepartmentRoster();
+  } catch {
+    /* ignore */
+  }
+
   let pipelineName: string | null = null;
   let stageName: string | null = null;
   if (args.dealId) {

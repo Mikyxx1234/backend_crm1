@@ -1,24 +1,22 @@
 /**
  * Allowlist de telefones para o Agente IA (resposta + 1º atendimento).
  *
- * Segurança p/ teste em produção: por padrão SÓ o número de teste é
- * atendido pela IA. Qualquer outro telefone é bloqueado (sem assign,
- * sem reply, sem saudação).
+ * Produção geral: por padrão TODOS os telefones são atendidos (`open`).
  *
- * Liberar todos os números:
- *   AI_REPLY_PHONE_ALLOWLIST=*
- *   (ou "all" / "off")
+ * Restringir de novo (teste):
+ *   AI_REPLY_PHONE_ALLOWLIST=11970617878
  *
  * Lista custom (vírgula/espaço):
  *   AI_REPLY_PHONE_ALLOWLIST=11970617878,11999999999
  *
- * Sem env → default restrito ao telefone de teste abaixo.
+ * Forçar aberto explicitamente:
+ *   AI_REPLY_PHONE_ALLOWLIST=*
  */
 
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 
-/** Telefone autorizado no teste em prod (somente dígitos, DDD+número). */
+/** Telefone usado nos testes (só se allowlist restricted for ligada). */
 export const AI_TEST_PHONE_DIGITS = "11970617878";
 
 function logAi(event: string, payload: Record<string, unknown>) {
@@ -33,7 +31,6 @@ export function normalizePhoneDigits(raw: string | null | undefined): string {
   if (!raw) return "";
   let d = String(raw).replace(/\D/g, "");
   if (!d) return "";
-  // country code BR
   if (d.startsWith("55") && d.length >= 12) d = d.slice(2);
   while (d.startsWith("0") && d.length > 11) d = d.slice(1);
   return d;
@@ -44,8 +41,9 @@ function parseAllowlistRaw(raw: string | null | undefined): {
   phones: string[];
 } {
   const v = (raw ?? "").trim();
+  // Default produção: aberto.
   if (!v) {
-    return { mode: "restricted", phones: [AI_TEST_PHONE_DIGITS] };
+    return { mode: "open", phones: [] };
   }
   const lower = v.toLowerCase();
   if (lower === "*" || lower === "all" || lower === "off" || lower === "disabled") {
@@ -56,14 +54,14 @@ function parseAllowlistRaw(raw: string | null | undefined): {
     .map((p) => normalizePhoneDigits(p))
     .filter((p) => p.length >= 8);
   if (phones.length === 0) {
-    return { mode: "restricted", phones: [AI_TEST_PHONE_DIGITS] };
+    return { mode: "open", phones: [] };
   }
   return { mode: "restricted", phones };
 }
 
 /**
  * Resolve allowlist: env AI_REPLY_PHONE_ALLOWLIST > org setting
- * `ai.replyPhoneAllowlist` > default (só telefone de teste).
+ * `ai.replyPhoneAllowlist` > default aberto (produção).
  */
 export async function resolveAiPhoneAllowlist(): Promise<{
   mode: "open" | "restricted";
@@ -83,8 +81,7 @@ export async function resolveAiPhoneAllowlist(): Promise<{
   } catch {
     /* fora de RequestContext */
   }
-  const parsed = parseAllowlistRaw(null);
-  return { mode: parsed.mode, phones: new Set(parsed.phones) };
+  return { mode: "open", phones: new Set() };
 }
 
 export function phoneMatchesAllowlist(

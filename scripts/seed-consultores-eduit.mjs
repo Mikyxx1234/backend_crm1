@@ -70,15 +70,14 @@ const DEPARTMENTS = [
   { key: "atendimento", name: "Atendimento - SAC", color: "#3B82F6", icon: "🎧", create: true },
 ];
 
-// Regras de departamento (confirmadas com o time):
-//  - Wesley  -> Retencao (somente; quem e retencao nao recebe outro dept)
-//  - Danubia -> Acolhimento + Atendimento (acolhimento faz acolhimento E
-//               atendimento — regra herdada do papel de acolhimento)
-//  - Marilia + demais -> Atendimento ("Atendimento - SAC", somente)
+// Regras de departamento (produção):
+//  - Wesley + Danubia -> Acolhimento + Retencao
+//  - Marilia -> Acolhimento
+//  - Demais consultores -> Atendimento ("Atendimento - SAC")
 const CONSULTORES = [
-  { name: "Wesley Guerreiro", email: "wesley.guerreiro@cruzeiroead.com.br", depts: ["retencao"] },
-  { name: "Danubia", email: "danubia.sousa@cruzeiroead.com.br", depts: ["acolhimento", "atendimento"] },
-  { name: "Marilia Souza", email: "marilia.nascimento@cruzeiroead.com.br", depts: ["atendimento"] },
+  { name: "Wesley Guerreiro", email: "wesley.guerreiro@cruzeiroead.com.br", depts: ["acolhimento", "retencao"] },
+  { name: "Danubia", email: "danubia.sousa@cruzeiroead.com.br", depts: ["acolhimento", "retencao"] },
+  { name: "Marilia Souza", email: "marilia.nascimento@cruzeiroead.com.br", depts: ["acolhimento"] },
   { name: "Beatriz", email: "beatriz.andrade@cruzeiroead.com.br", depts: ["atendimento"] },
   { name: "Breno", email: "breno.silva@cruzeiroead.com.br", depts: ["atendimento"] },
   { name: "Camila Ferreira", email: "erica.ferreira@cruzeiroead.com.br", depts: ["atendimento"] },
@@ -128,12 +127,22 @@ async function ensureDepartments(orgId) {
         continue;
       }
       dep = await prisma.department.create({
-        data: { organizationId: orgId, name: d.name, color: d.color, icon: d.icon },
+        data: {
+          organizationId: orgId,
+          name: d.name,
+          color: d.color,
+          icon: d.icon,
+          distributionEnabled: true,
+        },
         select: { id: true, name: true },
       });
       console.log(`  [dept] criado "${dep.name}" (${dep.id})`);
     } else {
       console.log(`  [dept] ja existe "${dep.name}" (${dep.id})`);
+      await prisma.department.update({
+        where: { id: dep.id },
+        data: { distributionEnabled: true },
+      });
     }
     map[d.key] = dep.id;
   }
