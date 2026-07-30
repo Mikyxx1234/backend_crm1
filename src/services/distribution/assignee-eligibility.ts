@@ -1,7 +1,7 @@
 /**
  * Verifica se um userId humano ainda está elegível na Distribuição
- * (ONLINE, horário, fila, participa). Agentes IA não entram na lista —
- * retornam `true` (dono IA é válido para manter).
+ * (ONLINE, horário, fila, participa). Agentes IA retornam
+ * `eligible: false` + `isAi: true` — nunca fecham fila humana.
  */
 
 import { prisma } from "@/lib/prisma";
@@ -15,7 +15,7 @@ export async function isAssigneeCurrentlyEligible(
     select: { id: true, type: true },
   });
   if (!user) return { eligible: false, isAi: false, reason: "USER_NOT_FOUND" };
-  if (user.type === "AI") return { eligible: true, isAi: true };
+  if (user.type === "AI") return { eligible: false, isAi: true, reason: "AI_NOT_HUMAN_DISTRIBUTION" };
 
   try {
     const views = await getDistributionResponsibles();

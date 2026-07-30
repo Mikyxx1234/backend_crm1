@@ -265,8 +265,74 @@ export async function tryAssignFirstAttendanceAi(args: {
   const contactId = conv.contactId ?? args.contactId;
   if (!contactId) return null;
 
-  // Já está na IA → ok.
+  // Já está na IA: verifica handoff/pending antes de confirmar.
   if (conv.assignedToId && conv.assignedTo?.type === "AI") {
+    // Handoff activo em fila → limpa IA e devolve para fila humana.
+    const aiWaitingHuman = await prisma.distributionPending.findFirst({
+      where: {
+        status: "PENDING",
+        OR: [{ conversationId: args.conversationId }, { contactId }],
+      },
+      select: { id: true, triggerSource: true },
+    });
+    if (aiWaitingHuman) {
+      await prisma.$transaction(async (tx) => {
+        await tx.conversation.update({
+          where: { id: args.conversationId },
+          data: { assignedToId: null },
+        });
+        await tx.contact.update({
+          where: { id: contactId },
+          data: { assignedToId: null },
+        });
+        await tx.deal.updateMany({
+          where: { contactId, status: "OPEN" },
+          data: { ownerId: null },
+        });
+      });
+      logAi("first_attendance_clear_ai_pending", {
+        conversationId: args.conversationId,
+        contactId,
+        pendingId: aiWaitingHuman.id,
+        triggerSource: aiWaitingHuman.triggerSource,
+      });
+      return null;
+    }
+    // Conversa foi roteada para depto via handoff IA recente → não reclama.
+    if (conv.departmentId) {
+      const recentAiHandoff = await prisma.distributionPending.findFirst({
+        where: {
+          triggerSource: { contains: "AI_AGENT" },
+          status: { in: ["PENDING", "RESOLVED"] },
+          createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+          OR: [{ conversationId: args.conversationId }, { contactId }],
+        },
+        select: { id: true },
+      });
+      if (recentAiHandoff) {
+        await prisma.$transaction(async (tx) => {
+          await tx.conversation.update({
+            where: { id: args.conversationId },
+            data: { assignedToId: null },
+          });
+          await tx.contact.update({
+            where: { id: contactId },
+            data: { assignedToId: null },
+          });
+          await tx.deal.updateMany({
+            where: { contactId, status: "OPEN" },
+            data: { ownerId: null },
+          });
+        });
+        logAi("first_attendance_clear_ai_dept_handoff", {
+          conversationId: args.conversationId,
+          contactId,
+          departmentId: conv.departmentId,
+          distributionPendingId: recentAiHandoff.id,
+        });
+        return null;
+      }
+    }
     return conv.assignedToId;
   }
 

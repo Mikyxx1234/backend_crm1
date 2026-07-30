@@ -392,6 +392,165 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       select: { id: true },
     });
 
+    // ── 0b. Pending handoff while AI is still assignee ──────────────
+    // The conversation was queued for human distribution; AI must not reply.
+    const pendingHandoff = await prisma.distributionPending.findFirst({
+      where: {
+        status: "PENDING",
+        OR: [
+          { conversationId: args.conversationId },
+          { contactId: args.contactId },
+        ],
+      },
+      select: { id: true, triggerSource: true },
+      orderBy: { updatedAt: "desc" },
+    });
+    if (pendingHandoff) {
+      await executeAcademicDepartmentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        userMessage: args.userMessage,
+        reason: "IA ainda assignee com pending ativo — reencaminhando",
+      }).catch(() => null);
+      const stillOpen = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: { assignedToId: true },
+      });
+      if (!stillOpen?.assignedToId || stillOpen.assignedToId === assignee.id) {
+        const lastBotMsg = await prisma.message.findFirst({
+          where: {
+            conversationId: args.conversationId,
+            direction: "out",
+            authorType: "bot",
+            isPrivate: false,
+            messageType: { not: "note" },
+          },
+          orderBy: { createdAt: "desc" },
+          select: { content: true },
+        });
+        const queueAckPhrases = [
+          "já está na fila",
+          "só mais um pouquinho",
+          "fala com você em breve",
+          "consultor(a) fala com você",
+          "vou te conectar",
+        ];
+        if (!queueAckPhrases.some((p) => lastBotMsg?.content?.includes(p))) {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text: "Tudo bem, só mais um pouquinho e logo você será atendido(a).",
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        }
+      }
+      logAi("handoff_pending_ai_assignee", {
+        conversationId: args.conversationId,
+        pendingId: pendingHandoff.id,
+      });
+      return;
+    }
+
+    // ── 0c. Post-handoff ack silence ──────────────────────────────────
+    // If the last bot message was a handoff/queue notification and the
+    // user just sent a short acknowledgement, do not invoke the LLM.
+    {
+      const lastBotOut = await prisma.message.findFirst({
+        where: {
+          conversationId: args.conversationId,
+          direction: "out",
+          authorType: "bot",
+          isPrivate: false,
+          messageType: { not: "note" },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { content: true },
+      });
+      const HANDOFF_PHRASES = [
+        "vou te conectar",
+        "fala com você em breve",
+        "já está na fila",
+        "só mais um pouquinho",
+        "setor de",
+        "Retenção",
+        "Acolhimento",
+      ];
+      if (HANDOFF_PHRASES.some((p) => lastBotOut?.content?.includes(p))) {
+        const norm = args.userMessage
+          .normalize("NFD")
+          .replace(/\p{M}/gu, "")
+          .trim()
+          .toLowerCase();
+        const isAck =
+          /^(ok|obrigad[oa]|valeu|beleza|certo|ta|tá|tudo bem|pode deixar|aguardo|fico no aguardo|ah tudo bem)[\s!.]*$/i.test(
+            norm,
+          ) ||
+          (norm.length <= 40 &&
+            /obrigad[oa]|valeu|beleza|aguardo/.test(norm));
+        if (isAck) {
+          const curConv = await prisma.conversation.findUnique({
+            where: { id: args.conversationId },
+            select: { assignedToId: true },
+          });
+          if (curConv?.assignedToId === assignee.id) {
+            await prisma.$transaction(async (tx) => {
+              await tx.conversation.update({
+                where: { id: args.conversationId },
+                data: { assignedToId: null },
+              });
+              await tx.contact.update({
+                where: { id: args.contactId },
+                data: { assignedToId: null },
+              });
+              await tx.deal.updateMany({
+                where: { contactId: args.contactId, status: "OPEN" },
+                data: { ownerId: null },
+              });
+            });
+          }
+          await executeAcademicDepartmentHandoff({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            dealId: openDeal?.id ?? null,
+            userMessage: args.userMessage,
+            reason: "Aluno confirmou handoff (ack pós-transferência)",
+          }).catch(() => null);
+          const queueAckPhrases2 = [
+            "já está na fila",
+            "só mais um pouquinho",
+            "fala com você em breve",
+            "vou te conectar",
+          ];
+          if (!queueAckPhrases2.some((p) => lastBotOut?.content?.includes(p))) {
+            await sendAgentMessage({
+              conversationId: args.conversationId,
+              contactId: args.contactId,
+              agentUserId: assignee.id,
+              autonomyMode: cfg.autonomyMode,
+              text: "Tudo bem, só mais um pouquinho e logo você será atendido(a).",
+              channel: args.channel,
+              kind: "text",
+              humanBehavior,
+              generationId: args.generationId,
+              bypassAssigneeCheck: true,
+            }).catch(() => null);
+          }
+          logAi("handoff_ack_silence", {
+            conversationId: args.conversationId,
+            userMessage: args.userMessage.slice(0, 50),
+          });
+          return;
+        }
+      }
+    }
+
     // ── 1. Business hours gate ────────────────────────────────
     const businessHours = normalizeBusinessHours(cfg.businessHours);
     if (businessHours?.enabled && !isWithinBusinessHours(businessHours)) {

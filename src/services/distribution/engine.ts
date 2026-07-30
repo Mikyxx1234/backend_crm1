@@ -249,6 +249,15 @@ async function resolvePendingFor(
 ): Promise<void> {
   if (!dealId && !contactId) return;
   try {
+    // Safety: never close a human-queue pending onto an AI user.
+    const resolverUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { type: true },
+    });
+    if (resolverUser?.type === "AI") {
+      console.warn("[distribution] resolvePendingFor skipped — userId is AI", { userId });
+      return;
+    }
     await prisma.distributionPending.updateMany({
       where: {
         status: "PENDING",
@@ -435,13 +444,19 @@ export async function executeDistribution(
     if (already?.assignedToId) {
       const contactId = input.contactId ?? already.contactId ?? null;
       const check = await isAssigneeCurrentlyEligible(already.assignedToId);
-      if (!check.eligible && contactId) {
+      // IA nunca conta como distribuição humana bem-sucedida — limpa e segue.
+      if (check.isAi && contactId) {
+        await clearOwnershipForRedistribution({
+          conversationId: input.conversationId,
+          contactId,
+        });
+      } else if (!check.eligible && contactId) {
         // Offline/indisponível herdado: limpa e segue redistribuição.
         await clearOwnershipForRedistribution({
           conversationId: input.conversationId,
           contactId,
         });
-      } else if (check.eligible) {
+      } else if (check.eligible && !check.isAi) {
         if (contactId) {
           await syncOwnershipForContact(contactId);
         } else if (input.dealId) {
@@ -496,7 +511,7 @@ export async function executeDistribution(
       const healed = await syncOwnershipForContact(contactId);
       if (healed && input.conversationId) {
         const healCheck = await isAssigneeCurrentlyEligible(healed);
-        if (!healCheck.eligible) {
+        if (!healCheck.eligible || healCheck.isAi) {
           await clearOwnershipForRedistribution({
             conversationId: input.conversationId,
             contactId,

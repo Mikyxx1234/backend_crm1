@@ -256,6 +256,14 @@ export async function maybeDistributeNewInboundTicket(input: {
   let assignee = input.assignedToId ?? null;
   if (assignee) {
     const check = await isAssigneeCurrentlyEligible(assignee);
+    // AI owner: keep regardless of eligible flag — first-attendance guard handles post-handoff.
+    if (check.isAi) {
+      console.warn(
+        "[DBG-e46688 maybeDist] keep_ai_assignee",
+        JSON.stringify({ convId: input.conversationId, assignee }),
+      );
+      return;
+    }
     if (check.eligible) {
       // IA herdada: mantém. Humano elegível sem reply nesta conversa:
       // libera p/ 1º atendimento IA (substitui INICIO-PIPE).

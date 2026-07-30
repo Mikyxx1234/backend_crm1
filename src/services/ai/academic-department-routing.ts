@@ -75,12 +75,6 @@ export async function resolveDepartmentByName(
   const trimmed = name.trim();
   if (!trimmed) return null;
 
-  const exact = await prisma.department.findFirst({
-    where: { name: { equals: trimmed, mode: "insensitive" } },
-    select: { id: true, name: true },
-  });
-  if (exact) return exact;
-
   const key =
     classifyAcademicDepartmentKey(trimmed) ??
     (normalize(trimmed).includes("acolh")
@@ -91,23 +85,39 @@ export async function resolveDepartmentByName(
           ? "atendimento"
           : null);
 
+  // Prefere departamentos com membros HUMAN (evita IDs órfãos/duplicados
+  // sem roster — causa distribuição org-wide / falha de fila).
   const all = await prisma.department.findMany({
-    select: { id: true, name: true },
+    select: {
+      id: true,
+      name: true,
+      _count: {
+        select: { members: { where: { user: { type: "HUMAN" } } } },
+      },
+    },
     orderBy: { name: "asc" },
   });
+  const ranked = [...all].sort(
+    (a, b) => (b._count.members ?? 0) - (a._count.members ?? 0),
+  );
+
+  const exact = ranked.find(
+    (d) => normalize(d.name) === normalize(trimmed),
+  );
+  if (exact) return { id: exact.id, name: exact.name };
 
   if (key) {
     const patterns = ACADEMIC_DEPARTMENT_ALIASES[key];
-    const hit = all.find((d) => {
+    const hit = ranked.find((d) => {
       const dn = normalize(d.name);
       return patterns.some((p) => dn.includes(normalize(p)));
     });
-    if (hit) return hit;
+    if (hit) return { id: hit.id, name: hit.name };
   }
 
-  // Fallback: contains do texto pedido
   const needle = normalize(trimmed);
-  return all.find((d) => normalize(d.name).includes(needle)) ?? null;
+  const contains = ranked.find((d) => normalize(d.name).includes(needle));
+  return contains ? { id: contains.id, name: contains.name } : null;
 }
 
 export async function resolveDepartmentByKey(
