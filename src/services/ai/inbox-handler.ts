@@ -72,6 +72,22 @@ function logAi(event: string, payload: Record<string, unknown>) {
   );
 }
 
+/** Cumprimento curto (oi/olá/bom dia...) sem pedido útil. */
+function isBareGreetingMessage(raw: string): boolean {
+  const n = raw
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[!?.…,]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!n || n.length > 40) return false;
+  return /^(oi+|ola+|oie+|hey|hello|bom dia|boa tarde|boa noite)( tudo bem)?$/.test(
+    n,
+  );
+}
+
 /**
  * Confirma que a conversa ainda está com um agente IA ativo e que
  * nenhum humano respondeu depois do início do processamento.
@@ -328,7 +344,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     }
 
     // ── 3. Opening message (primeira resposta da conversa) ────
-    if (cfg.openingMessage?.trim()) {
+    // Retorno (já teve outra conversa): NÃO manda openingMessage —
+    // deixa o LLM cumprimentar uma vez ("Oi de novo...").
+    // Primeiro contato: manda openingMessage; se o aluno só disse oi,
+    // para aí (sem 2º "olá" do LLM).
+    let sentOpeningThisTurn = false;
+    const priorConversations = await prisma.conversation.count({
+      where: {
+        contactId: args.contactId,
+        NOT: { id: args.conversationId },
+      },
+    });
+    const isReturningContact = priorConversations > 0;
+
+    if (cfg.openingMessage?.trim() && !isReturningContact) {
       const alreadyGreeted = await hasAgentGreetedInCurrentAssignment(
         args.conversationId,
       );
@@ -383,8 +412,18 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         }).catch(() => null);
         if (greetResult && greetResult.status !== "skipped") {
           await markAgentGreetedNow(args.conversationId);
+          sentOpeningThisTurn = true;
         }
       }
+    }
+
+    // Só cumprimento + já saudamos nesta rodada → não chama LLM de novo.
+    if (sentOpeningThisTurn && isBareGreetingMessage(args.userMessage)) {
+      logAi("greeting_only", {
+        conversationId: args.conversationId,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
     }
 
     // ── 4. Roda o LLM normalmente ─────────────────────────────
