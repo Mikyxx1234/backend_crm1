@@ -155,37 +155,79 @@ export async function maybeDistributeNewInboundTicket(input: {
   if (assignee) {
     const check = await isAssigneeCurrentlyEligible(assignee);
     if (check.eligible) {
+      // IA herdada: mantém. Humano elegível sem reply nesta conversa:
+      // libera p/ 1º atendimento IA (substitui INICIO-PIPE).
+      if (!check.isAi) {
+        const conv = await prisma.conversation.findUnique({
+          where: { id: input.conversationId },
+          select: { hasHumanReply: true },
+        });
+        if (!conv?.hasHumanReply) {
+          console.warn(
+            "[DBG-e46688 maybeDist] release_human_for_first_attendance",
+            JSON.stringify({
+              convId: input.conversationId,
+              assignee,
+            }),
+          );
+          try {
+            await clearOwnershipForRedistribution({
+              conversationId: input.conversationId,
+              contactId: input.contactId,
+            });
+          } catch (e) {
+            console.error(
+              "[distribution] clearOwnershipForRedistribution failed",
+              e,
+            );
+            return;
+          }
+          assignee = null;
+        } else {
+          console.warn(
+            "[DBG-e46688 maybeDist] keep_eligible_assignee",
+            JSON.stringify({
+              convId: input.conversationId,
+              assignee,
+              isAi: check.isAi,
+            }),
+          );
+          return;
+        }
+      } else {
+        console.warn(
+          "[DBG-e46688 maybeDist] keep_eligible_assignee",
+          JSON.stringify({
+            convId: input.conversationId,
+            assignee,
+            isAi: check.isAi,
+          }),
+        );
+        return;
+      }
+    } else {
       console.warn(
-        "[DBG-e46688 maybeDist] keep_eligible_assignee",
+        "[DBG-e46688 maybeDist] clear_ineligible_assignee",
         JSON.stringify({
           convId: input.conversationId,
           assignee,
-          isAi: check.isAi,
+          reason: check.reason,
         }),
       );
-      return;
+      try {
+        await clearOwnershipForRedistribution({
+          conversationId: input.conversationId,
+          contactId: input.contactId,
+        });
+      } catch (e) {
+        console.error(
+          "[distribution] clearOwnershipForRedistribution failed",
+          e,
+        );
+        return;
+      }
+      assignee = null;
     }
-    console.warn(
-      "[DBG-e46688 maybeDist] clear_ineligible_assignee",
-      JSON.stringify({
-        convId: input.conversationId,
-        assignee,
-        reason: check.reason,
-      }),
-    );
-    try {
-      await clearOwnershipForRedistribution({
-        conversationId: input.conversationId,
-        contactId: input.contactId,
-      });
-    } catch (e) {
-      console.error(
-        "[distribution] clearOwnershipForRedistribution failed",
-        e,
-      );
-      return;
-    }
-    assignee = null;
   }
 
   // 1º atendimento: Agente IA (se houver ativo) assume antes da fila humana.

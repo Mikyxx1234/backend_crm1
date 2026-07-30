@@ -46,6 +46,8 @@ export type RunContext = {
   contactId?: string | null;
   /// Deal em curso (se houver um aberto para este contato).
   dealId?: string | null;
+  /// Última mensagem do aluno (para inferir departamento no handoff).
+  userMessage?: string | null;
 };
 
 function ok<T>(data: T) {
@@ -639,6 +641,7 @@ function transferToHumanTool(ctx: RunContext) {
           contactId: ctx.contactId,
           dealId: ctx.dealId,
           departmentName: departmentName ?? null,
+          userMessage: ctx.userMessage ?? null,
           reason,
         });
         if (ctx.contactId) {
@@ -769,6 +772,32 @@ function executeDistributionTool(ctx: RunContext) {
         if (!ctx.contactId && !ctx.dealId)
           return fail("Sem contato/negócio para distribuir.");
 
+        // Se a conversa está na IA, usa o handoff acadêmico (limpa assignee +
+        // dept + reassign). Evita early-return "ASSIGNED" mantendo a IA.
+        if (ctx.conversationId) {
+          const conv = await prisma.conversation.findUnique({
+            where: { id: ctx.conversationId },
+            select: { assignedTo: { select: { type: true } } },
+          });
+          if (conv?.assignedTo?.type === "AI") {
+            const handoff = await executeAcademicDepartmentHandoff({
+              conversationId: ctx.conversationId,
+              contactId: ctx.contactId ?? null,
+              dealId: ctx.dealId,
+              departmentName: departmentName ?? null,
+              userMessage: ctx.userMessage ?? null,
+              reason: reason ?? "execute_distribution via IA",
+            });
+            return ok({
+              assigned: Boolean(handoff.distribution?.success),
+              assignedTo: handoff.distribution?.selectedUserName ?? null,
+              assignedUserId: handoff.distribution?.selectedUserId ?? null,
+              departmentName: handoff.departmentName,
+              reason: handoff.distribution?.reason ?? null,
+            });
+          }
+        }
+
         let departmentId: string | null = null;
         if (departmentName?.trim()) {
           const dept = await resolveDepartmentByName(departmentName);
@@ -789,6 +818,7 @@ function executeDistributionTool(ctx: RunContext) {
           conversationId: ctx.conversationId ?? null,
           triggerSource: "AUTOMATION",
           departmentId,
+          reassign: true,
         });
 
         if (ctx.dealId) {

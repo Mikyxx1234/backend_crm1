@@ -205,6 +205,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       conversationId: args.conversationId ?? null,
       contactId: args.contactId ?? null,
       dealId: args.dealId ?? null,
+      userMessage: args.userMessage,
     };
 
     const toolSet = buildToolSet(ctx, runtimeTools);

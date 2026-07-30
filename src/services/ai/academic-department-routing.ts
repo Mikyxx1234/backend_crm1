@@ -171,9 +171,24 @@ export async function executeAcademicDepartmentHandoff(args: {
   if (args.departmentName?.trim()) {
     dept = await resolveDepartmentByName(args.departmentName);
   }
+
+  let userMessage = args.userMessage ?? null;
+  if (!userMessage && args.conversationId) {
+    const lastIn = await prisma.message.findFirst({
+      where: {
+        conversationId: args.conversationId,
+        direction: "in",
+        isPrivate: false,
+      },
+      orderBy: { createdAt: "desc" },
+      select: { content: true },
+    });
+    userMessage = lastIn?.content ?? null;
+  }
+
   if (!dept) {
     const key = inferDepartmentFromContext({
-      userMessage: args.userMessage,
+      userMessage,
       pipelineName,
       stageName,
     });

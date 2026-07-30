@@ -106,7 +106,7 @@ export async function scheduleAiReply(
   if (input.eligible === false) return;
   if (!input.userMessage?.trim() && !input.messageId) return;
 
-  // Kill-switch: em prod só o telefone de teste recebe IA.
+  // Allowlist (default aberto em produção). Se restricted, bloqueia.
   try {
     const allowed = await isContactAllowedForAi(input.contactId);
     if (!allowed) {

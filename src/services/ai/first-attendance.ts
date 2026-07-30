@@ -268,42 +268,23 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
-  // Já tem humano no chat (ainda sem reply) → não mexe.
-  if (conv.assignedToId && conv.assignedTo?.type === "HUMAN") {
-    logAi("first_attendance_skip_human_on_chat", {
+  // Humano no chat SEM reply → libera para a IA (1º atendimento).
+  // Herança de responsável antigo não deve bloquear o agente acadêmico.
+  if (conv.assignedToId && conv.assignedTo?.type === "HUMAN" && !conv.hasHumanReply) {
+    logAi("first_attendance_clear_inherited_human", {
       conversationId: args.conversationId,
       humanUserId: conv.assignedToId,
     });
-    return null;
-  }
-
-  // Humano no contato/deal → devolve o chat a ele.
-  const humanOwner =
-    (args.assignedToId
-      ? (
-          await prisma.user.findUnique({
-            where: { id: args.assignedToId },
-            select: { type: true },
-          })
-        )?.type === "HUMAN"
-        ? args.assignedToId
-        : null
-      : null) ?? (await findExistingHumanOwner(contactId));
-
-  if (humanOwner) {
-    if (conv.assignedToId !== humanOwner) {
-      await assignConversationToHuman({
-        conversationId: args.conversationId,
-        contactId,
-        humanUserId: humanOwner,
+    await prisma.$transaction(async (tx) => {
+      await tx.conversation.update({
+        where: { id: args.conversationId },
+        data: { assignedToId: null },
       });
-      logAi("first_attendance_restored_human", {
-        conversationId: args.conversationId,
-        contactId,
-        humanUserId: humanOwner,
+      await tx.contact.update({
+        where: { id: contactId },
+        data: { assignedToId: null },
       });
-    }
-    return null;
+    });
   }
 
   const agent = await resolveFirstAttendanceAgent();
@@ -316,10 +297,35 @@ export async function tryAssignFirstAttendanceAi(args: {
 
   const academic = await isAcademicPipeContact(contactId, agent.pipelineId);
   if (!academic) {
-    logAi("first_attendance_skip_not_academic", {
-      conversationId: args.conversationId,
-      contactId,
-    });
+    // Fora do acadêmico: se havia humano no contato/deal, devolve.
+    const humanOwner =
+      (args.assignedToId
+        ? (
+            await prisma.user.findUnique({
+              where: { id: args.assignedToId },
+              select: { type: true },
+            })
+          )?.type === "HUMAN"
+          ? args.assignedToId
+          : null
+        : null) ?? (await findExistingHumanOwner(contactId));
+    if (humanOwner) {
+      await assignConversationToHuman({
+        conversationId: args.conversationId,
+        contactId,
+        humanUserId: humanOwner,
+      });
+      logAi("first_attendance_restored_human_non_academic", {
+        conversationId: args.conversationId,
+        contactId,
+        humanUserId: humanOwner,
+      });
+    } else {
+      logAi("first_attendance_skip_not_academic", {
+        conversationId: args.conversationId,
+        contactId,
+      });
+    }
     return null;
   }
 
