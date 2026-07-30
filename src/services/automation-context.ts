@@ -153,6 +153,24 @@ export async function cancelContext(contextId: string) {
   return row;
 }
 
+/** Cancela todos os contextos RUNNING/PAUSED do contato (humano assumiu). */
+export async function cancelActiveContextsForContact(
+  contactId: string,
+): Promise<number> {
+  const active = await getContactActiveContexts(contactId);
+  let n = 0;
+  for (const ctx of active) {
+    const row = await cancelContext(ctx.id);
+    if (row) n += 1;
+  }
+  if (n > 0) {
+    log.info(
+      `cancelActiveContextsForContact contact=${contactId} cancelled=${n}`,
+    );
+  }
+  return n;
+}
+
 export async function timeoutContext(contextId: string) {
   const row = await prisma.automationContext.update({
     where: { id: contextId },
@@ -187,6 +205,27 @@ export async function getContactAutomationHistory(contactId: string, limit = 20)
 }
 
 export async function processIncomingMessage(contactId: string, messageContent: string) {
+  // Se humano já está atendendo, encerra salesbot ativo e não avança passos.
+  try {
+    const { getHumanAttendanceForContact } = await import(
+      "@/services/attendance-guards"
+    );
+    const snap = await getHumanAttendanceForContact(contactId);
+    if (snap?.suppressAutomation) {
+      const cancelled = await cancelActiveContextsForContact(contactId);
+      log.info(
+        `processIncomingMessage skip — atendimento ativo contact=${contactId} cancelled=${cancelled} assignee=${snap.assignedToId ?? "-"}`,
+      );
+      return;
+    }
+  } catch (err) {
+    log.warn(
+      `processIncomingMessage human-guard failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
   const activeContexts = await getContactActiveContexts(contactId);
 
   log.debug(

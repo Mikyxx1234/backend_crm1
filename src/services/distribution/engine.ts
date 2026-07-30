@@ -24,6 +24,10 @@ import {
 } from "@/services/deals";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
+import {
+  clearOwnershipForRedistribution,
+  isAssigneeCurrentlyEligible,
+} from "./assignee-eligibility";
 import type { DistributionBlockReason } from "./eligibility";
 import {
   getDistributionResponsibles,
@@ -422,31 +426,40 @@ export async function executeDistribution(
     });
     if (already?.assignedToId) {
       const contactId = input.contactId ?? already.contactId ?? null;
-      if (contactId) {
-        await syncOwnershipForContact(contactId);
-      } else if (input.dealId) {
-        const deal = await prisma.deal.findUnique({
-          where: { id: input.dealId },
-          select: { ownerId: true, contactId: true },
+      const check = await isAssigneeCurrentlyEligible(already.assignedToId);
+      if (!check.eligible && contactId) {
+        // Offline/indisponível herdado: limpa e segue redistribuição.
+        await clearOwnershipForRedistribution({
+          conversationId: input.conversationId,
+          contactId,
         });
-        if (deal && !deal.ownerId) {
-          await assignDealOwner(input.dealId, already.assignedToId);
-        } else if (deal?.contactId) {
-          await syncOwnershipForContact(deal.contactId);
+      } else if (check.eligible) {
+        if (contactId) {
+          await syncOwnershipForContact(contactId);
+        } else if (input.dealId) {
+          const deal = await prisma.deal.findUnique({
+            where: { id: input.dealId },
+            select: { ownerId: true, contactId: true },
+          });
+          if (deal && !deal.ownerId) {
+            await assignDealOwner(input.dealId, already.assignedToId);
+          } else if (deal?.contactId) {
+            await syncOwnershipForContact(deal.contactId);
+          }
         }
+        await resolvePendingFor(
+          input.dealId,
+          contactId,
+          already.assignedToId,
+        );
+        return {
+          success: true,
+          reason: "ASSIGNED",
+          selectedUserId: already.assignedToId,
+          selectedUserName: null,
+          evaluated: [],
+        };
       }
-      await resolvePendingFor(
-        input.dealId,
-        contactId,
-        already.assignedToId,
-      );
-      return {
-        success: true,
-        reason: "ASSIGNED",
-        selectedUserId: already.assignedToId,
-        selectedUserName: null,
-        evaluated: [],
-      };
     }
   }
 
@@ -474,19 +487,31 @@ export async function executeDistribution(
     if (contactId) {
       const healed = await syncOwnershipForContact(contactId);
       if (healed && input.conversationId) {
-        const again = await prisma.conversation.findUnique({
-          where: { id: input.conversationId },
-          select: { assignedToId: true },
-        });
-        if (again?.assignedToId) {
-          await resolvePendingFor(input.dealId, contactId, again.assignedToId);
-          return {
-            success: true,
-            reason: "ASSIGNED",
-            selectedUserId: again.assignedToId,
-            selectedUserName: null,
-            evaluated: [],
-          };
+        const healCheck = await isAssigneeCurrentlyEligible(healed);
+        if (!healCheck.eligible) {
+          await clearOwnershipForRedistribution({
+            conversationId: input.conversationId,
+            contactId,
+          });
+        } else {
+          const again = await prisma.conversation.findUnique({
+            where: { id: input.conversationId },
+            select: { assignedToId: true },
+          });
+          if (again?.assignedToId) {
+            await resolvePendingFor(
+              input.dealId,
+              contactId,
+              again.assignedToId,
+            );
+            return {
+              success: true,
+              reason: "ASSIGNED",
+              selectedUserId: again.assignedToId,
+              selectedUserName: null,
+              evaluated: [],
+            };
+          }
         }
       }
     }

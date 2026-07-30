@@ -127,6 +127,10 @@ function getDrainState(orgId: string) {
  * Nunca propaga erro ao webhook — falha só loga.
  */
 import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
+import {
+  clearOwnershipForRedistribution,
+  isAssigneeCurrentlyEligible,
+} from "@/services/distribution/assignee-eligibility";
 
 export async function maybeDistributeNewInboundTicket(input: {
   conversationId: string;
@@ -143,14 +147,52 @@ export async function maybeDistributeNewInboundTicket(input: {
     }),
   );
   // #endregion
-  if (input.assignedToId) return;
+
+  // Herança de contato/deal NÃO pode burlar elegibilidade: offline /
+  // indisponível / fora do expediente devem cair na redistribuição (ou IA).
+  let assignee = input.assignedToId ?? null;
+  if (assignee) {
+    const check = await isAssigneeCurrentlyEligible(assignee);
+    if (check.eligible) {
+      console.warn(
+        "[DBG-e46688 maybeDist] keep_eligible_assignee",
+        JSON.stringify({
+          convId: input.conversationId,
+          assignee,
+          isAi: check.isAi,
+        }),
+      );
+      return;
+    }
+    console.warn(
+      "[DBG-e46688 maybeDist] clear_ineligible_assignee",
+      JSON.stringify({
+        convId: input.conversationId,
+        assignee,
+        reason: check.reason,
+      }),
+    );
+    try {
+      await clearOwnershipForRedistribution({
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+      });
+    } catch (e) {
+      console.error(
+        "[distribution] clearOwnershipForRedistribution failed",
+        e,
+      );
+      return;
+    }
+    assignee = null;
+  }
 
   // 1º atendimento: Agente IA (se houver ativo) assume antes da fila humana.
   try {
     const aiUserId = await tryAssignFirstAttendanceAi({
       conversationId: input.conversationId,
       contactId: input.contactId,
-      assignedToId: input.assignedToId,
+      assignedToId: assignee,
     });
     if (aiUserId) {
       console.warn(

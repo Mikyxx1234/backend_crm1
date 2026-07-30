@@ -159,7 +159,20 @@ export async function redistributeResponsibleQueue(
         { code: "INVALID_RECIPIENTS", status: 400 },
       );
     }
-    recipients = picked as typeof recipients;
+    // Só elegíveis (ONLINE + horário + capacidade) — evita redistribuir
+    // para quem está Offline/indisponível e continuar recebendo lead.
+    const eligiblePicked = (picked as typeof recipients).filter(
+      (r) => r.eligible,
+    );
+    if (eligiblePicked.length === 0) {
+      throw Object.assign(
+        new Error(
+          "Nenhum dos destinatários selecionados está elegível (online e no horário). Escolha consultores disponíveis ou use a fila de espera.",
+        ),
+        { code: "NO_RECIPIENTS", status: 400 },
+      );
+    }
+    recipients = eligiblePicked;
   }
 
   const received = new Map<string, number>();

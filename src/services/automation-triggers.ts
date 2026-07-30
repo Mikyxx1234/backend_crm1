@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { getHumanAttendanceForContact } from "@/services/attendance-guards";
 
 import {
   enqueueAutomation,
@@ -369,6 +370,27 @@ export async function fireTrigger(
   event: string,
   context: { contactId?: string; dealId?: string; data?: unknown; depth?: number }
 ): Promise<void> {
+  // Não dispara salesbot/INICIO-PIPE/BV em cima de atendimento humano/IA.
+  if (
+    (event === "message_received" || event === "message_sent") &&
+    context.contactId
+  ) {
+    try {
+      const snap = await getHumanAttendanceForContact(context.contactId);
+      if (snap?.suppressAutomation) {
+        console.info(
+          `[fireTrigger] skip ${event} — atendimento ativo (contact=${context.contactId} conv=${snap.conversationId} assignee=${snap.assignedToId ?? "-"} humanReply=${snap.hasHumanReply})`,
+        );
+        return;
+      }
+    } catch (err) {
+      console.warn(
+        "[fireTrigger] human attendance check failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   let automations;
   try {
     automations = await prisma.automation.findMany({

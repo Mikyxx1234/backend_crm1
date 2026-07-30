@@ -1,14 +1,13 @@
 /**
- * Primeiro atendimento por Agente IA.
+ * Primeiro atendimento por Agente IA (pipe acadêmico).
  *
- * Quando a conversa (e o contato) estão sem responsável, atribui a um
- * agente IA ativo (preferência: arquétipo ATENDIMENTO + AUTONOMOUS).
- * Substitui o “início de pipe / salesbot” para dúvidas do aluno —
- * a distribuição humana só entra no handoff.
- *
- * Sem migration: elegibilidade via AIAgentConfig já existente + org
- * setting opcional `ai.firstAttendanceUserId` (força um agente).
- * Desliga com `ai.firstAttendanceEnabled=false`.
+ * Regras:
+ *  - Só no funil acadêmico (nome ~ACADEM*, pipelineId do agente, ou
+ *    org setting `ai.firstAttendancePipelineIds`).
+ *  - Sem responsável humano → IA assume conversa + contato + deals OPEN.
+ *  - Com responsável humano já atribuído → devolve o chat a esse humano
+ *    (não “rouba” nem deixa na IA).
+ *  - Desliga com `ai.firstAttendanceEnabled=false`.
  */
 
 import { getOrgSetting } from "@/lib/org-settings";
@@ -31,7 +30,10 @@ async function isFirstAttendanceEnabled(): Promise<boolean> {
   }
 }
 
-async function resolveFirstAttendanceUserId(): Promise<string | null> {
+async function resolveFirstAttendanceAgent(): Promise<{
+  userId: string;
+  pipelineId: string | null;
+} | null> {
   try {
     const forced = await getOrgSetting("ai.firstAttendanceUserId");
     if (forced?.trim()) {
@@ -41,9 +43,17 @@ async function resolveFirstAttendanceUserId(): Promise<string | null> {
           type: "AI",
           aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
         },
-        select: { id: true },
+        select: {
+          id: true,
+          aiAgentConfig: { select: { pipelineId: true } },
+        },
       });
-      if (u) return u.id;
+      if (u) {
+        return {
+          userId: u.id,
+          pipelineId: u.aiAgentConfig?.pipelineId ?? null,
+        };
+      }
     }
   } catch {
     /* fora de RequestContext */
@@ -56,21 +66,141 @@ async function resolveFirstAttendanceUserId(): Promise<string | null> {
       archetype: "ATENDIMENTO",
     },
     orderBy: { createdAt: "asc" },
-    select: { userId: true },
+    select: { userId: true, pipelineId: true },
   });
-  if (preferred) return preferred.userId;
+  if (preferred) {
+    return { userId: preferred.userId, pipelineId: preferred.pipelineId };
+  }
 
   const any = await prisma.aIAgentConfig.findFirst({
     where: { active: true, autonomyMode: "AUTONOMOUS" },
     orderBy: { createdAt: "asc" },
-    select: { userId: true },
+    select: { userId: true, pipelineId: true },
   });
-  return any?.userId ?? null;
+  if (!any) return null;
+  return { userId: any.userId, pipelineId: any.pipelineId };
+}
+
+async function resolveConfiguredPipelineIds(
+  agentPipelineId: string | null,
+): Promise<string[]> {
+  const ids = new Set<string>();
+  if (agentPipelineId) ids.add(agentPipelineId);
+  try {
+    const raw = await getOrgSetting("ai.firstAttendancePipelineIds");
+    if (raw?.trim()) {
+      for (const part of raw.split(/[,;\s]+/)) {
+        const id = part.trim();
+        if (id) ids.add(id);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+  return [...ids];
 }
 
 /**
- * Se a conversa está sem assignee, atribui ao agente de 1º atendimento.
- * Também alinha contato + deals OPEN (mesma regra do assign do inbox).
+ * Contato está no pipe acadêmico se tem deal OPEN cujo pipeline:
+ *  - está na lista configurada (agente / org setting), OU
+ *  - nome contém "academ" (ex.: ACADEMICO).
+ */
+async function isAcademicPipeContact(
+  contactId: string,
+  agentPipelineId: string | null,
+): Promise<boolean> {
+  const configured = await resolveConfiguredPipelineIds(agentPipelineId);
+  const openDeals = await prisma.deal.findMany({
+    where: { contactId, status: "OPEN" },
+    select: {
+      id: true,
+      pipelineId: true,
+      pipeline: { select: { name: true } },
+    },
+  });
+  if (openDeals.length === 0) {
+    // Sem deal: ainda assim atende se o canal default aponta p/ acadêmico
+    // (mensagens iniciais antes do deal). Heurística pelo nome do pipeline
+    // default do canal da conversa mais recente.
+    const conv = await prisma.conversation.findFirst({
+      where: { contactId, status: { not: "RESOLVED" } },
+      orderBy: { updatedAt: "desc" },
+      select: {
+        channelRef: {
+          select: {
+            defaultPipeline: { select: { id: true, name: true } },
+          },
+        },
+      },
+    });
+    const pipe = conv?.channelRef?.defaultPipeline;
+    if (!pipe) return false;
+    if (configured.includes(pipe.id)) return true;
+    return /academ/i.test(pipe.name ?? "");
+  }
+
+  for (const d of openDeals) {
+    if (configured.includes(d.pipelineId)) return true;
+    if (/academ/i.test(d.pipeline?.name ?? "")) return true;
+  }
+  return false;
+}
+
+/**
+ * Dono humano atual (contato ou deal OPEN) — se existir, o chat volta pra ele.
+ */
+async function findExistingHumanOwner(
+  contactId: string,
+): Promise<string | null> {
+  const contact = await prisma.contact.findUnique({
+    where: { id: contactId },
+    select: {
+      assignedToId: true,
+      assignedTo: { select: { type: true } },
+    },
+  });
+  if (contact?.assignedToId && contact.assignedTo?.type === "HUMAN") {
+    return contact.assignedToId;
+  }
+
+  const deal = await prisma.deal.findFirst({
+    where: {
+      contactId,
+      status: "OPEN",
+      ownerId: { not: null },
+      owner: { type: "HUMAN" },
+    },
+    orderBy: { updatedAt: "desc" },
+    select: { ownerId: true },
+  });
+  return deal?.ownerId ?? null;
+}
+
+async function assignConversationToHuman(args: {
+  conversationId: string;
+  contactId: string;
+  humanUserId: string;
+}): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    await tx.conversation.update({
+      where: { id: args.conversationId },
+      data: { assignedToId: args.humanUserId },
+    });
+    await tx.contact.update({
+      where: { id: args.contactId },
+      data: { assignedToId: args.humanUserId },
+    });
+    await tx.deal.updateMany({
+      where: { contactId: args.contactId, status: "OPEN" },
+      data: { ownerId: args.humanUserId },
+    });
+  });
+}
+
+/**
+ * Se a conversa está sem assignee humano e está no pipe acadêmico,
+ * atribui ao agente de 1º atendimento.
+ * Se já há humano responsável, devolve o chat a ele e retorna null.
  * @returns userId da IA se atribuiu; null se não aplicável.
  */
 export async function tryAssignFirstAttendanceAi(args: {
@@ -78,7 +208,6 @@ export async function tryAssignFirstAttendanceAi(args: {
   contactId: string;
   assignedToId?: string | null;
 }): Promise<string | null> {
-  if (args.assignedToId) return null;
   if (!(await isFirstAttendanceEnabled())) {
     logAi("first_attendance_disabled", {
       conversationId: args.conversationId,
@@ -88,19 +217,78 @@ export async function tryAssignFirstAttendanceAi(args: {
 
   const conv = await prisma.conversation.findUnique({
     where: { id: args.conversationId },
-    select: { assignedToId: true, contactId: true },
+    select: {
+      assignedToId: true,
+      contactId: true,
+      assignedTo: { select: { type: true } },
+    },
   });
-  if (!conv || conv.assignedToId) return null;
+  if (!conv) return null;
 
-  const aiUserId = await resolveFirstAttendanceUserId();
-  if (!aiUserId) {
+  const contactId = conv.contactId ?? args.contactId;
+  if (!contactId) return null;
+
+  // Já tem humano no chat → não mexe.
+  if (conv.assignedToId && conv.assignedTo?.type === "HUMAN") {
+    logAi("first_attendance_skip_human_on_chat", {
+      conversationId: args.conversationId,
+      humanUserId: conv.assignedToId,
+    });
+    return null;
+  }
+
+  // Humano no contato/deal → devolve o chat a ele (mesmo se chat estava na IA).
+  const humanOwner =
+    (args.assignedToId
+      ? (
+          await prisma.user.findUnique({
+            where: { id: args.assignedToId },
+            select: { type: true },
+          })
+        )?.type === "HUMAN"
+        ? args.assignedToId
+        : null
+      : null) ?? (await findExistingHumanOwner(contactId));
+
+  if (humanOwner) {
+    if (conv.assignedToId !== humanOwner) {
+      await assignConversationToHuman({
+        conversationId: args.conversationId,
+        contactId,
+        humanUserId: humanOwner,
+      });
+      logAi("first_attendance_restored_human", {
+        conversationId: args.conversationId,
+        contactId,
+        humanUserId: humanOwner,
+      });
+    }
+    return null;
+  }
+
+  // Já está na IA → ok, não reatribui.
+  if (conv.assignedToId && conv.assignedTo?.type === "AI") {
+    return null;
+  }
+
+  const agent = await resolveFirstAttendanceAgent();
+  if (!agent) {
     logAi("first_attendance_no_agent", {
       conversationId: args.conversationId,
     });
     return null;
   }
 
-  const contactId = conv.contactId ?? args.contactId;
+  const academic = await isAcademicPipeContact(contactId, agent.pipelineId);
+  if (!academic) {
+    logAi("first_attendance_skip_not_academic", {
+      conversationId: args.conversationId,
+      contactId,
+    });
+    return null;
+  }
+
+  const aiUserId = agent.userId;
 
   await prisma.$transaction(async (tx) => {
     await tx.conversation.update({
@@ -110,16 +298,14 @@ export async function tryAssignFirstAttendanceAi(args: {
         aiGreetedAt: null,
       },
     });
-    if (contactId) {
-      await tx.contact.update({
-        where: { id: contactId },
-        data: { assignedToId: aiUserId },
-      });
-      await tx.deal.updateMany({
-        where: { contactId, status: "OPEN" },
-        data: { ownerId: aiUserId },
-      });
-    }
+    await tx.contact.update({
+      where: { id: contactId },
+      data: { assignedToId: aiUserId },
+    });
+    await tx.deal.updateMany({
+      where: { contactId, status: "OPEN" },
+      data: { ownerId: aiUserId },
+    });
   });
 
   logAi("first_attendance_assigned", {

@@ -24,10 +24,18 @@ import {
 import { sseBus } from "@/lib/sse-bus";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
+import { cancelActiveContextsForContact } from "@/services/automation-context";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { logEvent } from "@/services/activity-log";
 
+/** Após humano enviar: mata salesbot ativo do contato (best-effort). */
+function stopAutomationsAfterHumanReply(contactId: string | null | undefined) {
+  if (!contactId) return;
+  void cancelActiveContextsForContact(contactId).catch((err) =>
+    console.warn("[automation] cancel after human reply:", err),
+  );
+}
 type RouteContext = { params: Promise<{ id: string }> };
 
 // ── DTO ──────────────────────────────────────
@@ -744,6 +752,8 @@ export async function POST(request: Request, context: RouteContext) {
         });
       } catch { /* colunas opcionais */ }
 
+      stopAutomationsAfterHumanReply(conv.contactId);
+
       fireTrigger("message_sent", {
         contactId: conv.contactId,
         data: { channel: channelLabel, content },
@@ -883,6 +893,8 @@ export async function POST(request: Request, context: RouteContext) {
         },
       });
     } catch { /* columns may not exist yet */ }
+
+    stopAutomationsAfterHumanReply(conv.contactId);
 
     fireTrigger("message_sent", {
       contactId: conv.contactId,
