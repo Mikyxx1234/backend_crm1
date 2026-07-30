@@ -38,6 +38,10 @@ export async function GET(request: Request) {
     // a resposta já traz o(s) item(ns)".
     const emailExact = searchParams.get("email") ?? undefined;
     const phoneExact = searchParams.get("phone") ?? undefined;
+    // Match exato pelo id do post/anúncio Meta que originou o contato
+    // (Contact.adSourceId, gravado pelo webhook Meta em referral.source_id).
+    // Uso principal: integrações (n8n) enumerando leads por anúncio.
+    const adSourceId = searchParams.get("adSourceId") ?? undefined;
     const page = parseIntParam(searchParams.get("page"), 1);
     const perPage = parseIntParam(searchParams.get("perPage"), 20);
     const sortByRaw = searchParams.get("sortBy");
@@ -99,6 +103,7 @@ export async function GET(request: Request) {
       customFieldFilters: customFieldFilters.length > 0 ? customFieldFilters : undefined,
       emailExact,
       phoneExact,
+      adSourceId,
       createdFrom,
       createdTo,
       updatedFrom,
