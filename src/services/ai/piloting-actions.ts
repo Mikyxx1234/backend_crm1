@@ -403,7 +403,21 @@ export async function hasAgentGreetedInCurrentAssignment(
     where: { id: conversationId },
     select: { aiGreetedAt: true },
   });
-  return row?.aiGreetedAt != null;
+  if (row?.aiGreetedAt != null) return true;
+
+  // Fallback: qualquer outbound do bot nesta conversa conta como
+  // já saudou — evita reenviar openingMessage após handoff.
+  const botOut = await prisma.message.findFirst({
+    where: {
+      conversationId,
+      direction: "out",
+      authorType: "bot",
+      isPrivate: false,
+      messageType: { not: "note" },
+    },
+    select: { id: true },
+  });
+  return botOut != null;
 }
 
 /**
@@ -499,7 +513,7 @@ export async function triggerAgentOpeningForContact(args: {
   if (!cfg.openingMessage?.trim()) {
     return { status: "skipped", reason: "no_opening_message" };
   }
-  if (conversation.aiGreetedAt != null) {
+  if (await hasAgentGreetedInCurrentAssignment(conversation.id)) {
     return { status: "skipped", reason: "already_greeted" };
   }
 

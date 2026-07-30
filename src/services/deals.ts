@@ -576,9 +576,24 @@ export async function propagateOwnerToContactAndChat(
           contactId,
           OR: [{ assignedToId: null }, { assignedToId: { not: ownerId } }],
         };
+
+  // Só reseta aiGreetedAt quando o novo responsável é IA — atribuição a
+  // humano (ou remoção) não deve apagar o marcador de saudação.
+  let newOwnerIsAi = false;
+  if (ownerId) {
+    const ownerRow = await tx.user.findUnique({
+      where: { id: ownerId },
+      select: { type: true },
+    });
+    newOwnerIsAi = ownerRow?.type === "AI";
+  }
+
   await tx.conversation.updateMany({
     where: changedWhere,
-    data: { assignedToId: ownerId, aiGreetedAt: null },
+    data: {
+      assignedToId: ownerId,
+      ...(newOwnerIsAi ? { aiGreetedAt: null } : {}),
+    },
   });
 }
 
