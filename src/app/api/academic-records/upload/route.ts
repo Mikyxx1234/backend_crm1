@@ -3,6 +3,9 @@ import { NextResponse } from "next/server";
 import { requireAdmin } from "@/lib/auth-helpers";
 import { importMatriculados } from "@/services/academic-records";
 
+/** Relatórios de matriculados podem levar minutos (parse + milhares de inserts). */
+export const maxDuration = 300;
+
 const MAX_FILE_SIZE = 32 * 1024 * 1024;
 
 /**
