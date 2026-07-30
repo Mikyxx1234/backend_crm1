@@ -30,11 +30,15 @@ import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { logEvent } from "@/services/activity-log";
 
 /** Após humano enviar: mata salesbot ativo do contato (best-effort). */
-function stopAutomationsAfterHumanReply(contactId: string | null | undefined) {
+async function stopAutomationsAfterHumanReply(
+  contactId: string | null | undefined,
+): Promise<void> {
   if (!contactId) return;
-  void cancelActiveContextsForContact(contactId).catch((err) =>
-    console.warn("[automation] cancel after human reply:", err),
-  );
+  try {
+    await cancelActiveContextsForContact(contactId);
+  } catch (err) {
+    console.warn("[automation] cancel after human reply:", err);
+  }
 }
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -752,12 +756,12 @@ export async function POST(request: Request, context: RouteContext) {
         });
       } catch { /* colunas opcionais */ }
 
-      stopAutomationsAfterHumanReply(conv.contactId);
-
-      fireTrigger("message_sent", {
-        contactId: conv.contactId,
-        data: { channel: channelLabel, content },
-      }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+      void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
+        fireTrigger("message_sent", {
+          contactId: conv.contactId,
+          data: { channel: channelLabel, content },
+        }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
+      );
 
       if (!sendRes.failed) {
         void logEvent({
@@ -894,12 +898,12 @@ export async function POST(request: Request, context: RouteContext) {
       });
     } catch { /* columns may not exist yet */ }
 
-    stopAutomationsAfterHumanReply(conv.contactId);
-
-    fireTrigger("message_sent", {
-      contactId: conv.contactId,
-      data: { channel: "WhatsApp", content },
-    }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+    void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
+      fireTrigger("message_sent", {
+        contactId: conv.contactId,
+        data: { channel: "WhatsApp", content },
+      }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
+    );
 
     // Log unificado de atividade (Activity Log) — fire-and-forget.
     // Falhas de envio sao registradas como MESSAGE_FAILED dentro de

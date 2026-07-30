@@ -370,11 +370,9 @@ export async function fireTrigger(
   event: string,
   context: { contactId?: string; dealId?: string; data?: unknown; depth?: number }
 ): Promise<void> {
-  // Não dispara salesbot/INICIO-PIPE/BV em cima de atendimento humano/IA.
-  if (
-    (event === "message_received" || event === "message_sent") &&
-    context.contactId
-  ) {
+  // Guarda só no INBOUND: não responder por cima de atendimento humano.
+  // message_sent é ação do agente e não pode ser suprimido por ela.
+  if (event === "message_received" && context.contactId) {
     try {
       const snap = await getHumanAttendanceForContact(context.contactId);
       if (snap?.suppressAutomation) {
