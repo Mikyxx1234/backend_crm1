@@ -164,6 +164,62 @@ function getDrainState(orgId: string) {
 }
 
 /**
+ * Marca como RESOLVED as pendências cuja conversa NÃO precisa mais ser
+ * distribuída — ou seja, saiu do universo `ABERTA_SEM_RESPONSAVEL`. Cobre:
+ *
+ *   - Conversa encerrada por qualquer via (status != OPEN)
+ *   - Conversa OPEN mas já atribuída por outro caminho (agente manual,
+ *     herança de contato/deal, `maybeAssignExisting…`)
+ *   - Conversa deletada
+ *
+ * Sem essa limpeza, o motor rescheduling ficava batendo em pendências
+ * fantasma (uma delas chegou a `attempts=1077` em prod — Cruzeiro EaD
+ * 2026-07-30) e a "fila de espera" do dashboard mostrava valores enganosos.
+ * `resolvedUserId=null` marca que foi cleanup, não distribuição real.
+ *
+ * Idempotente e barata (uma consulta com IN() + updateMany).
+ */
+async function cancelStalePendingOrphans(orgId: string): Promise<number> {
+  const stale = await prisma.distributionPending.findMany({
+    where: {
+      organizationId: orgId,
+      status: "PENDING",
+      conversationId: { not: null },
+    },
+    select: { id: true, conversationId: true },
+  });
+  if (stale.length === 0) return 0;
+
+  const convIds = stale
+    .map((p) => p.conversationId)
+    .filter((id): id is string => Boolean(id));
+
+  const stillActive = await prisma.conversation.findMany({
+    where: {
+      id: { in: convIds },
+      status: "OPEN",
+      assignedToId: null,
+    },
+    select: { id: true },
+  });
+  const activeSet = new Set(stillActive.map((c) => c.id));
+
+  const toResolve = stale
+    .filter((p) => !p.conversationId || !activeSet.has(p.conversationId))
+    .map((p) => p.id);
+  if (toResolve.length === 0) return 0;
+
+  const res = await prisma.distributionPending.updateMany({
+    where: { id: { in: toResolve } },
+    data: {
+      status: "RESOLVED",
+      resolvedAt: new Date(),
+    },
+  });
+  return res.count;
+}
+
+/**
  * Após criar um NOVO ticket OPEN inbound (modelo: RESOLVED não reabre),
  * tenta distribuir imediatamente se ainda não há responsável.
  *
@@ -393,6 +449,22 @@ export async function processPendingDistributionQueue(opts: {
       return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
     }
 
+    // Limpa pendências órfãs (conversa já encerrada / atribuída por outra via)
+    // antes de tentar distribuir. Sem isso o registro fica em `PENDING`
+    // eternamente e infla o dashboard com "aguardando" que não é fila real.
+    let cancelledOrphans = 0;
+    try {
+      cancelledOrphans = await cancelStalePendingOrphans(orgId);
+      if (cancelledOrphans > 0) {
+        console.info(
+          "[distribution] cancelStalePendingOrphans",
+          JSON.stringify({ orgId, trigger: opts.trigger, cancelled: cancelledOrphans }),
+        );
+      }
+    } catch (e) {
+      console.warn("[distribution] cancelStalePendingOrphans failed", e);
+    }
+
     // Gate: sem NENHUM consultor elegível agora, não percorre a fila
     // (evita centenas de executeDistribution → CPU / log spam).
     let anyEligible = false;
@@ -412,9 +484,15 @@ export async function processPendingDistributionQueue(opts: {
       });
       console.info(
         "[distribution] processPending skip — nenhum consultor elegível",
-        JSON.stringify({ orgId, trigger: opts.trigger, pending }),
+        JSON.stringify({ orgId, trigger: opts.trigger, pending, cancelledOrphans }),
       );
-      return { resolved: 0, cancelled: 0, pending, trigger: opts.trigger };
+      // Mesmo sem elegíveis, cancelamento de órfãs conta como progresso.
+      return {
+        resolved: 0,
+        cancelled: cancelledOrphans,
+        pending,
+        trigger: opts.trigger,
+      };
     }
 
     const items = await prisma.conversation.findMany({
@@ -484,20 +562,26 @@ export async function processPendingDistributionQueue(opts: {
       where: ABERTA_SEM_RESPONSAVEL,
     });
 
-    if (resolved > 0 || opts.trigger === "manual" || opts.trigger === "scheduled") {
+    if (
+      resolved > 0 ||
+      cancelledOrphans > 0 ||
+      opts.trigger === "manual" ||
+      opts.trigger === "scheduled"
+    ) {
       console.info(
         "[distribution] processPendingDistributionQueue",
         JSON.stringify({
           orgId,
           trigger: opts.trigger,
           resolved,
+          cancelledOrphans,
           pending,
           scanned: items.length,
         }),
       );
     }
 
-    return { resolved, cancelled: 0, pending, trigger: opts.trigger };
+    return { resolved, cancelled: cancelledOrphans, pending, trigger: opts.trigger };
   } finally {
     state.running = false;
     const queued = state.queuedTrigger;
