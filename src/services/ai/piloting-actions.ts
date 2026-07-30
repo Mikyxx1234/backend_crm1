@@ -95,6 +95,19 @@ export async function sendAgentMessage(args: {
   const text = args.text.trim();
   if (!text) return { status: "skipped", reason: "empty" };
 
+  // Kill-switch absoluto: não envia WhatsApp fora da allowlist.
+  try {
+    const { isContactAllowedForAi } = await import(
+      "@/services/ai/phone-allowlist"
+    );
+    const allowed = await isContactAllowedForAi(args.contactId);
+    if (!allowed) {
+      return { status: "skipped", reason: "phone_allowlist" };
+    }
+  } catch {
+    return { status: "skipped", reason: "phone_allowlist_error" };
+  }
+
   // Revalida autorização imediatamente antes de qualquer envio.
   const { assertAiStillAuthorized } = await import("@/services/ai/inbox-handler");
   const auth = await assertAiStillAuthorized({

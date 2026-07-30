@@ -12,6 +12,7 @@ import { cache } from "@/lib/cache";
 import { getOrgIdOrNull, runWithContext } from "@/lib/request-context";
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
+import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 
 export const DEFAULT_AI_DEBOUNCE_MS = 2500;
 const MSG_CLAIM_TTL_SEC = 600;
@@ -104,6 +105,21 @@ export async function scheduleAiReply(
 ): Promise<void> {
   if (input.eligible === false) return;
   if (!input.userMessage?.trim() && !input.messageId) return;
+
+  // Kill-switch: em prod só o telefone de teste recebe IA.
+  try {
+    const allowed = await isContactAllowedForAi(input.contactId);
+    if (!allowed) {
+      logAi("debounce_skip_allowlist", {
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+      });
+      return;
+    }
+  } catch (e) {
+    console.error("[ai] phone allowlist check failed — blocking reply", e);
+    return;
+  }
 
   const claimed = await claimInboundMessageForAi(input.messageId);
   if (!claimed) return;

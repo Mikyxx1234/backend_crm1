@@ -12,6 +12,7 @@
 
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
+import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 
 function logAi(event: string, payload: Record<string, unknown>) {
   console.info(
@@ -212,6 +213,21 @@ export async function tryAssignFirstAttendanceAi(args: {
     logAi("first_attendance_disabled", {
       conversationId: args.conversationId,
     });
+    return null;
+  }
+
+  // Segurança: não atribui IA a nenhum telefone fora da allowlist.
+  try {
+    const allowed = await isContactAllowedForAi(args.contactId);
+    if (!allowed) {
+      logAi("first_attendance_skip_allowlist", {
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+      });
+      return null;
+    }
+  } catch (e) {
+    console.error("[ai] first_attendance allowlist failed — skipping", e);
     return null;
   }
 

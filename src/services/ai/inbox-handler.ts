@@ -48,6 +48,7 @@ import {
   markAgentGreetedNow,
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
+import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 import {
   LOW_CONFIDENCE_HANDOFF_MESSAGE,
   parseAgentConfidence,
@@ -143,6 +144,22 @@ export async function assertAiStillAuthorized(args: {
 export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
   const startedAt = new Date();
   try {
+    // Defesa em profundidade: nunca envia se telefone fora da allowlist.
+    try {
+      const allowed = await isContactAllowedForAi(args.contactId);
+      if (!allowed) {
+        logAi("blocked", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          reason: "phone_allowlist",
+        });
+        return;
+      }
+    } catch (e) {
+      console.error("[ai] phone allowlist in maybeReply — blocking", e);
+      return;
+    }
+
     const conversation = await prisma.conversation.findUnique({
       where: { id: args.conversationId },
       select: {
