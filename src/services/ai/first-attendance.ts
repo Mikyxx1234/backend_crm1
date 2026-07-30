@@ -105,6 +105,10 @@ async function resolveConfiguredPipelineIds(
  * Contato está no pipe acadêmico se tem deal OPEN cujo pipeline:
  *  - está na lista configurada (agente / org setting), OU
  *  - nome contém "academ" (ex.: ACADEMICO).
+ *
+ * Importante: `Deal` NÃO tem `pipelineId` direto — o funil vem de
+ * `deal.stage.pipeline`. Select errado quebrava o 1º atendimento em
+ * runtime (catch silencioso → ninguém recebia a IA).
  */
 async function isAcademicPipeContact(
   contactId: string,
@@ -115,8 +119,11 @@ async function isAcademicPipeContact(
     where: { contactId, status: "OPEN" },
     select: {
       id: true,
-      pipelineId: true,
-      pipeline: { select: { name: true } },
+      stage: {
+        select: {
+          pipeline: { select: { id: true, name: true } },
+        },
+      },
     },
   });
   if (openDeals.length === 0) {
@@ -141,8 +148,10 @@ async function isAcademicPipeContact(
   }
 
   for (const d of openDeals) {
-    if (configured.includes(d.pipelineId)) return true;
-    if (/academ/i.test(d.pipeline?.name ?? "")) return true;
+    const pipe = d.stage?.pipeline;
+    if (!pipe) continue;
+    if (configured.includes(pipe.id)) return true;
+    if (/academ/i.test(pipe.name ?? "")) return true;
   }
   return false;
 }
