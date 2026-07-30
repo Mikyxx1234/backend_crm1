@@ -11,13 +11,20 @@ export const dynamic = "force-dynamic";
  * Conceito — quão ocupado o agente está AGORA, expresso em % da carga
  * máxima recomendada. Usamos:
  *
- *   activeConversations = conversas OPEN atribuídas a ele
- *                         (ignoramos PENDING/SNOOZED/RESOLVED)
+ *   activeConversations = conversas OPEN atribuídas onde é a VEZ do agente
+ *                         responder ("Entrada" + "Aguardando" do inbox).
+ *                         Ignoramos "Respondidas" (aguarda cliente voltar)
+ *                         e "Erro" (não é carga ativa).
  *   maxConcurrent       = limite recomendado (20 por padrão — pode
  *                         virar `User.maxConcurrentConversations` no
  *                         futuro sem quebrar consumidor).
  *
  *   loadPct = clamp(active / max × 100, 0..100)
+ *
+ * Definição alinhada com `getQueueCounts` (ver AGENT.md 2026-07-30). Antes
+ * contávamos TODAS as OPEN atribuídas, o que inflava a carga com conversas
+ * que dependiam do cliente voltar — o widget mostrava "sobrecarregado"
+ * mesmo com o consultor com pouca coisa pra fazer AGORA.
  *
  * Também devolvemos um "tone" (healthy/busy/overloaded) pronto para o
  * frontend aplicar cor sem recalcular thresholds. A régua é:
@@ -43,6 +50,11 @@ export async function GET() {
     where: {
       status: "OPEN",
       assignedToId: userId,
+      hasError: false,
+      OR: [
+        { hasHumanReply: false },
+        { lastMessageDirection: "in" },
+      ],
     },
   });
 
