@@ -54,7 +54,7 @@ function readNumber(cfg: unknown, key: string): number | undefined {
  *  2. Setar `timeoutAt` se o step tem `timeoutMs` configurado (cronômetro)
  *  3. NÃO chamar continueFromStep (esses steps pausam o fluxo)
  */
-const PAUSING_STEP_TYPES = new Set([
+export const PAUSING_STEP_TYPES = new Set([
   "question",
   "send_whatsapp_interactive",
   "send_whatsapp_template",
@@ -70,6 +70,32 @@ export async function getActiveContext(automationId: string, contactId: string) 
     },
     orderBy: { updatedAt: "desc" },
   });
+}
+
+/**
+ * Fecha contexto RUNNING órfão ao fim da execução do motor.
+ * Não toca contextos parados em passo pausante (espera legítima de resposta).
+ */
+export async function closeStrandedContext(automationId: string, contactId: string) {
+  const ctx = await getActiveContext(automationId, contactId);
+  if (!ctx) return null;
+
+  if (ctx.currentStepId) {
+    const step = await prisma.automationStep.findUnique({
+      where: { id: ctx.currentStepId },
+      select: { type: true },
+    });
+    if (step && PAUSING_STEP_TYPES.has(step.type)) {
+      return null;
+    }
+  }
+
+  const row = await prisma.automationContext.update({
+    where: { id: ctx.id },
+    data: { status: "COMPLETED", currentStepId: null, timeoutAt: null },
+  });
+  publishAutomationState(row);
+  return row;
 }
 
 export async function createContext(
