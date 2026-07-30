@@ -5,6 +5,7 @@
 
 import { executeDistribution } from "@/services/distribution";
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { ACADEMIC_DEPARTMENT_ALIASES } from "@/lib/ai-agents/academic-atendimento-prompt";
 
 export type AcademicDeptKey = keyof typeof ACADEMIC_DEPARTMENT_ALIASES;
@@ -266,6 +267,38 @@ export async function executeAcademicDepartmentHandoff(args: {
     departmentId: dept?.id ?? null,
     reassign: true,
   });
+
+  // Nota interna de distribuição (privada, não duplica em 2 min)
+  const noteContent = dept
+    ? `Conversa distribuída para ${dept.name}`
+    : `Conversa distribuída para a fila de atendimento`;
+  const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
+  const existingNote = await prisma.message.findFirst({
+    where: {
+      conversationId: args.conversationId,
+      messageType: "note",
+      isPrivate: true,
+      content: { startsWith: "Conversa distribuída para" },
+      createdAt: { gte: twoMinutesAgo },
+    },
+    select: { id: true },
+  });
+  if (!existingNote) {
+    await prisma.message
+      .create({
+        data: withOrgFromCtx({
+          conversationId: args.conversationId,
+          content: noteContent,
+          messageType: "note",
+          isPrivate: true,
+          authorType: "bot",
+          direction: "out",
+          senderName: "Agente IA",
+          sendStatus: "sent",
+        }),
+      })
+      .catch(() => null);
+  }
 
   return {
     departmentId: dept?.id ?? null,
