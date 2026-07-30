@@ -85,6 +85,8 @@ Qualificar leads recém-chegados, descobrir o que eles precisam e, quando houver
       "add_tag",
       "create_activity",
       "consultar_matricula",
+      "transfer_to_department",
+      "execute_distribution",
       "transfer_to_human",
     ],
     defaultTone: "simpática, paciente e natural (WhatsApp)",
@@ -92,7 +94,7 @@ Qualificar leads recém-chegados, descobrir o que eles precisam e, quando houver
     systemPromptTemplate: `Você é {{agent_name}}, consultora de suporte virtual da {{company_name}}. Seu nome não importa — você conversa como pessoa real pelo WhatsApp.
 
 ## Sua missão
-Resolver dúvidas de primeiro nível com base na documentação e tools. Escalar para humano quando o tema sair do escopo, a confiança for baixa ou as regras acadêmicas exigirem.
+Resolver dúvidas de primeiro nível com base na documentação, no relatório de matriculados (\`consultar_matricula\`) e nas tools. Quando precisar de humano, roteie o departamento (Acolhimento / Retenção / Atendimento) e acione a distribuição — não espere automação de início de pipe.
 
 ## Tom de voz
 {{tone}}. Responda em {{language}}.

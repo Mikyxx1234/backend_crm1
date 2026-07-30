@@ -28,6 +28,10 @@ import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
 import { executeDistribution } from "@/services/distribution";
 import { addTagToContact } from "@/services/tags";
+import {
+  resolveDepartmentByName,
+  executeAcademicDepartmentHandoff,
+} from "@/services/ai/academic-department-routing";
 import type { ActivityType, Prisma } from "@prisma/client";
 
 export type RunContext = {
@@ -613,49 +617,82 @@ function searchProductsTool(_ctx: RunContext) {
 function transferToHumanTool(ctx: RunContext) {
   return tool({
     description:
-      "Transfere a conversa atual para um atendente humano. Use sempre que o assunto sair do seu escopo, quando o cliente pedir explicitamente, ou quando detectar insatisfação/risco. Após chamar, NÃO envie mais mensagens — pare de responder.",
+      "Transfere a conversa para um consultor humano via Distribuição Inteligente. Prefira informar `departmentName` (Acolhimento / Retenção / Atendimento). Se omitir, o sistema infere: retenção (cancelar/trancar/transferência curso-polo), acolhimento (funil acolhimento), senão atendimento. Após chamar, NÃO envie mais mensagens longas — só confirme ao aluno que um consultor vai ajudar.",
     inputSchema: z.object({
       reason: z
         .string()
         .describe(
-          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu falar com humano sobre reembolso').",
+          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu cancelar matrícula').",
+        ),
+      departmentName: z
+        .string()
+        .optional()
+        .describe(
+          "Acolhimento | Retenção | Atendimento (ou Atendimento - SAC).",
         ),
     }),
-    execute: async ({ reason }) => {
+    execute: async ({ reason, departmentName }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
-        await prisma.conversation.update({
-          where: { id: ctx.conversationId },
-          data: {
-            assignedToId: null,
-            updatedAt: new Date(),
-          },
+        const result = await executeAcademicDepartmentHandoff({
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          dealId: ctx.dealId,
+          departmentName: departmentName ?? null,
+          reason,
         });
         if (ctx.contactId) {
           await createActivity({
             type: "NOTE",
             title: "Transferência IA → humano",
-            description: reason,
+            description: [
+              reason,
+              result.departmentName
+                ? `Dept: ${result.departmentName}`
+                : null,
+              result.distribution?.selectedUserName
+                ? `Atribuído: ${result.distribution.selectedUserName}`
+                : result.distribution?.reason
+                  ? `Distribuição: ${result.distribution.reason}`
+                  : null,
+            ]
+              .filter(Boolean)
+              .join(" | "),
             completed: true,
             contactId: ctx.contactId,
             dealId: ctx.dealId ?? undefined,
             userId: ctx.agentUserId,
           }).catch(() => null);
         }
-        sseBus.publish("conversation_unassigned", {
-          organizationId: getOrgIdOrNull(),
-          conversationId: ctx.conversationId,
-          contactId: ctx.contactId,
-          reason,
-        });
+        sseBus.publish(
+          result.distribution?.selectedUserId
+            ? "conversation_assigned"
+            : "conversation_unassigned",
+          {
+            organizationId: getOrgIdOrNull(),
+            conversationId: ctx.conversationId,
+            contactId: ctx.contactId,
+            assignedToId: result.distribution?.selectedUserId ?? null,
+            reason,
+          },
+        );
         if (ctx.dealId) {
           createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
             action: "transferred_to_human",
             agentId: ctx.agentId ?? null,
             reason,
+            departmentId: result.departmentId,
+            departmentName: result.departmentName,
+            selectedUserId: result.distribution?.selectedUserId ?? null,
           }).catch(() => {});
         }
-        return ok({ transferred: true });
+        return ok({
+          transferred: true,
+          departmentName: result.departmentName,
+          assigned: Boolean(result.distribution?.success),
+          assignedTo: result.distribution?.selectedUserName ?? null,
+          distributionReason: result.distribution?.reason ?? null,
+        });
       } catch (err) {
         return fail(err instanceof Error ? err.message : "Falha ao transferir.");
       }
@@ -682,13 +719,10 @@ function transferToDepartmentTool(ctx: RunContext) {
         if (!ctx.conversationId) return fail("Sem conversa ativa para rotear.");
         const name = departmentName.trim();
         if (!name) return fail("Nome de departamento vazio.");
-        const dept = await prisma.department.findFirst({
-          where: { name: { equals: name, mode: "insensitive" } },
-          select: { id: true, name: true },
-        });
+        const dept = await resolveDepartmentByName(name);
         if (!dept)
           return fail(
-            `Departamento "${name}" não encontrado. Departamentos válidos são configurados pela organização.`,
+            `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
           );
         await prisma.conversation.update({
           where: { id: ctx.conversationId },
@@ -737,13 +771,16 @@ function executeDistributionTool(ctx: RunContext) {
 
         let departmentId: string | null = null;
         if (departmentName?.trim()) {
-          const dept = await prisma.department.findFirst({
-            where: { name: { equals: departmentName.trim(), mode: "insensitive" } },
-            select: { id: true },
-          });
+          const dept = await resolveDepartmentByName(departmentName);
           if (!dept)
             return fail(`Departamento "${departmentName}" não encontrado.`);
           departmentId = dept.id;
+          if (ctx.conversationId) {
+            await prisma.conversation.update({
+              where: { id: ctx.conversationId },
+              data: { departmentId: dept.id, updatedAt: new Date() },
+            });
+          }
         }
 
         const result = await executeDistribution({

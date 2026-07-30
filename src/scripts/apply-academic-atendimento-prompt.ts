@@ -13,17 +13,14 @@ import {
 } from "../lib/ai-agents/academic-atendimento-prompt";
 import { getArchetype } from "../lib/ai-agents/archetypes";
 
-/** Atendimento puro: sem distribuição automática. */
+/** Atendimento com distribuição por departamento (substitui INICIO-PIPE). */
 const ACADEMIC_TOOLS = [
   "add_tag",
   "create_activity",
   "consultar_matricula",
-  "transfer_to_human",
-];
-
-const TOOLS_TO_DISABLE = [
-  "execute_distribution",
   "transfer_to_department",
+  "execute_distribution",
+  "transfer_to_human",
 ];
 
 async function main() {
@@ -48,10 +45,7 @@ async function main() {
     console.log(`Encontrados ${agents.length} agente(s) ATENDIMENTO.`);
     for (const a of agents) {
       const tools = Array.from(
-        new Set([
-          ...(a.enabledTools ?? []).filter((t) => !TOOLS_TO_DISABLE.includes(t)),
-          ...ACADEMIC_TOOLS,
-        ]),
+        new Set([...(a.enabledTools ?? []), ...ACADEMIC_TOOLS]),
       );
       const keywords = Array.from(
         new Set([...(a.keywordHandoffs ?? []), ...ACADEMIC_HANDOFF_KEYWORDS]),
@@ -68,6 +62,7 @@ async function main() {
         },
       });
       console.log(`  OK ${a.user.name} (${a.id}) org=${a.organizationId}`);
+      console.log(`      tools: ${tools.join(", ")}`);
     }
   } finally {
     await prisma.$disconnect();

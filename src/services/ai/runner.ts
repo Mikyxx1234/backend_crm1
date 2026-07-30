@@ -130,7 +130,15 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const deal = args.dealId
       ? await prisma.deal.findUnique({
           where: { id: args.dealId },
-          include: { stage: { select: { name: true, pipelineId: true } } },
+          include: {
+            stage: {
+              select: {
+                name: true,
+                pipelineId: true,
+                pipeline: { select: { name: true } },
+              },
+            },
+          },
         })
       : null;
 
@@ -326,7 +334,10 @@ type RenderArgs = {
   deal: {
     title: string;
     value: unknown;
-    stage: { name: string } | null;
+    stage: {
+      name: string;
+      pipeline?: { name: string } | null;
+    } | null;
   } | null;
   retrievalBlock: string;
   qualificationQuestions: QualificationQuestion[];
@@ -364,8 +375,18 @@ function renderSystemPrompt(args: RenderArgs): string {
     lines.push("DEAL ATUAL:");
     lines.push(`- Título: ${args.deal.title}`);
     if (args.deal.value) lines.push(`- Valor: R$ ${String(args.deal.value)}`);
+    if (args.deal.stage?.pipeline?.name)
+      lines.push(`- Funil: ${args.deal.stage.pipeline.name}`);
     if (args.deal.stage) lines.push(`- Estágio: ${args.deal.stage.name}`);
+    lines.push(
+      "- Use Funil/Estágio para decidir Acolhimento vs Atendimento na distribuição.",
+    );
   }
+
+  lines.push("");
+  lines.push(
+    "Lembrete: chame `consultar_matricula` cedo no atendimento para personalizar com o relatório de matriculados.",
+  );
 
   if (args.override?.trim()) {
     lines.push("");

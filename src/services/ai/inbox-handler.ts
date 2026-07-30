@@ -35,7 +35,6 @@ import {
   matchHandoffKeyword,
   normalizeBusinessHours,
   renderTemplate,
-  type HandoffMode,
 } from "@/lib/ai-agents/piloting";
 import { cache } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
@@ -43,12 +42,12 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
 import {
-  executeAgentHandoff,
   hasAgentGreetedInCurrentAssignment,
   markAgentGreetedNow,
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
+import { executeAcademicDepartmentHandoff } from "@/services/ai/academic-department-routing";
 import {
   LOW_CONFIDENCE_HANDOFF_MESSAGE,
   parseAgentConfidence,
@@ -313,14 +312,11 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       cfg.keywordHandoffs ?? [],
     );
     if (keyword) {
-      await executeAgentHandoff({
+      await executeAcademicDepartmentHandoff({
         conversationId: args.conversationId,
         contactId: args.contactId,
         dealId: openDeal?.id ?? null,
-        agentId: cfg.id,
-        agentUserId: assignee.id,
-        mode: (cfg.inactivityHandoffMode as HandoffMode) ?? "KEEP_OWNER",
-        specificUserId: cfg.inactivityHandoffUserId ?? null,
+        userMessage: args.userMessage,
         reason: `Palavra-chave disparou handoff: "${keyword}"`,
       });
       logAi("handoff", {
@@ -483,14 +479,11 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         humanBehavior,
         generationId: args.generationId,
       }).catch(() => null);
-      await executeAgentHandoff({
+      await executeAcademicDepartmentHandoff({
         conversationId: args.conversationId,
         contactId: args.contactId,
         dealId: openDeal?.id ?? null,
-        agentId: cfg.id,
-        agentUserId: assignee.id,
-        mode: (cfg.inactivityHandoffMode as HandoffMode) ?? "KEEP_OWNER",
-        specificUserId: cfg.inactivityHandoffUserId ?? null,
+        userMessage: args.userMessage,
         reason: `Baixa confiança da IA (${parsed.confidence?.toFixed(2)})`,
       });
       await prisma.aIAgentRun
