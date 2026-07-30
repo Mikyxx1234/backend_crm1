@@ -695,6 +695,9 @@ function transferToHumanTool(ctx: RunContext) {
           assigned: Boolean(result.distribution?.success),
           assignedTo: result.distribution?.selectedUserName ?? null,
           distributionReason: result.distribution?.reason ?? null,
+          queuedWaiting:
+            result.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+            result.distribution?.reason === "NO_DEPARTMENT",
         });
       } catch (err) {
         return fail(err instanceof Error ? err.message : "Falha ao transferir.");
@@ -794,6 +797,9 @@ function executeDistributionTool(ctx: RunContext) {
               assignedUserId: handoff.distribution?.selectedUserId ?? null,
               departmentName: handoff.departmentName,
               reason: handoff.distribution?.reason ?? null,
+              queuedWaiting:
+                handoff.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+                handoff.distribution?.reason === "NO_DEPARTMENT",
             });
           }
         }
@@ -816,7 +822,7 @@ function executeDistributionTool(ctx: RunContext) {
           dealId: ctx.dealId ?? null,
           contactId: ctx.contactId ?? null,
           conversationId: ctx.conversationId ?? null,
-          triggerSource: "AUTOMATION",
+          triggerSource: "AI_AGENT",
           departmentId,
           reassign: true,
         });

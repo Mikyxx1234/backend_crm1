@@ -38,7 +38,9 @@ export type DistributionTriggerSource =
   | "SYSTEM"
   | "AUTOMATION"
   | "MANUAL"
-  | "SIMULATION";
+  | "SIMULATION"
+  /** Handoff / execute_distribution solicitado pelo agente de IA. */
+  | "AI_AGENT";
 
 export type DistributionReason =
   | "ASSIGNED"
@@ -197,7 +199,7 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
           ? { dealId: input.dealId }
           : { contactId: input.contactId }),
       },
-      select: { id: true, attempts: true },
+      select: { id: true, attempts: true, triggerSource: true },
     });
     if (existing) {
       await prisma.distributionPending.update({
@@ -205,6 +207,11 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
         data: {
           attempts: existing.attempts + 1,
           lastAttemptAt: new Date(),
+          // Preserva origem IA se a tentativa atual (ou anterior) veio do agente.
+          triggerSource: mergeTriggerSources(
+            existing.triggerSource ?? input.triggerSource,
+            input.triggerSource,
+          ),
           ...(input.conversationId
             ? { conversationId: input.conversationId }
             : {}),
@@ -282,8 +289,15 @@ async function emitDistributionEvent(
       newValue: selectedUserName ?? null,
       meta: { reason, triggerSource: input.triggerSource, selectedUserId },
       actor: {
-        type: input.triggerSource === "AUTOMATION" ? "AUTOMATION" : "SYSTEM",
-        label: "Distribuição Inteligente",
+        type:
+          input.triggerSource === "AUTOMATION" ||
+          input.triggerSource === "AI_AGENT"
+            ? "AUTOMATION"
+            : "SYSTEM",
+        label:
+          input.triggerSource === "AI_AGENT"
+            ? "Agente IA · Distribuição"
+            : "Distribuição Inteligente",
       },
     });
   } catch (e) {
@@ -295,6 +309,7 @@ async function emitDistributionEvent(
 const LOG_COALESCE_WINDOW_MS = 45_000;
 
 const TRIGGER_MERGE_ORDER: DistributionTriggerSource[] = [
+  "AI_AGENT",
   "AUTOMATION",
   "MANUAL",
   "SYSTEM",

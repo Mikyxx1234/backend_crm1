@@ -129,7 +129,7 @@ export async function executeAcademicDepartmentHandoff(args: {
     const { ensureAcademicDepartmentRoster } = await import(
       "@/services/ai/ensure-academic-dept-roster"
     );
-    await ensureAcademicDepartmentRoster();
+    await ensureAcademicDepartmentRoster({ force: true });
   } catch {
     /* ignore */
   }
@@ -216,11 +216,26 @@ export async function executeAcademicDepartmentHandoff(args: {
     });
   }
 
+  // Garante contactId para enfileirar em DistributionPending se ninguém
+  // elegível (queueLimit / offline / dept) — senão a aba mostra a conversa
+  // mas sem origem "Agente IA".
+  let contactId = args.contactId;
+  if (!contactId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: { contactId: true },
+    });
+    contactId = conv?.contactId ?? null;
+  }
+
+  // AI_AGENT: se ninguém elegível (offline / fila cheia / fora do dept),
+  // o motor enfileira em DistributionPending e a conversa fica sem
+  // assignedToId → aparece em "Aguardando distribuição".
   const distribution = await executeDistribution({
     dealId: args.dealId ?? null,
-    contactId: args.contactId,
+    contactId,
     conversationId: args.conversationId,
-    triggerSource: "AUTOMATION",
+    triggerSource: "AI_AGENT",
     departmentId: dept?.id ?? null,
     reassign: true,
   });

@@ -68,19 +68,65 @@ export async function getPendingDistributions(): Promise<
     },
   });
 
-  return items.map((c) => ({
-    id: c.id,
-    dealId: null,
-    contactId: c.contactId,
-    // Exibe o TELEFONE (mais útil/discreto na fila); cai pro nome se não houver.
-    label: c.contact?.phone || c.contact?.name || "Atendimento",
-    channel: c.channel ?? "",
-    distributionType: null,
-    triggerSource: "INBOUND",
-    attempts: 0,
-    lastAttemptAt: c.updatedAt.toISOString(),
-    createdAt: c.createdAt.toISOString(),
-  }));
+  if (items.length === 0) return [];
+
+  const convIds = items.map((c) => c.id);
+  const contactIds = items
+    .map((c) => c.contactId)
+    .filter((id): id is string => Boolean(id));
+
+  // Origem real da solicitação (ex.: AI_AGENT) — a aba "Aguardando" lista
+  // conversas OPEN sem assignee; o meta vem da pendência do motor.
+  const pendRows = await prisma.distributionPending.findMany({
+    where: {
+      status: "PENDING",
+      OR: [
+        { conversationId: { in: convIds } },
+        ...(contactIds.length > 0 ? [{ contactId: { in: contactIds } }] : []),
+      ],
+    },
+    select: {
+      conversationId: true,
+      contactId: true,
+      triggerSource: true,
+      attempts: true,
+      lastAttemptAt: true,
+      distributionType: true,
+      dealId: true,
+      createdAt: true,
+    },
+    orderBy: { updatedAt: "desc" },
+  });
+
+  const byConv = new Map<string, (typeof pendRows)[number]>();
+  const byContact = new Map<string, (typeof pendRows)[number]>();
+  for (const row of pendRows) {
+    if (row.conversationId && !byConv.has(row.conversationId)) {
+      byConv.set(row.conversationId, row);
+    }
+    if (row.contactId && !byContact.has(row.contactId)) {
+      byContact.set(row.contactId, row);
+    }
+  }
+
+  return items.map((c) => {
+    const meta =
+      byConv.get(c.id) ??
+      (c.contactId ? byContact.get(c.contactId) : undefined) ??
+      null;
+    return {
+      id: c.id,
+      dealId: meta?.dealId ?? null,
+      contactId: c.contactId,
+      label: c.contact?.phone || c.contact?.name || "Atendimento",
+      channel: c.channel ?? "",
+      distributionType: meta?.distributionType ?? null,
+      triggerSource: meta?.triggerSource ?? "INBOUND",
+      attempts: meta?.attempts ?? 0,
+      lastAttemptAt: (meta?.lastAttemptAt ?? c.updatedAt).toISOString(),
+      createdAt: (meta?.createdAt ?? c.createdAt).toISOString(),
+    };
+  });
 }
 
 export interface RetryResult {
@@ -269,12 +315,18 @@ export async function maybeDistributeNewInboundTicket(input: {
       },
     });
 
+    const convDept = await prisma.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { departmentId: true },
+    });
+
     const result = await executeDistribution({
       dealId: null,
       contactId: input.contactId,
       conversationId: input.conversationId,
       distributionType: null,
       triggerSource: "SYSTEM",
+      departmentId: convDept?.departmentId ?? null,
     });
     // #region agent log
     console.warn(
@@ -368,7 +420,7 @@ export async function processPendingDistributionQueue(opts: {
     const items = await prisma.conversation.findMany({
       where: ABERTA_SEM_RESPONSAVEL,
       orderBy: { createdAt: "asc" },
-      select: { id: true, contactId: true },
+      select: { id: true, contactId: true, departmentId: true },
       take: 50,
     });
 
@@ -388,12 +440,15 @@ export async function processPendingDistributionQueue(opts: {
 
     for (const it of items) {
       try {
+        // Passa departmentId explícito → motor filtra por DepartmentMember
+        // mesmo com distribution.respectDepartment=false (handoff acadêmico).
         const result = await executeDistribution({
           dealId: null,
           contactId: it.contactId,
           conversationId: it.id,
           distributionType: null,
           triggerSource: "SYSTEM",
+          departmentId: it.departmentId,
         });
         // #region agent log
         console.warn(

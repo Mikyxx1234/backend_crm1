@@ -15,6 +15,9 @@
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 
+/** Limite de fila alinhado ao seed de consultores (~volume DataCrazy). */
+const QUEUE_LIMIT = 25;
+
 const DEPT_DEFS = [
   { key: "acolhimento", names: ["Acolhimento"], color: "#8B5CF6", icon: "🤝" },
   { key: "retencao", names: ["Retenção", "Retencao"], color: "#EF4444", icon: "🔁" },
@@ -157,22 +160,47 @@ async function syncUserDepts(args: {
     },
     update: { allowedDepartmentIds: args.deptIds },
   });
+
+  // Motor de distribuição: participa + teto de fila (não mexe em presença).
+  await prisma.distributionResponsible.upsert({
+    where: {
+      organizationId_userId: {
+        organizationId: args.orgId,
+        userId: args.userId,
+      },
+    },
+    create: {
+      organizationId: args.orgId,
+      userId: args.userId,
+      participates: true,
+      queueLimit: QUEUE_LIMIT,
+    },
+    update: { participates: true, queueLimit: QUEUE_LIMIT },
+  });
 }
 
 /**
  * Sincroniza roster acadêmico. Best-effort — nunca derruba o fluxo.
+ * @param opts.force — ignora o TTL de 5 min (uso admin / handoff crítico).
  */
-export async function ensureAcademicDepartmentRoster(): Promise<void> {
+export async function ensureAcademicDepartmentRoster(opts?: {
+  force?: boolean;
+}): Promise<{ synced: number; missing: string[] } | null> {
   const orgId = getOrgIdOrNull();
-  if (!orgId) return;
+  if (!orgId) return null;
 
   const last = lastSyncAt.get(orgId) ?? 0;
-  if (Date.now() - last < SYNC_TTL_MS) return;
+  if (!opts?.force && Date.now() - last < SYNC_TTL_MS) {
+    return null;
+  }
   lastSyncAt.set(orgId, Date.now());
 
   try {
     const deptMap = await ensureDeptMap(orgId);
     const academicIdSet = new Set(Object.values(deptMap));
+
+    let synced = 0;
+    const missing: string[] = [];
 
     for (const row of ROSTER) {
       const user = await prisma.user.findFirst({
@@ -183,7 +211,10 @@ export async function ensureAcademicDepartmentRoster(): Promise<void> {
         },
         select: { id: true },
       });
-      if (!user) continue;
+      if (!user) {
+        missing.push(row.email);
+        continue;
+      }
 
       const deptIds = row.depts.map((k) => deptMap[k]).filter(Boolean);
       if (deptIds.length === 0) continue;
@@ -193,6 +224,7 @@ export async function ensureAcademicDepartmentRoster(): Promise<void> {
         deptIds,
         academicIdSet,
       });
+      synced += 1;
     }
 
     console.info(
@@ -201,13 +233,20 @@ export async function ensureAcademicDepartmentRoster(): Promise<void> {
         event: "academic_dept_roster_synced",
         orgId,
         roster: ROSTER.length,
+        synced,
+        missing,
+        depts: Object.fromEntries(
+          Object.entries(deptMap).map(([k, id]) => [k, id]),
+        ),
       }),
     );
+    return { synced, missing };
   } catch (e) {
     console.warn(
       "[ai-attend] ensureAcademicDepartmentRoster failed:",
       e instanceof Error ? e.message : e,
     );
     lastSyncAt.delete(orgId);
+    return null;
   }
 }
