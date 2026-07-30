@@ -32,6 +32,7 @@ import {
   type QualificationQuestion,
 } from "@/lib/ai-agents/piloting";
 import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
+import { ACADEMIC_ATENDIMENTO_RULES } from "@/lib/ai-agents/academic-atendimento-prompt";
 import {
   formatRetrievalBlock,
   retrieveRelevantChunks,
@@ -67,6 +68,12 @@ export type RunResult = {
 };
 
 const MAX_HISTORY = 10;
+const ACADEMIC_RUNTIME_TOOLS = [
+  "consultar_matricula",
+  "transfer_to_department",
+  "execute_distribution",
+  "transfer_to_human",
+] as const;
 
 export async function runAgent(args: RunArgs): Promise<RunResult> {
   const agent = await prisma.aIAgentConfig.findUnique({
@@ -163,11 +170,25 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     );
     const outputStyle = normalizeOutputStyle(agent.outputStyle);
 
+    const isAcademicAttendance = agent.archetype === "ATENDIMENTO";
+    const runtimeTools = isAcademicAttendance
+      ? Array.from(new Set([...agent.enabledTools, ...ACADEMIC_RUNTIME_TOOLS]))
+      : agent.enabledTools;
+    const runtimeOverride = isAcademicAttendance
+      ? agent.systemPromptOverride?.includes(
+          "## DISTRIBUIÇÃO POR DEPARTAMENTO",
+        )
+        ? agent.systemPromptOverride
+        : [agent.systemPromptOverride, ACADEMIC_ATENDIMENTO_RULES]
+            .filter(Boolean)
+            .join("\n\n")
+      : agent.systemPromptOverride;
+
     const systemPrompt = renderSystemPrompt({
       template: agent.systemPromptTemplate,
-      override: agent.systemPromptOverride,
+      override: runtimeOverride,
       productPolicy: agent.productPolicy,
-      hasProductSearch: agent.enabledTools.includes("search_products"),
+      hasProductSearch: runtimeTools.includes("search_products"),
       tone: agent.tone,
       language: agent.language,
       autonomyMode: agent.autonomyMode,
@@ -186,7 +207,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       dealId: args.dealId ?? null,
     };
 
-    const toolSet = buildToolSet(ctx, agent.enabledTools);
+    const toolSet = buildToolSet(ctx, runtimeTools);
 
     const messages: Array<{
       role: "user" | "assistant";
