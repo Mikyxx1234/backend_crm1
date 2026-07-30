@@ -250,16 +250,44 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             orderBy: { createdAt: "asc" },
           });
           if (aiAgent) {
-            await sendAgentMessage({
-              conversationId: args.conversationId,
-              contactId: args.contactId,
-              agentUserId: aiAgent.id,
-              autonomyMode: "AUTONOMOUS",
-              text: "Recebi sua mensagem! Sua solicitação já está na fila — um(a) consultor(a) fala com você em breve, tá?",
-              channel: args.channel,
-              kind: "text",
-              bypassAssigneeCheck: true,
-            }).catch(() => null);
+            const lastBotOut = await prisma.message.findFirst({
+              where: {
+                conversationId: args.conversationId,
+                direction: "out",
+                authorType: "bot",
+                isPrivate: false,
+                messageType: { not: "note" },
+              },
+              orderBy: { createdAt: "desc" },
+              select: { content: true },
+            });
+            const queueAckPatterns = [
+              "já está na fila",
+              "só mais um pouquinho",
+              "fala com você em breve",
+              "consultor(a) fala com você",
+              "vou te conectar",
+            ];
+            const isRecentQueueAck = queueAckPatterns.some((p) =>
+              lastBotOut?.content?.includes(p),
+            );
+            if (!isRecentQueueAck) {
+              await sendAgentMessage({
+                conversationId: args.conversationId,
+                contactId: args.contactId,
+                agentUserId: aiAgent.id,
+                autonomyMode: "AUTONOMOUS",
+                text: "Tudo bem, só mais um pouquinho e logo você será atendido(a).",
+                channel: args.channel,
+                kind: "text",
+                bypassAssigneeCheck: true,
+              }).catch(() => null);
+            } else {
+              logAi("waiting_queue_ack_skipped", {
+                conversationId: args.conversationId,
+                pendingId: pending.id,
+              });
+            }
           }
         }
         logAi("waiting_queue_ack", {
@@ -628,23 +656,6 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         generationId: args.generationId,
         bypassAssigneeCheck: true,
       }).catch(() => null);
-      if (result.text) {
-        await prisma.message
-          .create({
-            data: withOrgFromCtx({
-              conversationId: args.conversationId,
-              content: `[IA → humano] ${stripConfidenceTag(result.text)}`,
-              direction: "out",
-              messageType: "note",
-              isPrivate: true,
-              authorType: "bot",
-              aiAgentUserId: assignee.id,
-              senderName: "Agente IA",
-              sendStatus: "sent",
-            }),
-          })
-          .catch(() => null);
-      }
       // Se o LLM só falou em transferir sem tool, garante a distribuição.
       if (result.status !== "HANDOFF" && !runHadTransferTools(result.toolCalls)) {
         await executeAcademicDepartmentHandoff({
