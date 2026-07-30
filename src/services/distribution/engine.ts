@@ -694,6 +694,21 @@ export async function executeDistribution(
     assignedDealId,
   );
 
+  // Handoff acadêmico / drenagem da fila → estágio "Em Atendimento".
+  if (
+    input.triggerSource === "AI_AGENT" ||
+    (input.triggerSource === "SYSTEM" && Boolean(input.departmentId))
+  ) {
+    void import("@/services/ai/academic-department-routing")
+      .then((m) =>
+        m.moveOpenDealToEmAtendimento({
+          dealId: assignedDealId,
+          contactId: input.contactId ?? null,
+        }),
+      )
+      .catch(() => null);
+  }
+
   return {
     success: true,
     reason: "ASSIGNED",

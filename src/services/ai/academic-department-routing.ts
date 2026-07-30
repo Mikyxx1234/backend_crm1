@@ -132,6 +132,118 @@ export async function resolveDepartmentByKey(
 }
 
 /**
+ * Após atribuir consultor humano, o negócio vai para o estágio
+ * "Em Atendimento" do funil ATENDIMENTO (Kanban operacional).
+ */
+export async function moveOpenDealToEmAtendimento(args: {
+  dealId?: string | null;
+  contactId?: string | null;
+}): Promise<{ moved: boolean; stageId?: string; dealId?: string }> {
+  let dealId = args.dealId ?? null;
+  if (!dealId && args.contactId) {
+    const open = await prisma.deal.findFirst({
+      where: { contactId: args.contactId, status: "OPEN" },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true },
+    });
+    dealId = open?.id ?? null;
+  }
+  if (!dealId) return { moved: false };
+
+  const preferred = await prisma.stage.findFirst({
+    where: {
+      name: { equals: "Em Atendimento", mode: "insensitive" },
+      pipeline: { name: { equals: "ATENDIMENTO", mode: "insensitive" } },
+    },
+    select: { id: true },
+  });
+  const stage =
+    preferred ??
+    (await prisma.stage.findFirst({
+      where: { name: { equals: "Em Atendimento", mode: "insensitive" } },
+      select: { id: true },
+      orderBy: { position: "asc" },
+    }));
+  if (!stage) return { moved: false, dealId };
+
+  const deal = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { stageId: true },
+  });
+  if (!deal) return { moved: false, dealId };
+  if (deal.stageId === stage.id) {
+    return { moved: true, stageId: stage.id, dealId };
+  }
+
+  try {
+    const { moveDeal } = await import("@/services/deals");
+    await moveDeal(dealId, stage.id, 0);
+    return { moved: true, stageId: stage.id, dealId };
+  } catch (e) {
+    console.error("[academic-handoff] moveOpenDealToEmAtendimento failed", e);
+    return { moved: false, stageId: stage.id, dealId };
+  }
+}
+
+/**
+ * Dúvida comercial sobre valor/grade/info de curso (em geral outro curso
+ * que não o da matrícula) — NUNCA site institucional; sempre humano.
+ */
+export function isCourseShoppingInquiry(userMessage: string): boolean {
+  const msg = normalize(userMessage);
+  if (!msg) return false;
+  if (
+    /(valor|preco|mensalidade|investimento|quanto\s+custa).{0,50}(curso|graduacao|pos[\s-]?graduacao|mba)/.test(
+      msg,
+    ) ||
+    /(curso|graduacao|pos[\s-]?graduacao|mba).{0,50}(valor|preco|mensalidade|investimento|quanto\s+custa)/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /grade\s+curricular|matriz\s+curricular|disciplinas\s+(do|de)\s+curso|grade\s+do\s+curso/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /quais\s+cursos|cursos\s+disponiveis|quero\s+saber\s+(do|sobre)\s+(o\s+)?curso|informac(ao|oes)\s+(do|sobre)\s+(o\s+)?curso|outro\s+curso/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /cruzeiro\.(edu|com)|portal\.cruzeiro|site\s+(da\s+)?cruzeiro|www\.cruzeiro/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Texto do agente implica handoff (mesmo sem tool). */
+export function textImpliesAcademicHandoff(text: string): boolean {
+  const t = normalize(text);
+  if (!t) return false;
+  return (
+    t.includes("vou te conectar") ||
+    t.includes("vou conectar voce") ||
+    t.includes("conectar com um") ||
+    t.includes("conectar com uma") ||
+    t.includes("consultor(a) fala") ||
+    t.includes("consultor fala com voce") ||
+    t.includes("consultora fala com voce") ||
+    t.includes("setor de retenc") ||
+    t.includes("ja esta na fila")
+  );
+}
+
+/**
  * Handoff acadêmico: define departamento + Distribuição Inteligente.
  * Substitui o “só limpar assignee” do transfer_to_human genérico.
  */
@@ -308,6 +420,20 @@ export async function executeAcademicDepartmentHandoff(args: {
         }),
       })
       .catch(() => null);
+  }
+
+  // Consultor humano atribuído → funil operacional "Em Atendimento".
+  if (distribution?.success && distribution.selectedUserId) {
+    const assignee = await prisma.user.findUnique({
+      where: { id: distribution.selectedUserId },
+      select: { type: true },
+    });
+    if (assignee?.type === "HUMAN") {
+      await moveOpenDealToEmAtendimento({
+        dealId: args.dealId ?? null,
+        contactId,
+      }).catch(() => null);
+    }
   }
 
   return {

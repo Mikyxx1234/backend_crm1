@@ -47,7 +47,13 @@ import {
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
-import { executeAcademicDepartmentHandoff, inferDepartmentFromContext } from "@/services/ai/academic-department-routing";
+import {
+  executeAcademicDepartmentHandoff,
+  inferDepartmentFromContext,
+  isCourseShoppingInquiry,
+  moveOpenDealToEmAtendimento,
+  textImpliesAcademicHandoff,
+} from "@/services/ai/academic-department-routing";
 import {
   LOW_CONFIDENCE_HANDOFF_MESSAGE,
   parseAgentConfidence,
@@ -637,7 +643,38 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       return;
     }
 
-    // ── 2b. Retenção determinística (tranc/cancel/desist) ─────
+    // ── 2b. Curso/valor/grade (não do curso atual) → consultor ─
+    // Nunca site institucional (Cruzeiro etc.): sempre humano.
+    if (isCourseShoppingInquiry(args.userMessage)) {
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: GENERIC_QUEUE_HANDOFF_MESSAGE,
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+      }).catch(() => null);
+      await executeAcademicDepartmentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        userMessage: args.userMessage,
+        departmentName: "Atendimento",
+        reason:
+          "Dúvida sobre valor/grade/info de curso — handoff obrigatório (sem site)",
+      });
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "course_shopping",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    // ── 2c. Retenção determinística (tranc/cancel/desist) ─────
     // Não depende do LLM acertar a tool: avisa o aluno e distribui.
     const retentionKey = inferDepartmentFromContext({
       userMessage: args.userMessage,
@@ -792,12 +829,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       return;
     }
 
+    const replyText = stripConfidenceTag(result.text || "");
     const transferred =
-      result.status === "HANDOFF" || runHadTransferTools(result.toolCalls);
+      result.status === "HANDOFF" ||
+      runHadTransferTools(result.toolCalls) ||
+      textImpliesAcademicHandoff(replyText);
 
     if (transferred) {
       const handoffText =
-        stripConfidenceTag(result.text || "") ||
+        replyText ||
         (inferDepartmentFromContext({ userMessage: args.userMessage }) ===
         "retencao"
           ? RETENTION_HANDOFF_MESSAGE
@@ -815,14 +855,41 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         generationId: args.generationId,
         bypassAssigneeCheck: true,
       }).catch(() => null);
-      // Se o LLM só falou em transferir sem tool, garante a distribuição.
-      if (result.status !== "HANDOFF" && !runHadTransferTools(result.toolCalls)) {
+      // Padrão: aviso de handoff (texto/tool) → humano ou fila.
+      // Se tools já atribuíram humano, só garante "Em Atendimento".
+      // Senão (só transfer_to_department / só texto) → distribui de verdade.
+      const afterHandoff = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: {
+          assignedToId: true,
+          assignedTo: { select: { type: true } },
+        },
+      });
+      const alreadyHuman = afterHandoff?.assignedTo?.type === "HUMAN";
+      const alreadyQueued = await prisma.distributionPending.findFirst({
+        where: {
+          status: "PENDING",
+          OR: [
+            { conversationId: args.conversationId },
+            { contactId: args.contactId },
+          ],
+        },
+        select: { id: true },
+      });
+      if (alreadyHuman) {
+        await moveOpenDealToEmAtendimento({
+          dealId: openDeal?.id ?? null,
+          contactId: args.contactId,
+        }).catch(() => null);
+      } else if (!alreadyQueued || afterHandoff?.assignedTo?.type === "AI") {
         await executeAcademicDepartmentHandoff({
           conversationId: args.conversationId,
           contactId: args.contactId,
           dealId: openDeal?.id ?? null,
           userMessage: args.userMessage,
-          reason: "Handoff sem tool — reforço backend",
+          reason: runHadTransferTools(result.toolCalls)
+            ? "Handoff com tool — reforço distribuição/fila"
+            : "Handoff por texto/nota — reforço backend",
         }).catch(() => null);
       }
       logAi("handoff", {
