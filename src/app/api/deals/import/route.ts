@@ -6,6 +6,7 @@ import { assertImportPermission, assertNoActiveImport } from "@/lib/import-guard
 import { validateDealImportHeaders } from "@/lib/deal-import-core";
 import {
   readDelimiterFlag,
+  readImportModeFlag,
   readTagFlag,
   readUpdateExistingFlag,
   readUploadedTable,
@@ -83,12 +84,19 @@ export async function POST(request: Request) {
 
     const delimiter = readDelimiterFlag(formData);
     const updateExisting = readUpdateExistingFlag(formData);
+    // `importMode` é o novo flag (create/update/upsert). Fallback derivado
+    // de `updateExisting` mantém compat com clientes antigos: sem update →
+    // "create"; com update → "upsert" (comportamento anterior à correção).
+    const importMode =
+      readImportModeFlag(formData) ?? (updateExisting ? "upsert" : "create");
     const tagName = readTagFlag(formData);
 
     // Parseia uma vez para validar cabeçalho e contar as linhas (total do
     // BulkOperation). O worker re-parseia o arquivo salvo no storage.
     const { headers, rows } = await readUploadedTable(file, delimiter);
-    const headerError = validateDealImportHeaders(headers);
+    const headerError = validateDealImportHeaders(headers, {
+      allowCreate: importMode !== "update",
+    });
     if (headerError) {
       return NextResponse.json({ message: headerError }, { status: 400 });
     }
@@ -116,6 +124,7 @@ export async function POST(request: Request) {
           fileName,
           originalName: file.name,
           updateExisting,
+          importMode,
           fileContentB64: buffer.toString("base64"),
           ...(delimiter ? { delimiter } : {}),
           ...(tagName ? { tagName } : {}),
@@ -133,6 +142,7 @@ export async function POST(request: Request) {
       originalName: file.name,
       delimiter,
       updateExisting,
+      importMode,
       tagName,
     });
 

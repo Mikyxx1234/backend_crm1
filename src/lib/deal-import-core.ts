@@ -28,6 +28,12 @@ export const DEAL_RESERVED_HEADERS = new Set<string>([
   "externalid",
   "kommo_lead_id",
   "lead_external_id",
+  // Kommo exporta o ID do lead como "id deal" (vira `id_deal` após normalização
+  // do header). Tratamos como sinônimo de external_id para permitir o match
+  // por chave técnica na atualização (sem esse alias, todo import Kommo caía
+  // em criação, gerando duplicidades sem contactId — ver incidente 2026-07-29).
+  "id_deal",
+  "iddeal",
   "deal_number",
   "title",
   "value",
@@ -64,6 +70,17 @@ export type DealImportOptions = {
   updateExisting: boolean;
   importTagId: string | null;
   dealCustomFieldMap?: Map<string, string>;
+  /**
+   * Permitir criar negócios novos quando a linha não casar com nenhum existente.
+   * Ausente/`true` = comportamento histórico (upsert). `false` = modo "somente
+   * atualizar": linhas sem match viram `skipped`. Ver `readImportModeFlag`.
+   */
+  allowCreate?: boolean;
+  /**
+   * Permitir atualizar negócios existentes quando a linha casar. Ausente cai
+   * em `updateExisting` (compat retroativa). `false` = modo "somente criar".
+   */
+  allowUpdate?: boolean;
 };
 
 export type DealRowResult =
@@ -193,8 +210,39 @@ export async function preloadContactsForChunk(
   }
 }
 
-export function validateDealImportHeaders(headers: string[]): string | null {
-  if (headers.length === 0 || !headers.includes("title")) {
+/** Colunas aceitas como identificador único do deal (para match no upsert). */
+const DEAL_IDENTIFIER_HEADERS = [
+  "id",
+  "deal_number",
+  "external_id",
+  "externalid",
+  "kommo_lead_id",
+  "lead_external_id",
+  "id_deal",
+  "iddeal",
+] as const;
+
+export function validateDealImportHeaders(
+  headers: string[],
+  opts?: { allowCreate?: boolean },
+): string | null {
+  if (headers.length === 0) {
+    return "CSV sem colunas de cabeçalho.";
+  }
+
+  // Modo "somente atualizar": não vamos criar nada, então `title`/`stage` são
+  // supérfluos — basta uma coluna identificadora para achar o deal existente.
+  // Cobre o caso Kommo: CSV enxuto `id deal;titulo` + tag em lote.
+  const allowCreate = opts?.allowCreate ?? true;
+  if (!allowCreate) {
+    const hasIdentifier = DEAL_IDENTIFIER_HEADERS.some((h) => headers.includes(h));
+    if (!hasIdentifier) {
+      return 'Modo "somente atualizar": inclua ao menos uma coluna identificadora do negócio (id, deal_number, external_id, id_deal ou variantes).';
+    }
+    return null;
+  }
+
+  if (!headers.includes("title")) {
     return 'CSV inválido: coluna "title" obrigatória. Informe "stage_id" ou "pipeline_name" + "stage_name".';
   }
   const hasStage = headers.includes("stage_id") || headers.includes("stageid");
@@ -240,7 +288,17 @@ function pickDealExternalId(
   headers: string[],
   row: Record<string, string>,
 ): string | null | undefined {
-  if (!hasColumn(headers, "external_id", "externalid", "kommo_lead_id", "lead_external_id")) {
+  if (
+    !hasColumn(
+      headers,
+      "external_id",
+      "externalid",
+      "kommo_lead_id",
+      "lead_external_id",
+      "id_deal",
+      "iddeal",
+    )
+  ) {
     return undefined;
   }
   const v =
@@ -248,6 +306,8 @@ function pickDealExternalId(
     row.externalid?.trim() ||
     row.kommo_lead_id?.trim() ||
     row.lead_external_id?.trim() ||
+    row.id_deal?.trim() ||
+    row.iddeal?.trim() ||
     "";
   return v === "" ? null : v;
 }
@@ -430,16 +490,24 @@ async function resolveDealUpsert(
   ctx: { contactId?: string; stageId?: string | null; title?: string } = {},
 ): Promise<{ ok: true; target: DealUpsert } | { ok: false; message: string }> {
   const id = row.id?.trim();
-  const ext =
+  // `id_deal` (Kommo) é ambíguo: em orgs migradas do Kommo o valor foi copiado
+  // para `deal.number` (identificador nativo do CRM); em orgs mais novas pode
+  // ter sido gravado em `external_id`. Testamos AMBOS abaixo — number primeiro
+  // (mais provável no legado Kommo, ver Cruzeiro EaD 2026-07-29) e external_id
+  // como fallback. Ver DEAL_IDENTIFIER_HEADERS.
+  const kommoIdRaw = row.id_deal?.trim() || row.iddeal?.trim() || "";
+  const explicitExt =
     row.external_id?.trim() ||
     row.externalid?.trim() ||
     row.kommo_lead_id?.trim() ||
-    row.lead_external_id?.trim();
-  const numRaw = row.deal_number?.trim();
+    row.lead_external_id?.trim() ||
+    "";
+  const ext = explicitExt || kommoIdRaw;
+  const numRaw = row.deal_number?.trim() || (/^\d+$/.test(kommoIdRaw) ? kommoIdRaw : "");
 
   const orgId = getOrgIdOrThrow();
 
-  // Precedência: id interno > deal_number > external_id.
+  // Precedência: id interno > deal_number (inclui id_deal numérico) > external_id.
   if (id) {
     const d = await prisma.deal.findUnique({ where: { id }, select: { id: true } });
     if (d) return { ok: true, target: { mode: "update", id: d.id } };
@@ -498,13 +566,16 @@ export async function processDealRow(
   opts: DealImportOptions,
   cache: DealImportCache,
 ): Promise<DealRowResult> {
-  const title = row.title?.trim();
-  if (!title) return { status: "failed", message: "Título vazio." };
+  // Modo alvo (novo `importMode`) com fallback para `updateExisting` (compat).
+  const allowUpdate = opts.allowUpdate ?? opts.updateExisting;
+  const allowCreate = opts.allowCreate ?? true;
 
+  // Título e estágio são obrigatórios APENAS para criar. Em update-only o CSV
+  // pode trazer só o identificador do deal (ex.: Kommo `id deal` + tag). Se
+  // vierem, são propagados para o update; se não, o deal existente mantém o
+  // valor atual.
+  const title = row.title?.trim() ?? "";
   const stageId = await resolveStageId(row, cache);
-  if (!stageId) {
-    return { status: "failed", message: "Estágio não encontrado (stage_id ou pipeline+estágio)." };
-  }
 
   const statusRaw = row.status?.trim()?.toUpperCase();
   if (statusRaw && !isValidDealStatus(statusRaw)) {
@@ -538,7 +609,11 @@ export async function processDealRow(
     return { status: "failed", message: "Erro ao resolver contato." };
   }
 
-  const resolved = await resolveDealUpsert(row, { contactId, stageId, title });
+  const resolved = await resolveDealUpsert(row, {
+    ...(contactId ? { contactId } : {}),
+    ...(stageId ? { stageId } : {}),
+    ...(title ? { title } : {}),
+  });
   if (!resolved.ok) return { status: "failed", message: resolved.message };
 
   const externalPatch = pickDealExternalId(headers, row);
@@ -549,13 +624,18 @@ export async function processDealRow(
     let outcome: "created" | "updated" | "skipped" = "created";
 
     if (resolved.target.mode === "update") {
-      if (!opts.updateExisting) {
+      if (!allowUpdate) {
+        // Modo "somente criar": achou match, então não mexemos no deal.
+        // Aplicamos apenas a tag (idempotente).
         if (opts.importTagId) await attachTagToDeal(resolved.target.id, opts.importTagId);
         return { status: "skipped" };
       }
-      await updateDeal(resolved.target.id, {
-        title,
-        stageId,
+      // Update parcial: só inclui o que veio no CSV. Em CSV mínimo (só
+      // identificador + tag) o payload de campos fica vazio e pulamos o
+      // `updateDeal` — o efeito da linha é apenas a tag/custom fields.
+      const updatePayload = {
+        ...(title ? { title } : {}),
+        ...(stageId ? { stageId } : {}),
         ...(value !== undefined ? { value } : {}),
         ...(statusRaw && isValidDealStatus(statusRaw) ? { status: statusRaw } : {}),
         ...(expectedClose !== undefined ? { expectedClose } : {}),
@@ -563,10 +643,29 @@ export async function processDealRow(
         ...(contactId !== undefined ? { contactId } : {}),
         ...(ownerId !== undefined ? { ownerId } : {}),
         ...(externalPatch !== undefined ? { externalId: externalPatch } : {}),
-      });
+      };
+      if (Object.keys(updatePayload).length > 0) {
+        await updateDeal(resolved.target.id, updatePayload);
+        outcome = "updated";
+      } else {
+        outcome = "skipped";
+      }
       dealId = resolved.target.id;
-      outcome = "updated";
     } else {
+      // Modo "somente atualizar": não achou match → NÃO CRIA. Era exatamente
+      // isso que gerava deals órfãos (sem contactId) na importação Kommo do
+      // Cruzeiro EaD (2026-07-29) — o CSV não trazia colunas de contato e o
+      // header `id deal` não era reconhecido, então toda linha caía aqui.
+      if (!allowCreate) {
+        return { status: "skipped" };
+      }
+      // Para CRIAR o deal precisamos de stage (title tem fallback no service).
+      if (!stageId) {
+        return {
+          status: "failed",
+          message: "Estágio não encontrado (stage_id ou pipeline+estágio).",
+        };
+      }
       let externalForCreate: string | null | undefined = undefined;
       if (externalPatch !== undefined) externalForCreate = externalPatch;
       else if (resolved.target.externalId !== undefined) externalForCreate = resolved.target.externalId;
@@ -586,7 +685,12 @@ export async function processDealRow(
       outcome = "created";
     }
 
-    if (opts.importTagId && dealId) await attachTagToDeal(dealId, opts.importTagId);
+    if (opts.importTagId && dealId) {
+      await attachTagToDeal(dealId, opts.importTagId);
+      // Linha "só pra pintar tag" (update-only sem campos) conta como update
+      // efetivo: a tag foi o trabalho realizado, não é um skip vazio.
+      if (outcome === "skipped") outcome = "updated";
+    }
     if (dealId) await applyDealCustomFields(dealId, row, opts.dealCustomFieldMap);
 
     return { status: outcome };
