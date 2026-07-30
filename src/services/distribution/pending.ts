@@ -126,6 +126,8 @@ function getDrainState(orgId: string) {
  *
  * Nunca propaga erro ao webhook — falha só loga.
  */
+import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
+
 export async function maybeDistributeNewInboundTicket(input: {
   conversationId: string;
   contactId: string;
@@ -142,6 +144,27 @@ export async function maybeDistributeNewInboundTicket(input: {
   );
   // #endregion
   if (input.assignedToId) return;
+
+  // 1º atendimento: Agente IA (se houver ativo) assume antes da fila humana.
+  try {
+    const aiUserId = await tryAssignFirstAttendanceAi({
+      conversationId: input.conversationId,
+      contactId: input.contactId,
+      assignedToId: input.assignedToId,
+    });
+    if (aiUserId) {
+      console.warn(
+        "[DBG-e46688 maybeDist] first_attendance_ai",
+        JSON.stringify({
+          convId: input.conversationId,
+          aiUserId,
+        }),
+      );
+      return;
+    }
+  } catch (e) {
+    console.error("[ai] tryAssignFirstAttendanceAi failed", e);
+  }
 
   try {
     const widgetActive = await hasOrganizationWidget("smart_distribution");

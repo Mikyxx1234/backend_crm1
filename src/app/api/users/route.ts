@@ -8,25 +8,34 @@ import { getSystemPresenceMap } from "@/services/system-presence";
 
 const VALID_ROLES = ["ADMIN", "MANAGER", "MEMBER"] as const;
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const r = await requireAuth();
     if (!r.ok) return r.response;
 
+    const includeAi =
+      new URL(request.url).searchParams.get("includeAi") === "1" ||
+      new URL(request.url).searchParams.get("includeAi") === "true";
+
     const users = await prisma.user.findMany({
-      // Apenas operadores humanos aparecem aqui. Agentes de IA
-      // (User.type=AI) têm tela própria em /ai-agents e não fazem
-      // sentido em seletores de "assinar conversa para mim" etc.
-      // userOrgFilter blinda o vazamento entre tenants — User nao esta
-      // no SCOPED_MODELS da Prisma Extension (precisamos de auth sem ctx),
-      // entao filtragem aqui e MANUAL e OBRIGATORIA.
-      where: { type: "HUMAN", ...userOrgFilter(r.session) },
+      // Por padrão só humanos (Equipe / filtros). Com ?includeAi=1 inclui
+      // agentes IA ativos — usado nos seletores de responsável (1º atendimento).
+      where: includeAi
+        ? {
+            ...userOrgFilter(r.session),
+            OR: [
+              { type: "HUMAN" },
+              { type: "AI", aiAgentConfig: { active: true } },
+            ],
+          }
+        : { type: "HUMAN", ...userOrgFilter(r.session) },
       orderBy: { name: "asc" },
       select: {
         id: true,
         name: true,
         email: true,
         role: true,
+        type: true,
         avatarUrl: true,
         // Roles RBAC atribuídas (modelo novo). Usado pela tela de Equipe
         // para exibir a "função" como role customizada (mantendo só ADMIN
