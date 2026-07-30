@@ -91,6 +91,12 @@ export async function sendAgentMessage(args: {
   /// Só tem efeito em AUTONOMOUS + meta + phoneNumberId válido.
   humanBehavior?: HumanBehaviorConfig;
   generationId?: string;
+  /**
+   * Após handoff a tool já limpa o assignee. Sem este bypass a mensagem
+   * de "vou te transferir" morre no assertAiStillAuthorized (unassigned)
+   * e o aluno fica sem resposta.
+   */
+  bypassAssigneeCheck?: boolean;
 }): Promise<SendAgentMessageResult> {
   const text = args.text.trim();
   if (!text) return { status: "skipped", reason: "empty" };
@@ -109,14 +115,33 @@ export async function sendAgentMessage(args: {
   }
 
   // Revalida autorização imediatamente antes de qualquer envio.
-  const { assertAiStillAuthorized } = await import("@/services/ai/inbox-handler");
-  const auth = await assertAiStillAuthorized({
-    conversationId: args.conversationId,
-    expectedAgentUserId: args.agentUserId,
-    generationId: args.generationId,
-  });
-  if (!auth.ok) {
-    return { status: "skipped", reason: auth.reason };
+  if (!args.bypassAssigneeCheck) {
+    const { assertAiStillAuthorized } = await import(
+      "@/services/ai/inbox-handler"
+    );
+    const auth = await assertAiStillAuthorized({
+      conversationId: args.conversationId,
+      expectedAgentUserId: args.agentUserId,
+      generationId: args.generationId,
+    });
+    if (!auth.ok) {
+      return { status: "skipped", reason: auth.reason };
+    }
+  } else {
+    // Ainda bloqueia se humano já assumiu e respondeu nesta conversa.
+    const lastOut = await prisma.message.findFirst({
+      where: {
+        conversationId: args.conversationId,
+        direction: "out",
+        isPrivate: false,
+        messageType: { not: "note" },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { authorType: true },
+    });
+    if (lastOut?.authorType === "human") {
+      return { status: "skipped", reason: "human_last_outbound" };
+    }
   }
 
   const isMeta = args.channel === "meta" || args.channel == null;
@@ -169,13 +194,18 @@ export async function sendAgentMessage(args: {
       }
     }
 
-    const auth2 = await assertAiStillAuthorized({
-      conversationId: args.conversationId,
-      expectedAgentUserId: args.agentUserId,
-      generationId: args.generationId,
-    });
-    if (!auth2.ok) {
-      return { status: "skipped", reason: auth2.reason };
+    if (!args.bypassAssigneeCheck) {
+      const { assertAiStillAuthorized } = await import(
+        "@/services/ai/inbox-handler"
+      );
+      const auth2 = await assertAiStillAuthorized({
+        conversationId: args.conversationId,
+        expectedAgentUserId: args.agentUserId,
+        generationId: args.generationId,
+      });
+      if (!auth2.ok) {
+        return { status: "skipped", reason: auth2.reason };
+      }
     }
 
     let externalId: string | null = null;
@@ -238,13 +268,18 @@ export async function sendAgentMessage(args: {
         return saveDraft(args.conversationId, args.agentUserId, text);
       }
 
-      const authB = await assertAiStillAuthorized({
-        conversationId: args.conversationId,
-        expectedAgentUserId: args.agentUserId,
-        generationId: args.generationId,
-      });
-      if (!authB.ok) {
-        return { status: "skipped", reason: authB.reason };
+      if (!args.bypassAssigneeCheck) {
+        const { assertAiStillAuthorized } = await import(
+          "@/services/ai/inbox-handler"
+        );
+        const authB = await assertAiStillAuthorized({
+          conversationId: args.conversationId,
+          expectedAgentUserId: args.agentUserId,
+          generationId: args.generationId,
+        });
+        if (!authB.ok) {
+          return { status: "skipped", reason: authB.reason };
+        }
       }
 
       const saved = await prisma.message.create({

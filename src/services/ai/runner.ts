@@ -261,8 +261,12 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       result.outputTokens,
     );
 
-    const hadTransfer = result.toolCalls.some(
-      (c) => c.toolName === "transfer_to_human",
+    const hadTransfer = result.toolCalls.some((c) =>
+      [
+        "transfer_to_human",
+        "transfer_to_department",
+        "execute_distribution",
+      ].includes(c.toolName),
     );
     const status: RunResult["status"] = hadTransfer ? "HANDOFF" : "COMPLETED";
 
