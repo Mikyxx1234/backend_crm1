@@ -44,6 +44,7 @@ import { logEvent } from "@/services/activity-log";
 import {
   createContext,
   advanceContext,
+  closeStrandedContext,
   getActiveContext,
   interpolateVariables,
 } from "@/services/automation-context";
@@ -1050,6 +1051,8 @@ type StepResult = {
   skipRemaining?: boolean;
   gotoStepId?: string;
   setVariable?: { name: string; value: unknown };
+  /** Quando presente, substitui o "OK" na mensagem de SUCCESS do log. */
+  note?: string;
 };
 
 async function executeStep(
@@ -1079,7 +1082,14 @@ async function executeStep(
         });
         targetDealId = openDeal?.id;
       }
-      if (!targetDealId) throw new Error("move_stage: dealId ausente no contexto");
+      if (!targetDealId) {
+        // Opt-in: sem negócio aberto, seguir o fluxo em vez de abortar.
+        // Padrão continua sendo throw (ex.: Dna Work não pode mudar).
+        if (cfg.continueIfNoDeal === true) {
+          return { note: "ignorado (contato sem negócio aberto)" };
+        }
+        throw new Error("move_stage: dealId ausente no contexto");
+      }
       // Estágios terminais fixos (Ganho/Perdido) sincronizam Deal.status
       // — mesma regra do moveDeal manual no Kanban.
       const targetStage = await prisma.stage.findUnique({
@@ -3162,7 +3172,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
         stepId: step.id,
         stepType: step.type,
         status: "SUCCESS",
-        message: `${stepLabel} — OK`,
+        message: `${stepLabel} — ${result.note ?? "OK"}`,
         payload: cleanConfig,
       });
       if (result.skipRemaining && !result.gotoStepId) break;
@@ -3210,6 +3220,17 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       }
       const idx = automation.steps.indexOf(step);
       current = idx >= 0 ? automation.steps[idx + 1] : undefined;
+    }
+  }
+
+  if (rt.contactId) {
+    try {
+      await closeStrandedContext(automationId, rt.contactId);
+    } catch (err) {
+      log.warn(
+        `[${traceId}] closeStrandedContext falhou:`,
+        err instanceof Error ? err.message : err,
+      );
     }
   }
 
@@ -3455,7 +3476,7 @@ export async function continueFromStep(
         stepId: step.id,
         stepType: step.type,
         status: "SUCCESS",
-        message: `${stepLabel} — OK`,
+        message: `${stepLabel} — ${result.note ?? "OK"}`,
       });
       if (result.skipRemaining && !result.gotoStepId) break;
     } catch (err) {
@@ -3496,6 +3517,15 @@ export async function continueFromStep(
       const idx = automation.steps.indexOf(step);
       current = idx >= 0 ? automation.steps[idx + 1] : undefined;
     }
+  }
+
+  try {
+    await closeStrandedContext(automationId, contactId);
+  } catch (err) {
+    log.warn(
+      `continueFromStep closeStrandedContext falhou:`,
+      err instanceof Error ? err.message : err,
+    );
   }
 
   await logStep({

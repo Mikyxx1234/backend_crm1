@@ -133,11 +133,18 @@ export async function GET(request: Request) {
                 return tabs.length > 0 ? [...tabs] : (["esperando", "respondidas"] as InboxCategoryTab[]);
               })()
             : null;
+        const countsSearchRaw =
+          searchParams.get("search") ?? searchParams.get("q") ?? "";
+        const countsSearch =
+          typeof countsSearchRaw === "string" && countsSearchRaw.trim().length > 0
+            ? countsSearchRaw.trim()
+            : undefined;
         const counts = await getTabCounts(
           visibility.conversationWhere,
           memberCategoryTabs,
           allowedChannelIds,
           filterConditions,
+          countsSearch,
         );
         if (user.role === "MEMBER") {
           const masked = { ...counts };

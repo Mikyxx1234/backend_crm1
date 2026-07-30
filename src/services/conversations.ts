@@ -46,7 +46,7 @@ export type GetConversationsParams = {
    * visíveis, só `visibilityWhere`).
    */
   todosCategoryTabs?: InboxCategoryTab[];
-  /** Busca global: nome/telefone do contato, inboxName, responsável. Ignora filtro de aba. */
+  /** Busca: nome/telefone/ticket/etc. Combinada em AND com a aba (não substitui). */
   search?: string;
   page?: number;
   perPage?: number;
@@ -275,10 +275,74 @@ function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
 }
 
 /**
+ * Condições OR da busca textual (nome, telefone, ticket #, etc.).
+ * Extraído para reuso entre listagem e contadores — busca e aba/filtros
+ * devem ser aplicados em AND (nunca um exclui o outro).
+ */
+export async function buildConversationSearchWhere(
+  search: string | undefined | null,
+): Promise<Prisma.ConversationWhereInput | null> {
+  const q = search?.trim() ?? "";
+  if (q.length === 0) return null;
+
+  const or: Prisma.ConversationWhereInput[] = [
+    { contact: { name: { contains: q, mode: "insensitive" } } },
+    { contact: { phone: { contains: q, mode: "insensitive" } } },
+    { contact: { email: { contains: q, mode: "insensitive" } } },
+    { contact: { whatsappUsername: { contains: q, mode: "insensitive" } } },
+    { contact: { source: { contains: q, mode: "insensitive" } } },
+    { contact: { company: { name: { contains: q, mode: "insensitive" } } } },
+    { contact: { customFields: { some: { value: { contains: q, mode: "insensitive" } } } } },
+    { contact: { deals: { some: { title: { contains: q, mode: "insensitive" } } } } },
+    { inboxName: { contains: q, mode: "insensitive" } },
+    { assignedTo: { name: { contains: q, mode: "insensitive" } } },
+    { assignedTo: { email: { contains: q, mode: "insensitive" } } },
+  ];
+  // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
+  // "+55 11 94501-0493". Mesma regra de deals/contatos/kanban.
+  const digits = q.replace(/\D+/g, "");
+  if (digits.length >= 3) {
+    const contactIds = await findContactIdsByPhoneDigits(digits);
+    if (contactIds.length > 0) {
+      or.push({ contactId: { in: contactIds } });
+    }
+  }
+  // Busca pelo #número do ticket ("1234" ou "#1234") — match exato.
+  // Só Int4 válido: telefone completo (11 dígitos) estoura o Int e quebrava
+  // a query inteira (loading longo + zero resultados).
+  const numeric = q.replace(/^#/, "");
+  if (/^\d+$/.test(numeric)) {
+    const n = Number(numeric);
+    if (Number.isInteger(n) && n >= 0 && n <= PG_INT4_MAX) {
+      or.push({ number: n });
+    }
+  }
+  return { OR: or };
+}
+
+function tabFilterWhere(
+  tab: InboxTab,
+  todosCategoryTabs?: InboxCategoryTab[],
+): Prisma.ConversationWhereInput | null {
+  if (tab === "todos") {
+    if (todosCategoryTabs && todosCategoryTabs.length > 0) {
+      return { OR: todosCategoryTabs.map((t) => tabToWhere(t)) };
+    }
+    return null;
+  }
+  if (tab === "abertas") return { status: "OPEN" };
+  return tabToWhere(tab);
+}
+
+/**
  * Monta o `where` da listagem de conversas (visibilidade + busca/aba +
  * filtros). Extraído de `getConversations` para ser reaproveitado pelo
  * encerramento em massa "por filtro" (`getResolvableConversationIds`),
  * garantindo que a seleção "todas do filtro" case exatamente com a lista.
+ *
+ * Busca e aba são AND: com termo digitado, a aba continua filtrando
+ * (ex.: Encerradas + telefone). Antes a busca substituía a aba e o
+ * operador via conversa RESOLVED dentro de "Entrada".
  */
 export async function buildConversationListWhere(
   params: GetConversationsParams,
@@ -289,56 +353,12 @@ export async function buildConversationListWhere(
     conditions.push(params.visibilityWhere);
   }
 
-  const q = params.search?.trim() ?? "";
-  if (q.length > 0) {
-    const or: Prisma.ConversationWhereInput[] = [
-      { contact: { name: { contains: q, mode: "insensitive" } } },
-      { contact: { phone: { contains: q, mode: "insensitive" } } },
-      { contact: { email: { contains: q, mode: "insensitive" } } },
-      { contact: { whatsappUsername: { contains: q, mode: "insensitive" } } },
-      { contact: { source: { contains: q, mode: "insensitive" } } },
-      { contact: { company: { name: { contains: q, mode: "insensitive" } } } },
-      { contact: { customFields: { some: { value: { contains: q, mode: "insensitive" } } } } },
-      { contact: { deals: { some: { title: { contains: q, mode: "insensitive" } } } } },
-      { inboxName: { contains: q, mode: "insensitive" } },
-      { assignedTo: { name: { contains: q, mode: "insensitive" } } },
-      { assignedTo: { email: { contains: q, mode: "insensitive" } } },
-    ];
-    // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
-    // "+55 11 94501-0493". Mesma regra de deals/contatos/kanban.
-    const digits = q.replace(/\D+/g, "");
-    if (digits.length >= 3) {
-      const contactIds = await findContactIdsByPhoneDigits(digits);
-      if (contactIds.length > 0) {
-        or.push({ contactId: { in: contactIds } });
-      }
-    }
-    // Busca pelo #número do ticket ("1234" ou "#1234") — match exato.
-    // Só Int4 válido: telefone completo (11 dígitos) estoura o Int e quebrava
-    // a query inteira (loading longo + zero resultados).
-    const numeric = q.replace(/^#/, "");
-    if (/^\d+$/.test(numeric)) {
-      const n = Number(numeric);
-      if (
-        Number.isInteger(n) &&
-        n >= 0 &&
-        n <= PG_INT4_MAX
-      ) {
-        or.push({ number: n });
-      }
-    }
-    conditions.push({ OR: or });
-  } else if (params.tab) {
-    if (params.tab === "todos") {
-      const orTabs = params.todosCategoryTabs;
-      if (orTabs && orTabs.length > 0) {
-        conditions.push({ OR: orTabs.map((t) => tabToWhere(t)) });
-      }
-    } else if (params.tab === "abertas") {
-      conditions.push({ status: "OPEN" });
-    } else {
-      conditions.push(tabToWhere(params.tab));
-    }
+  const searchWhere = await buildConversationSearchWhere(params.search);
+  if (searchWhere) conditions.push(searchWhere);
+
+  if (params.tab) {
+    const tabWhere = tabFilterWhere(params.tab, params.todosCategoryTabs);
+    if (tabWhere) conditions.push(tabWhere);
   }
   if (params.status && !params.tab) conditions.push({ status: params.status });
   if (params.allowedChannelIds) {
@@ -618,6 +638,7 @@ async function countTodosTab(
   memberOrTabs: InboxCategoryTab[] | null,
   allowedChannelIds?: string[] | null,
   filterConditions?: Prisma.ConversationWhereInput[],
+  searchWhere?: Prisma.ConversationWhereInput | null,
 ): Promise<number> {
   const conditions: Prisma.ConversationWhereInput[] = [];
   if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
@@ -632,6 +653,7 @@ async function countTodosTab(
   if (filterConditions && filterConditions.length > 0) {
     conditions.push(...filterConditions);
   }
+  if (searchWhere) conditions.push(searchWhere);
   const where: Prisma.ConversationWhereInput =
     conditions.length > 0 ? { AND: conditions } : {};
   return prisma.conversation.count({ where });
@@ -646,8 +668,11 @@ export async function getTabCounts(
   /** Filtros ativos (funil): responsável, tags, origem, estágio… Aplicados a
    *  TODAS as contagens para que os badges reflitam o filtro selecionado. */
   filterConditions?: Prisma.ConversationWhereInput[],
+  /** Busca textual — mesma regra da listagem, para badges casarem com a lista. */
+  search?: string | null,
 ): Promise<Record<InboxTab, number>> {
   const extra = filterConditions ?? [];
+  const searchWhere = await buildConversationSearchWhere(search);
   const results = await Promise.all(
     TAB_LIST.map(async (tab) => {
       const conditions: Prisma.ConversationWhereInput[] = [];
@@ -659,6 +684,7 @@ export async function getTabCounts(
         conditions.push({ channelId: { in: allowedChannelIds } });
       }
       if (extra.length > 0) conditions.push(...extra);
+      if (searchWhere) conditions.push(searchWhere);
       const where: Prisma.ConversationWhereInput =
         conditions.length > 0 ? { AND: conditions } : {};
       const count = await prisma.conversation.count({ where });
@@ -671,6 +697,7 @@ export async function getTabCounts(
     todosMemberCategoryTabs ?? null,
     allowedChannelIds,
     extra,
+    searchWhere,
   );
   // "abertas" = todas as conversas em aberto (status OPEN), independentemente
   // da subcategoria. Contagem própria (não é uma categoria em TAB_LIST).
@@ -682,6 +709,7 @@ export async function getTabCounts(
     conditions.push({ status: "OPEN" });
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
     if (extra.length > 0) conditions.push(...extra);
+    if (searchWhere) conditions.push(searchWhere);
     record.abertas = await prisma.conversation.count({
       where: conditions.length > 0 ? { AND: conditions } : {},
     });
