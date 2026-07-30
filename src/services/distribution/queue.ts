@@ -1,16 +1,30 @@
 /**
- * Fila (carga) de cada responsável = nº TOTAL de CONVERSAS OPEN atribuídas a
- * ele, tenha ele respondido ou não. É a carga real do consultor e serve de base
- * tanto para o LIMITE (`queueLimit` = teto de conversas abertas simultâneas)
- * quanto para a SELEÇÃO ("menor carga" no `engine.selectResponsible`).
+ * Fila (carga) de cada responsável = nº de CONVERSAS OPEN atribuídas onde é a
+ * VEZ DO AGENTE responder — "Entrada" + "Aguardando" no vocabulário do inbox.
+ * Serve de base tanto para o LIMITE (`queueLimit` = teto de conversas abertas
+ * simultâneas) quanto para a SELEÇÃO ("menor carga" em `engine.selectResponsible`).
  *
- * IMPORTANTE (correção do caso "50 leads pra uma pessoa"): antes contávamos só
- * as conversas AGUARDANDO resposta do consultor (`lastMessageDirection = "in"`
- * OU `hasHumanReply = false`). Um consultor que respondia rápido zerava esse
- * pendente e continuava sendo "a menor fila" — recebendo leads sem parar e
- * furando o limite, que também olhava só o pendente. Passamos a contar TODA
- * conversa OPEN atribuída, para que o limite e o balanceamento reflitam a carga
- * total. A regra de "pendente" segue existindo para o inbox/redistribuição.
+ * Critério (ver AGENT.md 2026-07-30):
+ *   `status = OPEN` AND `assignedToId = user` AND `hasError = false`
+ *   AND (`hasHumanReply = false` OR `lastMessageDirection = "in"`)
+ *
+ * Ou seja: só conta o que realmente depende do consultor agora.
+ *   - "Entrada"    (`hasHumanReply=false`) → conta.
+ *   - "Aguardando" (`hasHumanReply=true` + `lastMessageDirection="in"`) → conta.
+ *   - "Respondidas" (`out`, esperando cliente) → NÃO conta (não é carga ativa,
+ *     depende do cliente voltar; o ciclo é encerrado pela automação de
+ *     inatividade em 30min).
+ *   - "Erro" (`hasError=true`) → NÃO conta (precisa de correção, não é fila).
+ *
+ * Histórico (correção do caso "50 leads pra uma pessoa"): a versão anterior
+ * contava TODAS as OPEN atribuídas, incluindo "Respondidas". O problema que
+ * essa versão tentava evitar (consultor rápido zera fila e recebe leads sem
+ * parar) é agora coberto pela cláusula `lastMessageDirection = "in"`: o
+ * consultor só sai da fila quando **realmente** terminou o turno de fala
+ * (respondeu por último). A pilha de "Respondidas" antigas depende da
+ * automação "Aguardando Resposta" para encerrar/mover — sem ela, essas ficam
+ * pra sempre, mas mesmo assim não travam a distribuição (que era o efeito
+ * colateral da definição antiga).
  *
  * `Conversation` é org-scoped, então o filtro de organização é injetado pela
  * Prisma Extension. Uma única `groupBy` (sem N+1).
@@ -19,7 +33,7 @@
 import { prisma } from "@/lib/prisma";
 
 /**
- * Mapa userId → total de conversas OPEN atribuídas ao consultor.
+ * Mapa userId → nº de conversas OPEN aguardando ação do consultor.
  * Usuários sem conversas não aparecem no mapa (o caller assume 0).
  */
 export async function getQueueCounts(
@@ -33,6 +47,11 @@ export async function getQueueCounts(
     where: {
       status: "OPEN",
       assignedToId: { in: userIds },
+      hasError: false,
+      OR: [
+        { hasHumanReply: false },
+        { lastMessageDirection: "in" },
+      ],
     },
     _count: { _all: true },
   });
