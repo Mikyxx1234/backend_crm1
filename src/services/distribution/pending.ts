@@ -21,6 +21,7 @@ import {
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
 import { executeDistribution } from "./engine";
+import { getDistributionResponsibles } from "./responsibles";
 
 export interface PendingDistributionView {
   id: string;
@@ -246,13 +247,8 @@ export async function maybeDistributeNewInboundTicket(input: {
     );
     // #endregion
 
-    // Se ninguém elegível (ou corrida com presença), agenda drenagem da fila.
-    if (!result.success) {
-      scheduleProcessPendingDistributionQueue({
-        trigger: "new_item",
-        delayMs: 2000,
-      });
-    }
+    // Sem elegíveis: deixa na fila e NÃO dispara retry em loop.
+    // Drena só quando consultor ficar disponível / cron / manual.
   } catch (e) {
     console.error("[distribution] maybeDistributeNewInboundTicket failed", e);
     // #region agent log
@@ -264,10 +260,6 @@ export async function maybeDistributeNewInboundTicket(input: {
       }),
     );
     // #endregion
-    scheduleProcessPendingDistributionQueue({
-      trigger: "new_item",
-      delayMs: 2000,
-    });
   }
 }
 
@@ -307,11 +299,35 @@ export async function processPendingDistributionQueue(opts: {
       return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
     }
 
+    // Gate: sem NENHUM consultor elegível agora, não percorre a fila
+    // (evita centenas de executeDistribution → CPU / log spam).
+    let anyEligible = false;
+    try {
+      const views = await getDistributionResponsibles();
+      anyEligible = views.some((r) => r.eligible);
+    } catch (e) {
+      console.warn(
+        "[distribution] processPending eligibility precheck failed",
+        e,
+      );
+      anyEligible = false;
+    }
+    if (!anyEligible) {
+      const pending = await prisma.conversation.count({
+        where: ABERTA_SEM_RESPONSAVEL,
+      });
+      console.info(
+        "[distribution] processPending skip — nenhum consultor elegível",
+        JSON.stringify({ orgId, trigger: opts.trigger, pending }),
+      );
+      return { resolved: 0, cancelled: 0, pending, trigger: opts.trigger };
+    }
+
     const items = await prisma.conversation.findMany({
       where: ABERTA_SEM_RESPONSAVEL,
       orderBy: { createdAt: "asc" },
       select: { id: true, contactId: true },
-      take: 200,
+      take: 50,
     });
 
     // #region agent log
@@ -326,6 +342,7 @@ export async function processPendingDistributionQueue(opts: {
     // #endregion
 
     let resolved = 0;
+    let consecutiveNoEligible = 0;
 
     for (const it of items) {
       try {
@@ -347,7 +364,17 @@ export async function processPendingDistributionQueue(opts: {
           }),
         );
         // #endregion
-        if (result.success) resolved++;
+        if (result.success) {
+          resolved++;
+          consecutiveNoEligible = 0;
+        } else if (
+          result.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+          result.reason === "NO_DEPARTMENT"
+        ) {
+          consecutiveNoEligible += 1;
+          // Capacidade esgotou no meio da drenagem — para o lote.
+          if (consecutiveNoEligible >= 3) break;
+        }
       } catch (e) {
         console.error(
           "[distribution] processPendingDistributionQueue item failed",
@@ -378,11 +405,19 @@ export async function processPendingDistributionQueue(opts: {
     state.running = false;
     const queued = state.queuedTrigger;
     state.queuedTrigger = null;
-    if (queued) {
-      // Reprocessa o que chegou durante a execução (sem empilhar timers).
+    // Só re-drena se alguém ficou elegível / capacidade / manual.
+    // `new_item` NÃO reentra sozinho — evita loop quando a fila está
+    // cheia e ninguém ONLINE.
+    if (
+      queued &&
+      (queued === "agent_online" ||
+        queued === "agent_eligible" ||
+        queued === "capacity_released" ||
+        queued === "manual")
+    ) {
       scheduleProcessPendingDistributionQueue({
         trigger: queued,
-        delayMs: 250,
+        delayMs: 500,
       });
     }
   }

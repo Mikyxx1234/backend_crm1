@@ -225,17 +225,10 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
         },
       });
     }
-    // A UI da fila deriva de conversas OPEN sem assignee — agenda drenagem
-    // (import dinâmico evita ciclo engine ↔ pending). Útil em corrida com
-    // presença/horário: alguém fica elegível milissegundos depois.
-    void import("./pending")
-      .then((m) =>
-        m.scheduleProcessPendingDistributionQueue({
-          trigger: "new_item",
-          delayMs: 2000,
-        }),
-      )
-      .catch(() => {});
+    // NÃO agenda retry automático aqui. Com fila cheia / ninguém ONLINE,
+    // reprocessar a cada falha vira loop (CPU alto). A drenagem só roda
+    // quando alguém fica elegível (online/capacidade), no cron periódico
+    // ou no botão manual.
   } catch (e) {
     console.error("[distribution] falha ao enfileirar pendência", e);
   }
