@@ -43,6 +43,7 @@ import {
 import { fireTrigger } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { scheduleAiReply } from "@/services/ai/inbound-debounce";
+import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
@@ -2480,6 +2481,16 @@ async function executePostBody(
             }).catch((err) =>
               log.debug("Falha ao enviar push (não-fatal):", err),
             );
+
+            // 1º atendimento IA ANTES do salesbot/INICIO-PIPE (allowlist).
+            try {
+              await ensureInboundAiAttendance({
+                conversationId: conversation.id,
+                contactId: contact.id,
+              });
+            } catch (err) {
+              log.error("Falha no ensureInboundAiAttendance:", err);
+            }
 
             try {
               await processSalesbotMessage(contact.id, parsed.text);

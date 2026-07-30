@@ -14,6 +14,7 @@ import {
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { scheduleAiReply } from "@/services/ai/inbound-debounce";
+import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -593,6 +594,15 @@ export async function handleBaileysMessage(
       preview: parsed.text || "[mídia]",
       channel: "WhatsApp",
     }).catch((err) => log.debug("Falha ao enviar push (não-fatal):", err));
+
+    try {
+      await ensureInboundAiAttendance({
+        conversationId: conversation.id,
+        contactId: contact.id,
+      });
+    } catch (err) {
+      log.error("Falha no ensureInboundAiAttendance:", err);
+    }
 
     try {
       await processSalesbotMessage(contact.id, parsed.text);
