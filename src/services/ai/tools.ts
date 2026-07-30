@@ -711,7 +711,7 @@ function transferToHumanTool(ctx: RunContext) {
 function transferToDepartmentTool(ctx: RunContext) {
   return tool({
     description:
-      "Roteia a conversa atual para um departamento (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC') com base no assunto do aluno. NÃO tira a conversa do agente — apenas define o departamento responsável, que é usado pela Distribuição Inteligente para escolher o consultor certo. Chame ANTES de `execute_distribution` quando souber a área. Match do nome é case-insensitive.",
+      "Roteia a conversa atual para um departamento (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC') com base no assunto do aluno. NÃO tira a conversa do agente — apenas define o departamento responsável, que é usado pela Distribuição Inteligente para escolher o consultor certo. Chame ANTES de `execute_distribution` quando souber a área; o `execute_distribution` subsequente preserva o departamento já definido aqui. Match do nome é case-insensitive.",
     inputSchema: z.object({
       departmentName: z
         .string()

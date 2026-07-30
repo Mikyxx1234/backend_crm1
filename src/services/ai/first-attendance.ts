@@ -255,6 +255,8 @@ export async function tryAssignFirstAttendanceAi(args: {
       assignedToId: true,
       contactId: true,
       hasHumanReply: true,
+      departmentId: true,
+      aiGreetedAt: true,
       assignedTo: { select: { type: true } },
     },
   });
@@ -266,6 +268,51 @@ export async function tryAssignFirstAttendanceAi(args: {
   // Já está na IA → ok.
   if (conv.assignedToId && conv.assignedTo?.type === "AI") {
     return conv.assignedToId;
+  }
+
+  // Já enfileirado para humano (handoff IA) → NÃO reassumir com a IA
+  // (senão reenvia saudação e "some" com o pedido de atendente).
+  const waitingHuman = await prisma.distributionPending.findFirst({
+    where: {
+      status: "PENDING",
+      OR: [
+        { conversationId: args.conversationId },
+        { contactId },
+      ],
+    },
+    select: { id: true, triggerSource: true },
+  });
+  if (waitingHuman) {
+    logAi("first_attendance_skip_pending_human", {
+      conversationId: args.conversationId,
+      contactId,
+      pendingId: waitingHuman.id,
+      triggerSource: waitingHuman.triggerSource,
+    });
+    return null;
+  }
+
+  // Conversa já foi roteada para um departamento por handoff IA e tem um
+  // DistributionPending recente do agente → não reclama a conversa.
+  if (conv.departmentId) {
+    const recentAiHandoff = await prisma.distributionPending.findFirst({
+      where: {
+        triggerSource: { contains: "AI_AGENT" },
+        status: { in: ["PENDING", "RESOLVED"] },
+        createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
+        OR: [{ conversationId: args.conversationId }, { contactId }],
+      },
+      select: { id: true },
+    });
+    if (recentAiHandoff) {
+      logAi("first_attendance_skip_dept_handoff", {
+        conversationId: args.conversationId,
+        contactId,
+        departmentId: conv.departmentId,
+        distributionPendingId: recentAiHandoff.id,
+      });
+      return null;
+    }
   }
 
   // Humano já respondeu nesta conversa → não rouba.
@@ -345,7 +392,9 @@ export async function tryAssignFirstAttendanceAi(args: {
       where: { id: args.conversationId },
       data: {
         assignedToId: aiUserId,
-        aiGreetedAt: null,
+        // Não zera aiGreetedAt aqui: após handoff o marker pode já ter
+        // sido limpo por propagate, mas o bot já falou — reabrir com
+        // aiGreetedAt=null reenvia openingMessage no "Ok".
       },
     });
     await tx.contact.update({

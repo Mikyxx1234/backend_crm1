@@ -53,6 +53,18 @@ export function inferDepartmentFromContext(args: {
   );
   if (funnel.includes("acolh")) return "acolhimento";
 
+  // Início de aulas / calouros / novo ingresso → Acolhimento.
+  if (
+    /inici[oa]\s*(d[ae]s?\s+)?aulas?/.test(msg) ||
+    /comec[oa]\s*(d[ae]s?\s+)?aulas?/.test(msg) ||
+    /quando\s+(comec|inic)/.test(msg) ||
+    /calouro/.test(msg) ||
+    /novo\s+ingresso/.test(msg) ||
+    /matricula\s+recente/.test(msg)
+  ) {
+    return "acolhimento";
+  }
+
   return "atendimento";
 }
 
@@ -186,6 +198,21 @@ export async function executeAcademicDepartmentHandoff(args: {
     userMessage = lastIn?.content ?? null;
   }
 
+  // Antes de re-inferir pelo texto do aluno, respeita o departamento que
+  // já foi fixado na conversa (ex.: via transfer_to_department).
+  if (!dept) {
+    const convRow = await prisma.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: { departmentId: true },
+    });
+    if (convRow?.departmentId) {
+      dept = await prisma.department.findUnique({
+        where: { id: convRow.departmentId },
+        select: { id: true, name: true },
+      });
+    }
+  }
+
   if (!dept) {
     const key = inferDepartmentFromContext({
       userMessage,
@@ -201,7 +228,8 @@ export async function executeAcademicDepartmentHandoff(args: {
       data: {
         departmentId: dept.id,
         assignedToId: null,
-        aiGreetedAt: null,
+        // Mantém aiGreetedAt: se zerar, o próximo inbound reassumido
+        // pela IA reenvia a openingMessage (bug Thabata).
         updatedAt: new Date(),
       },
     });
@@ -210,7 +238,6 @@ export async function executeAcademicDepartmentHandoff(args: {
       where: { id: args.conversationId },
       data: {
         assignedToId: null,
-        aiGreetedAt: null,
         updatedAt: new Date(),
       },
     });
