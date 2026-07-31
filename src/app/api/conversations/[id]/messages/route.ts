@@ -756,6 +756,17 @@ export async function POST(request: Request, context: RouteContext) {
         });
       } catch { /* colunas opcionais */ }
 
+      // Resposta do consultor libera vaga na fila (deixa de contar em
+      // `getQueueCounts`) → drena a fila de espera sem esperar o cron.
+      void import("@/services/distribution/pending")
+        .then((m) =>
+          m.scheduleProcessPendingDistributionQueue({
+            trigger: "capacity_released",
+            delayMs: 400,
+          }),
+        )
+        .catch(() => {});
+
       void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
         fireTrigger("message_sent", {
           contactId: conv.contactId,
@@ -897,6 +908,17 @@ export async function POST(request: Request, context: RouteContext) {
         },
       });
     } catch { /* columns may not exist yet */ }
+
+    // Resposta do consultor libera vaga na fila (deixa de contar em
+    // `getQueueCounts`) → drena a fila de espera sem esperar o cron.
+    void import("@/services/distribution/pending")
+      .then((m) =>
+        m.scheduleProcessPendingDistributionQueue({
+          trigger: "capacity_released",
+          delayMs: 400,
+        }),
+      )
+      .catch(() => {});
 
     void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
       fireTrigger("message_sent", {
