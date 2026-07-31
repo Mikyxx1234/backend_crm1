@@ -41,7 +41,7 @@ export interface CockpitData {
   totals: {
     /** Distribuições com sucesso hoje (todas as origens). */
     distributedToday: number;
-    /** Distribuições feitas HOJE pelo agente (origem AUTOMATION). */
+    /** Distribuições feitas HOJE pelo agente IA (handoff, origem AI_AGENT). */
     distributedByAgentToday: number;
     /** Conversas OPEN atribuídas a agentes de IA agora. */
     attendingNow: number;
@@ -93,13 +93,15 @@ export async function getCockpitData(): Promise<CockpitData> {
         },
         _count: { _all: true },
       }),
-      // Quantas dessas foram disparadas pelo agente (automação).
+      // Quantas dessas foram feitas pelo AGENTE IA (handoff → distribuição).
+      // Origem AI_AGENT — distinto de AUTOMATION (workflows), que roda mesmo
+      // com o agente desligado e não deve entrar neste card.
       prisma.distributionLog.count({
         where: {
           organizationId: orgId,
           success: true,
           createdAt: { gte: since },
-          triggerSource: { contains: "AUTOMATION" },
+          triggerSource: { contains: "AI_AGENT" },
         },
       }),
       prisma.distributionPending.count({
