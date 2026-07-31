@@ -204,7 +204,7 @@
       tbody tr { border-bottom: 1px solid rgba(255,255,255,0.05); }
       tbody tr:last-child { border-bottom: none; }
       tbody tr:hover { background: rgba(255,255,255,0.03); }
-      td.num { text-align: right; font-variant-numeric: tabular-nums; }
+      .num { text-align: center; font-variant-numeric: tabular-nums; }
       .cname { font-weight: 600; }
       .cdept { font-size: 11px; color: var(--muted); }
 
@@ -221,7 +221,7 @@
       .b-full { color: var(--danger); background: var(--danger-bg); }
       .b-full .bdot { background: var(--danger); }
 
-      .queue-cell { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+      .queue-cell { display: flex; flex-direction: column; gap: 4px; align-items: center; }
       .bar { width: 90px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.08); overflow: hidden; }
       .bar > i { display: block; height: 100%; border-radius: 3px; background: var(--primary); }
       .bar > i.warn { background: var(--warn); }
@@ -282,9 +282,9 @@
 
         <div class="totals">
           <div class="stat" style="--accent: var(--primary)">
-            <div class="label">Distribuídos hoje</div>
+            <div class="label">Atendimentos hoje</div>
             <div class="value" id="t-dist">—</div>
-            <div class="sub" id="t-dist-sub">todos os canais</div>
+            <div class="sub" id="t-dist-sub">conversas · todos os canais</div>
           </div>
           <div class="stat" style="--accent: #8b5cf6">
             <div class="label">Pelo agente IA hoje</div>
@@ -473,7 +473,7 @@
       }
 
       function render(data) {
-        document.getElementById("t-dist").textContent = data.totals.distributedToday;
+        document.getElementById("t-dist").textContent = data.totals.attendancesToday;
         document.getElementById("t-agent").textContent = data.totals.distributedByAgentToday;
         document.getElementById("t-att").textContent = data.totals.attendingNow;
         document.getElementById("t-pend").textContent = data.totals.pendingQueue;

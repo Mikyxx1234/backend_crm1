@@ -1,8 +1,10 @@
 /**
  * Métricas do "Cockpit do Agente" — painel operacional (herdeiro do cockpit do
- * DataCrazy) migrado para o CRM novo. Lê da mesma fonte do motor de
- * distribuição (`responsibles.ts`, já corrigido) + `DistributionLog` +
- * conversas OPEN. É SOMENTE LEITURA e escopado à organização do token.
+ * DataCrazy) migrado para o CRM novo. Os números de atendimento usam a MESMA
+ * fonte da aba Dashboard do CRM (conversas: `conversation.count` /
+ * `assignedToId`), além de `responsibles.ts` (elegibilidade/fila) e
+ * `DistributionLog` (só o handoff do agente IA). É SOMENTE LEITURA e escopado
+ * à organização do token.
  *
  * Consumido por `GET /api/public/agent-cockpit` (Bearer token) e renderizado
  * pelo dashboard estático `public/cockpit-agente.html`.
@@ -32,15 +34,23 @@ export interface CockpitConsultant {
   queueLimit: number;
   status: string | null;
   eligible: boolean;
-  /** Leads que ESTE consultor recebeu hoje pela distribuição. */
+  /**
+   * Conversas atribuídas a ESTE consultor hoje — mesma fonte do Dashboard
+   * do CRM (conversation.assignedToId, criadas hoje). "Atendimentos" por
+   * consultor, não distribuições.
+   */
   receivedToday: number;
 }
 
 export interface CockpitData {
   generatedAt: string;
   totals: {
-    /** Distribuições com sucesso hoje (todas as origens). */
-    distributedToday: number;
+    /**
+     * Atendimentos de hoje — mesma fonte do Dashboard do CRM
+     * (conversas criadas hoje, todos os canais). Substitui a antiga contagem
+     * de distribuições para os números baterem com a aba Dashboard.
+     */
+    attendancesToday: number;
     /** Distribuições feitas HOJE pelo agente IA (handoff, origem AI_AGENT). */
     distributedByAgentToday: number;
     /** Conversas OPEN atribuídas a agentes de IA agora. */
@@ -70,8 +80,14 @@ export async function getCockpitData(): Promise<CockpitData> {
   const orgId = getOrgIdOrThrow();
   const since = startOfTodaySaoPaulo();
 
-  const [agentConfigs, responsibles, distToday, byAgentToday, pendingQueue] =
-    await Promise.all([
+  const [
+    agentConfigs,
+    responsibles,
+    attendancesToday,
+    convByAgent,
+    byAgentToday,
+    pendingQueue,
+  ] = await Promise.all([
       prisma.aIAgentConfig.findMany({
         where: { organizationId: orgId },
         select: {
@@ -82,14 +98,19 @@ export async function getCockpitData(): Promise<CockpitData> {
         },
       }),
       getDistributionResponsibles(),
-      // Distribuições com sucesso hoje, por consultor selecionado.
-      prisma.distributionLog.groupBy({
-        by: ["selectedUserId"],
+      // "Atendimentos hoje" — mesma definição do Dashboard do CRM:
+      // conversas criadas hoje (todos os canais, atribuídas ou não).
+      prisma.conversation.count({
+        where: { organizationId: orgId, createdAt: { gte: since } },
+      }),
+      // Conversas atribuídas por consultor hoje — "recebidos hoje" = atendimentos
+      // por atendente, igual ao Dashboard (conversation.assignedToId).
+      prisma.conversation.groupBy({
+        by: ["assignedToId"],
         where: {
           organizationId: orgId,
-          success: true,
           createdAt: { gte: since },
-          selectedUserId: { not: null },
+          assignedToId: { not: null },
         },
         _count: { _all: true },
       }),
@@ -110,11 +131,9 @@ export async function getCockpitData(): Promise<CockpitData> {
     ]);
 
   const receivedByUser = new Map<string, number>();
-  let distributedToday = 0;
-  for (const row of distToday) {
-    if (!row.selectedUserId) continue;
-    receivedByUser.set(row.selectedUserId, row._count._all);
-    distributedToday += row._count._all;
+  for (const row of convByAgent) {
+    if (!row.assignedToId) continue;
+    receivedByUser.set(row.assignedToId, row._count._all);
   }
 
   // Atendendo agora por agente (conversas OPEN atribuídas ao user do agente).
@@ -164,7 +183,7 @@ export async function getCockpitData(): Promise<CockpitData> {
   return {
     generatedAt: new Date().toISOString(),
     totals: {
-      distributedToday,
+      attendancesToday,
       distributedByAgentToday: byAgentToday,
       attendingNow,
       pendingQueue,
