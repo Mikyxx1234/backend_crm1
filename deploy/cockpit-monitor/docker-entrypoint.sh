@@ -4,6 +4,9 @@ set -eu
 ACCESS_SECRET="${COCKPIT_ACCESS_SECRET:-}"
 BACKEND_PROD_URL="${BACKEND_PROD_URL:-${COCKPIT_API_BASE:-}}"
 FRONTEND_PROD_URL="${FRONTEND_PROD_URL:-}"
+# Porta em que o Nginx escuta. Default 80; ajuste (ex.: 8000) para casar com
+# o mapeamento de domínio do EasyPanel sem precisar mexer no domínio.
+LISTEN_PORT="${PORT:-80}"
 
 if [ -z "$ACCESS_SECRET" ]; then
   echo "ERRO: defina COCKPIT_ACCESS_SECRET no EasyPanel." >&2
@@ -25,7 +28,7 @@ BP_HOST="$(host_from "$BACKEND_PROD_URL")"
 
 cat > /etc/nginx/conf.d/default.conf <<NGINX
 server {
-  listen 80;
+  listen ${LISTEN_PORT};
   server_name _;
   root /usr/share/nginx/html;
   index index.html;
