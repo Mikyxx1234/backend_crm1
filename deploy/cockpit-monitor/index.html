@@ -59,18 +59,6 @@
         box-shadow: 0 4px 14px rgba(91, 111, 245, 0.35);
       }
       .pipe-arrow { color: var(--muted-2); font-size: 18px; user-select: none; }
-      .env-toggle { margin-left: auto; display: flex; gap: 4px; }
-      .env-toggle button {
-        padding: 6px 12px; font-size: 11px; font-weight: 700; letter-spacing: 0.04em;
-        border-radius: 999px; border: 1px solid var(--border-strong);
-        background: transparent; color: var(--muted); cursor: pointer;
-      }
-      .env-toggle button.active {
-        background: var(--success-bg); color: var(--success); border-color: rgba(16,185,129,0.35);
-      }
-      .env-toggle button.dev.active {
-        background: var(--warn-bg); color: var(--warn); border-color: rgba(245,158,11,0.35);
-      }
 
       header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
       .brand { display: flex; align-items: center; gap: 12px; }
@@ -192,10 +180,6 @@
         <button type="button" class="pipe" data-stage="frontend">🖥 Frontend</button>
         <span class="pipe-arrow" aria-hidden="true">→</span>
         <button type="button" class="pipe" data-stage="backend">⚙ Backend</button>
-        <div class="env-toggle" role="group" aria-label="Ambiente">
-          <button type="button" data-env="prod" class="active">PROD</button>
-          <button type="button" data-env="dev" class="dev">DEV</button>
-        </div>
       </nav>
 
       <!-- MONITOR -->
@@ -225,7 +209,7 @@
             <div class="sub">sem responsável elegível</div>
           </div>
         </div>
-        <div class="section-title">Agentes de IA · <span id="monitor-env-label">PROD</span></div>
+        <div class="section-title">Agentes de IA</div>
         <div id="agents" class="agents"></div>
         <div class="section-title">Consultores</div>
         <div class="table-card">
@@ -275,13 +259,13 @@
     <script>
       var REFRESH_MS = 15000;
       var timer = null;
-      var state = { stage: "monitor", env: "prod" };
+      var state = { stage: "monitor" };
 
       function cfg() { return window.COCKPIT_CONFIG || {}; }
       function urls(kind) {
         var u = cfg().urls && cfg().urls[kind];
         if (!u) return "";
-        return (state.env === "dev" && u.dev) ? u.dev : (u.prod || "");
+        return u.prod || "";
       }
       function apiBase() {
         var be = urls("backend");
@@ -308,22 +292,10 @@
         ["monitor", "frontend", "backend"].forEach(function (s) {
           document.getElementById("stage-" + s).classList.toggle("hidden", s !== stage);
         });
-        location.hash = stage + "-" + state.env;
+        location.hash = stage;
         if (stage === "frontend") renderFrontend();
         if (stage === "backend") renderBackend();
         if (stage === "monitor") refreshMonitor(true);
-      }
-
-      function setEnv(env) {
-        state.env = env;
-        document.querySelectorAll(".env-toggle button").forEach(function (el) {
-          el.classList.toggle("active", el.getAttribute("data-env") === env);
-        });
-        document.getElementById("monitor-env-label").textContent = env.toUpperCase();
-        location.hash = state.stage + "-" + env;
-        if (state.stage === "monitor") refreshMonitor(true);
-        if (state.stage === "frontend") renderFrontend();
-        if (state.stage === "backend") renderBackend();
       }
 
       function openUrl(url, sameTab) {
@@ -334,9 +306,8 @@
 
       function renderFrontend() {
         var base = urls("frontend");
-        var envLabel = state.env.toUpperCase();
-        document.getElementById("fe-title").textContent = "CRM Frontend · " + envLabel;
-        document.getElementById("fe-url").textContent = base || "(URL não configurada — FRONTEND_" + envLabel + "_URL no EasyPanel)";
+        document.getElementById("fe-title").textContent = "CRM Frontend";
+        document.getElementById("fe-url").textContent = base || "(URL não configurada — FRONTEND_PROD_URL no EasyPanel)";
         var links = [
           ["Dashboard", "/dashboard"],
           ["Agentes IA", "/ai-agents"],
@@ -357,8 +328,7 @@
 
       function renderBackend() {
         var base = apiBase();
-        var envLabel = state.env.toUpperCase();
-        document.getElementById("be-title").textContent = "Backend CRM · " + envLabel;
+        document.getElementById("be-title").textContent = "Backend CRM";
         document.getElementById("be-url").textContent = base || "(não configurado)";
         var links = [
           ["Health JSON", "/api/health"],
@@ -375,12 +345,7 @@
 
       function pingBackendHealth() {
         var el = document.getElementById("be-health");
-        var proxyPath = state.env === "dev" ? "/proxy/dev/backend/health" : "/proxy/prod/backend/health";
-        if (state.env === "dev" && !urls("backend")) {
-          el.className = "health err";
-          el.lastChild.textContent = "Backend DEV não configurado";
-          return;
-        }
+        var proxyPath = "/proxy/prod/backend/health";
         fetch(proxyPath, { cache: "no-store" })
           .then(function (r) {
             el.className = "health " + (r.ok ? "ok" : "err");
@@ -447,10 +412,6 @@
 
       function refreshMonitor(silent) {
         if (state.stage !== "monitor") return;
-        if (state.env === "dev" && !urls("backend")) {
-          setStatus("err", "Backend DEV não configurado");
-          return;
-        }
         fetchCockpit()
           .then(function (r) {
             if (r.status === 401) throw new Error("Segredo cockpit inválido (COCKPIT_ACCESS_SECRET).");
@@ -459,7 +420,7 @@
           })
           .then(function (data) {
             renderMonitor(data);
-            setStatus("ok", state.env.toUpperCase() + " · " + new Date().toLocaleTimeString("pt-BR"));
+            setStatus("ok", new Date().toLocaleTimeString("pt-BR"));
           })
           .catch(function (e) {
             if (!silent) setStatus("err", e.message || "Falha");
@@ -469,15 +430,10 @@
       document.querySelectorAll(".pipe").forEach(function (btn) {
         btn.addEventListener("click", function () { setStage(btn.getAttribute("data-stage")); });
       });
-      document.querySelectorAll(".env-toggle button").forEach(function (btn) {
-        btn.addEventListener("click", function () { setEnv(btn.getAttribute("data-env")); });
-      });
 
       function boot() {
-        var hash = (location.hash || "#monitor-prod").replace("#", "").split("-");
+        var hash = (location.hash || "#monitor").replace("#", "").split("-");
         if (hash[0]) state.stage = hash[0];
-        if (hash[1] === "dev" || hash[1] === "prod") state.env = hash[1];
-        setEnv(state.env);
         setStage(state.stage);
         if (timer) clearInterval(timer);
         timer = setInterval(function () { refreshMonitor(true); }, REFRESH_MS);
