@@ -24,9 +24,22 @@ import {
 import { sseBus } from "@/lib/sse-bus";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
+import { cancelActiveContextsForContact } from "@/services/automation-context";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { logEvent } from "@/services/activity-log";
 
+/** Após humano enviar: mata salesbot ativo do contato (best-effort). */
+async function stopAutomationsAfterHumanReply(
+  contactId: string | null | undefined,
+): Promise<void> {
+  if (!contactId) return;
+  try {
+    await cancelActiveContextsForContact(contactId);
+  } catch (err) {
+    console.warn("[automation] cancel after human reply:", err);
+  }
+}
 type RouteContext = { params: Promise<{ id: string }> };
 
 // ── DTO ──────────────────────────────────────
@@ -743,10 +756,23 @@ export async function POST(request: Request, context: RouteContext) {
         });
       } catch { /* colunas opcionais */ }
 
-      fireTrigger("message_sent", {
-        contactId: conv.contactId,
-        data: { channel: channelLabel, content },
-      }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+      // Resposta do consultor libera vaga na fila (deixa de contar em
+      // `getQueueCounts`) → drena a fila de espera sem esperar o cron.
+      void import("@/services/distribution/pending")
+        .then((m) =>
+          m.scheduleProcessPendingDistributionQueue({
+            trigger: "capacity_released",
+            delayMs: 400,
+          }),
+        )
+        .catch(() => {});
+
+      void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
+        fireTrigger("message_sent", {
+          contactId: conv.contactId,
+          data: { channel: channelLabel, content },
+        }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
+      );
 
       if (!sendRes.failed) {
         void logEvent({
@@ -883,10 +909,23 @@ export async function POST(request: Request, context: RouteContext) {
       });
     } catch { /* columns may not exist yet */ }
 
-    fireTrigger("message_sent", {
-      contactId: conv.contactId,
-      data: { channel: "WhatsApp", content },
-    }).catch((err) => console.warn("[automation trigger] message_sent:", err));
+    // Resposta do consultor libera vaga na fila (deixa de contar em
+    // `getQueueCounts`) → drena a fila de espera sem esperar o cron.
+    void import("@/services/distribution/pending")
+      .then((m) =>
+        m.scheduleProcessPendingDistributionQueue({
+          trigger: "capacity_released",
+          delayMs: 400,
+        }),
+      )
+      .catch(() => {});
+
+    void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
+      fireTrigger("message_sent", {
+        contactId: conv.contactId,
+        data: { channel: "WhatsApp", content },
+      }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
+    );
 
     // Log unificado de atividade (Activity Log) — fire-and-forget.
     // Falhas de envio sao registradas como MESSAGE_FAILED dentro de
@@ -935,6 +974,8 @@ export async function POST(request: Request, context: RouteContext) {
           err,
         ),
     );
+    // Humano respondeu: invalida debounce do Agente IA pendente.
+    cancelAiReplyDebounce(conv.id, "human_outbound");
 
     return NextResponse.json({
       message: {

@@ -3,6 +3,11 @@ import {
   summarizeConditionConfig,
   type ConditionConfig,
 } from "@/lib/automation-condition";
+import {
+  newRoundRobinOptionId,
+  summarizeRoundRobinConfig,
+  type RoundRobinConfig,
+} from "@/lib/automation-round-robin";
 
 export type AutomationTriggerType =
   | "stage_changed"
@@ -20,6 +25,7 @@ export type AutomationTriggerType =
   | "call_received"
   | "call_made"
   | "conversation_tabulated"
+  | "whatsapp_session_expiring"
   | "manual";
 
 export type AutomationStep = {
@@ -44,6 +50,7 @@ export const AUTOMATION_TRIGGER_TYPES: AutomationTriggerType[] = [
   "call_received",
   "call_made",
   "conversation_tabulated",
+  "whatsapp_session_expiring",
   "manual",
 ];
 
@@ -63,6 +70,7 @@ export const ACTION_STEP_TYPES = [
   "webhook",
   "delay",
   "condition",
+  "round_robin",
   "update_lead_score",
   "question",
   "wait_for_reply",
@@ -100,6 +108,7 @@ export function triggerTypeLabel(t: string): string {
     call_received: "Ligação recebida",
     call_made: "Ligação realizada",
     conversation_tabulated: "Conversa tabulada (encerramento)",
+    whatsapp_session_expiring: "Sessão do WhatsApp prestes a encerrar",
     manual: "Manual (executar pela conversa)",
   };
   return map[t] ?? t;
@@ -122,6 +131,7 @@ export function stepTypeLabel(t: string): string {
     webhook: "Webhook",
     delay: "Atraso",
     condition: "Condição",
+    round_robin: "Round Robin de caminhos",
     update_lead_score: "Atualizar lead score",
     question: "Pergunta ao lead",
     wait_for_reply: "Aguardar resposta",
@@ -213,8 +223,10 @@ export function summarizeTriggerConfig(
       if (c.tabulationLabel) return `Tabulação: ${String(c.tabulationLabel)}`;
       if (c.tabulationId) return `Tabulação ID: ${String(c.tabulationId).slice(0, 8)}…`;
       if (c.departmentId) return `Departamento: ${String(c.departmentId).slice(0, 8)}…`;
-      return "Qualquer tabulação";
+      return "Qualquer encerramento";
     }
+    case "whatsapp_session_expiring":
+      return `${String(c.hoursBeforeExpiry ?? 1)}h antes do encerramento`;
     default:
       return "—";
   }
@@ -231,8 +243,13 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
       if (sid && lookup?.[sid]) return lookup[sid];
       return sid ? `Estágio: ${sid.slice(0, 12)}…` : "Definir estágio";
     }
-    case "assign_owner":
-      return c.userId ? `Usuário: ${String(c.userId)}` : "Definir usuário";
+    case "assign_owner": {
+      const target = c.target ? String(c.target) : "deal";
+      const targetLabel = target === "both" ? "negócio e contato" : target === "contact" ? "contato" : "negócio";
+      const userId = c.userId ? String(c.userId).trim() : "";
+      if (!userId) return `Limpar responsável (${targetLabel})`;
+      return `Usuário: ${userId} (${targetLabel})`;
+    }
     case "transfer_department":
       return c.departmentName
         ? String(c.departmentName)
@@ -277,6 +294,8 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
     }
     case "condition":
       return summarizeConditionConfig(c);
+    case "round_robin":
+      return summarizeRoundRobinConfig(c);
     case "update_lead_score":
       return "Recalcular score";
     case "question": {
@@ -334,7 +353,15 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
         : "Selecionar agente IA";
     }
     case "execute_distribution": {
+      const names = Array.isArray(c.departmentNames)
+        ? c.departmentNames.filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+        : [];
       const t = c.distributionType ? String(c.distributionType) : "";
+      if (names.length > 0) {
+        const deptLabel =
+          names.length <= 2 ? names.join(", ") : `${names.slice(0, 2).join(", ")} +${names.length - 2}`;
+        return t ? `${deptLabel} · ${t}` : deptLabel;
+      }
       return t ? `Distribuição: ${t}` : "Distribuição padrão";
     }
     case "send_product": {
@@ -395,7 +422,7 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
     case "move_stage":
       return { stageId: "" };
     case "assign_owner":
-      return { userId: "" };
+      return { userId: "", target: "deal" };
     case "transfer_department":
       return { departmentId: "", departmentName: "" };
     case "add_tag":
@@ -429,6 +456,12 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
             rules: [{ field: "", op: "eq", value: "" }],
           },
         ],
+      };
+      return cfg as unknown as Record<string, unknown>;
+    }
+    case "round_robin": {
+      const cfg: RoundRobinConfig = {
+        options: [{ id: newRoundRobinOptionId() }, { id: newRoundRobinOptionId() }],
       };
       return cfg as unknown as Record<string, unknown>;
     }
@@ -489,9 +522,8 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
         target: "deal",
       };
     case "execute_distribution":
-      // v1: "executar distribuição padrão". distributionType opcional
-      // (avalia TYPE_INCOMPATIBLE no motor). Sem fallback complexo.
-      return { distributionType: "" };
+      // distributionType opcional; departmentIds = pool opcional de departamentos.
+      return { distributionType: "", departmentIds: [], departmentNames: [] };
     default:
       return {};
   }
@@ -652,6 +684,8 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
       // Matching considera ancestrais (mirar categoria pai vale pra
       // descendentes — ver evaluateTrigger em services/automations.ts).
       return { departmentId: "", tabulationId: "", tabulationLabel: "" };
+    case "whatsapp_session_expiring":
+      return { hoursBeforeExpiry: 1 };
     default:
       return {};
   }

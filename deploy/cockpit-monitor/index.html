@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cockpit IA — Cruzeiro do Sul</title>
+    <style>
+      :root {
+        --bg: #0b1220;
+        --bg-gradient: linear-gradient(135deg, #0b1220 0%, #131b30 40%, #1c1530 70%, #0e1426 100%);
+        --card: #1a2238;
+        --card-2: #202a45;
+        --border: rgba(255, 255, 255, 0.08);
+        --border-strong: rgba(255, 255, 255, 0.14);
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --muted-2: #64748b;
+        --primary: #5b6ff5;
+        --primary-light: #7b8df7;
+        --success: #10b981;
+        --success-bg: rgba(16, 185, 129, 0.12);
+        --danger: #ef4444;
+        --danger-bg: rgba(239, 68, 68, 0.12);
+        --warn: #f59e0b;
+        --warn-bg: rgba(245, 158, 11, 0.12);
+        --radius: 16px;
+        --radius-sm: 10px;
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; min-height: 100%; }
+      body {
+        background: var(--bg);
+        background-image: var(--bg-gradient);
+        background-attachment: fixed;
+        color: var(--text);
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      .wrap { max-width: 1120px; margin: 0 auto; padding: 20px 20px 48px; }
+
+      /* Pipeline */
+      .pipeline-bar {
+        display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+        margin-bottom: 22px; padding: 10px 12px;
+        background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+      }
+      .pipe {
+        display: inline-flex; align-items: center; gap: 8px;
+        padding: 10px 16px; border-radius: var(--radius-sm);
+        border: 1px solid var(--border-strong); background: var(--card-2);
+        color: var(--muted); font-weight: 600; font-size: 13px; cursor: pointer;
+        transition: all 0.15s;
+      }
+      .pipe:hover { color: var(--text); border-color: rgba(255,255,255,0.22); }
+      .pipe.active {
+        color: #fff; border-color: transparent;
+        background: linear-gradient(135deg, var(--primary), #8b5cf6);
+        box-shadow: 0 4px 14px rgba(91, 111, 245, 0.35);
+      }
+      .pipe-arrow { color: var(--muted-2); font-size: 18px; user-select: none; }
+
+      header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
+      .brand { display: flex; align-items: center; gap: 12px; }
+      .brand .logo {
+        width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center;
+        background: linear-gradient(135deg, var(--primary), #8b5cf6);
+        box-shadow: 0 6px 20px rgba(91, 111, 245, 0.45); font-size: 20px;
+      }
+      .brand h1 { margin: 0; font-size: 18px; font-weight: 700; }
+      .brand p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+      .head-actions { display: flex; align-items: center; gap: 10px; }
+      .updated { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-bg); }
+      .dot.stale { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-bg); }
+      .dot.err { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-bg); }
+
+      button.btn {
+        font-family: inherit; cursor: pointer; border: 1px solid var(--border-strong);
+        background: var(--card-2); color: var(--text); border-radius: var(--radius-sm);
+        padding: 8px 14px; font-size: 13px; font-weight: 600;
+      }
+      button.btn:hover { background: #26314f; }
+      button.btn.primary {
+        background: linear-gradient(135deg, var(--primary), var(--primary-light));
+        border-color: transparent; color: #fff;
+      }
+
+      .stage.hidden { display: none !important; }
+
+      /* Launcher cards */
+      .launcher { display: grid; gap: 16px; }
+      .launch-card {
+        background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px;
+      }
+      .launch-card h3 { margin: 0 0 6px; font-size: 15px; }
+      .launch-card .url { font-size: 12px; color: var(--muted); word-break: break-all; margin-bottom: 14px; }
+      .launch-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+      .link-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 8px; margin-top: 12px; }
+      .link-grid a {
+        display: block; padding: 10px 12px; border-radius: var(--radius-sm);
+        background: var(--card-2); border: 1px solid var(--border);
+        color: var(--text); text-decoration: none; font-size: 13px; font-weight: 600;
+      }
+      .link-grid a:hover { border-color: var(--primary); color: var(--primary-light); }
+      .health { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 10px; }
+      .health .hdot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+      .health.ok .hdot { background: var(--success); }
+      .health.err .hdot { background: var(--danger); }
+      .note {
+        margin-top: 16px; padding: 12px 14px; border-radius: var(--radius-sm);
+        background: rgba(91,111,245,0.1); border: 1px solid rgba(91,111,245,0.25);
+        font-size: 12px; color: var(--muted);
+      }
+
+      /* Monitor (cockpit) */
+      .totals { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 22px; }
+      @media (max-width: 760px) { .totals { grid-template-columns: repeat(2, 1fr); } }
+      .stat {
+        position: relative; background: var(--card); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 16px 18px; overflow: hidden;
+      }
+      .stat::before { content: ""; position: absolute; inset: 0 auto 0 0; width: 3px; background: var(--accent, var(--primary)); }
+      .stat .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; }
+      .stat .value { margin-top: 8px; font-size: 30px; font-weight: 800; font-variant-numeric: tabular-nums; }
+      .stat .sub { margin-top: 2px; font-size: 12px; color: var(--muted-2); }
+      .section-title { font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 700; margin: 26px 0 12px; }
+      .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+      .agent {
+        background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+        padding: 16px; display: flex; align-items: center; gap: 14px;
+      }
+      .agent .av {
+        width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center;
+        background: linear-gradient(135deg, rgba(91,111,245,0.25), rgba(139,92,246,0.25));
+        border: 1px solid var(--border-strong);
+      }
+      .agent .name { font-weight: 700; font-size: 14px; }
+      .agent .meta { font-size: 12px; color: var(--muted); }
+      .agent .att b { font-size: 22px; font-weight: 800; }
+      .table-card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 12px 16px; font-size: 13px; }
+      thead th { font-size: 11px; text-transform: uppercase; color: var(--muted); background: rgba(255,255,255,0.02); border-bottom: 1px solid var(--border); }
+      tbody tr { border-bottom: 1px solid rgba(255,255,255,0.05); }
+      td.num { text-align: right; font-variant-numeric: tabular-nums; }
+      .badge { display: inline-flex; align-items: center; gap: 5px; padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+      .badge .bdot { width: 6px; height: 6px; border-radius: 50%; }
+      .b-ok { color: var(--success); background: var(--success-bg); }
+      .b-ok .bdot { background: var(--success); }
+      .b-off { color: var(--muted); background: rgba(148,163,184,0.12); }
+      .b-full { color: var(--danger); background: var(--danger-bg); }
+      .queue-cell { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+      .bar { width: 90px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.08); overflow: hidden; }
+      .bar > i { display: block; height: 100%; background: var(--primary); }
+      .bar > i.warn { background: var(--warn); }
+      .bar > i.full { background: var(--danger); }
+      .empty { padding: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="brand">
+          <div class="logo">🤖</div>
+          <div>
+            <h1>Cockpit IA</h1>
+            <p>Cruzeiro do Sul · hub CRM</p>
+          </div>
+        </div>
+        <div class="head-actions">
+          <div class="updated"><span id="status-dot" class="dot"></span><span id="updated-txt">—</span></div>
+        </div>
+      </header>
+
+      <nav class="pipeline-bar" aria-label="Pipeline CRM">
+        <button type="button" class="pipe active" data-stage="monitor">📊 Monitor</button>
+        <span class="pipe-arrow" aria-hidden="true">→</span>
+        <button type="button" class="pipe" data-stage="frontend">🖥 Frontend</button>
+        <span class="pipe-arrow" aria-hidden="true">→</span>
+        <button type="button" class="pipe" data-stage="backend">⚙ Backend</button>
+      </nav>
+
+      <!-- MONITOR -->
+      <section id="stage-monitor" class="stage">
+        <div class="head-actions" style="margin-bottom:14px;justify-content:flex-end;">
+          <button type="button" class="btn" onclick="refreshMonitor(true)">Atualizar</button>
+        </div>
+        <div class="totals">
+          <div class="stat" style="--accent: var(--primary)">
+            <div class="label">Distribuídos hoje</div>
+            <div class="value" id="t-dist">—</div>
+            <div class="sub">todos os canais</div>
+          </div>
+          <div class="stat" style="--accent: #8b5cf6">
+            <div class="label">Pelo agente IA hoje</div>
+            <div class="value" id="t-agent">—</div>
+            <div class="sub">handoff do agente</div>
+          </div>
+          <div class="stat" style="--accent: var(--success)">
+            <div class="label">Atendendo agora</div>
+            <div class="value" id="t-att">—</div>
+            <div class="sub">conversas do agente</div>
+          </div>
+          <div class="stat" style="--accent: var(--warn)">
+            <div class="label">Fila de espera</div>
+            <div class="value" id="t-pend">—</div>
+            <div class="sub">sem responsável elegível</div>
+          </div>
+        </div>
+        <div class="section-title">Agentes de IA</div>
+        <div id="agents" class="agents"></div>
+        <div class="section-title">Consultores</div>
+        <div class="table-card">
+          <table>
+            <thead><tr><th>Consultor</th><th class="num">Recebidos hoje</th><th class="num">Fila</th><th>Status</th></tr></thead>
+            <tbody id="consultants"></tbody>
+          </table>
+          <div id="consultants-empty" class="empty hidden">Nenhum consultor encontrado.</div>
+        </div>
+      </section>
+
+      <!-- FRONTEND -->
+      <section id="stage-frontend" class="stage hidden">
+        <div class="launcher">
+          <div class="launch-card">
+            <div class="health" id="fe-health"><span class="hdot"></span><span>Frontend</span></div>
+            <h3 id="fe-title">CRM Frontend · PROD</h3>
+            <div class="url" id="fe-url">—</div>
+            <div class="launch-actions">
+              <button type="button" class="btn primary" id="fe-open">Abrir CRM aqui</button>
+              <button type="button" class="btn" id="fe-tab">Nova aba</button>
+            </div>
+            <div class="link-grid" id="fe-links"></div>
+            <p class="note">O CRM não pode ser embutido nesta página (segurança). Use os botões acima para abrir o frontend no ambiente selecionado.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- BACKEND -->
+      <section id="stage-backend" class="stage hidden">
+        <div class="launcher">
+          <div class="launch-card">
+            <div class="health" id="be-health"><span class="hdot"></span><span>Backend API</span></div>
+            <h3 id="be-title">Backend CRM · PROD</h3>
+            <div class="url" id="be-url">—</div>
+            <div class="launch-actions">
+              <button type="button" class="btn primary" id="be-health-btn">Ver /api/health</button>
+              <button type="button" class="btn" id="be-tab">Abrir raiz</button>
+            </div>
+            <div class="link-grid" id="be-links"></div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <script src="/config.js"></script>
+    <script>
+      var REFRESH_MS = 15000;
+      var timer = null;
+      var state = { stage: "monitor" };
+
+      function cfg() { return window.COCKPIT_CONFIG || {}; }
+      function urls(kind) {
+        var u = cfg().urls && cfg().urls[kind];
+        if (!u) return "";
+        return u.prod || "";
+      }
+      function apiBase() {
+        var be = urls("backend");
+        return be || (cfg().apiBase || "").replace(/\/$/, "");
+      }
+
+      function esc(s) {
+        return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+        });
+      }
+
+      function setStatus(kind, text) {
+        var dot = document.getElementById("status-dot");
+        dot.className = "dot" + (kind === "stale" ? " stale" : kind === "err" ? " err" : "");
+        document.getElementById("updated-txt").textContent = text;
+      }
+
+      function setStage(stage) {
+        state.stage = stage;
+        document.querySelectorAll(".pipe").forEach(function (el) {
+          el.classList.toggle("active", el.getAttribute("data-stage") === stage);
+        });
+        ["monitor", "frontend", "backend"].forEach(function (s) {
+          document.getElementById("stage-" + s).classList.toggle("hidden", s !== stage);
+        });
+        location.hash = stage;
+        if (stage === "frontend") renderFrontend();
+        if (stage === "backend") renderBackend();
+        if (stage === "monitor") refreshMonitor(true);
+      }
+
+      function openUrl(url, sameTab) {
+        if (!url) return;
+        if (sameTab) window.location.href = url;
+        else window.open(url, "_blank", "noopener,noreferrer");
+      }
+
+      function renderFrontend() {
+        var base = urls("frontend");
+        document.getElementById("fe-title").textContent = "CRM Frontend";
+        document.getElementById("fe-url").textContent = base || "(URL não configurada — FRONTEND_PROD_URL no EasyPanel)";
+        var links = [
+          ["Dashboard", "/dashboard"],
+          ["Agentes IA", "/ai-agents"],
+          ["Inbox", "/inbox"],
+          ["Pipeline", "/pipeline"],
+          ["Automações", "/automations"],
+          ["Distribuição", "/settings/distribution"],
+          ["API Tokens", "/settings/api-tokens"],
+        ];
+        document.getElementById("fe-links").innerHTML = links.map(function (pair) {
+          var href = base ? base + pair[1] : "#";
+          return '<a href="' + esc(href) + '" target="_blank" rel="noopener">' + esc(pair[0]) + "</a>";
+        }).join("");
+        document.getElementById("fe-open").onclick = function () { openUrl(base + "/dashboard", true); };
+        document.getElementById("fe-tab").onclick = function () { openUrl(base + "/dashboard", false); };
+        document.getElementById("fe-health").className = "health" + (base ? "" : " err");
+      }
+
+      function renderBackend() {
+        var base = apiBase();
+        document.getElementById("be-title").textContent = "Backend CRM";
+        document.getElementById("be-url").textContent = base || "(não configurado)";
+        var links = [
+          ["Health JSON", "/api/health"],
+          ["Cockpit API", "/api/public/agent-cockpit"],
+          ["Cockpit HTML", "/cockpit-agente.html"],
+        ];
+        document.getElementById("be-links").innerHTML = links.map(function (pair) {
+          return '<a href="' + esc(base + pair[1]) + '" target="_blank" rel="noopener">' + esc(pair[0]) + "</a>";
+        }).join("");
+        document.getElementById("be-health-btn").onclick = function () { openUrl(base + "/api/health", false); };
+        document.getElementById("be-tab").onclick = function () { openUrl(base, false); };
+        pingBackendHealth();
+      }
+
+      function pingBackendHealth() {
+        var el = document.getElementById("be-health");
+        var proxyPath = "/proxy/prod/backend/health";
+        fetch(proxyPath, { cache: "no-store" })
+          .then(function (r) {
+            el.className = "health " + (r.ok ? "ok" : "err");
+            el.lastChild.textContent = r.ok ? "Backend online" : "Backend erro " + r.status;
+          })
+          .catch(function () {
+            el.className = "health err";
+            el.lastChild.textContent = "Backend offline";
+          });
+      }
+
+      function fetchCockpit() {
+        var secret = cfg().accessSecret;
+        var base = apiBase();
+        if (!base || !secret) {
+          return Promise.reject(new Error("Hub não configurado (COCKPIT_* no EasyPanel)."));
+        }
+        return fetch(base + "/api/public/agent-cockpit", {
+          headers: { "X-Cockpit-Access": secret },
+          cache: "no-store",
+        });
+      }
+
+      function renderMonitor(data) {
+        document.getElementById("t-dist").textContent = data.totals.distributedToday;
+        document.getElementById("t-agent").textContent = data.totals.distributedByAgentToday;
+        document.getElementById("t-att").textContent = data.totals.attendingNow;
+        document.getElementById("t-pend").textContent = data.totals.pendingQueue;
+        var agentsEl = document.getElementById("agents");
+        if (!data.agents.length) {
+          agentsEl.innerHTML = '<div class="empty">Nenhum agente de IA configurado.</div>';
+        } else {
+          agentsEl.innerHTML = data.agents.map(function (a) {
+            var badge = a.active
+              ? '<span class="badge b-ok"><span class="bdot"></span>Ativo</span>'
+              : '<span class="badge b-off"><span class="bdot"></span>Inativo</span>';
+            return (
+              '<div class="agent"><div class="av">🤖</div><div><div class="name">' + esc(a.name || "Agente") +
+              '</div><div class="meta">' + esc(a.archetype) + " · " + badge + '</div></div><div class="att"><b>' +
+              a.attendingNow + "</b></div></div>"
+            );
+          }).join("");
+        }
+        var tbody = document.getElementById("consultants");
+        var emptyEl = document.getElementById("consultants-empty");
+        if (!data.consultants.length) {
+          tbody.innerHTML = "";
+          emptyEl.classList.remove("hidden");
+        } else {
+          emptyEl.classList.add("hidden");
+          tbody.innerHTML = data.consultants.map(function (c) {
+            var dept = c.departments && c.departments.length
+              ? '<div style="font-size:11px;color:var(--muted)">' + esc(c.departments.join(", ")) + "</div>" : "";
+            var limit = c.queueLimit > 0 ? c.queueLimit : null;
+            var qText = limit ? c.queueCount + " / " + limit : String(c.queueCount);
+            var elig = c.eligible
+              ? '<span class="badge b-ok"><span class="bdot"></span>Elegível</span>'
+              : '<span class="badge b-off"><span class="bdot"></span>Offline</span>';
+            return "<tr><td><b>" + esc(c.name || "—") + "</b>" + dept + '</td><td class="num">' +
+              c.receivedToday + '</td><td class="num">' + qText + "</td><td>" + elig + "</td></tr>";
+          }).join("");
+        }
+      }
+
+      function refreshMonitor(silent) {
+        if (state.stage !== "monitor") return;
+        fetchCockpit()
+          .then(function (r) {
+            if (r.status === 401) throw new Error("Segredo cockpit inválido (COCKPIT_ACCESS_SECRET).");
+            if (!r.ok) throw new Error("Erro " + r.status);
+            return r.json();
+          })
+          .then(function (data) {
+            renderMonitor(data);
+            setStatus("ok", new Date().toLocaleTimeString("pt-BR"));
+          })
+          .catch(function (e) {
+            if (!silent) setStatus("err", e.message || "Falha");
+          });
+      }
+
+      document.querySelectorAll(".pipe").forEach(function (btn) {
+        btn.addEventListener("click", function () { setStage(btn.getAttribute("data-stage")); });
+      });
+
+      function boot() {
+        var hash = (location.hash || "#monitor").replace("#", "").split("-");
+        if (hash[0]) state.stage = hash[0];
+        setStage(state.stage);
+        if (timer) clearInterval(timer);
+        timer = setInterval(function () { refreshMonitor(true); }, REFRESH_MS);
+      }
+      boot();
+    </script>
+  </body>
+</html>

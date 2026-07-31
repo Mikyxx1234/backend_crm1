@@ -204,6 +204,56 @@ function and(
 }
 
 /**
+ * Escopo SQL dos deals (pipeline + filtros opcionais) para agregações
+ * raw — evita carregar dezenas de milhares de IDs em JS e estourar o
+ * `IN (...)` do funil histórico (bug prod ACADÊMICO ~34k deals).
+ *
+ * Alias esperados: `d` = deals, `s` = stages (já joined).
+ */
+function buildDealScopeSql(f: DashboardFilters, orgId: string): Prisma.Sql {
+  const parts: Prisma.Sql[] = [
+    Prisma.sql`d."organizationId" = ${orgId}`,
+    Prisma.sql`s."pipelineId" = ${f.pipelineId}`,
+  ];
+  if (f.stageIds && f.stageIds.length > 0) {
+    parts.push(Prisma.sql`d."stageId" IN (${Prisma.join(f.stageIds)})`);
+  }
+  const owners = (f.ownerIds ?? []).filter((id): id is string => !!id);
+  if (owners.length > 0) {
+    parts.push(Prisma.sql`d."ownerId" IN (${Prisma.join(owners)})`);
+  }
+  if (f.tagIds && f.tagIds.length > 0) {
+    parts.push(Prisma.sql`EXISTS (
+      SELECT 1 FROM tags_on_deals td
+      WHERE td."dealId" = d.id AND td."tagId" IN (${Prisma.join(f.tagIds)})
+    )`);
+  }
+  if (f.sources && f.sources.length > 0) {
+    const real = f.sources.filter((s) => s && s !== SOURCE_NONE);
+    const wantNone = f.sources.includes(SOURCE_NONE);
+    const sourceParts: Prisma.Sql[] = [];
+    if (real.length > 0) {
+      sourceParts.push(Prisma.sql`c.source IN (${Prisma.join(real)})`);
+    }
+    if (wantNone) {
+      sourceParts.push(
+        Prisma.sql`(d."contactId" IS NULL OR c.source IS NULL OR c.source = '')`,
+      );
+    }
+    if (sourceParts.length === 1) {
+      parts.push(sourceParts[0]!);
+    } else if (sourceParts.length > 1) {
+      parts.push(Prisma.sql`(${Prisma.join(sourceParts, " OR ")})`);
+    }
+  }
+  return Prisma.join(parts, " AND ");
+}
+
+function dealScopeNeedsContact(f: DashboardFilters): boolean {
+  return Boolean(f.sources && f.sources.length > 0);
+}
+
+/**
  * Condição de origem em cima do contato do deal, com suporte a
  * "Sem origem" (contato com source null/"" ou deal sem contato).
  */
@@ -312,6 +362,11 @@ export async function getDashboard(
     closedAt: { gte: prev.from, lte: prev.to },
   };
 
+  const dealScope = buildDealScopeSql(f, orgId);
+  const contactJoin = dealScopeNeedsContact(f)
+    ? Prisma.sql`LEFT JOIN contacts c ON c.id = d."contactId"`
+    : Prisma.empty;
+
   const [
     stages,
     openAgg,
@@ -330,8 +385,9 @@ export async function getDashboard(
     ownerLost,
     ownerCreated,
     periodDeals,
-    dealIdRows,
-    openStallRows,
+    enteredRows,
+    exitedRows,
+    stalledAgg,
   ] = await Promise.all([
     prisma.stage.findMany({
       where: { pipelineId: f.pipelineId },
@@ -421,18 +477,55 @@ export async function getDashboard(
         tags: { select: { tag: { select: { id: true, name: true, color: true } } } },
       },
     }),
-    // Ponte p/ o funil histórico: ids dos deals que casam com os filtros
-    // estruturais (qualquer status/data), usados no IN do DealEvent.
-    prisma.deal.findMany({
-      where: { AND: structural },
-      select: { id: true },
-    }),
-    // Leads parados: snapshot de negócios OPEN com updatedAt p/ comparar
-    // com o rottingDays de cada etapa.
-    prisma.deal.findMany({
-      where: and(structural, openCond),
-      select: { stageId: true, updatedAt: true, value: true },
-    }),
+    // Funil histórico: JOIN no escopo do pipeline (sem IN com N ids).
+    prisma.$queryRaw<{ stageId: string; c: bigint }[]>(Prisma.sql`
+      SELECT stage_id AS "stageId", COUNT(*)::bigint AS c FROM (
+        SELECT (e.meta->'to'->>'id') AS stage_id
+        FROM deal_events e
+        INNER JOIN deals d ON d.id = e."dealId"
+        INNER JOIN stages s ON s.id = d."stageId"
+        ${contactJoin}
+        WHERE e."organizationId" = ${orgId} AND e.type = 'STAGE_CHANGED'
+          AND e."createdAt" >= ${f.from} AND e."createdAt" <= ${f.to}
+          AND ${dealScope}
+        UNION ALL
+        SELECT (e.meta->>'stageId') AS stage_id
+        FROM deal_events e
+        INNER JOIN deals d ON d.id = e."dealId"
+        INNER JOIN stages s ON s.id = d."stageId"
+        ${contactJoin}
+        WHERE e."organizationId" = ${orgId} AND e.type = 'CREATED'
+          AND e."createdAt" >= ${f.from} AND e."createdAt" <= ${f.to}
+          AND ${dealScope}
+      ) x
+      WHERE stage_id IS NOT NULL
+      GROUP BY stage_id
+    `),
+    prisma.$queryRaw<{ stageId: string; c: bigint }[]>(Prisma.sql`
+      SELECT (e.meta->'from'->>'id') AS "stageId", COUNT(*)::bigint AS c
+      FROM deal_events e
+      INNER JOIN deals d ON d.id = e."dealId"
+      INNER JOIN stages s ON s.id = d."stageId"
+      ${contactJoin}
+      WHERE e."organizationId" = ${orgId} AND e.type = 'STAGE_CHANGED'
+        AND e."createdAt" >= ${f.from} AND e."createdAt" <= ${f.to}
+        AND (e.meta->'from'->>'id') IS NOT NULL
+        AND ${dealScope}
+      GROUP BY 1
+    `),
+    // Leads parados: agrega no SQL (evita trazer dezenas de milhares de rows).
+    prisma.$queryRaw<{ stageId: string; c: bigint; v: unknown }[]>(Prisma.sql`
+      SELECT d."stageId" AS "stageId",
+             COUNT(*)::bigint AS c,
+             COALESCE(SUM(d.value), 0) AS v
+      FROM deals d
+      INNER JOIN stages s ON s.id = d."stageId"
+      ${contactJoin}
+      WHERE ${dealScope}
+        AND d.status = 'OPEN'
+        AND d."updatedAt" < (NOW() - (s."rottingDays" * INTERVAL '1 day'))
+      GROUP BY d."stageId"
+    `),
   ]);
 
   // ── Summary ──────────────────────────────────────────────────────
@@ -480,43 +573,8 @@ export async function getDashboard(
     },
   };
 
-  // ── Funil histórico (entered/exited via DealEvent) ───────────────
-  // Cruza os eventos do período apenas com os deals que casam com os
-  // filtros estruturais (ponte por dealId), mantendo a consistência.
-  const dealIds = dealIdRows.map((d) => d.id);
-  const [enteredRows, exitedRows] =
-    dealIds.length > 0
-      ? await Promise.all([
-          prisma.$queryRaw<{ stageId: string; c: bigint }[]>(Prisma.sql`
-            SELECT stage_id AS "stageId", COUNT(*)::bigint AS c FROM (
-              SELECT (e.meta->'to'->>'id') AS stage_id
-              FROM deal_events e
-              WHERE e."organizationId" = ${orgId} AND e.type = 'STAGE_CHANGED'
-                AND e."createdAt" >= ${f.from} AND e."createdAt" <= ${f.to}
-                AND e."dealId" IN (${Prisma.join(dealIds)})
-              UNION ALL
-              SELECT (e.meta->>'stageId') AS stage_id
-              FROM deal_events e
-              WHERE e."organizationId" = ${orgId} AND e.type = 'CREATED'
-                AND e."createdAt" >= ${f.from} AND e."createdAt" <= ${f.to}
-                AND e."dealId" IN (${Prisma.join(dealIds)})
-            ) x
-            WHERE stage_id IS NOT NULL
-            GROUP BY stage_id
-          `),
-          prisma.$queryRaw<{ stageId: string; c: bigint }[]>(Prisma.sql`
-            SELECT (e.meta->'from'->>'id') AS "stageId", COUNT(*)::bigint AS c
-            FROM deal_events e
-            WHERE e."organizationId" = ${orgId} AND e.type = 'STAGE_CHANGED'
-              AND e."createdAt" >= ${f.from} AND e."createdAt" <= ${f.to}
-              AND e."dealId" IN (${Prisma.join(dealIds)})
-              AND (e.meta->'from'->>'id') IS NOT NULL
-            GROUP BY 1
-          `),
-        ])
-      : [[], []];
-
   // ── Funil por etapa ──────────────────────────────────────────────
+  // entered/exited já vieram agregados via JOIN (sem IN de N ids).
   const openStageMap = new Map(openByStage.map((r) => [r.stageId, r]));
   const wonStageMap = new Map(
     wonByStage.map((r) => [r.stageId, Number(r._count._all)]),
@@ -709,21 +767,13 @@ export async function getDashboard(
   );
 
   // ── Leads parados por etapa ──────────────────────────────────────
-  // OPEN cujo updatedAt ultrapassou o rottingDays da etapa.
-  const now = Date.now();
-  const dayMs = 1000 * 60 * 60 * 24;
-  const rottingByStage = new Map(stages.map((s) => [s.id, s.rottingDays]));
-  const stalledBuckets = new Map<string, { count: number; value: number }>();
-  for (const d of openStallRows) {
-    const rotting = rottingByStage.get(d.stageId);
-    if (rotting == null) continue;
-    const ageDays = (now - d.updatedAt.getTime()) / dayMs;
-    if (ageDays <= rotting) continue;
-    const sb = stalledBuckets.get(d.stageId) ?? { count: 0, value: 0 };
-    sb.count++;
-    sb.value += toNumber(d.value);
-    stalledBuckets.set(d.stageId, sb);
-  }
+  // OPEN cujo updatedAt ultrapassou o rottingDays da etapa (agregado no SQL).
+  const stalledBuckets = new Map(
+    stalledAgg.map((r) => [
+      r.stageId,
+      { count: Number(r.c), value: toNumber(r.v) },
+    ]),
+  );
   const stalled: DashboardStalledStage[] = stages
     .filter((s) => stalledBuckets.has(s.id))
     .map((s) => {

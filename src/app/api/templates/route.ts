@@ -1,7 +1,12 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { createTemplate, getTemplates } from "@/services/templates";
+import {
+  createTemplate,
+  getTemplates,
+  normalizeTemplateAttachments,
+  MAX_TEMPLATE_ATTACHMENTS,
+} from "@/services/templates";
 
 // Bug 29/mai/26: usavamos `auth()` direto. createTemplate chama
 // `withOrgFromCtx({...})` que exige RequestContext ativo, e
@@ -40,6 +45,24 @@ export async function POST(request: Request) {
           { status: 400 },
         );
       }
+
+      let attachments: ReturnType<typeof normalizeTemplateAttachments> | undefined;
+      if ("attachments" in body) {
+        if (!Array.isArray(body.attachments)) {
+          return NextResponse.json(
+            { message: "attachments deve ser uma lista." },
+            { status: 400 },
+          );
+        }
+        if (body.attachments.length > MAX_TEMPLATE_ATTACHMENTS) {
+          return NextResponse.json(
+            { message: `Máximo de ${MAX_TEMPLATE_ATTACHMENTS} anexos por modelo.` },
+            { status: 400 },
+          );
+        }
+        attachments = normalizeTemplateAttachments(body.attachments);
+      }
+
       const template = await createTemplate({
         name,
         content,
@@ -57,6 +80,7 @@ export async function POST(request: Request) {
           typeof body.mediaType === "string" && body.mediaType ? body.mediaType : null,
         mediaName:
           typeof body.mediaName === "string" && body.mediaName ? body.mediaName : null,
+        attachments,
       });
       return NextResponse.json(template, { status: 201 });
     } catch (e) {

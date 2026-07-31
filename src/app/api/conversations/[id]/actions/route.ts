@@ -2,6 +2,7 @@ import type { ConversationStatus } from "@prisma/client";
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { checkPermission } from "@/lib/authz";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
@@ -18,6 +19,7 @@ import { logEvent } from "@/services/activity-log";
 import { sseBus } from "@/lib/sse-bus";
 import { executeDistribution } from "@/services/distribution";
 import { assertLeafInDepartment, getAncestors } from "@/services/tabulations";
+import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 
 async function logDealEventsForConversationContact(
   conversationId: string,
@@ -100,7 +102,25 @@ export async function POST(request: Request, context: RouteContext) {
         } else {
           return NextResponse.json({ message: "assignedToId inválido." }, { status: 400 });
         }
-        const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
+        const sessionUser = session.user as {
+          id: string;
+          role: "ADMIN" | "MANAGER" | "MEMBER";
+          organizationId: string | null;
+          isSuperAdmin: boolean;
+        };
+        const canReassignOthers = await checkPermission(
+          {
+            userId: sessionUser.id,
+            organizationId: sessionUser.organizationId,
+            isSuperAdmin: sessionUser.isSuperAdmin,
+          },
+          "conversation:reassign_others",
+        );
+        const user = {
+          id: sessionUser.id,
+          role: sessionUser.role,
+          canReassignOthers,
+        };
         const prev = await prisma.conversation.findUnique({
           where: { id },
           select: { assignedToId: true, assignedTo: { select: { id: true, name: true } } },
@@ -140,6 +160,8 @@ export async function POST(request: Request, context: RouteContext) {
               toUserId: result.conversation.assignedToId ?? null,
             },
           });
+          // Assumir / reassign: cancela debounce IA pendente.
+          cancelAiReplyDebounce(id, "assignee_changed");
         }
 
         return NextResponse.json(
@@ -588,7 +610,8 @@ export async function POST(request: Request, context: RouteContext) {
       // arvore do dept) -> 400 (defesa; UI ja bloqueia o botao).
       let tabulationId: string | null = null;
       let tabulationAncestors: string[] = [];
-      let tabulationDepartmentId: string | null = null;
+      /** Departamento no momento do encerramento (antes do clearDepartment). */
+      let resolvedDepartmentId: string | null = null;
       if (dbStatus === "RESOLVED") {
         const dept = await prisma.conversation.findUnique({
           where: { id },
@@ -597,6 +620,7 @@ export async function POST(request: Request, context: RouteContext) {
             department: { select: { id: true, requireTabulationOnClose: true } },
           },
         });
+        resolvedDepartmentId = dept?.departmentId ?? null;
         const rawTab = typeof b.tabulationId === "string" ? b.tabulationId.trim() : "";
         const requires = !!dept?.department?.requireTabulationOnClose;
         if (requires && !rawTab) {
@@ -625,7 +649,6 @@ export async function POST(request: Request, context: RouteContext) {
             );
           }
           tabulationId = rawTab;
-          tabulationDepartmentId = dept.departmentId;
           tabulationAncestors = await getAncestors(rawTab);
         }
       }
@@ -704,22 +727,28 @@ export async function POST(request: Request, context: RouteContext) {
         }
       }
 
-      // Trigger de automacao conversation_tabulated (soh quando o
-      // encerramento gravou tabulacao). Roda depois de logs, fire-and-forget.
-      if (dbStatus === "RESOLVED" && tabulationId) {
-        void logEvent({
-          type: "CONVERSATION_TABULATED",
-          entityType: "CONVERSATION",
-          entityId: id,
-          entityLabel: updated.externalId ?? null,
-          conversationId: id,
-          contactId: conv.contact?.id ?? null,
-          meta: {
-            tabulationId,
-            ancestorIds: tabulationAncestors,
-            departmentId: tabulationDepartmentId,
-          },
-        });
+      // Trigger conversation_tabulated: dispara em TODO encerramento (RESOLVED).
+      // Antes só rodava com tabulationId — conversas sem departamento / sem
+      // diálogo de tabulação (requireTabulationOnClose=false) nunca acionavam
+      // automações configuradas como "Qualquer tabulação". Automações que
+      // filtram tabulação específica continuam sem match quando tabulationId
+      // é null (ver matchesTriggerConfig). Só no primeiro encerramento.
+      if (dbStatus === "RESOLVED" && conv.status !== "RESOLVED") {
+        if (tabulationId) {
+          void logEvent({
+            type: "CONVERSATION_TABULATED",
+            entityType: "CONVERSATION",
+            entityId: id,
+            entityLabel: updated.externalId ?? null,
+            conversationId: id,
+            contactId: conv.contact?.id ?? null,
+            meta: {
+              tabulationId,
+              ancestorIds: tabulationAncestors,
+              departmentId: resolvedDepartmentId,
+            },
+          });
+        }
         // Resolve dealId (primeiro deal aberto do contato) para automacoes
         // que dependem de contexto de negocio (mover card, mudar funil).
         let dealId: string | undefined;
@@ -737,7 +766,7 @@ export async function POST(request: Request, context: RouteContext) {
           data: {
             tabulationId,
             ancestorIds: tabulationAncestors,
-            departmentId: tabulationDepartmentId,
+            departmentId: resolvedDepartmentId,
             conversationId: id,
           },
         }).catch(() => {

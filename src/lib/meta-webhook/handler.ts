@@ -11,6 +11,7 @@ import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
+import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -41,7 +42,8 @@ import {
 } from "@/services/whatsapp-call-consent-webhook";
 import { fireTrigger } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
-import { maybeReplyAsAIAgent } from "@/services/ai/inbox-handler";
+import { scheduleAiReply } from "@/services/ai/inbound-debounce";
+import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
@@ -743,7 +745,7 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
   });
 
   try {
-    return await withConversationNumberRetry((number) =>
+    const created = await withConversationNumberRetry((number) =>
       prisma.conversation.create({
         data: withOrgFromCtx({
           number,
@@ -756,6 +758,13 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
         select: convSelect,
       }),
     );
+    // Novo ticket após RESOLVED: redistribui se ainda sem responsável.
+    await maybeDistributeNewInboundTicket({
+      conversationId: created.id,
+      contactId,
+      assignedToId: contact?.assignedToId ?? null,
+    });
+    return created;
   } catch (err) {
     // Corrida: dois webhooks/mensagens simultaneos do mesmo numero. O
     // indice unico parcial rejeita o 2o create com P2002 — reusa o
@@ -2473,6 +2482,16 @@ async function executePostBody(
               log.debug("Falha ao enviar push (não-fatal):", err),
             );
 
+            // 1º atendimento IA ANTES do salesbot/INICIO-PIPE (allowlist).
+            try {
+              await ensureInboundAiAttendance({
+                conversationId: conversation.id,
+                contactId: contact.id,
+              });
+            } catch (err) {
+              log.error("Falha no ensureInboundAiAttendance:", err);
+            }
+
             try {
               await processSalesbotMessage(contact.id, parsed.text);
             } catch (err) {
@@ -2502,13 +2521,12 @@ async function executePostBody(
               log.error("Falha ao disparar gatilho message_received:", err);
             }
 
-            // Agente de IA atribuído à conversa? Dispara resposta
-            // (autônoma ou como rascunho, conforme config). Background:
-            // não atrasamos o 200 OK pra Meta (LLM pode demorar 2-6s).
+            // Agente de IA: agenda resposta com debounce (agrupa msgs consecutivas).
             if (!isSystemMessage && parsed.text) {
-              void maybeReplyAsAIAgent({
+              void scheduleAiReply({
                 conversationId: conversation.id,
                 contactId: contact.id,
+                messageId: msgCreated.id,
                 userMessage: parsed.text,
                 channel: "meta",
               });

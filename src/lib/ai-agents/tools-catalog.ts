@@ -61,12 +61,36 @@ export const TOOLS_CATALOG: ToolDescriptor[] = [
     defaultForArchetypes: ["SDR", "VENDEDOR"],
   },
   {
+    id: "consultar_matricula",
+    label: "Consultar matrícula do aluno",
+    description:
+      "Consulta os dados acadêmicos do aluno em conversa (curso, polo, série, situação da matrícula, ciclo) a partir do relatório de matriculados. Casa por telefone/e-mail do contato.",
+    category: "crm",
+    defaultForArchetypes: ["ATENDIMENTO", "SUPORTE"],
+  },
+  {
     id: "send_whatsapp_template",
     label: "Enviar template WhatsApp",
     description:
       "Envia um template aprovado pela Meta (ex.: envio de proposta formatada, confirmação de agendamento).",
     category: "whatsapp",
     defaultForArchetypes: ["VENDEDOR"],
+  },
+  {
+    id: "transfer_to_department",
+    label: "Rotear para departamento",
+    description:
+      "Classifica o caso e roteia a conversa para um departamento. Define o departamento usado pela Distribuição Inteligente.",
+    category: "handoff",
+    defaultForArchetypes: ["ATENDIMENTO", "SUPORTE"],
+  },
+  {
+    id: "execute_distribution",
+    label: "Executar distribuição",
+    description:
+      "Aciona a Distribuição Inteligente para atribuir a conversa ao consultor certo.",
+    category: "handoff",
+    defaultForArchetypes: ["ATENDIMENTO", "SUPORTE"],
   },
   {
     id: "transfer_to_human",

@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cockpit IA — Cruzeiro do Sul</title>
+    <style>
+      :root {
+        --bg: #0b1220;
+        --bg-gradient: linear-gradient(135deg, #0b1220 0%, #131b30 40%, #1c1530 70%, #0e1426 100%);
+        --card: #1a2238;
+        --card-2: #202a45;
+        --border: rgba(255, 255, 255, 0.08);
+        --border-strong: rgba(255, 255, 255, 0.14);
+        --text: #e2e8f0;
+        --muted: #94a3b8;
+        --muted-2: #64748b;
+        --primary: #5b6ff5;
+        --primary-light: #7b8df7;
+        --success: #10b981;
+        --success-bg: rgba(16, 185, 129, 0.12);
+        --danger: #ef4444;
+        --danger-bg: rgba(239, 68, 68, 0.12);
+        --warn: #f59e0b;
+        --warn-bg: rgba(245, 158, 11, 0.12);
+        --radius: 16px;
+        --radius-sm: 10px;
+      }
+
+      * { box-sizing: border-box; }
+
+      html, body {
+        margin: 0;
+        padding: 0;
+        min-height: 100%;
+      }
+
+      body {
+        background: var(--bg);
+        background-image: var(--bg-gradient);
+        background-attachment: fixed;
+        color: var(--text);
+        font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+          Roboto, Helvetica, Arial, sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      .wrap {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 28px 20px 48px;
+      }
+
+      /* ── Header ─────────────────────────────── */
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 24px;
+        flex-wrap: wrap;
+      }
+      .brand { display: flex; align-items: center; gap: 12px; }
+      .brand .logo {
+        width: 40px;
+        height: 40px;
+        border-radius: 12px;
+        display: grid;
+        place-items: center;
+        background: linear-gradient(135deg, var(--primary) 0%, #8b5cf6 100%);
+        box-shadow: 0 6px 20px rgba(91, 111, 245, 0.45);
+        font-size: 20px;
+      }
+      .brand h1 {
+        margin: 0;
+        font-size: 18px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+      }
+      .brand p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+
+      .head-actions { display: flex; align-items: center; gap: 10px; }
+      .updated { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-bg); }
+      .dot.stale { background: var(--warn); box-shadow: 0 0 0 3px var(--warn-bg); }
+      .dot.err { background: var(--danger); box-shadow: 0 0 0 3px var(--danger-bg); }
+
+      button {
+        font-family: inherit;
+        cursor: pointer;
+        border: 1px solid var(--border-strong);
+        background: var(--card-2);
+        color: var(--text);
+        border-radius: var(--radius-sm);
+        padding: 8px 14px;
+        font-size: 13px;
+        font-weight: 600;
+        transition: background 0.15s, border-color 0.15s, transform 0.05s;
+      }
+      button:hover { background: #26314f; border-color: rgba(255,255,255,0.22); }
+      button:active { transform: translateY(1px); }
+      button.primary {
+        background: linear-gradient(135deg, var(--primary) 0%, var(--primary-light) 100%);
+        border-color: transparent;
+        color: #fff;
+        box-shadow: 0 4px 14px rgba(91, 111, 245, 0.4);
+      }
+      button.primary:hover { filter: brightness(1.06); }
+      button.ghost { background: transparent; }
+
+      /* ── Cards de totais ─────────────────────── */
+      .totals {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+        margin-bottom: 22px;
+      }
+      @media (max-width: 760px) { .totals { grid-template-columns: repeat(2, 1fr); } }
+      @media (max-width: 420px) { .totals { grid-template-columns: 1fr; } }
+
+      .stat {
+        position: relative;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px 18px;
+        overflow: hidden;
+      }
+      .stat::before {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 3px;
+        background: var(--accent, var(--primary));
+      }
+      .stat .label {
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .stat .value {
+        margin-top: 8px;
+        font-size: 30px;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+        font-variant-numeric: tabular-nums;
+      }
+      .stat .sub { margin-top: 2px; font-size: 12px; color: var(--muted-2); }
+
+      /* ── Seções ──────────────────────────────── */
+      .section-title {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--muted);
+        font-weight: 700;
+        margin: 26px 0 12px;
+      }
+
+      .agents { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 14px; }
+      .agent {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 16px;
+        display: flex;
+        align-items: center;
+        gap: 14px;
+      }
+      .agent .av {
+        width: 44px; height: 44px; border-radius: 12px; flex: none;
+        display: grid; place-items: center; font-size: 20px;
+        background: linear-gradient(135deg, rgba(91,111,245,0.25), rgba(139,92,246,0.25));
+        border: 1px solid var(--border-strong);
+      }
+      .agent .info { min-width: 0; flex: 1; }
+      .agent .name { font-weight: 700; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .agent .meta { font-size: 12px; color: var(--muted); }
+      .agent .att { text-align: right; }
+      .agent .att b { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+      .agent .att span { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+
+      /* ── Tabela de consultores ───────────────── */
+      .table-card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        overflow: hidden;
+      }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { text-align: left; padding: 12px 16px; font-size: 13px; }
+      thead th {
+        font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+        color: var(--muted); font-weight: 600; background: rgba(255,255,255,0.02);
+        border-bottom: 1px solid var(--border);
+      }
+      tbody tr { border-bottom: 1px solid rgba(255,255,255,0.05); }
+      tbody tr:last-child { border-bottom: none; }
+      tbody tr:hover { background: rgba(255,255,255,0.03); }
+      td.num { text-align: right; font-variant-numeric: tabular-nums; }
+      .cname { font-weight: 600; }
+      .cdept { font-size: 11px; color: var(--muted); }
+
+      .badge {
+        display: inline-flex; align-items: center; gap: 5px;
+        padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 600;
+        border: 1px solid transparent;
+      }
+      .badge .bdot { width: 6px; height: 6px; border-radius: 50%; }
+      .b-ok { color: var(--success); background: var(--success-bg); }
+      .b-ok .bdot { background: var(--success); }
+      .b-off { color: var(--muted); background: rgba(148,163,184,0.12); }
+      .b-off .bdot { background: var(--muted); }
+      .b-full { color: var(--danger); background: var(--danger-bg); }
+      .b-full .bdot { background: var(--danger); }
+
+      .queue-cell { display: flex; flex-direction: column; gap: 4px; align-items: flex-end; }
+      .bar { width: 90px; height: 5px; border-radius: 3px; background: rgba(255,255,255,0.08); overflow: hidden; }
+      .bar > i { display: block; height: 100%; border-radius: 3px; background: var(--primary); }
+      .bar > i.warn { background: var(--warn); }
+      .bar > i.full { background: var(--danger); }
+
+      /* ── Login / setup ───────────────────────── */
+      .setup {
+        max-width: 440px; margin: 8vh auto 0;
+        background: var(--card); border: 1px solid var(--border);
+        border-radius: var(--radius); padding: 28px;
+      }
+      .setup h2 { margin: 0 0 4px; font-size: 18px; }
+      .setup p { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
+      label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin: 14px 0 6px; }
+      input[type="text"], input[type="password"] {
+        width: 100%; padding: 11px 13px; font-family: inherit; font-size: 13px;
+        background: #0f1729; color: var(--text);
+        border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+      }
+      input:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 3px rgba(91,111,245,0.25); }
+      .setup button { width: 100%; margin-top: 20px; }
+      .err-msg { color: var(--danger); font-size: 12px; margin-top: 12px; min-height: 16px; }
+
+      .empty { padding: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+      .hidden { display: none !important; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <!-- SETUP -->
+      <div id="setup" class="setup hidden">
+        <h2>Cockpit do Agente</h2>
+        <p>Cole o token de integração (Configurações → API) ou deixe em branco se você já está logado no CRM no mesmo domínio. Deixe a URL base vazia para usar o domínio atual.</p>
+        <label for="in-base">URL base da API (opcional)</label>
+        <input id="in-base" type="text" placeholder="deixe em branco = mesmo domínio" />
+        <label for="in-token">Token (Bearer)</label>
+        <input id="in-token" type="password" placeholder="eduit_... (opcional se logado no CRM)" autocomplete="off" />
+        <button class="primary" onclick="saveConfig()">Entrar</button>
+        <div id="setup-err" class="err-msg"></div>
+      </div>
+
+      <!-- DASHBOARD -->
+      <div id="dash" class="hidden">
+        <header>
+          <div class="brand">
+            <div class="logo">🤖</div>
+            <div>
+              <h1>Cockpit IA</h1>
+              <p>Cruzeiro do Sul · monitoramento do agente</p>
+            </div>
+          </div>
+          <div class="head-actions">
+            <div class="updated"><span id="status-dot" class="dot"></span><span id="updated-txt">—</span></div>
+            <button class="ghost" onclick="refresh(true)">Atualizar</button>
+            <button class="ghost" id="btn-logout" onclick="logout()">Sair</button>
+          </div>
+        </header>
+
+        <div class="totals">
+          <div class="stat" style="--accent: var(--primary)">
+            <div class="label">Distribuídos hoje</div>
+            <div class="value" id="t-dist">—</div>
+            <div class="sub" id="t-dist-sub">todos os canais</div>
+          </div>
+          <div class="stat" style="--accent: #8b5cf6">
+            <div class="label">Pelo agente IA hoje</div>
+            <div class="value" id="t-agent">—</div>
+            <div class="sub">handoff do agente</div>
+          </div>
+          <div class="stat" style="--accent: var(--success)">
+            <div class="label">Atendendo agora</div>
+            <div class="value" id="t-att">—</div>
+            <div class="sub">conversas do agente</div>
+          </div>
+          <div class="stat" style="--accent: var(--warn)">
+            <div class="label">Fila de espera</div>
+            <div class="value" id="t-pend">—</div>
+            <div class="sub">sem responsável elegível</div>
+          </div>
+        </div>
+
+        <div class="section-title">Agentes de IA</div>
+        <div id="agents" class="agents"></div>
+
+        <div class="section-title">Consultores</div>
+        <div class="table-card">
+          <table>
+            <thead>
+              <tr>
+                <th>Consultor</th>
+                <th class="num">Recebidos hoje</th>
+                <th class="num">Fila</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody id="consultants"></tbody>
+          </table>
+          <div id="consultants-empty" class="empty hidden">Nenhum consultor encontrado.</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Gerado no deploy (EasyPanel): apiBase + accessSecret — ver deploy/cockpit-monitor -->
+    <script src="/config.js"></script>
+    <script>
+      var LS_TOKEN = "cockpit.token";
+      var LS_BASE = "cockpit.base";
+      var REFRESH_MS = 15000;
+      var timer = null;
+
+      function deployConfig() {
+        return window.COCKPIT_CONFIG || null;
+      }
+
+      function isAutoMode() {
+        var cfg = deployConfig();
+        return !!(cfg && cfg.accessSecret && cfg.apiBase);
+      }
+
+      function normalizeToken(raw) {
+        var t = String(raw == null ? "" : raw).trim();
+        t = t.replace(/^Bearer\s+/i, "");
+        t = t.replace(/^["']|["']$/g, "");
+        t = t.replace(/\s+/g, "");
+        return t;
+      }
+
+      function getBase() {
+        var cfg = deployConfig();
+        if (cfg && cfg.apiBase) return String(cfg.apiBase).trim().replace(/\/$/, "");
+        var b = (localStorage.getItem(LS_BASE) || "").trim().replace(/\/$/, "");
+        return b || window.location.origin;
+      }
+      function getToken() { return normalizeToken(localStorage.getItem(LS_TOKEN) || ""); }
+
+      function fetchCockpit(useToken) {
+        var cfg = deployConfig();
+        var token = useToken ? getToken() : "";
+        var headers = {};
+        if (cfg && cfg.accessSecret) {
+          headers["X-Cockpit-Access"] = cfg.accessSecret;
+        } else if (token) {
+          headers.Authorization = "Bearer " + token;
+        }
+        return fetch(getBase() + "/api/public/agent-cockpit", {
+          headers: headers,
+          credentials: cfg && cfg.accessSecret ? "omit" : "include",
+          cache: "no-store",
+        });
+      }
+
+      function loadCockpit(useToken) {
+        return fetchCockpit(useToken).then(function (res) {
+          if (res.status === 401 && useToken && getToken() && !isAutoMode()) {
+            return fetchCockpit(false);
+          }
+          return res;
+        }).then(function (res) {
+          if (res.status === 401) {
+            throw new Error(
+              isAutoMode()
+                ? "Cockpit não configurado no servidor (COCKPIT_*)."
+                : "Token inválido ou sessão expirada.",
+            );
+          }
+          if (!res.ok) throw new Error("Erro " + res.status + " — verifique a URL base da API.");
+          return res.json();
+        });
+      }
+
+      function esc(s) {
+        return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+        });
+      }
+
+      function saveConfig() {
+        var token = normalizeToken(document.getElementById("in-token").value);
+        var base = document.getElementById("in-base").value.trim().replace(/\/$/, "");
+        var errEl = document.getElementById("setup-err");
+        errEl.textContent = "";
+        if (base) localStorage.setItem(LS_BASE, base); else localStorage.removeItem(LS_BASE);
+        loadCockpit(!!token)
+          .then(function (data) {
+            if (token) localStorage.setItem(LS_TOKEN, token);
+            else localStorage.removeItem(LS_TOKEN);
+            showDash();
+            render(data);
+            var t = new Date();
+            setStatus("ok", "Atualizado " + t.toLocaleTimeString("pt-BR"));
+            if (timer) clearInterval(timer);
+            timer = setInterval(function () { refresh(false); }, REFRESH_MS);
+          })
+          .catch(function (e) {
+            errEl.textContent = e.message || "Falha ao conectar.";
+          });
+      }
+
+      function logout() {
+        if (isAutoMode()) return;
+        localStorage.removeItem(LS_TOKEN);
+        if (timer) clearInterval(timer);
+        showSetup();
+      }
+
+      function showSetup() {
+        if (isAutoMode()) return;
+        document.getElementById("dash").classList.add("hidden");
+        document.getElementById("setup").classList.remove("hidden");
+        document.getElementById("in-base").value = localStorage.getItem(LS_BASE) || "";
+      }
+      function showDash() {
+        document.getElementById("setup").classList.add("hidden");
+        document.getElementById("dash").classList.remove("hidden");
+        var logoutBtn = document.getElementById("btn-logout");
+        if (logoutBtn) logoutBtn.classList.toggle("hidden", isAutoMode());
+      }
+
+      function setStatus(kind, text) {
+        var dot = document.getElementById("status-dot");
+        dot.className = "dot" + (kind === "stale" ? " stale" : kind === "err" ? " err" : "");
+        document.getElementById("updated-txt").textContent = text;
+      }
+
+      function statusBadge(consultant) {
+        if (consultant.queueLimit > 0 && consultant.queueCount >= consultant.queueLimit) {
+          return '<span class="badge b-full"><span class="bdot"></span>Fila cheia</span>';
+        }
+        if (consultant.eligible) {
+          return '<span class="badge b-ok"><span class="bdot"></span>Elegível</span>';
+        }
+        var label = consultant.status === "ONLINE" ? "Indisponível" : "Offline";
+        return '<span class="badge b-off"><span class="bdot"></span>' + label + "</span>";
+      }
+
+      function queueCell(c) {
+        var limit = c.queueLimit > 0 ? c.queueLimit : null;
+        var pct = limit ? Math.min(100, Math.round((c.queueCount / limit) * 100)) : 0;
+        var cls = "";
+        if (limit) {
+          if (c.queueCount >= limit) cls = "full";
+          else if (pct >= 80) cls = "warn";
+        }
+        var text = limit ? c.queueCount + " / " + limit : String(c.queueCount);
+        var bar = limit
+          ? '<div class="bar"><i class="' + cls + '" style="width:' + pct + '%"></i></div>'
+          : "";
+        return '<div class="queue-cell"><span>' + text + "</span>" + bar + "</div>";
+      }
+
+      function render(data) {
+        document.getElementById("t-dist").textContent = data.totals.distributedToday;
+        document.getElementById("t-agent").textContent = data.totals.distributedByAgentToday;
+        document.getElementById("t-att").textContent = data.totals.attendingNow;
+        document.getElementById("t-pend").textContent = data.totals.pendingQueue;
+
+        var agentsEl = document.getElementById("agents");
+        if (!data.agents.length) {
+          agentsEl.innerHTML = '<div class="empty">Nenhum agente de IA configurado.</div>';
+        } else {
+          agentsEl.innerHTML = data.agents
+            .map(function (a) {
+              var badge = a.active
+                ? '<span class="badge b-ok"><span class="bdot"></span>Ativo</span>'
+                : '<span class="badge b-off"><span class="bdot"></span>Inativo</span>';
+              return (
+                '<div class="agent"><div class="av">🤖</div>' +
+                '<div class="info"><div class="name">' + esc(a.name || "Agente") + "</div>" +
+                '<div class="meta">' + esc(a.archetype) + " · " + badge + "</div></div>" +
+                '<div class="att"><b>' + a.attendingNow + "</b><span>atendendo</span></div></div>"
+              );
+            })
+            .join("");
+        }
+
+        var tbody = document.getElementById("consultants");
+        var emptyEl = document.getElementById("consultants-empty");
+        if (!data.consultants.length) {
+          tbody.innerHTML = "";
+          emptyEl.classList.remove("hidden");
+        } else {
+          emptyEl.classList.add("hidden");
+          tbody.innerHTML = data.consultants
+            .map(function (c) {
+              var dept = c.departments && c.departments.length
+                ? '<div class="cdept">' + esc(c.departments.join(", ")) + "</div>"
+                : "";
+              return (
+                "<tr><td><div class=\"cname\">" + esc(c.name || "—") + "</div>" + dept + "</td>" +
+                '<td class="num">' + c.receivedToday + "</td>" +
+                '<td class="num">' + queueCell(c) + "</td>" +
+                "<td>" + statusBadge(c) + "</td></tr>"
+              );
+            })
+            .join("");
+        }
+      }
+
+      function refresh(silent) {
+        var hasToken = !!getToken();
+        if (!hasToken && silent === false) { /* ok — tenta sessão */ }
+        loadCockpit(hasToken)
+          .then(function (data) {
+            render(data);
+            var t = new Date();
+            setStatus("ok", "Atualizado " + t.toLocaleTimeString("pt-BR"));
+          })
+          .catch(function (e) {
+            setStatus("err", e.message || "Falha ao atualizar");
+            if (!isAutoMode() && /inv[aá]lido|expirada|expirado|não configurado/i.test(e.message || "")) {
+              if (getToken()) localStorage.removeItem(LS_TOKEN);
+              setTimeout(showSetup, 1500);
+            }
+          });
+      }
+
+      function boot() {
+        if (isAutoMode()) {
+          showDash();
+          refresh(true);
+          timer = setInterval(function () { refresh(true); }, REFRESH_MS);
+          return;
+        }
+
+        var params = new URLSearchParams(window.location.search);
+        var qBase = (params.get("base") || "").trim().replace(/\/$/, "");
+        var qToken = normalizeToken(params.get("token") || "");
+        if (qBase) localStorage.setItem(LS_BASE, qBase);
+        if (qToken) localStorage.setItem(LS_TOKEN, qToken);
+        if (!getToken()) {
+          loadCockpit(false)
+            .then(function (data) {
+              showDash();
+              render(data);
+              setStatus("ok", "Sessão do CRM");
+              timer = setInterval(function () { refresh(true); }, REFRESH_MS);
+            })
+            .catch(function () {
+              showSetup();
+            });
+          return;
+        }
+        showDash();
+        refresh(false);
+        timer = setInterval(function () { refresh(true); }, REFRESH_MS);
+      }
+      boot();
+    </script>
+  </body>
+</html>

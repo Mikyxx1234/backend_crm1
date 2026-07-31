@@ -16,12 +16,20 @@ const CreateSchema = z.object({
 
 export async function GET() {
   return withOrgContext(async (session) => {
-    const role = session.user.role;
-    if (role !== "ADMIN" && role !== "MANAGER") {
-      return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
-    }
+    // Listagem (id/nome) é necessária no inbox para "Distribuir p/ departamento".
+    // Mutações (POST/PATCH) continuam restritas a ADMIN/MANAGER.
     const orgId = session.user.organizationId!;
+    const role = session.user.role;
+    const isManagerUp = role === "ADMIN" || role === "MANAGER";
     try {
+      if (!isManagerUp) {
+        const departments = await prisma.department.findMany({
+          where: { organizationId: orgId },
+          select: { id: true, name: true, color: true, icon: true },
+          orderBy: { name: "asc" },
+        });
+        return NextResponse.json(departments);
+      }
       const departments = await prisma.department.findMany({
         where: { organizationId: orgId },
         include: {

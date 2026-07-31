@@ -208,6 +208,15 @@ export type ContactImportPayload = {
   delimiter?: "," | ";" | "\t";
   /** Atualizar contatos existentes (default true). */
   updateExisting: boolean;
+  /**
+   * Modo de importação escolhido no wizard (apenas deals por ora):
+   *   - `"create"`  → só cria; linhas que casam com um deal existente são skipped.
+   *   - `"update"`  → só atualiza; linhas sem match são skipped (NÃO cria).
+   *   - `"upsert"`  → cria e atualiza (comportamento histórico).
+   * Ausente = fallback derivado de `updateExisting` (compat com clientes antigos).
+   * Sync com `ImportMode` em `@/lib/import-helpers`.
+   */
+  importMode?: "create" | "update" | "upsert";
   /** Tag opcional a aplicar em todos os contatos importados. */
   tagName?: string;
 };

@@ -112,7 +112,12 @@ export async function processDealsImport(
     return;
   }
 
-  const headerError = validateDealImportHeaders(headers);
+  // A validação precisa espelhar o `importMode` para não barrar CSV mínimo em
+  // "somente atualizar" (ex.: Kommo `id deal;titulo` para aplicar tag em lote).
+  const mode = payload.importMode ?? "upsert";
+  const headerError = validateDealImportHeaders(headers, {
+    allowCreate: mode !== "update",
+  });
   if (headerError) {
     await markOperationFailed(operationId, organizationId, headerError);
     return;
@@ -144,11 +149,24 @@ export async function processDealsImport(
     );
   }
 
+  // Deriva `allowCreate` / `allowUpdate` a partir do `importMode` do payload
+  // (já resolvido acima). Em `update`, `updateExisting` sempre efetivo (não
+  // faz sentido "só atualizar" com update desligado); em `create`, update off.
+  const allowCreate = mode !== "update";
+  const allowUpdate = mode === "update" ? true : mode === "upsert" ? payload.updateExisting : false;
+
   const opts: DealImportOptions = {
     updateExisting: payload.updateExisting,
     importTagId,
     dealCustomFieldMap,
+    allowCreate,
+    allowUpdate,
   };
+
+  ctx.info(
+    { importMode: mode, allowCreate, allowUpdate, updateExisting: payload.updateExisting },
+    "Import de negócios: modo resolvido",
+  );
 
   // 5. Pré-carga global (T4): stages da org (1x) + owners por e-mail (lote).
   const cache = newDealImportCache();

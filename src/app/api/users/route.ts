@@ -4,28 +4,38 @@ import bcrypt from "bcryptjs";
 import { requireAdmin, requireAuth, userOrgFilter } from "@/lib/auth-helpers";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
+import { getSystemPresenceMap } from "@/services/system-presence";
 
 const VALID_ROLES = ["ADMIN", "MANAGER", "MEMBER"] as const;
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
     const r = await requireAuth();
     if (!r.ok) return r.response;
 
+    const includeAi =
+      new URL(request.url).searchParams.get("includeAi") === "1" ||
+      new URL(request.url).searchParams.get("includeAi") === "true";
+
     const users = await prisma.user.findMany({
-      // Apenas operadores humanos aparecem aqui. Agentes de IA
-      // (User.type=AI) têm tela própria em /ai-agents e não fazem
-      // sentido em seletores de "assinar conversa para mim" etc.
-      // userOrgFilter blinda o vazamento entre tenants — User nao esta
-      // no SCOPED_MODELS da Prisma Extension (precisamos de auth sem ctx),
-      // entao filtragem aqui e MANUAL e OBRIGATORIA.
-      where: { type: "HUMAN", ...userOrgFilter(r.session) },
+      // Por padrão só humanos (Equipe / filtros). Com ?includeAi=1 inclui
+      // agentes IA ativos — usado nos seletores de responsável (1º atendimento).
+      where: includeAi
+        ? {
+            ...userOrgFilter(r.session),
+            OR: [
+              { type: "HUMAN" },
+              { type: "AI", aiAgentConfig: { active: true } },
+            ],
+          }
+        : { type: "HUMAN", ...userOrgFilter(r.session) },
       orderBy: { name: "asc" },
       select: {
         id: true,
         name: true,
         email: true,
         role: true,
+        type: true,
         avatarUrl: true,
         // Roles RBAC atribuídas (modelo novo). Usado pela tela de Equipe
         // para exibir a "função" como role customizada (mantendo só ADMIN
@@ -45,12 +55,31 @@ export async function GET() {
       },
     });
 
+    // Presença de USO (aba do CRM aberta) — SEPARADA de agentStatus.
+    // agentStatus continua refletindo apenas a disponibilidade manual
+    // da Distribuição. Nunca combinar esses dois conceitos.
+    const orgId = r.session.user.organizationId;
+    let presence: Awaited<ReturnType<typeof getSystemPresenceMap>> = new Map();
+    if (orgId) {
+      try {
+        presence = await getSystemPresenceMap({
+          organizationId: orgId,
+          userIds: users.map((u) => u.id),
+        });
+      } catch {
+        // Migration ainda não aplicada / erro transiente: seguimos sem presença.
+      }
+    }
+
     // Achata `roleAssignments` em `assignedRoles` (lista limpa pra UI).
     const shaped = users.map((u) => {
       const { roleAssignments, ...rest } = u;
+      const p = presence.get(u.id);
       return {
         ...rest,
         assignedRoles: roleAssignments.map((a) => a.role),
+        systemOnline: p?.systemOnline ?? false,
+        lastSeenAt: p?.lastSeenAt ? p.lastSeenAt.toISOString() : null,
       };
     });
 

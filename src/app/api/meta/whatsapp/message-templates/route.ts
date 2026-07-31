@@ -12,6 +12,84 @@ function requireAdminOrManager(session: { user?: { role?: string } }): NextRespo
 }
 
 /**
+ * Timeout pra baixar a mídia de exemplo (HEADER IMAGE/VIDEO/DOCUMENT) de uma
+ * URL HTTPS externa antes de subir via Resumable Upload API. Mesmo racional
+ * do `GRAPH_TIMEOUT_MS` do client: falhar cedo com erro claro em vez de
+ * pendurar a requisição até o proxy reverso devolver 502.
+ */
+const HEADER_MEDIA_FETCH_TIMEOUT_MS = 20_000;
+
+/**
+ * Resolve os bytes da mídia de exemplo do HEADER (IMAGE/VIDEO/DOCUMENT) a
+ * partir de `headerMediaUrl` — aceita upload interno (`/api/storage/...`
+ * tenant-scoped ou `/uploads/...` legacy) ou URL HTTPS pública. Mesmo
+ * padrão usado pelo executor de automações ao resolver mídia de envio
+ * (ver `resolveTemplateHeaderMediaParam` em `automation-executor.ts`).
+ */
+async function resolveHeaderMediaBuffer(
+  mediaUrl: string,
+): Promise<{ buffer: Buffer; mimeType: string; fileName: string }> {
+  const trimmed = mediaUrl.trim();
+  const { parseStoragePath, readStoredFile, mimeFromFilename } = await import(
+    "@/lib/storage/local"
+  );
+  const parsedStorage = parseStoragePath(trimmed);
+  const isLegacyLocal = !parsedStorage && trimmed.startsWith("/uploads/");
+
+  if (parsedStorage) {
+    const stored = await readStoredFile(
+      parsedStorage.orgId,
+      parsedStorage.bucket,
+      parsedStorage.fileName,
+    );
+    if (!stored) {
+      throw new Error(`Arquivo da mídia de exemplo não encontrado em storage (${trimmed}).`);
+    }
+    return { buffer: stored.buffer, mimeType: stored.mimeType, fileName: parsedStorage.fileName };
+  }
+
+  if (isLegacyLocal) {
+    const { readFile } = await import("fs/promises");
+    const { join, basename } = await import("path");
+    const filePath = join(process.cwd(), "public", trimmed);
+    const buffer = await readFile(filePath);
+    const fileName = basename(trimmed);
+    return { buffer, mimeType: mimeFromFilename(fileName), fileName };
+  }
+
+  if (trimmed.startsWith("https://")) {
+    let res: Response;
+    try {
+      res = await fetch(trimmed, {
+        cache: "no-store",
+        signal: AbortSignal.timeout(HEADER_MEDIA_FETCH_TIMEOUT_MS),
+      });
+    } catch (err) {
+      if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+        throw new Error(
+          `Tempo limite ao baixar a mídia de exemplo do cabeçalho (${HEADER_MEDIA_FETCH_TIMEOUT_MS}ms): ${trimmed}`,
+        );
+      }
+      throw new Error(
+        `Falha ao baixar a mídia de exemplo do cabeçalho (${trimmed}): ${err instanceof Error ? err.message : err}`,
+      );
+    }
+    if (!res.ok) {
+      throw new Error(`Falha ao baixar a mídia de exemplo do cabeçalho (HTTP ${res.status}): ${trimmed}`);
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const contentType = res.headers.get("content-type")?.split(";")[0]?.trim();
+    const fileName = trimmed.split("?")[0].split("/").pop() || "header-media";
+    const mimeType = contentType || mimeFromFilename(fileName);
+    return { buffer, mimeType, fileName };
+  }
+
+  throw new Error(
+    `URL da mídia de exemplo inválida — use uma URL HTTPS pública ou um caminho de upload interno (/api/storage/... ou /uploads/...): ${trimmed}`,
+  );
+}
+
+/**
  * GET: lista templates da WABA (Graph `message_templates`).
  * POST: cria template — corpo assistido ou `{ "raw": true, "payload": { ... } }` (JSON oficial Meta).
  *
@@ -109,6 +187,30 @@ export async function POST(request: Request) {
             hc.example = b.headerExample;
           }
           components.push(hc);
+        }
+      } else if (headerFormat === "IMAGE" || headerFormat === "VIDEO" || headerFormat === "DOCUMENT") {
+        const headerMediaUrl = typeof b.headerMediaUrl === "string" ? b.headerMediaUrl.trim() : "";
+        if (!headerMediaUrl) {
+          return NextResponse.json(
+            {
+              message: `Cabeçalho ${headerFormat}: informe a URL (ou faça upload) da mídia de exemplo — a Meta exige isso ao criar o template.`,
+            },
+            { status: 400 },
+          );
+        }
+        try {
+          const { buffer, mimeType, fileName } = await resolveHeaderMediaBuffer(headerMediaUrl);
+          const headerHandle = await metaClient.uploadResumableHandle(buffer, mimeType, fileName);
+          components.push({
+            type: "HEADER",
+            format: headerFormat,
+            example: { header_handle: [headerHandle] },
+          });
+        } catch (mediaErr: unknown) {
+          console.error("[meta-templates] header media", mediaErr);
+          const msg =
+            mediaErr instanceof Error ? mediaErr.message : "Erro ao preparar a mídia de exemplo do cabeçalho.";
+          return NextResponse.json({ message: msg }, { status: 400 });
         }
       }
 

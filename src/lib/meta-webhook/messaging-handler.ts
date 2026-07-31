@@ -25,10 +25,12 @@ import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { sseBus } from "@/lib/sse-bus";
+import { scheduleAiReply } from "@/services/ai/inbound-debounce";
 import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
+import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { nextContactNumber } from "@/services/contacts";
 import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
@@ -299,7 +301,7 @@ async function processEvent(
     content = url ? `[${type}] ${url}` : `[${type}]`;
   }
 
-  await prisma.message.create({
+  const msgCreated = await prisma.message.create({
     data: withOrgFromCtx({
       conversationId: conversation.id,
       channelId: hit.channelId,
@@ -330,6 +332,16 @@ async function processEvent(
     preview: content || "[midia]",
     channel: platform === "instagram" ? "Instagram" : "Messenger",
   }).catch((err) => log.debug("push falhou (nao-fatal):", err));
+
+  if (content?.trim()) {
+    void scheduleAiReply({
+      conversationId: conversation.id,
+      contactId: contact.id,
+      messageId: msgCreated.id,
+      userMessage: content,
+      channel: "messaging",
+    });
+  }
 }
 
 // ── Upsert de Contact por PSID/IGSID ────────────────────────
@@ -455,7 +467,7 @@ async function findOrCreateConversation(
   });
 
   try {
-    return await withConversationNumberRetry((number) =>
+    const created = await withConversationNumberRetry((number) =>
       prisma.conversation.create({
         data: withOrgFromCtx({
           number,
@@ -468,6 +480,12 @@ async function findOrCreateConversation(
         select: { id: true },
       }),
     );
+    await maybeDistributeNewInboundTicket({
+      conversationId: created.id,
+      contactId,
+      assignedToId: contact?.assignedToId ?? null,
+    });
+    return created;
   } catch (err) {
     if (isActiveConversationUniqueViolation(err)) {
       const won = await findActive();

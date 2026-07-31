@@ -12,6 +12,9 @@ import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
 } from "@/services/conversations";
+import { maybeDistributeNewInboundTicket } from "@/services/distribution";
+import { scheduleAiReply } from "@/services/ai/inbound-debounce";
+import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -257,7 +260,7 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
   });
 
   try {
-    return await withConversationNumberRetry((number) =>
+    const created = await withConversationNumberRetry((number) =>
       prisma.conversation.create({
         data: withOrgFromCtx({
           number,
@@ -271,6 +274,12 @@ async function findOrCreateConversation(contactId: string, channelId: string, ra
         select: CONV_SELECT,
       }),
     );
+    await maybeDistributeNewInboundTicket({
+      conversationId: created.id,
+      contactId,
+      assignedToId: contact?.assignedToId ?? null,
+    });
+    return created;
   } catch (err) {
     // Corrida: mensagens simultaneas do mesmo numero disparam dois
     // findOrCreate; o indice unico parcial (1 conversa ativa por
@@ -530,14 +539,14 @@ export async function handleBaileysMessage(
       log.debug("Falha ao sincronizar avatar (não-fatal):", err),
     );
 
-    await prisma.$transaction(async (tx) => {
+    const msgCreated = await prisma.$transaction(async (tx) => {
       const dup = await tx.message.findFirst({
         where: { externalId: parsed.externalId },
         select: { id: true },
       });
-      if (dup) return;
+      if (dup) return null;
 
-      await tx.message.create({
+      return tx.message.create({
         data: withOrgFromCtx({
           conversationId: conversation.id,
           channelId,
@@ -550,6 +559,8 @@ export async function handleBaileysMessage(
         }),
       });
     });
+
+    if (!msgCreated) return;
 
     await prisma.conversation.update({
       where: { id: conversation.id },
@@ -585,6 +596,15 @@ export async function handleBaileysMessage(
     }).catch((err) => log.debug("Falha ao enviar push (não-fatal):", err));
 
     try {
+      await ensureInboundAiAttendance({
+        conversationId: conversation.id,
+        contactId: contact.id,
+      });
+    } catch (err) {
+      log.error("Falha no ensureInboundAiAttendance:", err);
+    }
+
+    try {
       await processSalesbotMessage(contact.id, parsed.text);
     } catch (err) {
       log.error("Falha no salesbot:", err);
@@ -602,6 +622,16 @@ export async function handleBaileysMessage(
       });
     } catch (err) {
       log.error("Falha ao disparar gatilho message_received:", err);
+    }
+
+    if (parsed.text) {
+      void scheduleAiReply({
+        conversationId: conversation.id,
+        contactId: contact.id,
+        messageId: msgCreated.id,
+        userMessage: parsed.text,
+        channel: "baileys",
+      });
     }
 
     log.info(`Mensagem de ${contact.name}: ${parsed.text.substring(0, 60)}`);

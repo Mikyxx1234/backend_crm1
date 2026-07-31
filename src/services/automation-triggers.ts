@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { getHumanAttendanceForContact } from "@/services/attendance-guards";
 
 import {
   enqueueAutomation,
@@ -333,6 +334,35 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
     }
   }
 
+  // 29/jul/26 — Rotas de API disparam deal_created/won/lost sem pipelineId
+  // no payload; o evaluateTrigger é fail-closed nesse filtro.
+  if (
+    (event === "deal_created" || event === "deal_won" || event === "deal_lost") &&
+    context.dealId &&
+    readString(data, "pipelineId") === undefined
+  ) {
+    const deal = await prisma.deal.findUnique({
+      where: { id: context.dealId },
+      select: {
+        stageId: true,
+        contactId: true,
+        stage: { select: { pipelineId: true } },
+      },
+    });
+    if (deal) {
+      return {
+        ...context,
+        contactId: context.contactId ?? deal.contactId ?? undefined,
+        data: {
+          ...data,
+          pipelineId: deal.stage.pipelineId,
+          stageId: readString(data, "stageId") ?? deal.stageId,
+          toStageId: readString(data, "toStageId") ?? deal.stageId,
+        },
+      };
+    }
+  }
+
   return context;
 }
 
@@ -340,6 +370,25 @@ export async function fireTrigger(
   event: string,
   context: { contactId?: string; dealId?: string; data?: unknown; depth?: number }
 ): Promise<void> {
+  // Guarda só no INBOUND: não responder por cima de atendimento humano.
+  // message_sent é ação do agente e não pode ser suprimido por ela.
+  if (event === "message_received" && context.contactId) {
+    try {
+      const snap = await getHumanAttendanceForContact(context.contactId);
+      if (snap?.suppressAutomation) {
+        console.info(
+          `[fireTrigger] skip ${event} — atendimento ativo (contact=${context.contactId} conv=${snap.conversationId} assignee=${snap.assignedToId ?? "-"} humanReply=${snap.hasHumanReply})`,
+        );
+        return;
+      }
+    } catch (err) {
+      console.warn(
+        "[fireTrigger] human attendance check failed:",
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+
   let automations;
   try {
     automations = await prisma.automation.findMany({

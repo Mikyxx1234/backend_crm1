@@ -72,6 +72,8 @@ model Organization {
   automationSteps          AutomationStep[]
   automationLogs           AutomationLog[]
   automationContexts       AutomationContext[]
+  automationSessionExpiryClaims AutomationSessionExpiryClaim[]
+  automationRoundRobinStates AutomationRoundRobinState[]
   metaWebhookEvents        MetaWebhookEvent[]
   channels                 Channel[]
   baileysAuthKeys          BaileysAuthKey[]
@@ -99,6 +101,8 @@ model Organization {
   agentSchedules           AgentSchedule[]
   agentStatuses            AgentStatus[]
   agentPresenceLogs        AgentPresenceLog[]
+  systemUsageSessions      SystemUsageSession[]
+  systemActivitySessions   SystemActivitySession[]
   aiAgentConfigs           AIAgentConfig[]
   aiAgentKnowledgeDocs     AIAgentKnowledgeDoc[]
   auditLogs                AuditLog[]
@@ -506,6 +510,8 @@ model User {
   schedule                       AgentSchedule?
   agentStatus                    AgentStatus?
   presenceLogs                   AgentPresenceLog[]
+  systemUsageSessions            SystemUsageSession[]
+  systemActivitySessions         SystemActivitySession[]
   assignedConversations          Conversation[]            @relation("ConversationAssignedTo")
   scheduledWhatsappCallsAssigned ScheduledWhatsappCall[]   @relation("ScheduledWhatsappCallAssignee")
   dealEvents                     DealEvent[]
@@ -1059,6 +1065,7 @@ model Contact {
   tags                   TagOnContact[]
   customFields           ContactCustomFieldValue[]
   automationContexts     AutomationContext[]
+  automationSessionExpiryClaims AutomationSessionExpiryClaim[]
   whatsappCallEvents     WhatsappCallEvent[]
   scheduledWhatsappCalls ScheduledWhatsappCall[]
   campaignRecipients     CampaignRecipient[]
@@ -2599,6 +2606,7 @@ model Conversation {
   /// departamento nao exige tabulacao.
   tabulationId String?
   tabulation   Tabulation? @relation(fields: [tabulationId], references: [id], onDelete: SetNull)
+  automationSessionExpiryClaims AutomationSessionExpiryClaim[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2826,6 +2834,8 @@ model Automation {
   allowManualRun Boolean             @default(false)
   steps          AutomationStep[]
   contexts       AutomationContext[]
+  sessionExpiryClaims AutomationSessionExpiryClaim[]
+  roundRobinStates AutomationRoundRobinState[]
   campaigns      Campaign[]
 
   createdAt DateTime @default(now())
@@ -2835,6 +2845,55 @@ model Automation {
   @@index([organizationId, active])
   @@index([organizationId, active, triggerType])
   @@map("automations")
+}
+
+/// Claim durável do trigger temporal da sessão Meta. A chave única usa a
+/// janela real (contato + canal + último inbound), portanto polls/re réplicas
+/// não repetem o disparo; um novo inbound cria uma nova janela elegível.
+model AutomationSessionExpiryClaim {
+  id               String       @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, map: "automation_session_expiry_org_fk")
+  automationId     String
+  automation       Automation   @relation(fields: [automationId], references: [id], onDelete: Cascade, map: "automation_session_expiry_automation_fk")
+  contactId        String
+  contact          Contact      @relation(fields: [contactId], references: [id], onDelete: Cascade, map: "automation_session_expiry_contact_fk")
+  channel          String
+  conversationId   String?
+  conversation     Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull, map: "automation_session_expiry_conversation_fk")
+  windowStartedAt  DateTime
+  sessionExpiresAt DateTime
+  createdAt        DateTime     @default(now())
+
+  @@unique([automationId, contactId, channel, windowStartedAt], map: "automation_session_expiry_claim_window_uq")
+  @@index([organizationId, createdAt], map: "automation_session_expiry_org_created_idx")
+  @@index([contactId, channel, windowStartedAt], map: "automation_session_expiry_contact_channel_window_idx")
+  @@map("automation_session_expiry_claims")
+}
+
+/// Cursor persistido do node "Round Robin de caminhos" (estilo Kommo).
+/// NÃO atribui agente — só guarda o índice da última opção escolhida
+/// pra rodízio circular entre execuções da mesma automação+step. Ver
+/// `@/lib/automation-round-robin.ts` e `case "round_robin"` em
+/// `automation-executor.ts`. `optionsSignature` (ids das opções, join
+/// por vírgula) detecta add/remove de opção e reseta `lastIndex` pro
+/// início (-1) na próxima execução.
+model AutomationRoundRobinState {
+  id               String       @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade, map: "automation_round_robin_state_org_fk")
+  automationId     String
+  automation       Automation   @relation(fields: [automationId], references: [id], onDelete: Cascade, map: "automation_round_robin_state_automation_fk")
+  stepId           String
+  /// -1 = ainda não rodou nenhuma vez; próxima escolha = índice 0.
+  lastIndex        Int          @default(-1)
+  optionsSignature String
+  updatedAt        DateTime     @updatedAt
+  createdAt        DateTime     @default(now())
+
+  @@unique([automationId, stepId], map: "automation_round_robin_state_automation_step_uq")
+  @@index([organizationId], map: "automation_round_robin_state_org_idx")
+  @@map("automation_round_robin_states")
 }
 
 model AutomationStep {
@@ -3271,6 +3330,8 @@ model MessageTemplate {
   mediaType      String?
   /// Nome original do arquivo (para exibição). Null se `mediaUrl` null.
   mediaName      String?
+  /// Anexos extras do modelo. Array de { url, mimeType?, name? }. Índice 0 espelhado em mediaUrl/mediaType/mediaName.
+  attachments    Json?
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
@@ -3473,6 +3534,8 @@ model DistributionResponsible {
   type            String?
   /// Pausa temporaria dedicada (alem de AgentStatus.AWAY).
   paused          Boolean      @default(false)
+  /// Minutos antes do almoco em que para de receber leads (0 = so no intervalo).
+  preLunchStopMinutes Int       @default(30)
   /// Ultima vez que recebeu lead pelo motor (desempate da selecao).
   lastExecutionAt DateTime?
   createdAt       DateTime     @default(now())
@@ -3636,6 +3699,61 @@ model AgentPresenceLog {
   @@index([userId, endedAt])
   @@index([userId, status, startedAt])
   @@map("agent_presence_logs")
+}
+
+/// Sessão de USO do CRM ("aba aberta") — independente do status manual de
+/// disponibilidade da Distribuição (AgentStatus).
+///
+/// Uma linha por sessão de uso. Enquanto `endedAt IS NULL` a sessão está
+/// aberta; o heartbeat do cliente atualiza `lastHeartbeatAt`. Um sweeper
+/// fecha sessões cujo último heartbeat expirou.
+///
+/// O partial unique index (userId) WHERE "endedAt" IS NULL garante que um
+/// usuário nunca tem mais de uma sessão aberta ao mesmo tempo — múltiplas
+/// abas convergem para a mesma sessão (upsert idempotente).
+model SystemUsageSession {
+  id              String    @id @default(cuid())
+  organizationId  String
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  startedAt       DateTime  @default(now())
+  lastHeartbeatAt DateTime  @default(now())
+  endedAt         DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([organizationId, userId, endedAt])
+  @@index([organizationId, startedAt])
+  @@index([userId, startedAt])
+  @@map("system_usage_sessions")
+}
+
+/// Sessão de USO REAL do CRM — mede blocos de atividade efetiva do usuário
+/// (interação humana visível). Independente do heartbeat de presença
+/// (SystemUsageSession), que apenas indica "CRM aberto".
+///
+/// Uma sessão é aberta na primeira interação, renovada em ações dentro de
+/// 5 minutos e fechada em `lastActivityAt + 5 minutos` por um sweeper.
+/// O partial unique (organizationId, userId) WHERE endedAt IS NULL garante
+/// no máximo uma sessão aberta por (org, usuário).
+model SystemActivitySession {
+  id               String    @id @default(cuid())
+  organizationId   String
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId           String
+  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  startedAt        DateTime  @default(now())
+  lastActivityAt   DateTime  @default(now())
+  endedAt          DateTime?
+  interactionCount Int       @default(1)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([organizationId, userId, endedAt])
+  @@index([organizationId, startedAt])
+  @@index([organizationId, lastActivityAt])
+  @@map("system_activity_sessions")
 }
 
 /// Callback de voz WhatsApp agendado (ex.: após template pós-chamada perdida).
@@ -4203,6 +4321,12 @@ model AIAgentRun {
   /// Custo estimado em USD baseado em pricing.ts no momento do run.
   costUsd         Float            @default(0)
   status          AIAgentRunStatus @default(RUNNING)
+  /// Confiança auto-declarada pelo LLM ([CONFIANCA:X.X]), 0–1. Null se
+  /// o modelo não emitiu o marcador. Base pra métricas de qualidade.
+  confidence      Float?
+  /// Motivo do handoff quando status=HANDOFF:
+  /// "keyword" | "low_confidence" | "tool_transfer" | "inactivity".
+  handoffReason   String?
   errorMessage    String?
   createdAt       DateTime         @default(now())
   finishedAt      DateTime?

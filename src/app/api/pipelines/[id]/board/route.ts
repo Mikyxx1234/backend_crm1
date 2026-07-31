@@ -54,7 +54,6 @@ export async function GET(request: Request, context: RouteContext) {
 
       const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
       const visibility = await getVisibilityFilter(user);
-      const visibilityOwnerId = visibility.canSeeAll ? null : user.id;
 
       const url = new URL(request.url);
       const statusParam = url.searchParams.get("status");
@@ -68,7 +67,7 @@ export async function GET(request: Request, context: RouteContext) {
       const sortField = parseBoardSortField(url.searchParams.get("sort"));
       const sortDirection = parseBoardSortDirection(url.searchParams.get("direction"));
 
-      const board = await getBoardData(pipelineId, visibilityOwnerId, statusFilter, undefined, {
+      const board = await getBoardData(pipelineId, visibility.dealWhere, statusFilter, undefined, {
         perStage,
         sortField,
         sortDirection,
@@ -111,7 +110,6 @@ export async function POST(request: Request, context: RouteContext) {
 
       const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
       const visibility = await getVisibilityFilter(user);
-      const visibilityOwnerId = visibility.canSeeAll ? null : user.id;
 
       let bodyJson: unknown = null;
       try {
@@ -145,7 +143,7 @@ export async function POST(request: Request, context: RouteContext) {
       };
       const board = await getBoardData(
         pipelineId,
-        visibilityOwnerId,
+        visibility.dealWhere,
         statusFilter,
         filters,
         limitOptions,

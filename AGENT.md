@@ -5,6 +5,62 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-07-30 — `getQueueCounts` conta apenas "Entrada + Aguardando" (vez do agente)
+
+**Decisão.** A fila (`getQueueCounts` em `src/services/distribution/queue.ts`),
+que alimenta o teto (`queueLimit`) e o balanceamento (`engine.selectResponsible`),
+passa a contar **somente** conversas OPEN atribuídas ao agente onde é a vez
+dele responder:
+
+- `hasError = false`
+- E (`hasHumanReply = false` **OR** `lastMessageDirection = "in"`)
+
+Ou seja: "Entrada" (nenhuma resposta humana ainda) + "Aguardando" (cliente
+respondeu por último). "Respondidas" (agente já mandou e aguarda cliente) e
+"Erro" **saem** da fila.
+
+**Contexto.** Caso Beatriz (Cruzeiro EaD, 2026-07-30): consultora com fila
+mostrando 25 sendo que a aba "Entrada" tinha 1 e "Aguardando" 2. Breakdown das
+25: 1 Entrada + 2 Aguardando + 15 Respondidas + 7 Erro. O usuário considera que
+a fila deve refletir a carga **ativa** do consultor (o que ele precisa fazer
+agora), não conversas que dependem do cliente voltar ou de correção de erro.
+
+**Alternativas descartadas:**
+
+- **Contar só "Entrada"** (`hasHumanReply=false`). Reabre o bug histórico
+  documentado no cabeçalho de `queue.ts` ("50 leads pra 1 pessoa"): agente
+  responde 1x → `hasHumanReply` vira `true` → fila zera → recebe novos leads
+  → loop.
+- **Contar TODAS OPEN (comportamento atual até 2026-07-30).** Definição
+  máxima de carga, mas divergia radicalmente do que o operador vê no inbox e
+  agentes com muitos "Respondidas" antigas ficavam permanentemente
+  inelegíveis, mesmo estando disponíveis para atender.
+- **Contar TODAS OPEN exceto `hasError=true`.** Reduziria pouco (fila 25 → 18
+  no caso Beatriz), sem resolver a queixa principal (contar "Respondidas"
+  como carga ativa).
+
+**Contra-medida contra o bug "50 leads":** a inclusão de `lastMessageDirection
+= "in"` garante que agente que respondeu e o cliente respondeu de volta continua
+contando — só sai da fila quando **realmente terminou** o ciclo (agente
+respondeu por último). A pilha de "Respondidas" só pode inflar se elas nunca
+forem encerradas — isso é responsabilidade da automação "Aguardando Resposta"
+(30min → encerra/move), que trata o ciclo de vida da conversa.
+
+**Impacto.**
+
+- Balanceamento (`selectResponsible`) e teto (`queueLimit`) passam a refletir a
+  carga **ativa** do consultor. Agentes com muitas "Respondidas" acumuladas
+  voltam a ser elegíveis para receber novos leads.
+- Depende que a automação de encerramento por inatividade continue funcionando
+  (senão a pilha de "Respondidas" cresce indefinidamente, sem efeito nenhum
+  na distribuição — o que era exatamente o efeito colateral que a mudança
+  original de 2026-07-XX tentou evitar). Ver incidente do 2026-07-30 sobre
+  conversas presas em ATENDIMENTO.
+- A definição de "fila" agora bate com o dashboard do agente (Entrada +
+  Aguardando) — coerência UX.
+
+---
+
 ### 2026-07-21 — Sync do schema de produção (`db_crm`) com a `DEV_BRANCH` antes do merge
 
 **Decisão.** Alinhar o banco de produção ao schema da `DEV_BRANCH` via

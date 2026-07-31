@@ -32,6 +32,7 @@ import {
   type QualificationQuestion,
 } from "@/lib/ai-agents/piloting";
 import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
+import { ACADEMIC_ATENDIMENTO_RULES } from "@/lib/ai-agents/academic-atendimento-prompt";
 import {
   formatRetrievalBlock,
   retrieveRelevantChunks,
@@ -67,6 +68,12 @@ export type RunResult = {
 };
 
 const MAX_HISTORY = 10;
+const ACADEMIC_RUNTIME_TOOLS = [
+  "consultar_matricula",
+  "transfer_to_department",
+  "execute_distribution",
+  "transfer_to_human",
+] as const;
 
 export async function runAgent(args: RunArgs): Promise<RunResult> {
   const agent = await prisma.aIAgentConfig.findUnique({
@@ -130,7 +137,15 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const deal = args.dealId
       ? await prisma.deal.findUnique({
           where: { id: args.dealId },
-          include: { stage: { select: { name: true, pipelineId: true } } },
+          include: {
+            stage: {
+              select: {
+                name: true,
+                pipelineId: true,
+                pipeline: { select: { name: true } },
+              },
+            },
+          },
         })
       : null;
 
@@ -155,11 +170,25 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     );
     const outputStyle = normalizeOutputStyle(agent.outputStyle);
 
+    const isAcademicAttendance = agent.archetype === "ATENDIMENTO";
+    const runtimeTools = isAcademicAttendance
+      ? Array.from(new Set([...agent.enabledTools, ...ACADEMIC_RUNTIME_TOOLS]))
+      : agent.enabledTools;
+    const runtimeOverride = isAcademicAttendance
+      ? agent.systemPromptOverride?.includes(
+          "## DISTRIBUIÇÃO POR DEPARTAMENTO",
+        )
+        ? agent.systemPromptOverride
+        : [agent.systemPromptOverride, ACADEMIC_ATENDIMENTO_RULES]
+            .filter(Boolean)
+            .join("\n\n")
+      : agent.systemPromptOverride;
+
     const systemPrompt = renderSystemPrompt({
       template: agent.systemPromptTemplate,
-      override: agent.systemPromptOverride,
+      override: runtimeOverride,
       productPolicy: agent.productPolicy,
-      hasProductSearch: agent.enabledTools.includes("search_products"),
+      hasProductSearch: runtimeTools.includes("search_products"),
       tone: agent.tone,
       language: agent.language,
       autonomyMode: agent.autonomyMode,
@@ -176,9 +205,10 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       conversationId: args.conversationId ?? null,
       contactId: args.contactId ?? null,
       dealId: args.dealId ?? null,
+      userMessage: args.userMessage,
     };
 
-    const toolSet = buildToolSet(ctx, agent.enabledTools);
+    const toolSet = buildToolSet(ctx, runtimeTools);
 
     const messages: Array<{
       role: "user" | "assistant";
@@ -231,8 +261,12 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       result.outputTokens,
     );
 
-    const hadTransfer = result.toolCalls.some(
-      (c) => c.toolName === "transfer_to_human",
+    const hadTransfer = result.toolCalls.some((c) =>
+      [
+        "transfer_to_human",
+        "transfer_to_department",
+        "execute_distribution",
+      ].includes(c.toolName),
     );
     const status: RunResult["status"] = hadTransfer ? "HANDOFF" : "COMPLETED";
 
@@ -240,6 +274,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       where: { id: run.id },
       data: {
         status,
+        handoffReason: hadTransfer ? "tool_transfer" : null,
         responsePreview: result.text.slice(0, 500),
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
@@ -325,7 +360,10 @@ type RenderArgs = {
   deal: {
     title: string;
     value: unknown;
-    stage: { name: string } | null;
+    stage: {
+      name: string;
+      pipeline?: { name: string } | null;
+    } | null;
   } | null;
   retrievalBlock: string;
   qualificationQuestions: QualificationQuestion[];
@@ -363,8 +401,18 @@ function renderSystemPrompt(args: RenderArgs): string {
     lines.push("DEAL ATUAL:");
     lines.push(`- Título: ${args.deal.title}`);
     if (args.deal.value) lines.push(`- Valor: R$ ${String(args.deal.value)}`);
+    if (args.deal.stage?.pipeline?.name)
+      lines.push(`- Funil: ${args.deal.stage.pipeline.name}`);
     if (args.deal.stage) lines.push(`- Estágio: ${args.deal.stage.name}`);
+    lines.push(
+      "- Use Funil/Estágio para decidir Acolhimento vs Atendimento na distribuição.",
+    );
   }
+
+  lines.push("");
+  lines.push(
+    "Lembrete: chame `consultar_matricula` cedo no atendimento para personalizar com o relatório de matriculados.",
+  );
 
   if (args.override?.trim()) {
     lines.push("");

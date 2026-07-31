@@ -319,6 +319,34 @@ export const cache = {
   del,
   delPattern,
   wrap,
+  tryClaim,
 };
+
+/**
+ * Claim atômico (SET NX). Retorna true se esta instância ganhou a chave.
+ * Fallback in-memory: check-then-set (bom o bastante em single-node).
+ */
+export async function tryClaim(
+  key: CacheKey,
+  ttlSec: number,
+  value: string = "1",
+): Promise<boolean> {
+  const fullKey = KEY_PREFIX + key;
+  const client = getClient();
+  if (!client) {
+    if (memoryGet(fullKey) !== undefined) return false;
+    memorySet(fullKey, value, ttlSec);
+    return true;
+  }
+  try {
+    const ok = await client.set(fullKey, value, "EX", ttlSec, "NX");
+    return ok === "OK";
+  } catch (err) {
+    log.warn({ err, key }, "[cache] tryClaim falhou — fallback memoria");
+    if (memoryGet(fullKey) !== undefined) return false;
+    memorySet(fullKey, value, ttlSec);
+    return true;
+  }
+}
 
 export type { CacheOptions as Options };

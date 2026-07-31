@@ -108,7 +108,20 @@ export async function getVisibilityFilter(
   const settings = await loadVisibilityMap();
   const mode = getModeForRole(settings, role);
 
+  // MEMBER nunca vê "Sem responsável" (deal/conversa sem dono) — mesmo com
+  // visibility.MEMBER=all. Só ADMIN/MANAGER enxergam a fila não atribuída
+  // no pipeline/inbox compartilhado.
   if (mode === "all") {
+    if (role === "MEMBER") {
+      return {
+        canSeeAll: true,
+        dealWhere: { ownerId: { not: null } },
+        conversationWhere: composeDepartmentScope(
+          { assignedToId: { not: null } },
+          deptScope,
+        ),
+      };
+    }
     return {
       canSeeAll: true,
       dealWhere: {},
@@ -124,20 +137,25 @@ export async function getVisibilityFilter(
    *     ligadas a contatos que ele acompanha.
    *   - sharedInbox=false → estritamente as conversas atribuídas a ele.
    * ADMIN e flag desligada mantêm o comportamento compartilhado.
+   *
+   * MEMBER: sempre estrito (só atribuídas a ele) — não entra no pool
+   * "Sem responsável".
    */
-  let strictOwnInbox = false;
-  try {
-    const orgId = getOrgIdOrThrow();
-    if (await isFeatureEnabled("rbac_granular_scope_v1", orgId)) {
-      const ctx = await loadAuthzContext({
-        userId: user.id,
-        organizationId: orgId,
-        isSuperAdmin: false,
-      });
-      if (!ctx.isAdmin && !ctx.sharedInbox) strictOwnInbox = true;
+  let strictOwnInbox = role === "MEMBER";
+  if (!strictOwnInbox) {
+    try {
+      const orgId = getOrgIdOrThrow();
+      if (await isFeatureEnabled("rbac_granular_scope_v1", orgId)) {
+        const ctx = await loadAuthzContext({
+          userId: user.id,
+          organizationId: orgId,
+          isSuperAdmin: false,
+        });
+        if (!ctx.isAdmin && !ctx.sharedInbox) strictOwnInbox = true;
+      }
+    } catch {
+      // Fora de RequestContext (ex.: jobs) — mantém comportamento compartilhado.
     }
-  } catch {
-    // Fora de RequestContext (ex.: jobs) — mantém comportamento compartilhado.
   }
 
   // Conversa ATRIBUÍDA ao agente é SEMPRE visível — inclusive sem departamento

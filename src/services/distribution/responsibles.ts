@@ -12,6 +12,7 @@ import type { AgentOnlineStatus, UserRole } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getSystemPresenceMap } from "@/services/system-presence";
 
 import {
   evaluateResponsibleEligibility,
@@ -28,13 +29,24 @@ const DEFAULT_RESPONSIBLE = {
   volume: 1,
   type: null as string | null,
   paused: false,
+  preLunchStopMinutes: 30,
   lastExecutionAt: null as Date | null,
 };
+
+export interface ResponsibleScheduleView {
+  startTime: string;
+  lunchStart: string;
+  lunchEnd: string;
+  endTime: string;
+  timezone: string;
+  weekdays: number[];
+}
 
 export interface DistributionResponsibleView {
   userId: string;
   name: string | null;
   email: string | null;
+  avatarUrl: string | null;
   role: UserRole;
   /** Config administrativa. */
   participates: boolean;
@@ -42,6 +54,8 @@ export interface DistributionResponsibleView {
   volume: number;
   type: string | null;
   paused: boolean;
+  /** Minutos antes do almoço em que para de receber leads. */
+  preLunchStopMinutes: number;
   lastExecutionAt: string | null;
   /** Departamentos dos quais é membro (dirige o roteamento por departamento). */
   departments: { id: string; name: string }[];
@@ -49,11 +63,20 @@ export interface DistributionResponsibleView {
   status: AgentOnlineStatus | null;
   /** Tem expediente configurado. */
   hasSchedule: boolean;
+  /** Expediente (null se não configurado). */
+  schedule: ResponsibleScheduleView | null;
   /** Fila atual (deals OPEN). */
   queueCount: number;
   /** Resultado da regra única. */
   eligible: boolean;
   blockedReasons: DistributionBlockReason[];
+  /**
+   * Presença de USO do CRM ("aba aberta"). Distinta de `status`:
+   * indica apenas se o agente tem o CRM aberto agora — não afeta
+   * elegibilidade da Distribuição.
+   */
+  systemOnline: boolean;
+  lastSeenAt: string | null;
 }
 
 export interface GetResponsiblesOptions {
@@ -67,6 +90,12 @@ export interface GetResponsiblesOptions {
    * `DEPARTMENT_MISMATCH` (inelegíveis). `null`/undefined = modo desligado.
    */
   departmentId?: string | null;
+  /**
+   * Pool de departamentos (OR): membro de qualquer um dos IDs é elegível
+   * quanto a departamento. Tem prioridade sobre `departmentId` quando ambos
+   * vêm preenchidos.
+   */
+  departmentIds?: string[] | null;
 }
 
 export async function getDistributionResponsibles(
@@ -78,26 +107,38 @@ export async function getDistributionResponsibles(
   const users = await prisma.user.findMany({
     where: { type: "HUMAN", organizationId: orgId },
     orderBy: { name: "asc" },
-    select: { id: true, name: true, email: true, role: true },
+    select: { id: true, name: true, email: true, avatarUrl: true, role: true },
   });
   if (users.length === 0) return [];
 
   const userIds = users.map((u) => u.id);
 
-  // Distribuição por departamento: carrega os membros do departamento-alvo
-  // para marcar quem está dentro/fora. Vazio (Set) quando modo desligado.
-  const departmentMemberIds = opts.departmentId
-    ? new Set(
-        (
-          await prisma.departmentMember.findMany({
-            where: { departmentId: opts.departmentId, userId: { in: userIds } },
-            select: { userId: true },
-          })
-        ).map((m) => m.userId),
-      )
-    : null;
+  // Distribuição por departamento: carrega os membros do(s) departamento(s)
+  // alvo para marcar quem está dentro/fora. Vazio (Set) quando modo desligado.
+  const scopeDeptIds = Array.from(
+    new Set(
+      [
+        ...(opts.departmentIds ?? []),
+        ...(opts.departmentId ? [opts.departmentId] : []),
+      ].filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  );
+  const departmentMemberIds =
+    scopeDeptIds.length > 0
+      ? new Set(
+          (
+            await prisma.departmentMember.findMany({
+              where: {
+                departmentId: { in: scopeDeptIds },
+                userId: { in: userIds },
+              },
+              select: { userId: true },
+            })
+          ).map((m) => m.userId),
+        )
+      : null;
 
-  const [responsibles, statuses, schedules, queue, memberships] = await Promise.all([
+  const [responsibles, statuses, schedules, queue, memberships, systemPresence] = await Promise.all([
     prisma.distributionResponsible.findMany({
       where: { userId: { in: userIds } },
       select: {
@@ -107,6 +148,7 @@ export async function getDistributionResponsibles(
         volume: true,
         type: true,
         paused: true,
+        preLunchStopMinutes: true,
         lastExecutionAt: true,
       },
     }),
@@ -131,6 +173,9 @@ export async function getDistributionResponsibles(
       where: { userId: { in: userIds }, organizationId: orgId },
       select: { userId: true, department: { select: { id: true, name: true } } },
     }),
+    // Presença de USO (aba do CRM aberta) — falha "aberta": em erro,
+    // devolvemos Map vazio para não bloquear a tela de Distribuição.
+    getSystemPresenceMap({ organizationId: orgId, userIds }).catch(() => new Map()),
   ]);
 
   // userId → lista de departamentos (nome), para exibição e roteamento.
@@ -177,6 +222,7 @@ export async function getDistributionResponsibles(
         type: cfg.type,
         status,
         schedule,
+        preLunchStopMinutes: cfg.preLunchStopMinutes,
         queueCount,
         // undefined = modo desligado (sem restrição); false = fora do depto.
         inDepartment: departmentMemberIds ? departmentMemberIds.has(u.id) : undefined,
@@ -188,12 +234,14 @@ export async function getDistributionResponsibles(
       userId: u.id,
       name: u.name,
       email: u.email,
+      avatarUrl: u.avatarUrl,
       role: u.role,
       participates: cfg.participates,
       queueLimit: cfg.queueLimit,
       volume: cfg.volume,
       type: cfg.type,
       paused: cfg.paused,
+      preLunchStopMinutes: cfg.preLunchStopMinutes,
       lastExecutionAt: cfg.lastExecutionAt
         ? cfg.lastExecutionAt.toISOString()
         : null,
@@ -202,9 +250,13 @@ export async function getDistributionResponsibles(
       ),
       status,
       hasSchedule: schedule !== null,
+      schedule,
       queueCount,
       eligible,
       blockedReasons,
+      systemOnline: systemPresence.get(u.id)?.systemOnline ?? false,
+      lastSeenAt:
+        systemPresence.get(u.id)?.lastSeenAt?.toISOString() ?? null,
     };
   });
 }

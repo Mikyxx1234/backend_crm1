@@ -12,6 +12,7 @@ import { cache } from "@/lib/cache";
 import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
 import {
   buildDealWhereFromFilters,
+  findContactIdsByPhoneDigits,
   type AdvancedDealFilters,
 } from "@/services/kanban-filters";
 
@@ -168,7 +169,8 @@ const listInclude = {
 
 export async function getDeals(params: GetDealsParams = {}) {
   const page = Math.max(1, params.page ?? 1);
-  const perPage = Math.min(100, Math.max(1, params.perPage ?? 20));
+  // Lista do Pipeline permite até 1000/página para seleção em massa.
+  const perPage = Math.min(1000, Math.max(1, params.perPage ?? 20));
   const skip = (page - 1) * perPage;
 
   const conditions: Prisma.DealWhereInput[] = [];
@@ -203,24 +205,40 @@ export async function getDeals(params: GetDealsParams = {}) {
     // Prisma gera 1 LEFT JOIN de `contacts` em vez de 1 por condição — antes eram
     // 4 self-joins (j0..j4) que faziam o board de busca custar ~2,4s no Postgres
     // (24/jul/26). Semanticamente idêntico ao anterior.
-    conditions.push({
-      OR: [
-        { title: { contains: search, mode: "insensitive" } },
-        // Campos personalizados do NEGÓCIO (RGM, CPF, matrícula, ...).
-        { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
-        {
-          contact: {
-            OR: [
-              { name: { contains: search, mode: "insensitive" } },
-              { email: { contains: search, mode: "insensitive" } },
-              { phone: { contains: search } },
-              // Campos personalizados do CONTATO vinculado.
-              { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
-            ],
-          },
+    const or: Prisma.DealWhereInput[] = [
+      { title: { contains: search, mode: "insensitive" } },
+      // Campos personalizados do NEGÓCIO (RGM, CPF, matrícula, ...).
+      { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
+      {
+        contact: {
+          OR: [
+            { name: { contains: search, mode: "insensitive" } },
+            { email: { contains: search, mode: "insensitive" } },
+            { phone: { contains: search } },
+            // Campos personalizados do CONTATO vinculado.
+            { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
+          ],
         },
-      ],
-    });
+      },
+    ];
+
+    // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
+    // "+55 11 94501-0493". Mesma regra do kanban (`findContactIdsByPhoneDigits`).
+    const digits = search.replace(/\D+/g, "");
+    if (digits.length >= 3) {
+      const contactIds = await findContactIdsByPhoneDigits(digits);
+      if (contactIds.length > 0) {
+        or.push({ contactId: { in: contactIds } });
+      }
+      if (/^\d+$/.test(search)) {
+        const asNumber = Number(search);
+        if (Number.isInteger(asNumber) && asNumber >= 0 && asNumber <= 2147483647) {
+          or.push({ number: asNumber });
+        }
+      }
+    }
+
+    conditions.push({ OR: or });
   }
 
   if (params.contactId) {
@@ -558,9 +576,24 @@ export async function propagateOwnerToContactAndChat(
           contactId,
           OR: [{ assignedToId: null }, { assignedToId: { not: ownerId } }],
         };
+
+  // Só reseta aiGreetedAt quando o novo responsável é IA — atribuição a
+  // humano (ou remoção) não deve apagar o marcador de saudação.
+  let newOwnerIsAi = false;
+  if (ownerId) {
+    const ownerRow = await tx.user.findUnique({
+      where: { id: ownerId },
+      select: { type: true },
+    });
+    newOwnerIsAi = ownerRow?.type === "AI";
+  }
+
   await tx.conversation.updateMany({
     where: changedWhere,
-    data: { assignedToId: ownerId, aiGreetedAt: null },
+    data: {
+      assignedToId: ownerId,
+      ...(newOwnerIsAi ? { aiGreetedAt: null } : {}),
+    },
   });
 }
 
@@ -582,6 +615,73 @@ export async function assignDealOwner(
     await propagateOwnerToContactAndChat(tx, deal.contactId, ownerId);
     return deal;
   });
+}
+
+/**
+ * Cura inconsistência Deal ↔ Contato ↔ Conversa: preenche só lados
+ * vazios a partir de um responsável já existente (não sobrescreve donos
+ * diferentes). Preferência: conversa → contato → deal aberto.
+ *
+ * Cobre o gap em que a distribuição/inbound atribui a conversa e o
+ * early-return da automação deixa o deal com `ownerId = null` → pipeline
+ * mostra "Sem responsável" mesmo com chat atribuído.
+ */
+export async function syncOwnershipForContact(
+  contactId: string,
+): Promise<string | null> {
+  const [contact, openDeals, openConvs] = await Promise.all([
+    prisma.contact.findUnique({
+      where: { id: contactId },
+      select: { assignedToId: true },
+    }),
+    prisma.deal.findMany({
+      where: { contactId, status: "OPEN" },
+      select: { id: true, ownerId: true },
+    }),
+    prisma.conversation.findMany({
+      where: { contactId, status: { not: "RESOLVED" } },
+      select: { id: true, assignedToId: true },
+      orderBy: { updatedAt: "desc" },
+    }),
+  ]);
+
+  const fromConv =
+    openConvs.find((c) => c.assignedToId)?.assignedToId ?? null;
+  const fromContact = contact?.assignedToId ?? null;
+  const fromDeal = openDeals.find((d) => d.ownerId)?.ownerId ?? null;
+  const ownerId = fromConv ?? fromContact ?? fromDeal;
+  if (!ownerId) return null;
+
+  const nullDealIds = openDeals.filter((d) => !d.ownerId).map((d) => d.id);
+  const nullConvIds = openConvs.filter((c) => !c.assignedToId).map((c) => c.id);
+  const contactNeeds = !fromContact;
+
+  if (!contactNeeds && nullDealIds.length === 0 && nullConvIds.length === 0) {
+    return ownerId;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    if (contactNeeds) {
+      await tx.contact.update({
+        where: { id: contactId },
+        data: { assignedToId: ownerId },
+      });
+    }
+    if (nullDealIds.length > 0) {
+      await tx.deal.updateMany({
+        where: { id: { in: nullDealIds } },
+        data: { ownerId },
+      });
+    }
+    if (nullConvIds.length > 0) {
+      await tx.conversation.updateMany({
+        where: { id: { in: nullConvIds } },
+        data: { assignedToId: ownerId },
+      });
+    }
+  });
+
+  return ownerId;
 }
 
 export async function deleteDeal(id: string) {
@@ -1185,14 +1285,22 @@ export async function resolveBoardDealIds(
  */
 export async function getBoardData(
   pipelineId: string,
-  visibilityOwnerId?: string | null,
+  /**
+   * Filtro de visibilidade (preferido). Aceita também o legado
+   * `visibilityOwnerId: string` — convertido para `{ ownerId }`.
+   */
+  visibilityWhere?: Prisma.DealWhereInput | string | null,
   statusFilter?: DealStatus | "ALL",
   advancedFilters?: AdvancedDealFilters,
   limitOptions?: BoardLimitOptions,
 ) {
   const orgId = getOrgIdOrThrow();
+  const normalizedWhere =
+    typeof visibilityWhere === "string"
+      ? { ownerId: visibilityWhere }
+      : visibilityWhere ?? null;
   const variant = JSON.stringify({
-    v: visibilityOwnerId ?? null,
+    v: normalizedWhere ?? null,
     s: statusFilter ?? null,
     f: advancedFilters ?? null,
     l: limitOptions ?? null,
@@ -1203,7 +1311,7 @@ export async function getBoardData(
     () =>
       computeBoardData(
         pipelineId,
-        visibilityOwnerId,
+        normalizedWhere,
         statusFilter,
         advancedFilters,
         limitOptions,
@@ -1213,7 +1321,7 @@ export async function getBoardData(
 
 async function computeBoardData(
   pipelineId: string,
-  visibilityOwnerId?: string | null,
+  visibilityWhere?: Prisma.DealWhereInput | null,
   statusFilter?: DealStatus | "ALL",
   advancedFilters?: AdvancedDealFilters,
   limitOptions?: BoardLimitOptions,
@@ -1227,8 +1335,8 @@ async function computeBoardData(
   } else if (!statusFilter) {
     conditions.push({ status: "OPEN" });
   }
-  if (visibilityOwnerId) {
-    conditions.push({ ownerId: visibilityOwnerId });
+  if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
+    conditions.push(visibilityWhere);
   }
 
   if (advancedFilters && Object.keys(advancedFilters).length > 0) {

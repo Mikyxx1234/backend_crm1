@@ -40,63 +40,58 @@ export async function authenticateApiRequest(
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
 
   if (match) {
-    const rawToken = match[1];
+    const rawToken = match[1].trim();
     const result = await validateToken(rawToken);
 
-    if (!result) {
-      logApiAccessAuthReject(request, { reason: "invalid_bearer_token", status: 401, via: "bearer" });
+    if (result) {
+      const rl = checkRateLimit(`token:${result.tokenHash}`);
+      if (!rl.allowed) {
+        logApiAccessAuthReject(request, { reason: "bearer_rate_limited", status: 429, via: "bearer" });
+        const res = NextResponse.json(
+          { message: "Limite de requisições excedido. Tente novamente em breve." },
+          { status: 429 }
+        );
+        setRateLimitHeaders(res.headers, rl);
+        return { ok: false, response: res };
+      }
+
+      // Ativa o ctx ja aqui pra qualquer prisma.* seguinte no handler
+      // funcionar sem precisar envolver em `withApiAuthContext`. Rotas
+      // que usam a forma nova (runWithContext) sobrescrevem idempotente.
+      // Bearer token -> ator INTEGRATION com o nome do token como label.
+      // Permite que o feed mostre "n8n_comercial" em vez do email do user
+      // tecnico dono do token.
+      const tokenActor: ContextActor = {
+        type: "INTEGRATION",
+        label: result.tokenName ?? "API Token",
+        ref: result.tokenId,
+      };
+      enterRequestContext({
+        organizationId: result.organizationId,
+        userId: result.user.id,
+        isSuperAdmin: result.user.isSuperAdmin,
+        actor: tokenActor,
+      });
+
       return {
-        ok: false,
-        response: NextResponse.json(
-          { message: "Token inválido ou expirado." },
-          { status: 401 }
-        ),
+        ok: true,
+        user: {
+          id: result.user.id,
+          name: result.user.name,
+          email: result.user.email,
+          role: result.user.role,
+          organizationId: result.organizationId,
+          isSuperAdmin: result.user.isSuperAdmin,
+          actor: tokenActor,
+        },
+        viaToken: true,
+        tokenHash: result.tokenHash,
       };
     }
 
-    const rl = checkRateLimit(`token:${result.tokenHash}`);
-    if (!rl.allowed) {
-      logApiAccessAuthReject(request, { reason: "bearer_rate_limited", status: 429, via: "bearer" });
-      const res = NextResponse.json(
-        { message: "Limite de requisições excedido. Tente novamente em breve." },
-        { status: 429 }
-      );
-      setRateLimitHeaders(res.headers, rl);
-      return { ok: false, response: res };
-    }
-
-    // Ativa o ctx ja aqui pra qualquer prisma.* seguinte no handler
-    // funcionar sem precisar envolver em `withApiAuthContext`. Rotas
-    // que usam a forma nova (runWithContext) sobrescrevem idempotente.
-    // Bearer token -> ator INTEGRATION com o nome do token como label.
-    // Permite que o feed mostre "n8n_comercial" em vez do email do user
-    // tecnico dono do token.
-    const tokenActor: ContextActor = {
-      type: "INTEGRATION",
-      label: result.tokenName ?? "API Token",
-      ref: result.tokenId,
-    };
-    enterRequestContext({
-      organizationId: result.organizationId,
-      userId: result.user.id,
-      isSuperAdmin: result.user.isSuperAdmin,
-      actor: tokenActor,
-    });
-
-    return {
-      ok: true,
-      user: {
-        id: result.user.id,
-        name: result.user.name,
-        email: result.user.email,
-        role: result.user.role,
-        organizationId: result.organizationId,
-        isSuperAdmin: result.user.isSuperAdmin,
-        actor: tokenActor,
-      },
-      viaToken: true,
-      tokenHash: result.tokenHash,
-    };
+    // Bearer inválido/expirado: tenta sessão (ex.: cockpit no frontend com
+    // cookie de login e token antigo ainda no localStorage).
+    logApiAccessAuthReject(request, { reason: "invalid_bearer_token", status: 401, via: "bearer" });
   }
 
   const session = await auth();

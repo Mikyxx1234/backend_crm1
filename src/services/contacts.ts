@@ -9,6 +9,7 @@ import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { getLogger } from "@/lib/logger";
 import { logEvent } from "@/services/activity-log";
+import { findContactIdsByPhoneDigits } from "@/services/kanban-filters";
 
 const log = getLogger("contacts-service");
 
@@ -74,6 +75,14 @@ export type GetContactsParams = {
    * vs `(11) 9...`. Para n8n: passe só dígitos no query param.
    */
   phoneExact?: string;
+  /**
+   * Match EXATO de `Contact.adSourceId` (id do post/anúncio Meta CTWA
+   * gravado pelo webhook Meta em `referral.source_id`). Pensado para
+   * integrações (n8n) que querem enumerar todos os contatos originados
+   * de um anúncio ou post específico — antes só era possível via SQL
+   * direto. Case-sensitive porque a Meta grava o id como string opaca.
+   */
+  adSourceId?: string;
   /** Intervalo de criação (createdAt). */
   createdFrom?: Date;
   createdTo?: Date;
@@ -107,7 +116,7 @@ export async function getContacts(params: GetContactsParams = {}) {
   const where: Prisma.ContactWhereInput = {};
 
   if (search) {
-    where.OR = [
+    const or: Prisma.ContactWhereInput[] = [
       { name: { contains: search, mode: "insensitive" } },
       { email: { contains: search, mode: "insensitive" } },
       { phone: { contains: search, mode: "insensitive" } },
@@ -119,6 +128,15 @@ export async function getContacts(params: GetContactsParams = {}) {
         },
       },
     ];
+    // Parcial por dígitos: "11945" encontra "+5511945…" sem precisar de +/DDI.
+    const digits = search.replace(/\D+/g, "");
+    if (digits.length >= 3) {
+      const ids = await findContactIdsByPhoneDigits(digits);
+      if (ids.length > 0) {
+        or.push({ id: { in: ids } });
+      }
+    }
+    where.OR = or;
   }
 
   if (params.customFieldFilters && params.customFieldFilters.length > 0) {
@@ -218,6 +236,11 @@ export async function getContacts(params: GetContactsParams = {}) {
       phoneOr.push({ phone: { endsWith: digits } });
     }
     exactFilters.push(phoneOr.length === 1 ? phoneOr[0] : { OR: phoneOr });
+  }
+
+  const adSourceIdRaw = params.adSourceId?.trim();
+  if (adSourceIdRaw) {
+    exactFilters.push({ adSourceId: adSourceIdRaw });
   }
 
   if (exactFilters.length > 0) {

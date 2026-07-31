@@ -11,11 +11,14 @@ COPY prisma ./prisma
 # timeout) e quebra o build inteiro. Re-tentamos algumas vezes com espera
 # crescente para neutralizar a flakiness de rede sem precisar de cache.
 # Cache do npm entre builds (BuildKit cache mount) -- reduz ~30s/build.
+# `--legacy-peer-deps`: conflito conhecido entre `@hookform/resolvers@5.x`
+# (peerOptional valibot@^1) e `valibot@0.39` (fixado via @typeschema/valibot).
+# O peer é *optional*, então tratar como npm 6 (legacy) é seguro.
 RUN --mount=type=cache,target=/root/.npm \
-    ( npm install --no-audit --no-fund \
-   || (echo "[npm install] falhou — retry 1/3 em 15s..." && sleep 15 && npm install --no-audit --no-fund) \
-   || (echo "[npm install] falhou — retry 2/3 em 30s..." && sleep 30 && npm install --no-audit --no-fund) \
-   || (echo "[npm install] falhou — retry 3/3 em 60s..." && sleep 60 && npm install --no-audit --no-fund) )
+    ( npm install --no-audit --no-fund --legacy-peer-deps \
+   || (echo "[npm install] falhou — retry 1/3 em 15s..." && sleep 15 && npm install --no-audit --no-fund --legacy-peer-deps) \
+   || (echo "[npm install] falhou — retry 2/3 em 30s..." && sleep 30 && npm install --no-audit --no-fund --legacy-peer-deps) \
+   || (echo "[npm install] falhou — retry 3/3 em 60s..." && sleep 60 && npm install --no-audit --no-fund --legacy-peer-deps) )
 
 COPY . .
 # Pasta `public` pode não existir no clone (vazia não vai pro Git); o runner precisa dela.

@@ -8,6 +8,10 @@ import {
 } from "@prisma/client";
 
 import { normalizeConditionConfig } from "@/lib/automation-condition";
+import {
+  normalizeRoundRobinConfig,
+  roundRobinOptionsSignature,
+} from "@/lib/automation-round-robin";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 import {
@@ -16,7 +20,11 @@ import {
   formatMetaSendError,
   type MetaWhatsAppClient,
 } from "@/lib/meta-whatsapp/client";
-import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
+import {
+  enrichTemplateComponentsForFlowSend,
+  resolveTemplateHeaderMediaFormat,
+} from "@/lib/meta-whatsapp/enrich-template-flow";
+import { toAbsolutePublicMediaUrl } from "@/lib/meta-whatsapp/to-absolute-public-media-url";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, runWithActor } from "@/lib/request-context";
@@ -36,6 +44,7 @@ import { logEvent } from "@/services/activity-log";
 import {
   createContext,
   advanceContext,
+  closeStrandedContext,
   getActiveContext,
   interpolateVariables,
 } from "@/services/automation-context";
@@ -197,6 +206,120 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
     return Number.isFinite(n) ? n : undefined;
   }
   return undefined;
+}
+
+/**
+ * Injeta o componente `header` de mídia (IMAGE/VIDEO/DOCUMENT) exigido pela
+ * Meta ao enviar templates cujo HEADER não é texto (erro `132012: header
+ * component parameter should not be empty` quando o parâmetro falta).
+ *
+ * Fluxo (opção "link" + fallback id para uploads internos):
+ *  1. Descobre o `headerFormat` na Graph (fonte da verdade); `headerMediaType`
+ *     do passo só entra se a Graph não responder.
+ *  2. Se não for mídia (TEXT/NONE/null), não faz nada — comportamento atual.
+ *  3. Se for mídia, exige `headerMediaUrl` (falha cedo, antes de chamar a Meta).
+ *  4. URL HTTPS pública → `{ link }`. Upload interno (`/api/storage/...` ou
+ *     `/uploads/...`) → sobe o arquivo na Meta e usa `{ id }` (storage exige
+ *     sessão; a Meta não consegue baixar o link).
+ *  5. Monta `{ type: "header", parameters: [...] }`, substituindo qualquer
+ *     header já presente em `components` (nunca duplica).
+ */
+async function injectTemplateHeaderMediaComponent(
+  client: MetaWhatsAppClient,
+  args: {
+    templateName: string;
+    languageCode: string;
+    templateGraphId: string | null;
+    components: unknown[] | undefined;
+    headerMediaUrl: string | null;
+    headerMediaType: "image" | "video" | "document" | null;
+  },
+): Promise<unknown[] | undefined> {
+  const fromGraph = await resolveTemplateHeaderMediaFormat(client, {
+    templateName: args.templateName,
+    languageCode: args.languageCode,
+    templateGraphId: args.templateGraphId,
+  });
+  const headerFormat = fromGraph ?? args.headerMediaType?.toUpperCase() ?? null;
+
+  if (headerFormat !== "IMAGE" && headerFormat !== "VIDEO" && headerFormat !== "DOCUMENT") {
+    return args.components;
+  }
+
+  if (!args.headerMediaUrl) {
+    throw new Error(
+      `send_whatsapp_template: template "${args.templateName}" exige header ${headerFormat}; configure headerMediaUrl no passo.`,
+    );
+  }
+
+  const mediaType = headerFormat.toLowerCase() as "image" | "video" | "document";
+  const mediaParam = await resolveTemplateHeaderMediaParam(client, args.headerMediaUrl, mediaType);
+  const headerComponent: Record<string, unknown> = {
+    type: "header",
+    parameters: [{ type: mediaType, [mediaType]: mediaParam }],
+  };
+
+  const withoutExistingHeader = (args.components ?? []).filter((c) => {
+    const o = asRecord(c);
+    return String(o?.type ?? "").toLowerCase() !== "header";
+  });
+
+  return [headerComponent, ...withoutExistingHeader];
+}
+
+/** Resolve `{ link }` (URL pública) ou `{ id }` (upload interno → Meta media). */
+async function resolveTemplateHeaderMediaParam(
+  client: MetaWhatsAppClient,
+  mediaUrl: string,
+  mediaType: "image" | "video" | "document",
+): Promise<{ link: string } | { id: string }> {
+  const trimmed = mediaUrl.trim();
+  const { parseStoragePath, readStoredFile, mimeFromFilename } = await import(
+    "@/lib/storage/local"
+  );
+  const parsedStorage = parseStoragePath(trimmed);
+  const isLegacyLocal = !parsedStorage && trimmed.startsWith("/uploads/");
+
+  if (parsedStorage || isLegacyLocal) {
+    let buffer: Buffer;
+    let resolvedFileName: string;
+    let mimeType: string;
+
+    if (parsedStorage) {
+      const stored = await readStoredFile(
+        parsedStorage.orgId,
+        parsedStorage.bucket,
+        parsedStorage.fileName,
+      );
+      if (!stored) {
+        throw new Error(
+          `send_whatsapp_template: arquivo do header não encontrado em storage (${trimmed})`,
+        );
+      }
+      buffer = stored.buffer;
+      mimeType = stored.mimeType;
+      resolvedFileName = parsedStorage.fileName;
+    } else {
+      const { readFile } = await import("fs/promises");
+      const { join, basename } = await import("path");
+      const filePath = join(process.cwd(), "public", trimmed);
+      buffer = await readFile(filePath);
+      resolvedFileName = basename(trimmed);
+      mimeType = mimeFromFilename(resolvedFileName);
+    }
+
+    const metaMediaId = await client.uploadMedia(buffer, mimeType, resolvedFileName);
+    return { id: metaMediaId };
+  }
+
+  // URL pública HTTPS — opção 1 pura. Relativa sem storage: expandir base.
+  if (trimmed.startsWith("https://") || trimmed.startsWith("/")) {
+    return { link: toAbsolutePublicMediaUrl(trimmed) };
+  }
+
+  throw new Error(
+    `send_whatsapp_template: headerMediaUrl inválida para ${mediaType} (use HTTPS público ou upload interno): ${trimmed}`,
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -818,6 +941,52 @@ function coerceForCompare(
   return { l: left, r: right };
 }
 
+/**
+ * Avalia se `now` (default: agora) cai dentro de alguma faixa da schedule.
+ * Aceita schedule como array direto OU envelopado em { schedule, timezone }.
+ * Usado pelo step `business_hours` e pela regra `in_business_hours` do
+ * bloco Condição.
+ */
+function evaluateBusinessHoursValue(raw: unknown, now: Date = new Date()): boolean {
+  let schedule: Array<{ days?: number[]; from?: string; to?: string }> = [];
+  let tz = "America/Sao_Paulo";
+
+  // Aceita: array direto, objeto { schedule, timezone }, ou JSON string.
+  let parsed: unknown = raw;
+  if (typeof raw === "string") {
+    try { parsed = JSON.parse(raw); } catch { parsed = null; }
+  }
+  if (Array.isArray(parsed)) {
+    schedule = parsed as typeof schedule;
+  } else if (parsed && typeof parsed === "object") {
+    const obj = parsed as Record<string, unknown>;
+    if (Array.isArray(obj.schedule)) schedule = obj.schedule as typeof schedule;
+    if (typeof obj.timezone === "string" && obj.timezone.trim()) tz = obj.timezone.trim();
+  }
+  if (schedule.length === 0) return false;
+
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false, weekday: "short",
+  });
+  const parts = formatter.formatToParts(now);
+  const hh = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
+  const mm = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
+  const dayName = parts.find((p) => p.type === "weekday")?.value ?? "";
+  const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const dayOfWeek = dayMap[dayName] ?? now.getDay();
+  const nowMinutes = hh * 60 + mm;
+
+  for (const slot of schedule) {
+    if (!slot.days?.includes(dayOfWeek)) continue;
+    const [fh, fm] = (slot.from ?? "00:00").split(":").map(Number);
+    const [th, tm] = (slot.to ?? "23:59").split(":").map(Number);
+    const fromMin = fh * 60 + fm;
+    const toMin = th * 60 + tm;
+    if (nowMinutes >= fromMin && nowMinutes <= toMin) return true;
+  }
+  return false;
+}
+
 function evalCondition(leftRaw: unknown, op: string, rightRaw: unknown): boolean {
   const { l: left, r: right } = coerceForCompare(leftRaw, rightRaw);
   const lStr = typeof left === "string" ? left.toLowerCase() : left;
@@ -882,6 +1051,8 @@ type StepResult = {
   skipRemaining?: boolean;
   gotoStepId?: string;
   setVariable?: { name: string; value: unknown };
+  /** Quando presente, substitui o "OK" na mensagem de SUCCESS do log. */
+  note?: string;
 };
 
 async function executeStep(
@@ -911,7 +1082,14 @@ async function executeStep(
         });
         targetDealId = openDeal?.id;
       }
-      if (!targetDealId) throw new Error("move_stage: dealId ausente no contexto");
+      if (!targetDealId) {
+        // Opt-in: sem negócio aberto, seguir o fluxo em vez de abortar.
+        // Padrão continua sendo throw (ex.: Dna Work não pode mudar).
+        if (cfg.continueIfNoDeal === true) {
+          return { note: "ignorado (contato sem negócio aberto)" };
+        }
+        throw new Error("move_stage: dealId ausente no contexto");
+      }
       // Estágios terminais fixos (Ganho/Perdido) sincronizam Deal.status
       // — mesma regra do moveDeal manual no Kanban.
       const targetStage = await prisma.stage.findUnique({
@@ -961,25 +1139,48 @@ async function executeStep(
     }
 
     case "assign_owner": {
-      const userId = readString(cfg, "userId");
-      if (!userId) throw new Error("assign_owner: userId obrigatório");
+      // userId vazio/whitespace = desatribuir (ownerId null), não erro.
+      const rawUserId = readString(cfg, "userId");
+      const ownerId = rawUserId?.trim() ? rawUserId.trim() : null;
       const target = readString(cfg, "target") ?? (rt.dealId ? "deal" : "contact");
+      const targetDealId = rt.dealId ?? readString(cfg, "dealId");
+      const targetContactId = rt.contactId ?? readString(cfg, "contactId");
+
       if (target === "deal") {
-        const targetDealId = rt.dealId ?? readString(cfg, "dealId");
         if (!targetDealId) throw new Error("assign_owner: dealId ausente");
         // Responsável único: muda o owner do deal e propaga para o
         // contato + conversas do contato (helper no service).
-        await assignDealOwner(targetDealId, userId);
-      } else {
-        const targetContactId = rt.contactId ?? readString(cfg, "contactId");
+        await assignDealOwner(targetDealId, ownerId);
+      } else if (target === "contact") {
         if (!targetContactId) throw new Error("assign_owner: contactId ausente");
         // Mesma regra de herança do deal: ao atribuir pelo contato,
         // propagamos pras conversas abertas — isso é o que faz o agente
         // de IA assumir automaticamente quando o `userId` aponta pra um
         // User type=AI (`maybeReplyAsAIAgent` lê `conversation.assignedToId`).
         await prisma.$transaction((tx) =>
-          propagateOwnerToContactAndChat(tx, targetContactId, userId),
+          propagateOwnerToContactAndChat(tx, targetContactId, ownerId),
         );
+      } else if (target === "both") {
+        if (!targetDealId && !targetContactId) {
+          throw new Error("assign_owner: nem dealId nem contactId disponíveis");
+        }
+        if (targetDealId) {
+          // assignDealOwner já cobre deal + contato do deal + chats. Se o
+          // rt.contactId vier de outra origem (ex.: divergente do contato
+          // do deal), propagamos também — idempotente se for o mesmo contato.
+          await assignDealOwner(targetDealId, ownerId);
+          if (rt.contactId) {
+            await prisma.$transaction((tx) =>
+              propagateOwnerToContactAndChat(tx, rt.contactId, ownerId),
+            );
+          }
+        } else if (targetContactId) {
+          await prisma.$transaction((tx) =>
+            propagateOwnerToContactAndChat(tx, targetContactId, ownerId),
+          );
+        }
+      } else {
+        throw new Error(`assign_owner: target inválido "${target}"`);
       }
       return {};
     }
@@ -1025,6 +1226,17 @@ async function executeStep(
       // aqui só decidimos qual ramo do fluxo seguir. Não lançamos erro: a
       // ausência de agente é um resultado de negócio esperado, não falha.
       const distributionType = readString(cfg, "distributionType") ?? null;
+      const departmentIdsRaw = Array.isArray(cfg.departmentIds)
+        ? cfg.departmentIds
+        : [];
+      const departmentIds = departmentIdsRaw
+        .filter((v): v is string => typeof v === "string" && v.trim().length > 0)
+        .map((v) => v.trim());
+      // Retrocompat: config antiga com departmentId singular.
+      const legacyDept = readString(cfg, "departmentId");
+      if (legacyDept && !departmentIds.includes(legacyDept)) {
+        departmentIds.push(legacyDept);
+      }
       const conversationId =
         rt.conversation && typeof rt.conversation === "object"
           ? ((rt.conversation as { id?: string }).id ?? null)
@@ -1036,6 +1248,7 @@ async function executeStep(
         conversationId,
         triggerSource: "AUTOMATION",
         distributionType,
+        departmentIds: departmentIds.length > 0 ? departmentIds : null,
       });
 
       if (result.success) {
@@ -1630,11 +1843,26 @@ async function executeStep(
         flowActionData,
         templateGraphId,
       });
+
+      const headerMediaUrlCfg = readString(cfg, "headerMediaUrl")?.trim() || null;
+      const headerMediaTypeCfg = readString(cfg, "headerMediaType")?.trim().toLowerCase();
+      const finalTplComponents = await injectTemplateHeaderMediaComponent(tplMetaClient, {
+        templateName,
+        languageCode: langCode,
+        templateGraphId,
+        components: enrichTpl.components,
+        headerMediaUrl: headerMediaUrlCfg,
+        headerMediaType:
+          headerMediaTypeCfg === "image" || headerMediaTypeCfg === "video" || headerMediaTypeCfg === "document"
+            ? headerMediaTypeCfg
+            : null,
+      });
+
       const tplResult = await tplMetaClient.sendTemplate(
         to,
         templateName,
         langCode,
-        enrichTpl.components,
+        finalTplComponents,
         recipient,
       );
       const tplExternalId = tplResult?.messages?.[0]?.id ?? null;
@@ -2163,6 +2391,17 @@ async function executeStep(
             typeof rightRaw === "string" && flowVars
               ? interpolateVariables(rightRaw, flowVars)
               : rightRaw;
+
+          // ── Regra de expediente (independente de field) ─────────
+          // Ops `in_business_hours` / `not_in_business_hours` esperam
+          // `value` = JSON string com `{ schedule, timezone }` (mesma
+          // forma do step `business_hours`). Curto-circuito antes de
+          // `evalCondition` porque a comparação não é escalar.
+          if (rule.op === "in_business_hours" || rule.op === "not_in_business_hours") {
+            const isOpen = evaluateBusinessHoursValue(right);
+            return rule.op === "in_business_hours" ? isOpen : !isOpen;
+          }
+
           return evalCondition(left, rule.op, right);
         });
         if (allMatch) {
@@ -2178,6 +2417,74 @@ async function executeStep(
       if (conditionCfg.elseStepId) {
         return { skipRemaining: true, gotoStepId: conditionCfg.elseStepId };
       }
+      return { skipRemaining: true };
+    }
+
+    case "round_robin": {
+      // Estilo Kommo: NÃO atribui agente — só escolhe qual caminho do
+      // fluxo seguir, em rodízio circular entre execuções da mesma
+      // automação+step. Cursor persistido em AutomationRoundRobinState
+      // (chave [automationId, stepId]); ver @/lib/automation-round-robin.
+      const rrCfg = normalizeRoundRobinConfig(cfg);
+      const options = rrCfg.options;
+      const n = options.length;
+      if (n === 0) return { skipRemaining: true };
+
+      const rrStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
+      if (!rrStepId) throw new Error("round_robin: __stepId ausente no contexto de execução");
+
+      const signature = roundRobinOptionsSignature(options);
+
+      const chosenIndex = await prisma.$transaction(async (tx) => {
+        const existing = await tx.automationRoundRobinState.findUnique({
+          where: { automationId_stepId: { automationId: rt.automationId, stepId: rrStepId } },
+        });
+
+        if (!existing) {
+          await tx.automationRoundRobinState.create({
+            data: withOrgFromCtx({
+              automationId: rt.automationId,
+              stepId: rrStepId,
+              lastIndex: -1,
+              optionsSignature: signature,
+            }),
+          });
+        } else if (existing.optionsSignature !== signature) {
+          // Lista de opções mudou (opção adicionada/removida) — reseta
+          // a fila pro início, conforme o texto de ajuda do card.
+          await tx.automationRoundRobinState.update({
+            where: { automationId_stepId: { automationId: rt.automationId, stepId: rrStepId } },
+            data: { lastIndex: -1, optionsSignature: signature },
+          });
+        }
+
+        // UPDATE atômico: calcula o próximo índice em uma única
+        // instrução (o UPDATE toma lock de linha no Postgres —
+        // execuções concorrentes da mesma automação+step serializam
+        // aqui em vez de lerem o mesmo lastIndex "velho").
+        const rows = await tx.$queryRaw<{ lastIndex: number }[]>`
+          UPDATE automation_round_robin_states
+          SET "lastIndex" = ("lastIndex" + 1) % ${n}, "updatedAt" = NOW()
+          WHERE "automationId" = ${rt.automationId} AND "stepId" = ${rrStepId}
+          RETURNING "lastIndex"
+        `;
+        return rows[0]?.lastIndex ?? 0;
+      });
+
+      // Escolhe options[chosenIndex]. Sem "else" obrigatória: se a
+      // opção sorteada não tiver destino, avança o cursor de LEITURA
+      // (sem persistir) e tenta a próxima em ordem circular, no
+      // máximo 1 volta completa. O `lastIndex` persistido fica no
+      // índice ESCOLHIDO nesta execução (chosenIndex) independente de
+      // qual destino tenha efetivamente sido usado.
+      for (let i = 0; i < n; i++) {
+        const opt = options[(chosenIndex + i) % n];
+        if (opt.nextStepId) {
+          return { skipRemaining: true, gotoStepId: opt.nextStepId };
+        }
+      }
+
+      // Nenhuma opção tem destino configurado — encerra o ramo sem erro.
       return { skipRemaining: true };
     }
 
@@ -2485,26 +2792,10 @@ async function executeStep(
     }
 
     case "business_hours": {
-      const schedule = Array.isArray(cfg.schedule) ? cfg.schedule as { days: number[]; from: string; to: string }[] : [];
-      const tz = readString(cfg, "timezone") ?? "America/Sao_Paulo";
-      const now = new Date();
-      const formatter = new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "2-digit", minute: "2-digit", hour12: false, weekday: "short" });
-      const parts = formatter.formatToParts(now);
-      const hh = Number(parts.find((p) => p.type === "hour")?.value ?? 0);
-      const mm = Number(parts.find((p) => p.type === "minute")?.value ?? 0);
-      const dayName = parts.find((p) => p.type === "weekday")?.value ?? "";
-      const dayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
-      const dayOfWeek = dayMap[dayName] ?? now.getDay();
-      const nowMinutes = hh * 60 + mm;
-      let isOpen = false;
-      for (const slot of schedule) {
-        if (!slot.days?.includes(dayOfWeek)) continue;
-        const [fh, fm] = (slot.from ?? "00:00").split(":").map(Number);
-        const [th, tm] = (slot.to ?? "23:59").split(":").map(Number);
-        const fromMin = fh * 60 + fm;
-        const toMin = th * 60 + tm;
-        if (nowMinutes >= fromMin && nowMinutes <= toMin) { isOpen = true; break; }
-      }
+      const isOpen = evaluateBusinessHoursValue({
+        schedule: Array.isArray(cfg.schedule) ? cfg.schedule : [],
+        timezone: readString(cfg, "timezone") ?? "America/Sao_Paulo",
+      });
       if (!isOpen) {
         const elseStepId = readString(cfg, "elseStepId");
         if (elseStepId) return { skipRemaining: true, gotoStepId: elseStepId };
@@ -2881,7 +3172,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
         stepId: step.id,
         stepType: step.type,
         status: "SUCCESS",
-        message: `${stepLabel} — OK`,
+        message: `${stepLabel} — ${result.note ?? "OK"}`,
         payload: cleanConfig,
       });
       if (result.skipRemaining && !result.gotoStepId) break;
@@ -2929,6 +3220,17 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       }
       const idx = automation.steps.indexOf(step);
       current = idx >= 0 ? automation.steps[idx + 1] : undefined;
+    }
+  }
+
+  if (rt.contactId) {
+    try {
+      await closeStrandedContext(automationId, rt.contactId);
+    } catch (err) {
+      log.warn(
+        `[${traceId}] closeStrandedContext falhou:`,
+        err instanceof Error ? err.message : err,
+      );
     }
   }
 
@@ -3174,7 +3476,7 @@ export async function continueFromStep(
         stepId: step.id,
         stepType: step.type,
         status: "SUCCESS",
-        message: `${stepLabel} — OK`,
+        message: `${stepLabel} — ${result.note ?? "OK"}`,
       });
       if (result.skipRemaining && !result.gotoStepId) break;
     } catch (err) {
@@ -3215,6 +3517,15 @@ export async function continueFromStep(
       const idx = automation.steps.indexOf(step);
       current = idx >= 0 ? automation.steps[idx + 1] : undefined;
     }
+  }
+
+  try {
+    await closeStrandedContext(automationId, contactId);
+  } catch (err) {
+    log.warn(
+      `continueFromStep closeStrandedContext falhou:`,
+      err instanceof Error ? err.message : err,
+    );
   }
 
   await logStep({

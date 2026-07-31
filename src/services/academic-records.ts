@@ -54,30 +54,41 @@ function str(v: unknown): string | null {
   return s.length > 0 ? s : null;
 }
 
+/** Aceita apenas datas com ano plausível (evita "+046073-01-01" do Excel). */
+function sane(d: Date): Date | null {
+  if (isNaN(d.getTime())) return null;
+  const y = d.getUTCFullYear();
+  return y >= 1900 && y <= 2100 ? d : null;
+}
+
 /** Tenta interpretar a data da matrícula em vários formatos. `null` se falhar. */
 function parseDate(v: unknown): Date | null {
   const s = String(v ?? "").trim();
   if (!s) return null;
+  // Número de série do Excel (dias desde 1899-12-30). Evita que o fallback
+  // `new Date("46073")` interprete o serial como ANO (bug que quebrava o import).
+  if (/^\d+(?:[.,]\d+)?$/.test(s)) {
+    const serial = Number(s.replace(",", "."));
+    if (serial > 0 && serial < 300000) {
+      return sane(new Date(Math.round((serial - 25569) * 86400 * 1000)));
+    }
+    return null;
+  }
   // ISO / yyyy-mm-dd
   let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (m) {
-    const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
-    return isNaN(d.getTime()) ? null : d;
+    return sane(new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])));
   }
   // dd/mm/yyyy ou mm/dd/yyyy (assume dd/mm — padrão BR)
   m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
   if (m) {
-    let [, a, b, y] = m;
+    const [, a, b, y] = m;
     let year = +y;
     if (year < 100) year += 2000;
-    const day = +a;
-    const month = +b;
     // Se o "dia" > 12, com certeza é dd/mm; senão assume dd/mm (BR).
-    const d = new Date(Date.UTC(year, month - 1, day));
-    return isNaN(d.getTime()) ? null : d;
+    return sane(new Date(Date.UTC(year, +b - 1, +a)));
   }
-  const d = new Date(s);
-  return isNaN(d.getTime()) ? null : d;
+  return sane(new Date(s));
 }
 
 // ── Mapeamento de colunas do relatório ─────────────────────────
@@ -168,21 +179,23 @@ export async function importMatriculados(params: {
     organizationId,
   }));
 
+  // Replace completo sem transação única longa — evita timeout do Prisma
+  // e do proxy (~60s) em relatórios com dezenas de milhares de linhas.
+  await prisma.studentAcademicRecord.deleteMany({ where: { organizationId } });
+
   const CHUNK = 1000;
-  await prisma.$transaction(async (tx) => {
-    await tx.studentAcademicRecord.deleteMany({ where: { organizationId } });
-    for (let i = 0; i < data.length; i += CHUNK) {
-      await tx.studentAcademicRecord.createMany({ data: data.slice(i, i + CHUNK) });
-    }
-    await tx.academicImportHistory.create({
-      data: {
-        organizationId,
-        reportType: "matriculados",
-        fileName,
-        totalRows: data.length,
-        uploadedById: uploadedById ?? null,
-      },
-    });
+  for (let i = 0; i < data.length; i += CHUNK) {
+    await prisma.studentAcademicRecord.createMany({ data: data.slice(i, i + CHUNK) });
+  }
+
+  await prisma.academicImportHistory.create({
+    data: {
+      organizationId,
+      reportType: "matriculados",
+      fileName,
+      totalRows: data.length,
+      uploadedById: uploadedById ?? null,
+    },
   });
 
   return { totalRows: data.length, skipped };
@@ -274,4 +287,24 @@ export async function getImportHistory(organizationId: string, limit = 20) {
 
 export async function getRecordCount(organizationId: string): Promise<number> {
   return prisma.studentAcademicRecord.count({ where: { organizationId } });
+}
+
+/**
+ * Remove TODOS os registros acadêmicos da org (e o histórico de importações).
+ * Usado para limpar dados de teste sem deixar peso no banco.
+ */
+export async function clearAcademicRecords(
+  organizationId: string,
+): Promise<{ deleted: number }> {
+  const deleted = await prisma.$transaction(
+    async (tx) => {
+      const res = await tx.studentAcademicRecord.deleteMany({
+        where: { organizationId },
+      });
+      await tx.academicImportHistory.deleteMany({ where: { organizationId } });
+      return res.count;
+    },
+    { timeout: 120_000, maxWait: 20_000 },
+  );
+  return { deleted };
 }

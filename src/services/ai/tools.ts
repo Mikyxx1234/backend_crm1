@@ -28,6 +28,10 @@ import { notifyDealStageChanged } from "@/services/automation-triggers";
 import { createDeal, createDealEvent, updateDeal } from "@/services/deals";
 import { executeDistribution } from "@/services/distribution";
 import { addTagToContact } from "@/services/tags";
+import {
+  resolveDepartmentByName,
+  executeAcademicDepartmentHandoff,
+} from "@/services/ai/academic-department-routing";
 import type { ActivityType, Prisma } from "@prisma/client";
 
 export type RunContext = {
@@ -42,6 +46,8 @@ export type RunContext = {
   contactId?: string | null;
   /// Deal em curso (se houver um aberto para este contato).
   dealId?: string | null;
+  /// Última mensagem do aluno (para inferir departamento no handoff).
+  userMessage?: string | null;
 };
 
 function ok<T>(data: T) {
@@ -613,49 +619,86 @@ function searchProductsTool(_ctx: RunContext) {
 function transferToHumanTool(ctx: RunContext) {
   return tool({
     description:
-      "Transfere a conversa atual para um atendente humano. Use sempre que o assunto sair do seu escopo, quando o cliente pedir explicitamente, ou quando detectar insatisfação/risco. Após chamar, NÃO envie mais mensagens — pare de responder.",
+      "Transfere a conversa para um consultor humano via Distribuição Inteligente. Prefira informar `departmentName` (Acolhimento / Retenção / Atendimento). Se omitir, o sistema infere: retenção (cancelar/trancar/transferência curso-polo), acolhimento (funil acolhimento), senão atendimento. Após chamar, NÃO envie mais mensagens longas — só confirme ao aluno que um consultor vai ajudar.",
     inputSchema: z.object({
       reason: z
         .string()
         .describe(
-          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu falar com humano sobre reembolso').",
+          "Motivo curto do handoff, para o atendente ler (ex: 'Cliente pediu cancelar matrícula').",
+        ),
+      departmentName: z
+        .string()
+        .optional()
+        .describe(
+          "Acolhimento | Retenção | Atendimento (ou Atendimento - SAC).",
         ),
     }),
-    execute: async ({ reason }) => {
+    execute: async ({ reason, departmentName }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
-        await prisma.conversation.update({
-          where: { id: ctx.conversationId },
-          data: {
-            assignedToId: null,
-            updatedAt: new Date(),
-          },
+        const result = await executeAcademicDepartmentHandoff({
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId,
+          dealId: ctx.dealId,
+          departmentName: departmentName ?? null,
+          userMessage: ctx.userMessage ?? null,
+          reason,
         });
         if (ctx.contactId) {
           await createActivity({
             type: "NOTE",
             title: "Transferência IA → humano",
-            description: reason,
+            description: [
+              reason,
+              result.departmentName
+                ? `Dept: ${result.departmentName}`
+                : null,
+              result.distribution?.selectedUserName
+                ? `Atribuído: ${result.distribution.selectedUserName}`
+                : result.distribution?.reason
+                  ? `Distribuição: ${result.distribution.reason}`
+                  : null,
+            ]
+              .filter(Boolean)
+              .join(" | "),
             completed: true,
             contactId: ctx.contactId,
             dealId: ctx.dealId ?? undefined,
             userId: ctx.agentUserId,
           }).catch(() => null);
         }
-        sseBus.publish("conversation_unassigned", {
-          organizationId: getOrgIdOrNull(),
-          conversationId: ctx.conversationId,
-          contactId: ctx.contactId,
-          reason,
-        });
+        sseBus.publish(
+          result.distribution?.selectedUserId
+            ? "conversation_assigned"
+            : "conversation_unassigned",
+          {
+            organizationId: getOrgIdOrNull(),
+            conversationId: ctx.conversationId,
+            contactId: ctx.contactId,
+            assignedToId: result.distribution?.selectedUserId ?? null,
+            reason,
+          },
+        );
         if (ctx.dealId) {
           createDealEvent(ctx.dealId, ctx.agentUserId, "AI_AGENT_ACTION", {
             action: "transferred_to_human",
             agentId: ctx.agentId ?? null,
             reason,
+            departmentId: result.departmentId,
+            departmentName: result.departmentName,
+            selectedUserId: result.distribution?.selectedUserId ?? null,
           }).catch(() => {});
         }
-        return ok({ transferred: true });
+        return ok({
+          transferred: true,
+          departmentName: result.departmentName,
+          assigned: Boolean(result.distribution?.success),
+          assignedTo: result.distribution?.selectedUserName ?? null,
+          distributionReason: result.distribution?.reason ?? null,
+          queuedWaiting:
+            result.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+            result.distribution?.reason === "NO_DEPARTMENT",
+        });
       } catch (err) {
         return fail(err instanceof Error ? err.message : "Falha ao transferir.");
       }
@@ -668,7 +711,7 @@ function transferToHumanTool(ctx: RunContext) {
 function transferToDepartmentTool(ctx: RunContext) {
   return tool({
     description:
-      "Roteia a conversa atual para um departamento (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC') com base no assunto do aluno. NÃO tira a conversa do agente — apenas define o departamento responsável, que é usado pela Distribuição Inteligente para escolher o consultor certo. Chame ANTES de `execute_distribution` quando souber a área. Match do nome é case-insensitive.",
+      "Roteia a conversa atual para um departamento (ex.: 'Acolhimento', 'Retenção', 'Atendimento - SAC') com base no assunto do aluno. NÃO tira a conversa do agente — apenas define o departamento responsável, que é usado pela Distribuição Inteligente para escolher o consultor certo. Chame ANTES de `execute_distribution` quando souber a área; o `execute_distribution` subsequente preserva o departamento já definido aqui. Match do nome é case-insensitive.",
     inputSchema: z.object({
       departmentName: z
         .string()
@@ -682,13 +725,10 @@ function transferToDepartmentTool(ctx: RunContext) {
         if (!ctx.conversationId) return fail("Sem conversa ativa para rotear.");
         const name = departmentName.trim();
         if (!name) return fail("Nome de departamento vazio.");
-        const dept = await prisma.department.findFirst({
-          where: { name: { equals: name, mode: "insensitive" } },
-          select: { id: true, name: true },
-        });
+        const dept = await resolveDepartmentByName(name);
         if (!dept)
           return fail(
-            `Departamento "${name}" não encontrado. Departamentos válidos são configurados pela organização.`,
+            `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
           );
         await prisma.conversation.update({
           where: { id: ctx.conversationId },
@@ -735,23 +775,56 @@ function executeDistributionTool(ctx: RunContext) {
         if (!ctx.contactId && !ctx.dealId)
           return fail("Sem contato/negócio para distribuir.");
 
+        // Se a conversa está na IA, usa o handoff acadêmico (limpa assignee +
+        // dept + reassign). Evita early-return "ASSIGNED" mantendo a IA.
+        if (ctx.conversationId) {
+          const conv = await prisma.conversation.findUnique({
+            where: { id: ctx.conversationId },
+            select: { assignedTo: { select: { type: true } } },
+          });
+          if (conv?.assignedTo?.type === "AI") {
+            const handoff = await executeAcademicDepartmentHandoff({
+              conversationId: ctx.conversationId,
+              contactId: ctx.contactId ?? null,
+              dealId: ctx.dealId,
+              departmentName: departmentName ?? null,
+              userMessage: ctx.userMessage ?? null,
+              reason: reason ?? "execute_distribution via IA",
+            });
+            return ok({
+              assigned: Boolean(handoff.distribution?.success),
+              assignedTo: handoff.distribution?.selectedUserName ?? null,
+              assignedUserId: handoff.distribution?.selectedUserId ?? null,
+              departmentName: handoff.departmentName,
+              reason: handoff.distribution?.reason ?? null,
+              queuedWaiting:
+                handoff.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+                handoff.distribution?.reason === "NO_DEPARTMENT",
+            });
+          }
+        }
+
         let departmentId: string | null = null;
         if (departmentName?.trim()) {
-          const dept = await prisma.department.findFirst({
-            where: { name: { equals: departmentName.trim(), mode: "insensitive" } },
-            select: { id: true },
-          });
+          const dept = await resolveDepartmentByName(departmentName);
           if (!dept)
             return fail(`Departamento "${departmentName}" não encontrado.`);
           departmentId = dept.id;
+          if (ctx.conversationId) {
+            await prisma.conversation.update({
+              where: { id: ctx.conversationId },
+              data: { departmentId: dept.id, updatedAt: new Date() },
+            });
+          }
         }
 
         const result = await executeDistribution({
           dealId: ctx.dealId ?? null,
           contactId: ctx.contactId ?? null,
           conversationId: ctx.conversationId ?? null,
-          triggerSource: "AUTOMATION",
+          triggerSource: "AI_AGENT",
           departmentId,
+          reassign: true,
         });
 
         if (ctx.dealId) {
@@ -802,7 +875,7 @@ const MATRICULA_TRANSFER_MESSAGE =
   "Para garantir a segurança dos seus dados, vou te transferir para um de nossos consultores, que poderá confirmar essas informações com você. Só um instante, por favor. 🙂";
 
 const MATRICULA_POLITICA =
-  "USO INTERNO — NÃO DIVULGUE. Use estes dados apenas como contexto para entender a situação do aluno e rotear/atender melhor. NUNCA repita ou confirme ao aluno dados pessoais/acadêmicos específicos (situação da matrícula, curso, polo, série, documentos, financeiro). Se o aluno pedir informação específica sobre a própria situação/dados, responda EXATAMENTE com a mensagem de transferência e acione a transferência para um consultor humano (transfer_to_department + execute_distribution, ou transfer_to_human).";
+  "USO INTERNO — NÃO DIVULGUE. Use estes dados apenas como contexto para entender a situação do aluno e atender melhor. NUNCA repita ou confirme ao aluno dados pessoais/acadêmicos específicos (situação da matrícula, curso, polo, série, documentos, financeiro). Se o aluno pedir informação específica sobre a própria situação/dados, responda EXATAMENTE com a mensagem de transferência e acione transfer_to_human. NÃO acione distribuição automática sem o aluno pedir humano.";
 
 function consultarMatriculaTool(ctx: RunContext) {
   return tool({

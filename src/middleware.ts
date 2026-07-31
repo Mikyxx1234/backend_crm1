@@ -120,6 +120,9 @@ const PUBLIC_PATHS = new Set([
   "/register",
   "/health",
   "/accept-invite",
+  // Cockpit do Agente: shell estático sem dados sensíveis. Os dados vêm de
+  // /api/public/agent-cockpit autenticado por Bearer token (não por cookie).
+  "/cockpit-agente.html",
 ]);
 
 const PUBLIC_API_PATHS = new Set(["/api/signup"]);
@@ -231,10 +234,10 @@ export async function middleware(req: NextRequest) {
 }
 
 export const config = {
-  // api/uploads fica fora do catch-all: multipart grande não deve passar
-  // pelo buffer do middleware. Auth já roda na rota.
+  // api/uploads e academic-records/upload ficam fora do catch-all: multipart
+  // grande não deve passar pelo buffer do middleware. Auth já roda na rota.
   matcher: [
     "/uploads/:path*",
-    "/((?!_next/static|_next/image|favicon.ico|api/uploads|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
+    "/((?!_next/static|_next/image|favicon.ico|api/uploads|api/academic-records/upload|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
   ],
 };

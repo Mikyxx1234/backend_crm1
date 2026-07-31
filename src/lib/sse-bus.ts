@@ -237,9 +237,19 @@ function bootstrapBackgroundServices() {
     .then(({ startTimeoutSweeper }) => startTimeoutSweeper())
     .catch((e) => console.error("[sse-bus] failed to start timeout sweeper:", e));
 
-  import("@/services/presence-reaper")
-    .then(({ startPresenceReaper }) => startPresenceReaper())
-    .catch((e) => console.error("[sse-bus] failed to start presence reaper:", e));
+  import("@/services/system-presence")
+    .then(({ startSystemPresenceSweeper }) => startSystemPresenceSweeper())
+    .catch((e) =>
+      console.error("[sse-bus] failed to start system-presence sweeper:", e),
+    );
+
+  // Sweeper independente do de presença — fecha SystemActivitySession vencidas
+  // (uso real). NÃO interfere no fluxo de presença ao vivo acima.
+  import("@/services/system-activity")
+    .then(({ startSystemActivitySweeper }) => startSystemActivitySweeper())
+    .catch((e) =>
+      console.error("[sse-bus] failed to start system-activity sweeper:", e),
+    );
 
   import("@/services/scheduled-messages-worker")
     .then(({ startScheduledMessagesWorker }) => startScheduledMessagesWorker())
@@ -257,6 +267,14 @@ function bootstrapBackgroundServices() {
     .then(({ startAIAgentInactivityWorker }) => startAIAgentInactivityWorker())
     .catch((e) =>
       console.error("[sse-bus] failed to start ai-agent inactivity worker:", e),
+    );
+
+  import("@/services/whatsapp-session-expiry-sweeper")
+    .then(({ startWhatsappSessionExpirySweeper }) =>
+      startWhatsappSessionExpirySweeper(),
+    )
+    .catch((e) =>
+      console.error("[sse-bus] failed to start session-expiry sweeper:", e),
     );
 }
 bootstrapBackgroundServices();

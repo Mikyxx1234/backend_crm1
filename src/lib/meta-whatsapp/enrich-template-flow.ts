@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { analyzeTemplateComponents } from "@/lib/meta-whatsapp/analyze-template-components";
 import type { MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
 import { MetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import { isFlowDefinitionButton } from "@/lib/meta-whatsapp/is-flow-definition-button";
@@ -488,4 +489,39 @@ export async function enrichTemplateComponentsForFlowSend(
   );
 
   return { components: merged, flowToken: token };
+}
+
+/**
+ * Resolve o `format` do componente HEADER da definição do template na Graph
+ * (IMAGE/VIDEO/DOCUMENT) — usado por `send_whatsapp_template` para saber se
+ * precisa exigir/injetar `headerMediaUrl` no envio (Meta erro `132012`
+ * quando o header é de mídia e vem sem parâmetro).
+ *
+ * Reaproveita a mesma resolução de definição (GET por ID Graph com fallback
+ * pra listagem) usada no enriquecimento de Flow. `strictFlowEnrich: false`
+ * pois a ausência de definição aqui não deve lançar — o chamador decide
+ * (ex.: cai pra `headerMediaType` explícito no config do passo).
+ */
+export async function resolveTemplateHeaderMediaFormat(
+  client: MetaWhatsAppClient,
+  args: {
+    templateName: string;
+    languageCode: string;
+    templateGraphId?: string | null;
+  },
+): Promise<"IMAGE" | "VIDEO" | "DOCUMENT" | null> {
+  const resolved = await resolveTemplateDefinitionRow(client, {
+    templateName: args.templateName,
+    languageCode: args.languageCode,
+    templateGraphId: args.templateGraphId ?? null,
+    strictFlowEnrich: false,
+  });
+  const analysis = analyzeTemplateComponents(
+    (resolved.row?.components as unknown[] | undefined) ?? undefined,
+  );
+  return analysis.headerFormat === "IMAGE" ||
+    analysis.headerFormat === "VIDEO" ||
+    analysis.headerFormat === "DOCUMENT"
+    ? analysis.headerFormat
+    : null;
 }

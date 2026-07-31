@@ -54,7 +54,7 @@ function readNumber(cfg: unknown, key: string): number | undefined {
  *  2. Setar `timeoutAt` se o step tem `timeoutMs` configurado (cronômetro)
  *  3. NÃO chamar continueFromStep (esses steps pausam o fluxo)
  */
-const PAUSING_STEP_TYPES = new Set([
+export const PAUSING_STEP_TYPES = new Set([
   "question",
   "send_whatsapp_interactive",
   "send_whatsapp_template",
@@ -70,6 +70,32 @@ export async function getActiveContext(automationId: string, contactId: string) 
     },
     orderBy: { updatedAt: "desc" },
   });
+}
+
+/**
+ * Fecha contexto RUNNING órfão ao fim da execução do motor.
+ * Não toca contextos parados em passo pausante (espera legítima de resposta).
+ */
+export async function closeStrandedContext(automationId: string, contactId: string) {
+  const ctx = await getActiveContext(automationId, contactId);
+  if (!ctx) return null;
+
+  if (ctx.currentStepId) {
+    const step = await prisma.automationStep.findUnique({
+      where: { id: ctx.currentStepId },
+      select: { type: true },
+    });
+    if (step && PAUSING_STEP_TYPES.has(step.type)) {
+      return null;
+    }
+  }
+
+  const row = await prisma.automationContext.update({
+    where: { id: ctx.id },
+    data: { status: "COMPLETED", currentStepId: null, timeoutAt: null },
+  });
+  publishAutomationState(row);
+  return row;
 }
 
 export async function createContext(
@@ -153,6 +179,24 @@ export async function cancelContext(contextId: string) {
   return row;
 }
 
+/** Cancela todos os contextos RUNNING/PAUSED do contato (humano assumiu). */
+export async function cancelActiveContextsForContact(
+  contactId: string,
+): Promise<number> {
+  const active = await getContactActiveContexts(contactId);
+  let n = 0;
+  for (const ctx of active) {
+    const row = await cancelContext(ctx.id);
+    if (row) n += 1;
+  }
+  if (n > 0) {
+    log.info(
+      `cancelActiveContextsForContact contact=${contactId} cancelled=${n}`,
+    );
+  }
+  return n;
+}
+
 export async function timeoutContext(contextId: string) {
   const row = await prisma.automationContext.update({
     where: { id: contextId },
@@ -187,6 +231,27 @@ export async function getContactAutomationHistory(contactId: string, limit = 20)
 }
 
 export async function processIncomingMessage(contactId: string, messageContent: string) {
+  // Se humano já está atendendo, encerra salesbot ativo e não avança passos.
+  try {
+    const { getHumanAttendanceForContact } = await import(
+      "@/services/attendance-guards"
+    );
+    const snap = await getHumanAttendanceForContact(contactId);
+    if (snap?.suppressAutomation) {
+      const cancelled = await cancelActiveContextsForContact(contactId);
+      log.info(
+        `processIncomingMessage skip — atendimento ativo contact=${contactId} cancelled=${cancelled} assignee=${snap.assignedToId ?? "-"}`,
+      );
+      return;
+    }
+  } catch (err) {
+    log.warn(
+      `processIncomingMessage human-guard failed: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+
   const activeContexts = await getContactActiveContexts(contactId);
 
   log.debug(

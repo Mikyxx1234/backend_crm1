@@ -31,16 +31,32 @@ export async function GET(
     since.setDate(since.getDate() - days);
     since.setHours(0, 0, 0, 0);
 
-    const [totals, statusBreak, perDay, lastRuns, draftsPending] =
-      await Promise.all([
+    const [
+      totals,
+      statusBreak,
+      handoffBreak,
+      perDay,
+      lastRuns,
+      draftsPending,
+    ] = await Promise.all([
         prisma.aIAgentRun.aggregate({
           where: { agentId: id, createdAt: { gte: since } },
           _sum: { inputTokens: true, outputTokens: true, costUsd: true },
+          _avg: { confidence: true },
           _count: { _all: true },
         }),
         prisma.aIAgentRun.groupBy({
           by: ["status"],
           where: { agentId: id, createdAt: { gte: since } },
+          _count: { _all: true },
+        }),
+        prisma.aIAgentRun.groupBy({
+          by: ["handoffReason"],
+          where: {
+            agentId: id,
+            createdAt: { gte: since },
+            handoffReason: { not: null },
+          },
           _count: { _all: true },
         }),
         // Defesa em profundidade: agentId vem do path; embora o caller
@@ -68,6 +84,8 @@ export async function GET(
             id: true,
             source: true,
             status: true,
+            confidence: true,
+            handoffReason: true,
             inputTokens: true,
             outputTokens: true,
             costUsd: true,
@@ -94,6 +112,14 @@ export async function GET(
       {} as Record<string, number>,
     );
 
+    const handoffReasons = handoffBreak.reduce(
+      (acc, row) => {
+        if (row.handoffReason) acc[row.handoffReason] = row._count._all;
+        return acc;
+      },
+      {} as Record<string, number>,
+    );
+
     return NextResponse.json({
       windowDays: days,
       totals: {
@@ -101,8 +127,13 @@ export async function GET(
         inputTokens: totals._sum.inputTokens ?? 0,
         outputTokens: totals._sum.outputTokens ?? 0,
         costUsd: Number((totals._sum.costUsd ?? 0).toFixed(4)),
+        avgConfidence:
+          totals._avg.confidence != null
+            ? Number(totals._avg.confidence.toFixed(2))
+            : null,
       },
       statusCounts,
+      handoffReasons,
       perDay: perDay.map((d) => ({
         day: d.day,
         runs: Number(d.runs ?? 0),

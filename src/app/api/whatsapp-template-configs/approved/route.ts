@@ -90,6 +90,7 @@ export async function GET() {
             hasVariables: analysis.hasVariables,
             flowAction: analysis.flowAction,
             flowId: analysis.flowId,
+            headerFormat: analysis.headerFormat,
           });
         }
         after = extractAfter(raw);

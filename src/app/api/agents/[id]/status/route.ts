@@ -6,7 +6,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
-import { retryPendingDistributions } from "@/services/distribution";
+import { processPendingDistributionQueue } from "@/services/distribution";
 import { drainSupportQueue } from "@/services/support/distribution";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -64,6 +64,20 @@ export async function PUT(req: Request, ctx: Ctx) {
       });
 
       const statusChanged = !existing || existing.status !== status;
+      // #region agent log
+      console.warn(
+        "[DBG-e46688 status-put] entry",
+        JSON.stringify({
+          paramUserId: id,
+          sessionUserId: session.user.id,
+          sessionOrgId: session.user.organizationId,
+          ctxOrgId: getOrgIdOrNull(),
+          existingStatus: existing?.status ?? null,
+          newStatus: status,
+          statusChanged,
+        }),
+      );
+      // #endregion
       if (statusChanged) {
         await recordPresenceTransition({ userId: id, nextStatus: status });
         sseBus.publish("presence_update", { organizationId: getOrgIdOrNull(), userId: id, status });
@@ -72,8 +86,29 @@ export async function PUT(req: Request, ctx: Ctx) {
         // Distribuição (leads que ficaram sem responsável elegível).
         // Best-effort — nunca derruba a atualização de status.
         if (status === "ONLINE") {
+          // #region agent log
+          console.warn(
+            "[DBG-e46688 status-put] before retry",
+            JSON.stringify({
+              paramUserId: id,
+              ctxOrgId: getOrgIdOrNull(),
+            }),
+          );
+          // #endregion
           try {
-            const drain = await retryPendingDistributions();
+            const drain = await processPendingDistributionQueue({
+              trigger: "agent_online",
+            });
+            // #region agent log
+            console.warn(
+              "[DBG-e46688 status-put] retry result",
+              JSON.stringify({
+                paramUserId: id,
+                ctxOrgId: getOrgIdOrNull(),
+                drain,
+              }),
+            );
+            // #endregion
             if (drain.resolved > 0 || drain.cancelled > 0) {
               sseBus.publish("presence_update", {
                 organizationId: getOrgIdOrNull(),
@@ -83,9 +118,20 @@ export async function PUT(req: Request, ctx: Ctx) {
             }
           } catch (e) {
             console.warn(
-              "[/api/agents/[id]/status] retryPendingDistributions falhou:",
+              "[/api/agents/[id]/status] processPendingDistributionQueue falhou:",
               e instanceof Error ? e.message : e,
             );
+            // #region agent log
+            console.warn(
+              "[DBG-e46688 status-put] retry threw",
+              JSON.stringify({
+                paramUserId: id,
+                ctxOrgId: getOrgIdOrNull(),
+                err: e instanceof Error ? e.message : String(e),
+                stack: e instanceof Error ? e.stack : null,
+              }),
+            );
+            // #endregion
           }
 
           // Também drena a fila do chat interno de suporte (tickets

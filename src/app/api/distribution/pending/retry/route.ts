@@ -9,7 +9,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
-import { retryPendingDistributions } from "@/services/distribution";
+import { processPendingDistributionQueue } from "@/services/distribution";
 import {
   assertSmartDistributionEnabled,
   WidgetNotEnabledError,
@@ -45,7 +45,7 @@ export async function POST() {
     }
 
     try {
-      const result = await retryPendingDistributions();
+      const result = await processPendingDistributionQueue({ trigger: "manual" });
       return NextResponse.json(result);
     } catch (e) {
       console.error("[POST /api/distribution/pending/retry]", e);

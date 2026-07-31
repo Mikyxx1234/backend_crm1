@@ -106,6 +106,10 @@ jobs:
       - name: Trigger Easypanel redeploy
         if: steps.env.outputs.WEBHOOK != ''
         timeout-minutes: 5
+        # A imagem já foi publicada no GHCR; webhook intermitente não deve
+        # falhar o pipeline inteiro (Easypanel pode demorar ou resetar conexão).
+        continue-on-error: true
+        id: easypanel_webhook
         run: |
           echo "Chamando webhook do Easypanel (fire-and-forget, com retry)..."
           WEBHOOK="${{ steps.env.outputs.WEBHOOK }}"
@@ -135,4 +139,10 @@ jobs:
             sleep 5
           done
           echo "ERRO: webhook do Easypanel falhou apos 5 tentativas (ultimo HTTP ${code:-000})."
+          echo "::warning::Imagem publicada no GHCR, mas webhook Easypanel falhou — redeploy manual se necessario."
           exit 1
+
+      - name: Webhook Easypanel (aviso)
+        if: steps.env.outputs.WEBHOOK != '' && steps.easypanel_webhook.outcome == 'failure'
+        run: |
+          echo "::warning::Build OK (ghcr.io/${{ env.IMAGE_NAME }}:${{ steps.env.outputs.TAG }}). Webhook Easypanel falhou — faça pull/restart manual no painel se o servico nao atualizou."

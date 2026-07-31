@@ -20,9 +20,14 @@ import { logEvent } from "@/services/activity-log";
 import {
   assignDealOwner,
   propagateOwnerToContactAndChat,
+  syncOwnershipForContact,
 } from "@/services/deals";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
+import {
+  clearOwnershipForRedistribution,
+  isAssigneeCurrentlyEligible,
+} from "./assignee-eligibility";
 import type { DistributionBlockReason } from "./eligibility";
 import {
   getDistributionResponsibles,
@@ -33,7 +38,9 @@ export type DistributionTriggerSource =
   | "SYSTEM"
   | "AUTOMATION"
   | "MANUAL"
-  | "SIMULATION";
+  | "SIMULATION"
+  /** Handoff / execute_distribution solicitado pelo agente de IA. */
+  | "AI_AGENT";
 
 export type DistributionReason =
   | "ASSIGNED"
@@ -54,6 +61,25 @@ export interface ExecuteDistributionInput {
    * automações de transferência).
    */
   departmentId?: string | null;
+  /**
+   * Pool explícito de departamentos (automação `execute_distribution`).
+   * Quando preenchido, ignora o toggle org `respectDepartment` e distribui
+   * apenas entre membros de qualquer um desses departamentos.
+   */
+  departmentIds?: string[] | null;
+  /**
+   * Quando true, redistribui mesmo se a conversa já tiver responsável
+   * (uso manual no inbox / handoff entre departamentos).
+   */
+  reassign?: boolean;
+  /**
+   * Quando true e o escopo de departamento (explícito ou da conversa) não
+   * tiver NENHUM responsável elegível, cai para o escopo org-wide (todos os
+   * elegíveis) em vez de deixar o lead preso na fila. Usado pelos gatilhos de
+   * SISTEMA (drenagem/reprocess/inbound): o departamento é PREFERÊNCIA, não
+   * uma prisão. Handoff explícito de agente/automação mantém `false` (estrito).
+   */
+  allowOrgWideFallback?: boolean;
   /** Momento de referência (testes). Default: agora. */
   now?: Date;
 }
@@ -181,28 +207,43 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
           ? { dealId: input.dealId }
           : { contactId: input.contactId }),
       },
-      select: { id: true, attempts: true },
+      select: { id: true, attempts: true, triggerSource: true },
     });
     if (existing) {
       await prisma.distributionPending.update({
         where: { id: existing.id },
-        data: { attempts: existing.attempts + 1, lastAttemptAt: new Date() },
+        data: {
+          attempts: existing.attempts + 1,
+          lastAttemptAt: new Date(),
+          // Preserva origem IA se a tentativa atual (ou anterior) veio do agente.
+          triggerSource: mergeTriggerSources(
+            existing.triggerSource ?? input.triggerSource,
+            input.triggerSource,
+          ),
+          ...(input.conversationId
+            ? { conversationId: input.conversationId }
+            : {}),
+        },
       });
-      return;
+    } else {
+      await prisma.distributionPending.create({
+        data: {
+          organizationId: getOrgIdOrThrow(),
+          dealId: input.dealId ?? null,
+          contactId: input.contactId ?? null,
+          conversationId: input.conversationId ?? null,
+          distributionType: input.distributionType ?? null,
+          triggerSource: input.triggerSource,
+          status: "PENDING",
+          attempts: 1,
+          lastAttemptAt: new Date(),
+        },
+      });
     }
-    await prisma.distributionPending.create({
-      data: {
-        organizationId: getOrgIdOrThrow(),
-        dealId: input.dealId ?? null,
-        contactId: input.contactId ?? null,
-        conversationId: input.conversationId ?? null,
-        distributionType: input.distributionType ?? null,
-        triggerSource: input.triggerSource,
-        status: "PENDING",
-        attempts: 1,
-        lastAttemptAt: new Date(),
-      },
-    });
+    // NÃO agenda retry automático aqui. Com fila cheia / ninguém ONLINE,
+    // reprocessar a cada falha vira loop (CPU alto). A drenagem só roda
+    // quando alguém fica elegível (online/capacidade), no cron periódico
+    // ou no botão manual.
   } catch (e) {
     console.error("[distribution] falha ao enfileirar pendência", e);
   }
@@ -216,6 +257,15 @@ async function resolvePendingFor(
 ): Promise<void> {
   if (!dealId && !contactId) return;
   try {
+    // Safety: never close a human-queue pending onto an AI user.
+    const resolverUser = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { type: true },
+    });
+    if (resolverUser?.type === "AI") {
+      console.warn("[distribution] resolvePendingFor skipped — userId is AI", { userId });
+      return;
+    }
     await prisma.distributionPending.updateMany({
       where: {
         status: "PENDING",
@@ -256,13 +306,49 @@ async function emitDistributionEvent(
       newValue: selectedUserName ?? null,
       meta: { reason, triggerSource: input.triggerSource, selectedUserId },
       actor: {
-        type: input.triggerSource === "AUTOMATION" ? "AUTOMATION" : "SYSTEM",
-        label: "Distribuição Inteligente",
+        type:
+          input.triggerSource === "AUTOMATION" ||
+          input.triggerSource === "AI_AGENT"
+            ? "AUTOMATION"
+            : "SYSTEM",
+        label:
+          input.triggerSource === "AI_AGENT"
+            ? "Agente IA · Distribuição"
+            : "Distribuição Inteligente",
       },
     });
   } catch (e) {
     console.error("[distribution] falha ao gravar evento no feed", e);
   }
+}
+
+/** Janela para juntar retries do mesmo lead (automação + drenagem SYSTEM). */
+const LOG_COALESCE_WINDOW_MS = 45_000;
+
+const TRIGGER_MERGE_ORDER: DistributionTriggerSource[] = [
+  "AI_AGENT",
+  "AUTOMATION",
+  "MANUAL",
+  "SYSTEM",
+  "SIMULATION",
+];
+
+function mergeTriggerSources(
+  existing: string,
+  next: DistributionTriggerSource,
+): string {
+  const parts = new Set(
+    existing
+      .split("+")
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+  parts.add(next);
+  const ordered = TRIGGER_MERGE_ORDER.filter((t) => parts.has(t));
+  for (const t of parts) {
+    if (!ordered.includes(t as DistributionTriggerSource)) ordered.push(t);
+  }
+  return ordered.join("+");
 }
 
 async function writeLog(
@@ -273,9 +359,53 @@ async function writeLog(
   evaluated: EvaluatedResponsibleSummary[],
 ): Promise<void> {
   try {
+    const orgId = getOrgIdOrThrow();
+    const since = new Date(Date.now() - LOG_COALESCE_WINDOW_MS);
+
+    // Mesmo atendimento/contato/deal + mesmo resultado em janela curta →
+    // atualiza o log existente (junta AUTOMATION+SYSTEM) em vez de duplicar.
+    const identity: Prisma.DistributionLogWhereInput | null =
+      input.conversationId
+        ? { conversationId: input.conversationId }
+        : input.contactId
+          ? { contactId: input.contactId }
+          : input.dealId
+            ? { dealId: input.dealId }
+            : null;
+
+    if (identity) {
+      const recent = await prisma.distributionLog.findFirst({
+        where: {
+          ...identity,
+          success,
+          reason,
+          createdAt: { gte: since },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { id: true, triggerSource: true },
+      });
+      if (recent) {
+        await prisma.distributionLog.update({
+          where: { id: recent.id },
+          data: {
+            triggerSource: mergeTriggerSources(
+              recent.triggerSource,
+              input.triggerSource,
+            ),
+            selectedUserId,
+            dealId: input.dealId ?? undefined,
+            contactId: input.contactId ?? undefined,
+            conversationId: input.conversationId ?? undefined,
+            evaluated: evaluated as unknown as Prisma.InputJsonValue,
+          },
+        });
+        return;
+      }
+    }
+
     await prisma.distributionLog.create({
       data: {
-        organizationId: getOrgIdOrThrow(),
+        organizationId: orgId,
         triggerSource: input.triggerSource,
         dealId: input.dealId ?? null,
         contactId: input.contactId ?? null,
@@ -310,30 +440,215 @@ export async function executeDistribution(
     };
   }
 
-  // Distribuição por departamento (flag por depto). A org usa o recurso mas
-  // este lead não está num departamento habilitado (ou sem departamento) →
-  // não distribui (fallback = fila), respeitando a fronteira do departamento.
-  const deptScope = await resolveDepartmentScope(input);
-  if (deptScope.mode === "blocked") {
-    await writeLog(input, false, "NO_DEPARTMENT", null, []);
-    await enqueuePending(input);
-    await emitDistributionEvent(input, false, "NO_DEPARTMENT", null, null, null);
-    return {
-      success: false,
-      reason: "NO_DEPARTMENT",
-      selectedUserId: null,
-      selectedUserName: null,
-      evaluated: [],
-    };
+  // Idempotente: se a conversa já tem responsável (ex.: inbound acabou de
+  // distribuir e a automação dispara execute_distribution de novo), não
+  // reatribui — salvo `reassign` (handoff manual para departamento).
+  // Antes de sair, cura deal/contato sem owner (pipeline "Sem responsável").
+  if (input.conversationId && !input.reassign) {
+    const already = await prisma.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { assignedToId: true, contactId: true },
+    });
+    if (already?.assignedToId) {
+      const contactId = input.contactId ?? already.contactId ?? null;
+      const check = await isAssigneeCurrentlyEligible(already.assignedToId);
+      // IA nunca conta como distribuição humana bem-sucedida — limpa e segue.
+      if (check.isAi && contactId) {
+        await clearOwnershipForRedistribution({
+          conversationId: input.conversationId,
+          contactId,
+        });
+      } else if (!check.eligible && contactId) {
+        // Offline/indisponível herdado: limpa e segue redistribuição.
+        await clearOwnershipForRedistribution({
+          conversationId: input.conversationId,
+          contactId,
+        });
+      } else if (check.eligible && !check.isAi) {
+        if (contactId) {
+          await syncOwnershipForContact(contactId);
+        } else if (input.dealId) {
+          const deal = await prisma.deal.findUnique({
+            where: { id: input.dealId },
+            select: { ownerId: true, contactId: true },
+          });
+          if (deal && !deal.ownerId) {
+            await assignDealOwner(input.dealId, already.assignedToId);
+          } else if (deal?.contactId) {
+            await syncOwnershipForContact(deal.contactId);
+          }
+        }
+        await resolvePendingFor(
+          input.dealId,
+          contactId,
+          already.assignedToId,
+        );
+        return {
+          success: true,
+          reason: "ASSIGNED",
+          selectedUserId: already.assignedToId,
+          selectedUserName: null,
+          evaluated: [],
+        };
+      }
+    }
   }
 
-  const responsibles = await getDistributionResponsibles({
-    distributionType: input.distributionType ?? null,
-    now: input.now,
-    departmentId: deptScope.mode === "department" ? deptScope.departmentId : null,
-  });
-  const evaluated = toSummary(responsibles);
-  const eligible = responsibles.filter((r) => r.eligible);
+  // Conversa sem assignee mas deal/contato já tem dono → espelha pro chat
+  // antes de tentar redistribuir (evita "já tem owner no pipeline" + inbox vazio).
+  if (!input.reassign) {
+    const contactId =
+      input.contactId ??
+      (input.conversationId
+        ? (
+            await prisma.conversation.findUnique({
+              where: { id: input.conversationId },
+              select: { contactId: true },
+            })
+          )?.contactId
+        : null) ??
+      (input.dealId
+        ? (
+            await prisma.deal.findUnique({
+              where: { id: input.dealId },
+              select: { contactId: true },
+            })
+          )?.contactId
+        : null);
+    if (contactId) {
+      const healed = await syncOwnershipForContact(contactId);
+      if (healed && input.conversationId) {
+        const healCheck = await isAssigneeCurrentlyEligible(healed);
+        if (!healCheck.eligible || healCheck.isAi) {
+          await clearOwnershipForRedistribution({
+            conversationId: input.conversationId,
+            contactId,
+          });
+        } else {
+          const again = await prisma.conversation.findUnique({
+            where: { id: input.conversationId },
+            select: { assignedToId: true },
+          });
+          if (again?.assignedToId) {
+            await resolvePendingFor(
+              input.dealId,
+              contactId,
+              again.assignedToId,
+            );
+            return {
+              success: true,
+              reason: "ASSIGNED",
+              selectedUserId: again.assignedToId,
+              selectedUserName: null,
+              evaluated: [],
+            };
+          }
+        }
+      }
+    }
+  }
+
+  // Handoff: libera o responsável atual antes de redistribuir — se ninguém
+  // estiver elegível, o lead fica na fila de espera (sem dono antigo).
+  if (input.reassign && input.conversationId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { assignedToId: true, contactId: true },
+    });
+    if (conv?.assignedToId) {
+      const contactId = conv.contactId ?? input.contactId ?? null;
+      await prisma.$transaction(async (tx) => {
+        await tx.conversation.update({
+          where: { id: input.conversationId! },
+          data: { assignedToId: null },
+        });
+        if (contactId) {
+          await tx.contact.update({
+            where: { id: contactId },
+            data: { assignedToId: null },
+          });
+          await tx.deal.updateMany({
+            where: { contactId, status: "OPEN" },
+            data: { ownerId: null },
+          });
+        }
+      });
+    }
+  }
+
+  // Pool explícito da automação (1+ departamentos no card) — força escopo
+  // mesmo com respectDepartment=false na org.
+  const explicitDeptIds = Array.from(
+    new Set(
+      [
+        ...(input.departmentIds ?? []),
+        ...(input.departmentId ? [input.departmentId] : []),
+      ].filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  );
+
+  let responsibles;
+  let departmentScoped = false;
+  if (explicitDeptIds.length > 0) {
+    // Marca a conversa com o 1º departamento (contexto/inbox); o pool
+    // de elegíveis usa TODOS os IDs selecionados.
+    if (input.conversationId) {
+      await prisma.conversation.update({
+        where: { id: input.conversationId },
+        data: { departmentId: explicitDeptIds[0]! },
+      });
+    }
+    responsibles = await getDistributionResponsibles({
+      distributionType: input.distributionType ?? null,
+      now: input.now,
+      departmentIds: explicitDeptIds,
+    });
+    departmentScoped = true;
+  } else {
+    // Distribuição por departamento (flag por depto). A org usa o recurso mas
+    // este lead não está num departamento habilitado (ou sem departamento) →
+    // não distribui (fallback = fila), respeitando a fronteira do departamento.
+    const deptScope = await resolveDepartmentScope(input);
+    if (deptScope.mode === "blocked") {
+      await writeLog(input, false, "NO_DEPARTMENT", null, []);
+      await enqueuePending(input);
+      await emitDistributionEvent(input, false, "NO_DEPARTMENT", null, null, null);
+      return {
+        success: false,
+        reason: "NO_DEPARTMENT",
+        selectedUserId: null,
+        selectedUserName: null,
+        evaluated: [],
+      };
+    }
+
+    departmentScoped = deptScope.mode === "department";
+    responsibles = await getDistributionResponsibles({
+      distributionType: input.distributionType ?? null,
+      now: input.now,
+      departmentId: deptScope.mode === "department" ? deptScope.departmentId : null,
+    });
+  }
+  let evaluated = toSummary(responsibles);
+  let eligible = responsibles.filter((r) => r.eligible);
+
+  // Fallback org-wide: um departamento sem NINGUÉM elegível (offline / fila
+  // cheia / sem membros) prendia o lead na fila para sempre — mesmo havendo
+  // consultores elegíveis em outros departamentos. Nos gatilhos de SISTEMA
+  // (drenagem/reprocess/inbound) o departamento é preferência, não prisão:
+  // se vazio, tenta todos os elegíveis antes de enfileirar.
+  if (eligible.length === 0 && input.allowOrgWideFallback && departmentScoped) {
+    const orgWide = await getDistributionResponsibles({
+      distributionType: input.distributionType ?? null,
+      now: input.now,
+    });
+    const orgEligible = orgWide.filter((r) => r.eligible);
+    if (orgEligible.length > 0) {
+      responsibles = orgWide;
+      evaluated = toSummary(orgWide);
+      eligible = orgEligible;
+    }
+  }
 
   if (eligible.length === 0) {
     // Ninguém elegível: não força atribuição. Registra no log E enfileira o
@@ -407,6 +722,21 @@ export async function executeDistribution(
     selected.name,
     assignedDealId,
   );
+
+  // Handoff acadêmico / drenagem da fila → estágio "Em Atendimento".
+  if (
+    input.triggerSource === "AI_AGENT" ||
+    (input.triggerSource === "SYSTEM" && Boolean(input.departmentId))
+  ) {
+    void import("@/services/ai/academic-department-routing")
+      .then((m) =>
+        m.moveOpenDealToEmAtendimento({
+          dealId: assignedDealId,
+          contactId: input.contactId ?? null,
+        }),
+      )
+      .catch(() => null);
+  }
 
   return {
     success: true,

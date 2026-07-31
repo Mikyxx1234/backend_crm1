@@ -35,18 +35,30 @@ import {
   matchHandoffKeyword,
   normalizeBusinessHours,
   renderTemplate,
-  type HandoffMode,
 } from "@/lib/ai-agents/piloting";
+import { cache } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
 import {
-  executeAgentHandoff,
   hasAgentGreetedInCurrentAssignment,
   markAgentGreetedNow,
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
+import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
+import {
+  executeAcademicDepartmentHandoff,
+  inferDepartmentFromContext,
+  isCourseShoppingInquiry,
+  moveOpenDealToEmAtendimento,
+  textImpliesAcademicHandoff,
+} from "@/services/ai/academic-department-routing";
+import {
+  LOW_CONFIDENCE_HANDOFF_MESSAGE,
+  parseAgentConfidence,
+  shouldHandoffOnLowConfidence,
+} from "@/services/ai/confidence";
 import { runAgent } from "@/services/ai/runner";
 
 export type InboundAIArgs = {
@@ -54,23 +66,251 @@ export type InboundAIArgs = {
   contactId: string;
   userMessage: string;
   channel: "meta" | "baileys";
+  /** Geração do debounce — se supersedida, aborta antes do envio. */
+  generationId?: string;
+  inboundMessageIds?: string[];
 };
 
+function logAi(event: string, payload: Record<string, unknown>) {
+  console.info(
+    "[ai-attend]",
+    JSON.stringify({ event, ts: new Date().toISOString(), ...payload }),
+  );
+}
+
+/** Cumprimento curto (oi/olá/bom dia...) sem pedido útil. */
+function isBareGreetingMessage(raw: string): boolean {
+  const n = raw
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[!?.…,]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!n || n.length > 40) return false;
+  return /^(oi+|ola+|oie+|hey|hello|bom dia|boa tarde|boa noite)( tudo bem)?$/.test(
+    n,
+  );
+}
+
+const RETENTION_HANDOFF_MESSAGE =
+  "Entendi! Sobre *trancamento/cancelamento* vou te conectar com o setor de *Retenção*. Um(a) consultor(a) fala com você em breve, tá?";
+
+const GENERIC_QUEUE_HANDOFF_MESSAGE =
+  "Vou te conectar com um(a) consultor(a) que vai te ajudar direitinho, tá? Só um instante.";
+
+function stripConfidenceTag(text: string): string {
+  return parseAgentConfidence(text).text.trim();
+}
+
+function runHadTransferTools(
+  toolCalls: Array<{ name: string }> | undefined,
+): boolean {
+  if (!toolCalls?.length) return false;
+  return toolCalls.some((c) =>
+    ["transfer_to_human", "transfer_to_department", "execute_distribution"].includes(
+      c.name,
+    ),
+  );
+}
+
+/**
+ * Confirma que a conversa ainda está com um agente IA ativo e que
+ * nenhum humano respondeu depois do início do processamento.
+ */
+export async function assertAiStillAuthorized(args: {
+  conversationId: string;
+  expectedAgentUserId: string;
+  generationId?: string;
+  since?: Date;
+}): Promise<{ ok: true } | { ok: false; reason: string }> {
+  if (args.generationId) {
+    const current = await cache.get<string>(`ai:gen:${args.conversationId}`);
+    if (current && current !== args.generationId) {
+      return { ok: false, reason: "generation_superseded" };
+    }
+  }
+
+  const conversation = await prisma.conversation.findUnique({
+    where: { id: args.conversationId },
+    select: {
+      assignedToId: true,
+      hasHumanReply: true,
+      assignedTo: { select: { type: true } },
+    },
+  });
+  if (!conversation?.assignedToId) {
+    return { ok: false, reason: "unassigned" };
+  }
+  if (conversation.assignedToId !== args.expectedAgentUserId) {
+    return { ok: false, reason: "assignee_changed" };
+  }
+  if (conversation.assignedTo?.type !== "AI") {
+    return { ok: false, reason: "assignee_not_ai" };
+  }
+
+  // Humano falou depois do início deste processamento?
+  if (args.since) {
+    const humanOut = await prisma.message.findFirst({
+      where: {
+        conversationId: args.conversationId,
+        direction: "out",
+        authorType: "human",
+        isPrivate: false,
+        createdAt: { gte: args.since },
+      },
+      select: { id: true },
+    });
+    if (humanOut) return { ok: false, reason: "human_replied_during_run" };
+  } else if (conversation.hasHumanReply) {
+    // Heurística: se a última outbound é humana, bloqueia.
+    const lastOut = await prisma.message.findFirst({
+      where: {
+        conversationId: args.conversationId,
+        direction: "out",
+        isPrivate: false,
+        messageType: { not: "note" },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { authorType: true },
+    });
+    if (lastOut?.authorType === "human") {
+      return { ok: false, reason: "human_last_outbound" };
+    }
+  }
+
+  return { ok: true };
+}
+
 export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
+  const startedAt = new Date();
   try {
+    // Defesa em profundidade: nunca envia se telefone fora da allowlist.
+    try {
+      const allowed = await isContactAllowedForAi(args.contactId);
+      if (!allowed) {
+        logAi("blocked", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          reason: "phone_allowlist",
+        });
+        return;
+      }
+    } catch (e) {
+      console.error("[ai] phone allowlist in maybeReply — blocking", e);
+      return;
+    }
+
     const conversation = await prisma.conversation.findUnique({
       where: { id: args.conversationId },
       select: {
         id: true,
         assignedToId: true,
         contactId: true,
-        // Trazemos o canal pra resolver o cliente Meta correto desse tenant.
-        // Sem isso, o agente IA da DNA respondia via numero da Eduit (singleton
-        // global do env). Cross-tenant leak critico.
+        hasHumanReply: true,
         channelRef: { select: { id: true, config: true } },
       },
     });
-    if (!conversation?.assignedToId) return;
+    if (!conversation?.assignedToId) {
+      // Sem responsável: se está na fila de distribuição (handoff IA),
+      // tenta redistribuir e confirma ao aluno — nunca fica mudo.
+      const pending = await prisma.distributionPending.findFirst({
+        where: {
+          status: "PENDING",
+          OR: [
+            { conversationId: args.conversationId },
+            { contactId: args.contactId },
+          ],
+        },
+        select: { id: true, triggerSource: true },
+        orderBy: { updatedAt: "desc" },
+      });
+      if (pending) {
+        const { executeDistribution } = await import(
+          "@/services/distribution"
+        );
+        const convDept = await prisma.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: { departmentId: true },
+        });
+        await executeDistribution({
+          dealId: null,
+          contactId: args.contactId,
+          conversationId: args.conversationId,
+          triggerSource: "SYSTEM",
+          departmentId: convDept?.departmentId ?? null,
+          // Departamento é preferência: se vazio, distribui a qualquer
+          // elegível em vez de cair para a IA / ficar preso na fila.
+          allowOrgWideFallback: true,
+        }).catch(() => null);
+
+        const stillOpen = await prisma.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: { assignedToId: true },
+        });
+        if (!stillOpen?.assignedToId) {
+          const aiAgent = await prisma.user.findFirst({
+            where: {
+              type: "AI",
+              aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
+            },
+            select: { id: true },
+            orderBy: { createdAt: "asc" },
+          });
+          if (aiAgent) {
+            const lastBotOut = await prisma.message.findFirst({
+              where: {
+                conversationId: args.conversationId,
+                direction: "out",
+                authorType: "bot",
+                isPrivate: false,
+                messageType: { not: "note" },
+              },
+              orderBy: { createdAt: "desc" },
+              select: { content: true },
+            });
+            const queueAckPatterns = [
+              "já está na fila",
+              "só mais um pouquinho",
+              "fala com você em breve",
+              "consultor(a) fala com você",
+              "vou te conectar",
+            ];
+            const isRecentQueueAck = queueAckPatterns.some((p) =>
+              lastBotOut?.content?.includes(p),
+            );
+            if (!isRecentQueueAck) {
+              await sendAgentMessage({
+                conversationId: args.conversationId,
+                contactId: args.contactId,
+                agentUserId: aiAgent.id,
+                autonomyMode: "AUTONOMOUS",
+                text: "Tudo bem, só mais um pouquinho e logo você será atendido(a).",
+                channel: args.channel,
+                kind: "text",
+                bypassAssigneeCheck: true,
+              }).catch(() => null);
+            } else {
+              logAi("waiting_queue_ack_skipped", {
+                conversationId: args.conversationId,
+                pendingId: pending.id,
+              });
+            }
+          }
+        }
+        logAi("waiting_queue_ack", {
+          conversationId: args.conversationId,
+          pendingId: pending.id,
+        });
+        return;
+      }
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "no_assignee",
+      });
+      return;
+    }
 
     const channelConfig = conversation.channelRef?.config as
       | Record<string, unknown>
@@ -97,12 +337,46 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             simulateTyping: true,
             typingPerCharMs: true,
             markMessagesRead: true,
+            model: true,
           },
         },
       },
     });
-    if (!assignee || assignee.type !== "AI") return;
-    if (!assignee.aiAgentConfig?.active) return;
+    if (!assignee || assignee.type !== "AI") {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "assignee_not_ai",
+      });
+      return;
+    }
+    if (!assignee.aiAgentConfig?.active) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "agent_inactive",
+        agentUserId: assignee.id,
+      });
+      return;
+    }
+
+    // Se a última outbound é humana, não compete com o atendente.
+    const lastOut = await prisma.message.findFirst({
+      where: {
+        conversationId: args.conversationId,
+        direction: "out",
+        isPrivate: false,
+        messageType: { not: "note" },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { authorType: true, createdAt: true },
+    });
+    if (lastOut?.authorType === "human") {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "human_last_outbound",
+        agentUserId: assignee.id,
+      });
+      return;
+    }
 
     const cfg = assignee.aiAgentConfig;
     const humanBehavior = {
@@ -111,11 +385,180 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       markMessagesRead: cfg.markMessagesRead,
     };
 
+    logAi("run_start", {
+      conversationId: args.conversationId,
+      contactId: args.contactId,
+      channel: args.channel,
+      generationId: args.generationId ?? null,
+      inboundMessageIds: args.inboundMessageIds ?? [],
+      model: cfg.model,
+      agentUserId: assignee.id,
+    });
+
     const openDeal = await prisma.deal.findFirst({
       where: { contactId: args.contactId, status: "OPEN" },
       orderBy: { updatedAt: "desc" },
       select: { id: true },
     });
+
+    // ── 0b. Pending handoff while AI is still assignee ──────────────
+    // The conversation was queued for human distribution; AI must not reply.
+    const pendingHandoff = await prisma.distributionPending.findFirst({
+      where: {
+        status: "PENDING",
+        OR: [
+          { conversationId: args.conversationId },
+          { contactId: args.contactId },
+        ],
+      },
+      select: { id: true, triggerSource: true },
+      orderBy: { updatedAt: "desc" },
+    });
+    if (pendingHandoff) {
+      await executeAcademicDepartmentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        userMessage: args.userMessage,
+        reason: "IA ainda assignee com pending ativo — reencaminhando",
+      }).catch(() => null);
+      const stillOpen = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: { assignedToId: true },
+      });
+      if (!stillOpen?.assignedToId || stillOpen.assignedToId === assignee.id) {
+        const lastBotMsg = await prisma.message.findFirst({
+          where: {
+            conversationId: args.conversationId,
+            direction: "out",
+            authorType: "bot",
+            isPrivate: false,
+            messageType: { not: "note" },
+          },
+          orderBy: { createdAt: "desc" },
+          select: { content: true },
+        });
+        const queueAckPhrases = [
+          "já está na fila",
+          "só mais um pouquinho",
+          "fala com você em breve",
+          "consultor(a) fala com você",
+          "vou te conectar",
+        ];
+        if (!queueAckPhrases.some((p) => lastBotMsg?.content?.includes(p))) {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text: "Tudo bem, só mais um pouquinho e logo você será atendido(a).",
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        }
+      }
+      logAi("handoff_pending_ai_assignee", {
+        conversationId: args.conversationId,
+        pendingId: pendingHandoff.id,
+      });
+      return;
+    }
+
+    // ── 0c. Post-handoff ack silence ──────────────────────────────────
+    // If the last bot message was a handoff/queue notification and the
+    // user just sent a short acknowledgement, do not invoke the LLM.
+    {
+      const lastBotOut = await prisma.message.findFirst({
+        where: {
+          conversationId: args.conversationId,
+          direction: "out",
+          authorType: "bot",
+          isPrivate: false,
+          messageType: { not: "note" },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { content: true },
+      });
+      const HANDOFF_PHRASES = [
+        "vou te conectar",
+        "fala com você em breve",
+        "já está na fila",
+        "só mais um pouquinho",
+        "setor de",
+        "Retenção",
+        "Acolhimento",
+      ];
+      if (HANDOFF_PHRASES.some((p) => lastBotOut?.content?.includes(p))) {
+        const norm = args.userMessage
+          .normalize("NFD")
+          .replace(/\p{M}/gu, "")
+          .trim()
+          .toLowerCase();
+        const isAck =
+          /^(ok|obrigad[oa]|valeu|beleza|certo|ta|tá|tudo bem|pode deixar|aguardo|fico no aguardo|ah tudo bem)[\s!.]*$/i.test(
+            norm,
+          ) ||
+          (norm.length <= 40 &&
+            /obrigad[oa]|valeu|beleza|aguardo/.test(norm));
+        if (isAck) {
+          const curConv = await prisma.conversation.findUnique({
+            where: { id: args.conversationId },
+            select: { assignedToId: true },
+          });
+          if (curConv?.assignedToId === assignee.id) {
+            await prisma.$transaction(async (tx) => {
+              await tx.conversation.update({
+                where: { id: args.conversationId },
+                data: { assignedToId: null },
+              });
+              await tx.contact.update({
+                where: { id: args.contactId },
+                data: { assignedToId: null },
+              });
+              await tx.deal.updateMany({
+                where: { contactId: args.contactId, status: "OPEN" },
+                data: { ownerId: null },
+              });
+            });
+          }
+          await executeAcademicDepartmentHandoff({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            dealId: openDeal?.id ?? null,
+            userMessage: args.userMessage,
+            reason: "Aluno confirmou handoff (ack pós-transferência)",
+          }).catch(() => null);
+          const queueAckPhrases2 = [
+            "já está na fila",
+            "só mais um pouquinho",
+            "fala com você em breve",
+            "vou te conectar",
+          ];
+          if (!queueAckPhrases2.some((p) => lastBotOut?.content?.includes(p))) {
+            await sendAgentMessage({
+              conversationId: args.conversationId,
+              contactId: args.contactId,
+              agentUserId: assignee.id,
+              autonomyMode: cfg.autonomyMode,
+              text: "Tudo bem, só mais um pouquinho e logo você será atendido(a).",
+              channel: args.channel,
+              kind: "text",
+              humanBehavior,
+              generationId: args.generationId,
+              bypassAssigneeCheck: true,
+            }).catch(() => null);
+          }
+          logAi("handoff_ack_silence", {
+            conversationId: args.conversationId,
+            userMessage: args.userMessage.slice(0, 50),
+          });
+          return;
+        }
+      }
+    }
 
     // ── 1. Business hours gate ────────────────────────────────
     const businessHours = normalizeBusinessHours(cfg.businessHours);
@@ -128,6 +571,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         const text = renderTemplate(businessHours.offHoursMessage, {
           contactName: contact?.name ?? null,
         });
+        const auth = await assertAiStillAuthorized({
+          conversationId: args.conversationId,
+          expectedAgentUserId: assignee.id,
+          generationId: args.generationId,
+          since: startedAt,
+        });
+        if (!auth.ok) {
+          logAi("blocked", {
+            conversationId: args.conversationId,
+            reason: auth.reason,
+            phase: "pre_off_hours_send",
+          });
+          return;
+        }
         await sendAgentMessage({
           conversationId: args.conversationId,
           contactId: args.contactId,
@@ -137,6 +594,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           channel: args.channel,
           kind: "off_hours",
           humanBehavior,
+          generationId: args.generationId,
         }).catch(() => null);
       }
       return;
@@ -148,24 +606,125 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       cfg.keywordHandoffs ?? [],
     );
     if (keyword) {
-      await executeAgentHandoff({
+      const deptKey = inferDepartmentFromContext({
+        userMessage: args.userMessage,
+      });
+      const handoffText =
+        deptKey === "retencao"
+          ? RETENTION_HANDOFF_MESSAGE
+          : GENERIC_QUEUE_HANDOFF_MESSAGE;
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: handoffText,
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+      }).catch(() => null);
+      await executeAcademicDepartmentHandoff({
         conversationId: args.conversationId,
         contactId: args.contactId,
         dealId: openDeal?.id ?? null,
-        agentId: cfg.id,
-        agentUserId: assignee.id,
-        mode: (cfg.inactivityHandoffMode as HandoffMode) ?? "KEEP_OWNER",
-        specificUserId: cfg.inactivityHandoffUserId ?? null,
+        userMessage: args.userMessage,
+        departmentName:
+          deptKey === "retencao"
+            ? "Retenção"
+            : deptKey === "acolhimento"
+              ? "Acolhimento"
+              : "Atendimento",
         reason: `Palavra-chave disparou handoff: "${keyword}"`,
+      });
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "keyword",
+        keyword,
+        department: deptKey,
+      });
+      return;
+    }
+
+    // ── 2b. Curso/valor/grade (não do curso atual) → consultor ─
+    // Nunca site institucional (Cruzeiro etc.): sempre humano.
+    if (isCourseShoppingInquiry(args.userMessage)) {
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: GENERIC_QUEUE_HANDOFF_MESSAGE,
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+      }).catch(() => null);
+      await executeAcademicDepartmentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        userMessage: args.userMessage,
+        departmentName: "Atendimento",
+        reason:
+          "Dúvida sobre valor/grade/info de curso — handoff obrigatório (sem site)",
+      });
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "course_shopping",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    // ── 2c. Retenção determinística (tranc/cancel/desist) ─────
+    // Não depende do LLM acertar a tool: avisa o aluno e distribui.
+    const retentionKey = inferDepartmentFromContext({
+      userMessage: args.userMessage,
+    });
+    if (retentionKey === "retencao") {
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: RETENTION_HANDOFF_MESSAGE,
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+      }).catch(() => null);
+      await executeAcademicDepartmentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        userMessage: args.userMessage,
+        departmentName: "Retenção",
+        reason: "Intenção de trancamento/cancelamento (regra determinística)",
+      });
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "retention_intent",
+        durationMs: Date.now() - startedAt.getTime(),
       });
       return;
     }
 
     // ── 3. Opening message (primeira resposta da conversa) ────
-    // Usa `Conversation.aiGreetedAt` em vez do histórico de mensagens
-    // pra que saudações disparem a cada nova atribuição ao agente IA,
-    // mesmo que ele já tenha respondido algo nesta mesma conversa antes.
-    if (cfg.openingMessage?.trim()) {
+    // Retorno (já teve outra conversa): NÃO manda openingMessage —
+    // deixa o LLM cumprimentar uma vez ("Oi de novo...").
+    // Primeiro contato: manda openingMessage; se o aluno só disse oi,
+    // para aí (sem 2º "olá" do LLM).
+    let sentOpeningThisTurn = false;
+    const priorConversations = await prisma.conversation.count({
+      where: {
+        contactId: args.contactId,
+        NOT: { id: args.conversationId },
+      },
+    });
+    const isReturningContact = priorConversations > 0;
+
+    if (cfg.openingMessage?.trim() && !isReturningContact) {
       const alreadyGreeted = await hasAgentGreetedInCurrentAssignment(
         args.conversationId,
       );
@@ -193,6 +752,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         if (cfg.openingDelayMs > 0) {
           await delay(Math.min(cfg.openingDelayMs, 10_000));
         }
+        const authGreet = await assertAiStillAuthorized({
+          conversationId: args.conversationId,
+          expectedAgentUserId: assignee.id,
+          generationId: args.generationId,
+          since: startedAt,
+        });
+        if (!authGreet.ok) {
+          logAi("blocked", {
+            conversationId: args.conversationId,
+            reason: authGreet.reason,
+            phase: "pre_greeting_send",
+          });
+          return;
+        }
         const greetResult = await sendAgentMessage({
           conversationId: args.conversationId,
           contactId: args.contactId,
@@ -202,14 +775,22 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           channel: args.channel,
           kind: "greeting",
           humanBehavior,
+          generationId: args.generationId,
         }).catch(() => null);
-        // Marca que cumprimentou tanto em envio real quanto em rascunho
-        // — o rascunho é decisão do humano mandar, mas do ponto de vista
-        // do agente "já cumprimentou" pra não duplicar.
         if (greetResult && greetResult.status !== "skipped") {
           await markAgentGreetedNow(args.conversationId);
+          sentOpeningThisTurn = true;
         }
       }
+    }
+
+    // Só cumprimento + já saudamos nesta rodada → não chama LLM de novo.
+    if (sentOpeningThisTurn && isBareGreetingMessage(args.userMessage)) {
+      logAi("greeting_only", {
+        conversationId: args.conversationId,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
     }
 
     // ── 4. Roda o LLM normalmente ─────────────────────────────
@@ -223,38 +804,223 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     });
 
     if (result.status === "FAILED") {
-      console.warn(
-        `[ai-inbox] runner falhou conv=${args.conversationId}: ${result.error}`,
-      );
+      logAi("run_failed", {
+        conversationId: args.conversationId,
+        error: result.error ?? "unknown",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      // Nunca deixa o aluno sem resposta: avisa + joga na distribuição.
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: GENERIC_QUEUE_HANDOFF_MESSAGE,
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+        bypassAssigneeCheck: true,
+      }).catch(() => null);
+      await executeAcademicDepartmentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        userMessage: args.userMessage,
+        reason: `Falha no run da IA: ${result.error ?? "unknown"}`,
+      }).catch(() => null);
       return;
     }
 
-    // Handoff: o runner já desatribuiu a conversa dentro da tool. Nada
-    // mais a fazer aqui; o atendente humano receberá via SSE.
-    if (result.status === "HANDOFF") {
-      // Registra uma nota privada pra contextualizar o operador.
-      if (result.text) {
-        await prisma.message
-          .create({
-            data: withOrgFromCtx({
-              conversationId: args.conversationId,
-              content: `[IA → humano] ${result.text}`,
-              direction: "out",
-              messageType: "note",
-              isPrivate: true,
-              authorType: "bot",
-              aiAgentUserId: assignee.id,
-              senderName: "Agente IA",
-              sendStatus: "sent",
-            }),
-          })
-          .catch(() => null);
+    const replyText = stripConfidenceTag(result.text || "");
+    const transferred =
+      result.status === "HANDOFF" ||
+      runHadTransferTools(result.toolCalls) ||
+      textImpliesAcademicHandoff(replyText);
+
+    if (transferred) {
+      const handoffText =
+        replyText ||
+        (inferDepartmentFromContext({ userMessage: args.userMessage }) ===
+        "retencao"
+          ? RETENTION_HANDOFF_MESSAGE
+          : GENERIC_QUEUE_HANDOFF_MESSAGE);
+      // Tools já podem ter limpo o assignee — bypass para a msg chegar no WhatsApp.
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: handoffText,
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+        bypassAssigneeCheck: true,
+      }).catch(() => null);
+      // Padrão: aviso de handoff (texto/tool) → humano ou fila.
+      // Se tools já atribuíram humano, só garante "Em Atendimento".
+      // Senão (só transfer_to_department / só texto) → distribui de verdade.
+      const afterHandoff = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: {
+          assignedToId: true,
+          assignedTo: { select: { type: true } },
+        },
+      });
+      const alreadyHuman = afterHandoff?.assignedTo?.type === "HUMAN";
+      const alreadyQueued = await prisma.distributionPending.findFirst({
+        where: {
+          status: "PENDING",
+          OR: [
+            { conversationId: args.conversationId },
+            { contactId: args.contactId },
+          ],
+        },
+        select: { id: true },
+      });
+      if (alreadyHuman) {
+        await moveOpenDealToEmAtendimento({
+          dealId: openDeal?.id ?? null,
+          contactId: args.contactId,
+        }).catch(() => null);
+      } else if (!alreadyQueued || afterHandoff?.assignedTo?.type === "AI") {
+        await executeAcademicDepartmentHandoff({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          dealId: openDeal?.id ?? null,
+          userMessage: args.userMessage,
+          reason: runHadTransferTools(result.toolCalls)
+            ? "Handoff com tool — reforço distribuição/fila"
+            : "Handoff por texto/nota — reforço backend",
+        }).catch(() => null);
       }
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "tool_transfer",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
       return;
     }
 
-    const text = result.text.trim();
-    if (!text) return;
+    const parsed = parseAgentConfidence(result.text.trim());
+    let text = parsed.text;
+    // Persiste a confiança auto-declarada no run (métrica de qualidade).
+    if (parsed.confidence !== null) {
+      await prisma.aIAgentRun
+        .update({
+          where: { id: result.runId },
+          data: { confidence: parsed.confidence },
+        })
+        .catch(() => null);
+    }
+    if (!text && !shouldHandoffOnLowConfidence(parsed.confidence)) {
+      logAi("empty_reply", {
+        conversationId: args.conversationId,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    // Paridade DataCrazy: confiança < 0.40 → mensagem neutra + handoff
+    // (não envia chute do LLM; não usa execute_distribution).
+    if (shouldHandoffOnLowConfidence(parsed.confidence)) {
+      const authLow = await assertAiStillAuthorized({
+        conversationId: args.conversationId,
+        expectedAgentUserId: assignee.id,
+        generationId: args.generationId,
+        since: startedAt,
+      });
+      if (!authLow.ok) {
+        logAi("blocked", {
+          conversationId: args.conversationId,
+          reason: authLow.reason,
+          phase: "pre_low_conf_handoff",
+        });
+        return;
+      }
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: LOW_CONFIDENCE_HANDOFF_MESSAGE,
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+      }).catch(() => null);
+      await executeAcademicDepartmentHandoff({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        dealId: openDeal?.id ?? null,
+        userMessage: args.userMessage,
+        reason: `Baixa confiança da IA (${parsed.confidence?.toFixed(2)})`,
+      });
+      await prisma.aIAgentRun
+        .update({
+          where: { id: result.runId },
+          data: { status: "HANDOFF", handoffReason: "low_confidence" },
+        })
+        .catch(() => null);
+      logAi("handoff", {
+        conversationId: args.conversationId,
+        reason: "low_confidence",
+        confidence: parsed.confidence,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    if (!text) {
+      logAi("empty_reply", {
+        conversationId: args.conversationId,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    // Revalida ANTES de enviar (humano pode ter assumido durante o LLM).
+    const auth = await assertAiStillAuthorized({
+      conversationId: args.conversationId,
+      expectedAgentUserId: assignee.id,
+      generationId: args.generationId,
+      since: startedAt,
+    });
+    if (!auth.ok) {
+      // Caso clássico do bug: tool de distribuição limpou o assignee e a
+      // mensagem útil do LLM morria aqui. Se ainda temos texto, envia com bypass.
+      if (
+        text &&
+        (auth.reason === "unassigned" || auth.reason === "assignee_changed")
+      ) {
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text,
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+        logAi("sent_after_unassign", {
+          conversationId: args.conversationId,
+          reason: auth.reason,
+          durationMs: Date.now() - startedAt.getTime(),
+        });
+        return;
+      }
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: auth.reason,
+        phase: "pre_send",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
 
     if (result.autonomyMode === "AUTONOMOUS" && args.channel === "meta") {
       if (!metaClient.configured) {
@@ -271,16 +1037,28 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         return;
       }
 
-      // ── Comportamento humano: typing/read antes da resposta do LLM ──
-      // Mesma lógica de sendAgentMessage — duplicada aqui porque o
-      // fluxo autônomo final grava Message direto (não passa pelo
-      // piloting-actions).
       await applyHumanBehaviorBeforeSend({
         conversationId: args.conversationId,
         text,
         humanBehavior,
         metaClient,
       });
+
+      // Segunda revalidação após typing delay.
+      const auth2 = await assertAiStillAuthorized({
+        conversationId: args.conversationId,
+        expectedAgentUserId: assignee.id,
+        generationId: args.generationId,
+        since: startedAt,
+      });
+      if (!auth2.ok) {
+        logAi("blocked", {
+          conversationId: args.conversationId,
+          reason: auth2.reason,
+          phase: "pre_send_after_typing",
+        });
+        return;
+      }
 
       let externalId: string | null = null;
       try {
@@ -290,6 +1068,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         console.error(
           `[ai-inbox] Falha ao enviar resposta autônoma: ${err}. Salvando rascunho pro humano revisar.`,
         );
+        logAi("send_failed", {
+          conversationId: args.conversationId,
+          error: err instanceof Error ? err.message : String(err),
+        });
         await saveDraft(assignee.id, args.conversationId, text);
         return;
       }
@@ -324,12 +1106,48 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         content: text,
         timestamp: saved.createdAt,
       });
+      logAi("send_ok", {
+        conversationId: args.conversationId,
+        messageId: saved.id,
+        channel: "meta",
+        model: cfg.model,
+        durationMs: Date.now() - startedAt.getTime(),
+      });
+      return;
+    }
+
+    // Baileys / draft path via sendAgentMessage (com revalidação interna).
+    if (result.autonomyMode === "AUTONOMOUS" && args.channel === "baileys") {
+      const sendResult = await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text,
+        channel: "baileys",
+        humanBehavior,
+        generationId: args.generationId,
+      });
+      logAi("send_result", {
+        conversationId: args.conversationId,
+        status: sendResult.status,
+        channel: "baileys",
+        durationMs: Date.now() - startedAt.getTime(),
+      });
       return;
     }
 
     await saveDraft(assignee.id, args.conversationId, text);
+    logAi("draft_saved", {
+      conversationId: args.conversationId,
+      durationMs: Date.now() - startedAt.getTime(),
+    });
   } catch (err) {
     console.error("[ai-inbox] erro não-fatal:", err);
+    logAi("run_error", {
+      conversationId: args.conversationId,
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 }
 

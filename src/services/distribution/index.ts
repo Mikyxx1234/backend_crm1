@@ -12,6 +12,7 @@ export {
 export {
   evaluateResponsibleEligibility,
   isWithinWorkingHours,
+  isInPreLunchOrLunchWindow,
   type DistributionBlockReason,
   type EligibilityContext,
   type EligibilityResult,
@@ -41,11 +42,23 @@ export {
 export {
   getPendingDistributions,
   retryPendingDistributions,
+  processPendingDistributionQueue,
+  scheduleProcessPendingDistributionQueue,
+  maybeDistributeNewInboundTicket,
   type PendingDistributionView,
   type RetryResult,
+  type PendingQueueTrigger,
 } from "./pending";
 
 export {
   getDistributionLogs,
   type DistributionLogView,
 } from "./logs";
+
+export {
+  redistributeResponsibleQueue,
+  type RedistributeInput,
+  type RedistributeMode,
+  type RedistributeQueueScope,
+  type RedistributeResult,
+} from "./redistribute";
