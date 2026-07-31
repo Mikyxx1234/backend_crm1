@@ -72,6 +72,14 @@ export interface ExecuteDistributionInput {
    * (uso manual no inbox / handoff entre departamentos).
    */
   reassign?: boolean;
+  /**
+   * Quando true e o escopo de departamento (explícito ou da conversa) não
+   * tiver NENHUM responsável elegível, cai para o escopo org-wide (todos os
+   * elegíveis) em vez de deixar o lead preso na fila. Usado pelos gatilhos de
+   * SISTEMA (drenagem/reprocess/inbound): o departamento é PREFERÊNCIA, não
+   * uma prisão. Handoff explícito de agente/automação mantém `false` (estrito).
+   */
+  allowOrgWideFallback?: boolean;
   /** Momento de referência (testes). Default: agora. */
   now?: Date;
 }
@@ -580,6 +588,7 @@ export async function executeDistribution(
   );
 
   let responsibles;
+  let departmentScoped = false;
   if (explicitDeptIds.length > 0) {
     // Marca a conversa com o 1º departamento (contexto/inbox); o pool
     // de elegíveis usa TODOS os IDs selecionados.
@@ -594,6 +603,7 @@ export async function executeDistribution(
       now: input.now,
       departmentIds: explicitDeptIds,
     });
+    departmentScoped = true;
   } else {
     // Distribuição por departamento (flag por depto). A org usa o recurso mas
     // este lead não está num departamento habilitado (ou sem departamento) →
@@ -612,14 +622,33 @@ export async function executeDistribution(
       };
     }
 
+    departmentScoped = deptScope.mode === "department";
     responsibles = await getDistributionResponsibles({
       distributionType: input.distributionType ?? null,
       now: input.now,
       departmentId: deptScope.mode === "department" ? deptScope.departmentId : null,
     });
   }
-  const evaluated = toSummary(responsibles);
-  const eligible = responsibles.filter((r) => r.eligible);
+  let evaluated = toSummary(responsibles);
+  let eligible = responsibles.filter((r) => r.eligible);
+
+  // Fallback org-wide: um departamento sem NINGUÉM elegível (offline / fila
+  // cheia / sem membros) prendia o lead na fila para sempre — mesmo havendo
+  // consultores elegíveis em outros departamentos. Nos gatilhos de SISTEMA
+  // (drenagem/reprocess/inbound) o departamento é preferência, não prisão:
+  // se vazio, tenta todos os elegíveis antes de enfileirar.
+  if (eligible.length === 0 && input.allowOrgWideFallback && departmentScoped) {
+    const orgWide = await getDistributionResponsibles({
+      distributionType: input.distributionType ?? null,
+      now: input.now,
+    });
+    const orgEligible = orgWide.filter((r) => r.eligible);
+    if (orgEligible.length > 0) {
+      responsibles = orgWide;
+      evaluated = toSummary(orgWide);
+      eligible = orgEligible;
+    }
+  }
 
   if (eligible.length === 0) {
     // Ninguém elegível: não força atribuição. Registra no log E enfileira o

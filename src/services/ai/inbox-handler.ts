@@ -240,6 +240,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           conversationId: args.conversationId,
           triggerSource: "SYSTEM",
           departmentId: convDept?.departmentId ?? null,
+          // Departamento é preferência: se vazio, distribui a qualquer
+          // elegível em vez de cair para a IA / ficar preso na fila.
+          allowOrgWideFallback: true,
         }).catch(() => null);
 
         const stillOpen = await prisma.conversation.findUnique({

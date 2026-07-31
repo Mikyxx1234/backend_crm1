@@ -391,6 +391,9 @@ export async function maybeDistributeNewInboundTicket(input: {
       distributionType: null,
       triggerSource: "SYSTEM",
       departmentId: convDept?.departmentId ?? null,
+      // Departamento é preferência: se vazio, distribui a qualquer
+      // elegível em vez de deixar o lead preso na fila.
+      allowOrgWideFallback: true,
     });
     // #region agent log
     console.warn(
@@ -535,6 +538,9 @@ export async function processPendingDistributionQueue(opts: {
           distributionType: null,
           triggerSource: "SYSTEM",
           departmentId: it.departmentId,
+          // Departamento é preferência: se vazio, distribui a qualquer
+          // elegível em vez de deixar o lead preso na fila.
+          allowOrgWideFallback: true,
         });
         // #region agent log
         console.warn(
