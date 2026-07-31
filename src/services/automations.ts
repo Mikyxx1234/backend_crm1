@@ -288,13 +288,19 @@ export function evaluateTrigger(
       if (cfgDept && dataDept && cfgDept !== dataDept) return false;
       if (cfgDept && !dataDept) return false;
 
+      const dataTab = readString(data, "tabulationId");
+
+      // Filtro explicito: usuario marcou "Somente quando tiver tabulacao".
+      // Encerramentos sem tabulationId sao descartados aqui.
+      const requireTab = cfg.requireTabulation === true;
+      if (requireTab && !dataTab) return false;
+
       // Filtro por tabulacao: casa se `config.tabulationId` for a
       // propria tabulacao escolhida OU um ancestral dela. Assim o
       // operador consegue mirar a categoria pai (ex.: "NÃO É ALUNO")
       // e valer pra todas as folhas descendentes.
       const cfgTab = readString(cfg, "tabulationId");
       if (!cfgTab) return true;
-      const dataTab = readString(data, "tabulationId");
       const dataAncestors = Array.isArray(data.ancestorIds)
         ? (data.ancestorIds as unknown[]).filter(
             (v): v is string => typeof v === "string",
