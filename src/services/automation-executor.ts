@@ -2178,7 +2178,12 @@ async function executeStep(
       }
 
       const stepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
-      const interactiveTimeoutMs = readNumber(cfg, "timeoutMs");
+      // Safety fallback: steps antigos criados antes do campo timeoutMs
+      // existir no editor não pausam para sempre — se ninguém responder em
+      // 24h o contexto é liberado pela varredura de timeout.
+      const INTERACTIVE_DEFAULT_TIMEOUT_MS = 86_400_000;
+      const rawTimeout = readNumber(cfg, "timeoutMs");
+      const interactiveTimeoutMs = rawTimeout && rawTimeout > 0 ? rawTimeout : INTERACTIVE_DEFAULT_TIMEOUT_MS;
       if (stepId && rt.contactId) {
         const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
         if (existingCtx) {

@@ -1,5 +1,7 @@
 import { prisma } from "@/lib/prisma";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getHumanAttendanceForContact } from "@/services/attendance-guards";
+import { getActiveContext } from "@/services/automation-context";
 
 import {
   enqueueAutomation,
@@ -431,6 +433,46 @@ export async function fireTrigger(
         if (!condOk) {
           continue;
         }
+
+        // ── Trava de reentrada ────────────────────────────────────────
+        // Se já existe execução ATIVA (AutomationContext RUNNING) desta
+        // automação para este contato, NÃO inicia outra. Um fluxo parado
+        // aguardando resposta/botão é retomado por processIncomingMessage;
+        // re-disparar do passo 0 criaria execuções paralelas e mensagens
+        // duplicadas (bug "recebi mensagens duplicadas").
+        if (enriched.contactId) {
+          const activeCtx = await getActiveContext(automation.id, enriched.contactId);
+
+          if (activeCtx) {
+            // #region agent log
+            fetch('http://127.0.0.1:7767/ingest/a84d1038-bd33-432e-81b0-7592338e5b66',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'90509a'},body:JSON.stringify({sessionId:'90509a',hypothesisId:'H2',location:'automation-triggers.ts:fireTrigger',message:'reentry-guard-skip',data:{event,automationId:automation.id,automationName:automation.name,contactId:enriched.contactId,activeContextId:activeCtx.id},timestamp:Date.now()})}).catch(()=>{});
+            // #endregion
+            console.info(
+              `[fireTrigger] skip "${automation.name}" (${event}) — execução já ativa (contexto=${activeCtx.id} contato=${enriched.contactId})`,
+            );
+            // Registro recuperável no painel/API de logs da automação
+            // (status SKIPPED) — serve de evidência de que a reentrada foi
+            // bloqueada em vez de duplicar o fluxo.
+            try {
+              await prisma.automationLog.create({
+                data: withOrgFromCtx({
+                  automationId: automation.id,
+                  contactId: enriched.contactId,
+                  dealId: enriched.dealId ?? null,
+                  stepId: null,
+                  stepType: null,
+                  status: "SKIPPED",
+                  message: `Reentrada bloqueada — execução já em andamento (contexto ${activeCtx.id})`,
+                  payload: { event, activeContextId: activeCtx.id },
+                }),
+              });
+            } catch {
+              /* best-effort: nunca derruba o disparo por causa do log */
+            }
+            continue;
+          }
+        }
+
         await enqueueAutomation(automation.id, { ...enriched, event });
         console.info(`[fireTrigger] "${automation.name}" disparada (${event})`);
       }
