@@ -22,6 +22,71 @@ import {
 } from "./eligibility";
 import { getQueueCounts } from "./queue";
 
+/** Linha de expediente já normalizada (sempre com os campos de sábado). */
+interface ScheduleRow {
+  userId: string;
+  startTime: string;
+  lunchStart: string;
+  lunchEnd: string;
+  endTime: string;
+  timezone: string;
+  weekdays: number[];
+  saturdayEnabled: boolean;
+  saturdayStart: string;
+  saturdayEnd: string;
+}
+
+/**
+ * Carrega os `AgentSchedule` dos usuários. Defensivo contra ambientes onde a
+ * migration das colunas de sábado (`saturday*`) ainda não foi aplicada: se o
+ * SELECT com essas colunas falhar (P2022 "column does not exist"), relê sem
+ * elas e assume sábado desligado. Assim a tela de Distribuição não quebra
+ * durante a janela entre o deploy do código e a aplicação da migration.
+ */
+async function loadSchedules(userIds: string[]): Promise<ScheduleRow[]> {
+  try {
+    return await prisma.agentSchedule.findMany({
+      where: { userId: { in: userIds } },
+      select: {
+        userId: true,
+        startTime: true,
+        lunchStart: true,
+        lunchEnd: true,
+        endTime: true,
+        timezone: true,
+        weekdays: true,
+        saturdayEnabled: true,
+        saturdayStart: true,
+        saturdayEnd: true,
+      },
+    });
+  } catch (e) {
+    console.warn(
+      "[distribution] AgentSchedule sem colunas de sábado — usando fallback " +
+        "(aplique a migration 20260801130000_add_agent_schedule_saturday).",
+      e,
+    );
+    const base = await prisma.agentSchedule.findMany({
+      where: { userId: { in: userIds } },
+      select: {
+        userId: true,
+        startTime: true,
+        lunchStart: true,
+        lunchEnd: true,
+        endTime: true,
+        timezone: true,
+        weekdays: true,
+      },
+    });
+    return base.map((s) => ({
+      ...s,
+      saturdayEnabled: false,
+      saturdayStart: "09:00",
+      saturdayEnd: "13:00",
+    }));
+  }
+}
+
 /** Defaults de config quando o usuário ainda não tem `DistributionResponsible`. */
 const DEFAULT_RESPONSIBLE = {
   participates: true,
@@ -169,21 +234,7 @@ export async function getDistributionResponsibles(
       where: { userId: { in: userIds } },
       select: { userId: true, status: true },
     }),
-    prisma.agentSchedule.findMany({
-      where: { userId: { in: userIds } },
-      select: {
-        userId: true,
-        startTime: true,
-        lunchStart: true,
-        lunchEnd: true,
-        endTime: true,
-        timezone: true,
-        weekdays: true,
-        saturdayEnabled: true,
-        saturdayStart: true,
-        saturdayEnd: true,
-      },
-    }),
+    loadSchedules(userIds),
     // Volume de fila POR DEPARTAMENTO quando há escopo (distribuição por
     // departamento): o consultor concorre/limita pela fila daquele depto, não
     // pela global. Sem escopo (tela/cockpit) = fila global.

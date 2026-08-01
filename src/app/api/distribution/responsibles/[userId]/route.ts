@@ -172,50 +172,82 @@ export async function PATCH(request: Request, context: RouteContext) {
         saturdayEnd: string;
       };
       if (schedulePatch) {
-        const existing = await prisma.agentSchedule.findUnique({
-          where: { userId },
-          select: {
-            startTime: true,
-            lunchStart: true,
-            lunchEnd: true,
-            endTime: true,
-            timezone: true,
-            weekdays: true,
-            saturdayEnabled: true,
-            saturdayStart: true,
-            saturdayEnd: true,
-          },
-        });
-        const data = {
-          startTime: schedulePatch.startTime ?? existing?.startTime ?? "08:00",
-          lunchStart: schedulePatch.lunchStart ?? existing?.lunchStart ?? "12:00",
-          lunchEnd: schedulePatch.lunchEnd ?? existing?.lunchEnd ?? "13:00",
-          endTime: schedulePatch.endTime ?? existing?.endTime ?? "18:00",
-          timezone:
-            schedulePatch.timezone ?? existing?.timezone ?? "America/Sao_Paulo",
-          weekdays: schedulePatch.weekdays ?? existing?.weekdays ?? [1, 2, 3, 4, 5],
-          saturdayEnabled:
-            schedulePatch.saturdayEnabled ?? existing?.saturdayEnabled ?? false,
-          saturdayStart:
-            schedulePatch.saturdayStart ?? existing?.saturdayStart ?? "09:00",
-          saturdayEnd: schedulePatch.saturdayEnd ?? existing?.saturdayEnd ?? "13:00",
-        };
-        schedule = await prisma.agentSchedule.upsert({
-          where: { userId },
-          create: withOrgFromCtx({ userId, ...data }),
-          update: data,
-          select: {
-            startTime: true,
-            lunchStart: true,
-            lunchEnd: true,
-            endTime: true,
-            timezone: true,
-            weekdays: true,
-            saturdayEnabled: true,
-            saturdayStart: true,
-            saturdayEnd: true,
-          },
-        });
+        const baseSelect = {
+          startTime: true,
+          lunchStart: true,
+          lunchEnd: true,
+          endTime: true,
+          timezone: true,
+          weekdays: true,
+        } as const;
+        const satSelect = {
+          ...baseSelect,
+          saturdayEnabled: true,
+          saturdayStart: true,
+          saturdayEnd: true,
+        } as const;
+
+        try {
+          const existing = await prisma.agentSchedule.findUnique({
+            where: { userId },
+            select: satSelect,
+          });
+          const data = {
+            startTime: schedulePatch.startTime ?? existing?.startTime ?? "08:00",
+            lunchStart: schedulePatch.lunchStart ?? existing?.lunchStart ?? "12:00",
+            lunchEnd: schedulePatch.lunchEnd ?? existing?.lunchEnd ?? "13:00",
+            endTime: schedulePatch.endTime ?? existing?.endTime ?? "18:00",
+            timezone:
+              schedulePatch.timezone ?? existing?.timezone ?? "America/Sao_Paulo",
+            weekdays: schedulePatch.weekdays ?? existing?.weekdays ?? [1, 2, 3, 4, 5],
+            saturdayEnabled:
+              schedulePatch.saturdayEnabled ?? existing?.saturdayEnabled ?? false,
+            saturdayStart:
+              schedulePatch.saturdayStart ?? existing?.saturdayStart ?? "09:00",
+            saturdayEnd:
+              schedulePatch.saturdayEnd ?? existing?.saturdayEnd ?? "13:00",
+          };
+          schedule = await prisma.agentSchedule.upsert({
+            where: { userId },
+            create: withOrgFromCtx({ userId, ...data }),
+            update: data,
+            select: satSelect,
+          });
+        } catch (e) {
+          // Fallback: colunas de sábado ainda não migradas neste ambiente
+          // (P2022). Salva o expediente sem os campos de sábado para não
+          // quebrar a edição do consultor; sábado assume desligado.
+          console.warn(
+            "[PATCH responsibles] AgentSchedule sem colunas de sábado — " +
+              "salvando sem elas (aplique a migration 20260801130000).",
+            e,
+          );
+          const existing = await prisma.agentSchedule.findUnique({
+            where: { userId },
+            select: baseSelect,
+          });
+          const data = {
+            startTime: schedulePatch.startTime ?? existing?.startTime ?? "08:00",
+            lunchStart: schedulePatch.lunchStart ?? existing?.lunchStart ?? "12:00",
+            lunchEnd: schedulePatch.lunchEnd ?? existing?.lunchEnd ?? "13:00",
+            endTime: schedulePatch.endTime ?? existing?.endTime ?? "18:00",
+            timezone:
+              schedulePatch.timezone ?? existing?.timezone ?? "America/Sao_Paulo",
+            weekdays: schedulePatch.weekdays ?? existing?.weekdays ?? [1, 2, 3, 4, 5],
+          };
+          const saved = await prisma.agentSchedule.upsert({
+            where: { userId },
+            create: withOrgFromCtx({ userId, ...data }),
+            update: data,
+            select: baseSelect,
+          });
+          schedule = {
+            ...saved,
+            saturdayEnabled: false,
+            saturdayStart: "09:00",
+            saturdayEnd: "13:00",
+          };
+        }
       }
 
       // Só faz upsert da config quando houver campo de config no corpo.
