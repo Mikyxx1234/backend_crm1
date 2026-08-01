@@ -11,36 +11,65 @@ import type { Prisma } from "@prisma/client";
 // SINCRONO. Mesma classe de bug do POST /api/automations principal.
 // Migrado para withOrgContext.
 
+// 23/jul/26 — Chaves conhecidas de "referencia de step" no config de
+// qualquer tipo de passo. Mesma lista canonica usada por
+// `remapStepRefsInValue` em services/automations.ts (Kommo legado
+// + formato nativo + condition multi-branch novo). Manter em sync
+// caso surjam novos step types com novas chaves de referencia.
+const STEP_REF_KEYS = new Set<string>([
+  "_nextStepId",
+  "_trueGotoStepId",
+  "_falseGotoStepId",
+  "_answeredGotoStepId",
+  "timeoutGotoStepId",
+  "elseGotoStepId",
+  "elseStepId",
+  "targetStepId",
+  "gotoStepId",
+  "nextStepId",
+  "receivedGotoStepId",
+]);
+
+/**
+ * Remap recursivo dos ids de step dentro de um config. Caminha em toda
+ * a arvore (objetos e arrays) e troca strings que estejam sob uma
+ * `STEP_REF_KEYS` — ou dentro do array `buttons[]` (`gotoStepId`) e
+ * `_branches[]` (`gotoStepId`) — usando `idMap`.
+ *
+ * Cobertura necessaria para o formato nativo:
+ *   - `condition.branches[i].nextStepId`  (formato novo multi-branch)
+ *   - `condition.elseStepId`              (formato novo multi-branch)
+ *   - `question.buttons[i].gotoStepId`    (ja coberto pelo case buttons)
+ *   - Todos os `_nextStepId`, `_trueGotoStepId`, etc. do formato legado
+ *
+ * Antes: implementacao chapada olhava so a raiz + `buttons[]` + `_branches[]`
+ * — `branches[].nextStepId` e `elseStepId` (usados pelo executor moderno
+ * em `automation-executor#normalizeConditionConfig`) escapavam do remap,
+ * deixando pernas do fluxo mortas ao importar um export com condition
+ * multi-branch.
+ */
 function remapIds(config: Record<string, unknown>, idMap: Map<string, string>): Record<string, unknown> {
-  const result = { ...config };
-
-  const stringFields = [
-    "_nextStepId", "_trueGotoStepId", "_falseGotoStepId",
-    "timeoutGotoStepId", "elseGotoStepId", "_answeredGotoStepId",
-    "targetStepId", "gotoStepId", "nextStepId", "receivedGotoStepId",
-  ];
-
-  for (const field of stringFields) {
-    if (typeof result[field] === "string" && result[field] !== "") {
-      result[field] = idMap.get(result[field] as string) ?? result[field];
+  const remapValue = (value: unknown, parentKey?: string): unknown => {
+    if (typeof value === "string") {
+      if (parentKey && STEP_REF_KEYS.has(parentKey) && value !== "" && idMap.has(value)) {
+        return idMap.get(value);
+      }
+      return value;
     }
-  }
+    if (Array.isArray(value)) {
+      return value.map((entry) => remapValue(entry, parentKey));
+    }
+    if (value && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+        out[k] = remapValue(v, k);
+      }
+      return out;
+    }
+    return value;
+  };
 
-  if (Array.isArray(result.buttons)) {
-    result.buttons = (result.buttons as { text: string; gotoStepId: string }[]).map((btn) => ({
-      ...btn,
-      gotoStepId: idMap.get(btn.gotoStepId) ?? btn.gotoStepId,
-    }));
-  }
-
-  if (Array.isArray(result._branches)) {
-    result._branches = (result._branches as { conditions: unknown[]; gotoStepId: string }[]).map((br) => ({
-      ...br,
-      gotoStepId: idMap.get(br.gotoStepId) ?? br.gotoStepId,
-    }));
-  }
-
-  return result;
+  return remapValue(config) as Record<string, unknown>;
 }
 
 type ParsedImport = {
@@ -142,6 +171,12 @@ export async function POST(request: Request) {
         );
       }
 
+      // 23/jul/26 — Propaga `s.id` fornecido no export (mesmo pattern
+      // que `POST /api/automations`). Quando o export ja traz ids
+      // proprios (ex: conversor Digisac que preserva os UUIDs de
+      // `blocks[]`), o remap fica no-op e nao dependemos do idMap para
+      // manter a topologia. Se o export nao trouxer ids, o Prisma
+      // gera cuids e a idMap resolve os refs no update abaixo.
       const automation = await createAutomation({
         name: parsed.name,
         description:
@@ -152,6 +187,7 @@ export async function POST(request: Request) {
         triggerConfig: parsed.triggerConfig as Prisma.InputJsonValue,
         active: false,
         steps: parsed.steps.map((s) => ({
+          ...(s.id ? { id: s.id } : {}),
           type: s.type,
           config: s.config as Prisma.InputJsonValue,
         })),
@@ -161,7 +197,7 @@ export async function POST(request: Request) {
       for (let i = 0; i < parsed.steps.length; i++) {
         const tempId = parsed.steps[i].id;
         const realId = automation.steps[i]?.id;
-        if (tempId && realId) {
+        if (tempId && realId && tempId !== realId) {
           idMap.set(tempId, realId);
         }
       }
