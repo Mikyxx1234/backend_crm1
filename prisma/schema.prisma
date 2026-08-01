@@ -3653,6 +3653,12 @@ model AgentSchedule {
   endTime        String       @default("18:00")
   timezone       String       @default("America/Sao_Paulo")
   weekdays       Int[]        @default([1, 2, 3, 4, 5])
+  /// Expediente de sabado por consultor. Quando `saturdayEnabled=true`, no
+  /// sabado a elegibilidade usa `[saturdayStart, saturdayEnd)` (sem almoco),
+  /// ignorando `weekdays`. Desligado = sabado fora do expediente.
+  saturdayEnabled Boolean     @default(false)
+  saturdayStart  String       @default("09:00")
+  saturdayEnd    String       @default("13:00")
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 

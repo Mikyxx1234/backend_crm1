@@ -10,7 +10,6 @@
 
 import type { AgentOnlineStatus, UserRole } from "@prisma/client";
 
-import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getSystemPresenceMap } from "@/services/system-presence";
@@ -19,36 +18,9 @@ import {
   evaluateResponsibleEligibility,
   type DistributionBlockReason,
   type EligibilityContext,
-  type SaturdayWindow,
   type ScheduleLike,
 } from "./eligibility";
 import { getQueueCounts } from "./queue";
-
-/**
- * Lê a janela de expediente de sábado da org (`distribution.saturdayWindow`,
- * JSON `{enabled,start,end,timezone}`). Retorna `null` quando ausente/desligada
- * — aí sábado segue fora do expediente (comportamento clássico).
- */
-async function loadSaturdayWindow(): Promise<SaturdayWindow | null> {
-  try {
-    const raw = await getOrgSetting("distribution.saturdayWindow");
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as {
-      enabled?: boolean;
-      start?: string;
-      end?: string;
-      timezone?: string;
-    };
-    if (!parsed?.enabled || !parsed.start || !parsed.end) return null;
-    return {
-      start: parsed.start,
-      end: parsed.end,
-      timezone: parsed.timezone,
-    };
-  } catch {
-    return null;
-  }
-}
 
 /** Defaults de config quando o usuário ainda não tem `DistributionResponsible`. */
 const DEFAULT_RESPONSIBLE = {
@@ -68,6 +40,9 @@ export interface ResponsibleScheduleView {
   endTime: string;
   timezone: string;
   weekdays: number[];
+  saturdayEnabled: boolean;
+  saturdayStart: string;
+  saturdayEnd: string;
 }
 
 export interface DistributionResponsibleView {
@@ -176,7 +151,6 @@ export async function getDistributionResponsibles(
     queue,
     memberships,
     systemPresence,
-    saturdayWindow,
   ] = await Promise.all([
     prisma.distributionResponsible.findMany({
       where: { userId: { in: userIds } },
@@ -205,6 +179,9 @@ export async function getDistributionResponsibles(
         endTime: true,
         timezone: true,
         weekdays: true,
+        saturdayEnabled: true,
+        saturdayStart: true,
+        saturdayEnd: true,
       },
     }),
     // Volume de fila POR DEPARTAMENTO quando há escopo (distribuição por
@@ -218,7 +195,6 @@ export async function getDistributionResponsibles(
     // Presença de USO (aba do CRM aberta) — falha "aberta": em erro,
     // devolvemos Map vazio para não bloquear a tela de Distribuição.
     getSystemPresenceMap({ organizationId: orgId, userIds }).catch(() => new Map()),
-    loadSaturdayWindow(),
   ]);
 
   // userId → lista de departamentos (nome), para exibição e roteamento.
@@ -242,6 +218,9 @@ export async function getDistributionResponsibles(
         endTime: s.endTime,
         timezone: s.timezone,
         weekdays: s.weekdays,
+        saturdayEnabled: s.saturdayEnabled,
+        saturdayStart: s.saturdayStart,
+        saturdayEnd: s.saturdayEnd,
       },
     ]),
   );
@@ -249,7 +228,6 @@ export async function getDistributionResponsibles(
   const eligibilityCtx: EligibilityContext = {
     distributionType: opts.distributionType ?? null,
     now: opts.now,
-    saturdayWindow,
   };
 
   return users.map((u) => {
@@ -294,7 +272,19 @@ export async function getDistributionResponsibles(
       ),
       status,
       hasSchedule: schedule !== null,
-      schedule,
+      schedule: schedule
+        ? {
+            startTime: schedule.startTime,
+            lunchStart: schedule.lunchStart,
+            lunchEnd: schedule.lunchEnd,
+            endTime: schedule.endTime,
+            timezone: schedule.timezone,
+            weekdays: schedule.weekdays,
+            saturdayEnabled: schedule.saturdayEnabled ?? false,
+            saturdayStart: schedule.saturdayStart ?? "09:00",
+            saturdayEnd: schedule.saturdayEnd ?? "13:00",
+          }
+        : null,
       queueCount,
       eligible,
       blockedReasons,

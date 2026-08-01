@@ -47,6 +47,10 @@ const bodySchema = z
         endTime: hhmm.optional(),
         timezone: z.string().min(1).max(64).optional(),
         weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7).optional(),
+        /** Expediente de sábado por consultor. */
+        saturdayEnabled: z.boolean().optional(),
+        saturdayStart: hhmm.optional(),
+        saturdayEnd: hhmm.optional(),
       })
       .optional(),
   })
@@ -163,6 +167,9 @@ export async function PATCH(request: Request, context: RouteContext) {
         endTime: string;
         timezone: string;
         weekdays: number[];
+        saturdayEnabled: boolean;
+        saturdayStart: string;
+        saturdayEnd: string;
       };
       if (schedulePatch) {
         const existing = await prisma.agentSchedule.findUnique({
@@ -174,6 +181,9 @@ export async function PATCH(request: Request, context: RouteContext) {
             endTime: true,
             timezone: true,
             weekdays: true,
+            saturdayEnabled: true,
+            saturdayStart: true,
+            saturdayEnd: true,
           },
         });
         const data = {
@@ -184,6 +194,11 @@ export async function PATCH(request: Request, context: RouteContext) {
           timezone:
             schedulePatch.timezone ?? existing?.timezone ?? "America/Sao_Paulo",
           weekdays: schedulePatch.weekdays ?? existing?.weekdays ?? [1, 2, 3, 4, 5],
+          saturdayEnabled:
+            schedulePatch.saturdayEnabled ?? existing?.saturdayEnabled ?? false,
+          saturdayStart:
+            schedulePatch.saturdayStart ?? existing?.saturdayStart ?? "09:00",
+          saturdayEnd: schedulePatch.saturdayEnd ?? existing?.saturdayEnd ?? "13:00",
         };
         schedule = await prisma.agentSchedule.upsert({
           where: { userId },
@@ -196,6 +211,9 @@ export async function PATCH(request: Request, context: RouteContext) {
             endTime: true,
             timezone: true,
             weekdays: true,
+            saturdayEnabled: true,
+            saturdayStart: true,
+            saturdayEnd: true,
           },
         });
       }

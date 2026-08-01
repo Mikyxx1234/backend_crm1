@@ -43,6 +43,14 @@ export interface ScheduleLike {
   endTime: string;
   timezone: string;
   weekdays: number[];
+  /**
+   * Expediente de SÁBADO por consultor. Quando `saturdayEnabled` e hoje é
+   * sábado, a elegibilidade usa `[saturdayStart, saturdayEnd)` (sem almoço),
+   * ignorando `weekdays`. Desligado/ausente = sábado fora do expediente.
+   */
+  saturdayEnabled?: boolean;
+  saturdayStart?: string;
+  saturdayEnd?: string;
 }
 
 export interface ResponsibleEligibilityInput {
@@ -74,35 +82,11 @@ export interface ResponsibleEligibilityInput {
   inDepartment?: boolean;
 }
 
-/**
- * Janela de expediente de SÁBADO no nível da ORGANIZAÇÃO. O schema de
- * `AgentSchedule` tem um único horário para todos os dias de `weekdays` (não há
- * horário por dia), então o sábado — com horário próprio e para todos os
- * consultores — é modelado aqui: quando definida e hoje é sábado, esta janela
- * GOVERNA o expediente do dia (ignora o horário de semana e o almoço).
- */
-export interface SaturdayWindow {
-  /** "HH:MM" — início do expediente de sábado. */
-  start: string;
-  /** "HH:MM" — fim do expediente de sábado. */
-  end: string;
-  /** Fuso para avaliar o sábado. Default `America/Sao_Paulo`. */
-  timezone?: string;
-}
-
 export interface EligibilityContext {
   /** Tipo/segmento solicitado pela distribuição (para `TYPE_INCOMPATIBLE`). */
   distributionType?: string | null;
   /** Momento de referência (testes/simulação). Default: agora. */
   now?: Date;
-  /**
-   * Janela de sábado da org (opcional). Quando definida e hoje é sábado, o
-   * expediente do dia passa a ser `[start, end)` para TODOS os consultores,
-   * independente do `AgentSchedule.weekdays` (que normalmente não inclui
-   * sábado). `null`/undefined = sábado fora do expediente (comportamento
-   * clássico).
-   */
-  saturdayWindow?: SaturdayWindow | null;
 }
 
 export interface EligibilityResult {
@@ -242,29 +226,32 @@ export function evaluateResponsibleEligibility(
     reasons.push("OFFLINE");
   }
 
-  // Sábado com janela da org: governa o expediente do dia para TODOS (ignora
-  // o horário de semana e o almoço). Fora dela → OUTSIDE_WORKING_HOURS.
-  const sat = ctx.saturdayWindow ?? null;
-  const satTz = sat?.timezone ?? input.schedule?.timezone ?? "America/Sao_Paulo";
-  const isSaturdayNow = sat
-    ? clockPartsForTimezone(satTz, now).currentWeekday === 6
-    : false;
+  if (input.schedule) {
+    const sched = input.schedule;
+    const { currentWeekday } = clockPartsForTimezone(sched.timezone, now);
 
-  if (sat && isSaturdayNow) {
-    const { currentMinutes } = clockPartsForTimezone(satTz, now);
-    const startMinutes = parseTime(sat.start);
-    const endMinutes = parseTime(sat.end);
-    if (currentMinutes < startMinutes || currentMinutes >= endMinutes) {
-      reasons.push("OUTSIDE_WORKING_HOURS");
-    }
-  } else if (input.schedule) {
-    const n = input.preLunchStopMinutes ?? 30;
-    if (isInPreLunchOrLunchWindow(input.schedule, now, n)) {
-      reasons.push("PRE_LUNCH");
-    } else if (isInPreEndWindow(input.schedule, now, n)) {
-      reasons.push("PRE_END");
-    } else if (!isWithinWorkingHours(input.schedule, now)) {
-      reasons.push("OUTSIDE_WORKING_HOURS");
+    if (currentWeekday === 6) {
+      // Sábado: janela própria por consultor (sem almoço/pré-corte). Ligado e
+      // fora do intervalo, ou desligado → OUTSIDE_WORKING_HOURS.
+      if (sched.saturdayEnabled && sched.saturdayStart && sched.saturdayEnd) {
+        const { currentMinutes } = clockPartsForTimezone(sched.timezone, now);
+        const startMinutes = parseTime(sched.saturdayStart);
+        const endMinutes = parseTime(sched.saturdayEnd);
+        if (currentMinutes < startMinutes || currentMinutes >= endMinutes) {
+          reasons.push("OUTSIDE_WORKING_HOURS");
+        }
+      } else {
+        reasons.push("OUTSIDE_WORKING_HOURS");
+      }
+    } else {
+      const n = input.preLunchStopMinutes ?? 30;
+      if (isInPreLunchOrLunchWindow(sched, now, n)) {
+        reasons.push("PRE_LUNCH");
+      } else if (isInPreEndWindow(sched, now, n)) {
+        reasons.push("PRE_END");
+      } else if (!isWithinWorkingHours(sched, now)) {
+        reasons.push("OUTSIDE_WORKING_HOURS");
+      }
     }
   }
 
