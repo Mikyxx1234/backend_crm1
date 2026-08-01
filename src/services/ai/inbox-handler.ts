@@ -240,9 +240,11 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           conversationId: args.conversationId,
           triggerSource: "SYSTEM",
           departmentId: convDept?.departmentId ?? null,
-          // Departamento é preferência: se vazio, distribui a qualquer
-          // elegível em vez de cair para a IA / ficar preso na fila.
-          allowOrgWideFallback: true,
+          // Fronteira de departamento ESTRITA: lead roteado a um depto só é
+          // distribuído a quem estiver disponível NAQUELE depto; se ninguém,
+          // segue o fluxo abaixo (IA reassume/confirma). Sem departamento já
+          // nasce org-wide.
+          allowOrgWideFallback: false,
         }).catch(() => null);
 
         const stillOpen = await prisma.conversation.findUnique({

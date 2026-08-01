@@ -10,6 +10,7 @@
 
 import type { AgentOnlineStatus, UserRole } from "@prisma/client";
 
+import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getSystemPresenceMap } from "@/services/system-presence";
@@ -18,9 +19,36 @@ import {
   evaluateResponsibleEligibility,
   type DistributionBlockReason,
   type EligibilityContext,
+  type SaturdayWindow,
   type ScheduleLike,
 } from "./eligibility";
 import { getQueueCounts } from "./queue";
+
+/**
+ * Lê a janela de expediente de sábado da org (`distribution.saturdayWindow`,
+ * JSON `{enabled,start,end,timezone}`). Retorna `null` quando ausente/desligada
+ * — aí sábado segue fora do expediente (comportamento clássico).
+ */
+async function loadSaturdayWindow(): Promise<SaturdayWindow | null> {
+  try {
+    const raw = await getOrgSetting("distribution.saturdayWindow");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      enabled?: boolean;
+      start?: string;
+      end?: string;
+      timezone?: string;
+    };
+    if (!parsed?.enabled || !parsed.start || !parsed.end) return null;
+    return {
+      start: parsed.start,
+      end: parsed.end,
+      timezone: parsed.timezone,
+    };
+  } catch {
+    return null;
+  }
+}
 
 /** Defaults de config quando o usuário ainda não tem `DistributionResponsible`. */
 const DEFAULT_RESPONSIBLE = {
@@ -65,7 +93,10 @@ export interface DistributionResponsibleView {
   hasSchedule: boolean;
   /** Expediente (null se não configurado). */
   schedule: ResponsibleScheduleView | null;
-  /** Fila atual (deals OPEN). */
+  /**
+   * Fila atual (conversas OPEN aguardando o consultor). POR DEPARTAMENTO quando
+   * a chamada tem escopo de departamento (distribuição); global caso contrário.
+   */
   queueCount: number;
   /** Resultado da regra única. */
   eligible: boolean;
@@ -138,7 +169,15 @@ export async function getDistributionResponsibles(
         )
       : null;
 
-  const [responsibles, statuses, schedules, queue, memberships, systemPresence] = await Promise.all([
+  const [
+    responsibles,
+    statuses,
+    schedules,
+    queue,
+    memberships,
+    systemPresence,
+    saturdayWindow,
+  ] = await Promise.all([
     prisma.distributionResponsible.findMany({
       where: { userId: { in: userIds } },
       select: {
@@ -168,7 +207,10 @@ export async function getDistributionResponsibles(
         weekdays: true,
       },
     }),
-    getQueueCounts(userIds),
+    // Volume de fila POR DEPARTAMENTO quando há escopo (distribuição por
+    // departamento): o consultor concorre/limita pela fila daquele depto, não
+    // pela global. Sem escopo (tela/cockpit) = fila global.
+    getQueueCounts(userIds, scopeDeptIds),
     prisma.departmentMember.findMany({
       where: { userId: { in: userIds }, organizationId: orgId },
       select: { userId: true, department: { select: { id: true, name: true } } },
@@ -176,6 +218,7 @@ export async function getDistributionResponsibles(
     // Presença de USO (aba do CRM aberta) — falha "aberta": em erro,
     // devolvemos Map vazio para não bloquear a tela de Distribuição.
     getSystemPresenceMap({ organizationId: orgId, userIds }).catch(() => new Map()),
+    loadSaturdayWindow(),
   ]);
 
   // userId → lista de departamentos (nome), para exibição e roteamento.
@@ -206,6 +249,7 @@ export async function getDistributionResponsibles(
   const eligibilityCtx: EligibilityContext = {
     distributionType: opts.distributionType ?? null,
     now: opts.now,
+    saturdayWindow,
   };
 
   return users.map((u) => {

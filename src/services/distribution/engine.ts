@@ -75,9 +75,14 @@ export interface ExecuteDistributionInput {
   /**
    * Quando true e o escopo de departamento (explícito ou da conversa) não
    * tiver NENHUM responsável elegível, cai para o escopo org-wide (todos os
-   * elegíveis) em vez de deixar o lead preso na fila. Usado pelos gatilhos de
-   * SISTEMA (drenagem/reprocess/inbound): o departamento é PREFERÊNCIA, não
-   * uma prisão. Handoff explícito de agente/automação mantém `false` (estrito).
+   * elegíveis) em vez de deixar o lead preso na fila.
+   *
+   * DEFAULT/ATUAL: `false` em todos os fluxos (fronteira de departamento
+   * ESTRITA — decisão de produto). Um lead roteado a um departamento só é
+   * distribuído a quem estiver disponível NAQUELE departamento; se ninguém,
+   * espera na fila do departamento e é drenado quando alguém do depto ficar
+   * elegível. Leads SEM departamento já são org-wide (departmentScoped=false),
+   * então este flag não os afeta. Mantido como opção para usos futuros.
    */
   allowOrgWideFallback?: boolean;
   /** Momento de referência (testes). Default: agora. */

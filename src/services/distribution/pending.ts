@@ -391,9 +391,12 @@ export async function maybeDistributeNewInboundTicket(input: {
       distributionType: null,
       triggerSource: "SYSTEM",
       departmentId: convDept?.departmentId ?? null,
-      // Departamento é preferência: se vazio, distribui a qualquer
-      // elegível em vez de deixar o lead preso na fila.
-      allowOrgWideFallback: true,
+      // Fronteira de departamento ESTRITA: quando o lead foi roteado a um
+      // departamento (ex.: handoff acadêmico), ele só é distribuído a quem
+      // estiver disponível NAQUELE depto — se ninguém, espera na fila do depto
+      // (nunca vai para outro). Leads SEM departamento já nascem org-wide
+      // (departmentScoped=false), então não ficam presos.
+      allowOrgWideFallback: false,
     });
     // #region agent log
     console.warn(
@@ -525,9 +528,18 @@ export async function processPendingDistributionQueue(opts: {
     // #endregion
 
     let resolved = 0;
-    let consecutiveNoEligible = 0;
+    // Fronteira de departamento ESTRITA: cada departamento tem capacidade
+    // independente. Em vez de parar o lote após N falhas seguidas (heurística
+    // global antiga), pulamos os itens de departamentos já esgotados NESTA
+    // passada — leads de um depto sem gente não impedem a drenagem de outro
+    // depto que tem capacidade. Limita as chamadas a (resolvidos + nº de
+    // departamentos distintos), evitando spam sem prender leads de outros deptos.
+    const ORG_WIDE_KEY = "__org_wide__";
+    const exhaustedDepartments = new Set<string>();
 
     for (const it of items) {
+      const deptKey = it.departmentId ?? ORG_WIDE_KEY;
+      if (exhaustedDepartments.has(deptKey)) continue;
       try {
         // Passa departmentId explícito → motor filtra por DepartmentMember
         // mesmo com distribution.respectDepartment=false (handoff acadêmico).
@@ -538,9 +550,10 @@ export async function processPendingDistributionQueue(opts: {
           distributionType: null,
           triggerSource: "SYSTEM",
           departmentId: it.departmentId,
-          // Departamento é preferência: se vazio, distribui a qualquer
-          // elegível em vez de deixar o lead preso na fila.
-          allowOrgWideFallback: true,
+          // Fronteira de departamento ESTRITA (ver maybeDistributeNewInboundTicket):
+          // lead roteado a um depto espera por alguém DAQUELE depto; nunca vai
+          // para outro. Sem departamento = org-wide desde o início.
+          allowOrgWideFallback: false,
         });
         // #region agent log
         console.warn(
@@ -555,14 +568,14 @@ export async function processPendingDistributionQueue(opts: {
         // #endregion
         if (result.success) {
           resolved++;
-          consecutiveNoEligible = 0;
         } else if (
           result.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
           result.reason === "NO_DEPARTMENT"
         ) {
-          consecutiveNoEligible += 1;
-          // Capacidade esgotou no meio da drenagem — para o lote.
-          if (consecutiveNoEligible >= 3) break;
+          // Departamento sem ninguém elegível agora → não tenta os próximos
+          // itens do MESMO depto nesta passada (drena quando alguém do depto
+          // ficar disponível: agent_online / capacity_released / cron).
+          exhaustedDepartments.add(deptKey);
         }
       } catch (e) {
         console.error(

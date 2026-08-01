@@ -35,12 +35,24 @@ import { prisma } from "@/lib/prisma";
 /**
  * Mapa userId → nº de conversas OPEN aguardando ação do consultor.
  * Usuários sem conversas não aparecem no mapa (o caller assume 0).
+ *
+ * `departmentIds` (opcional): quando informado, conta APENAS as conversas cujo
+ * `Conversation.departmentId` está no conjunto — ou seja, o "volume de fila"
+ * fica POR DEPARTAMENTO. Usado na distribuição por departamento (o consultor
+ * concorre pela menor fila DAQUELE departamento, e o teto `queueLimit` também
+ * conta só as conversas do departamento). Vazio/undefined = fila global (todas
+ * as conversas do consultor, todos os departamentos) — usado pela tela/cockpit.
  */
 export async function getQueueCounts(
   userIds: string[],
+  departmentIds?: string[] | null,
 ): Promise<Map<string, number>> {
   const result = new Map<string, number>();
   if (userIds.length === 0) return result;
+
+  const scopeDeptIds = (departmentIds ?? []).filter(
+    (id): id is string => typeof id === "string" && id.length > 0,
+  );
 
   const rows = await prisma.conversation.groupBy({
     by: ["assignedToId"],
@@ -48,6 +60,9 @@ export async function getQueueCounts(
       status: "OPEN",
       assignedToId: { in: userIds },
       hasError: false,
+      ...(scopeDeptIds.length > 0
+        ? { departmentId: { in: scopeDeptIds } }
+        : {}),
       OR: [
         { hasHumanReply: false },
         { lastMessageDirection: "in" },

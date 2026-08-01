@@ -74,11 +74,35 @@ export interface ResponsibleEligibilityInput {
   inDepartment?: boolean;
 }
 
+/**
+ * Janela de expediente de SÁBADO no nível da ORGANIZAÇÃO. O schema de
+ * `AgentSchedule` tem um único horário para todos os dias de `weekdays` (não há
+ * horário por dia), então o sábado — com horário próprio e para todos os
+ * consultores — é modelado aqui: quando definida e hoje é sábado, esta janela
+ * GOVERNA o expediente do dia (ignora o horário de semana e o almoço).
+ */
+export interface SaturdayWindow {
+  /** "HH:MM" — início do expediente de sábado. */
+  start: string;
+  /** "HH:MM" — fim do expediente de sábado. */
+  end: string;
+  /** Fuso para avaliar o sábado. Default `America/Sao_Paulo`. */
+  timezone?: string;
+}
+
 export interface EligibilityContext {
   /** Tipo/segmento solicitado pela distribuição (para `TYPE_INCOMPATIBLE`). */
   distributionType?: string | null;
   /** Momento de referência (testes/simulação). Default: agora. */
   now?: Date;
+  /**
+   * Janela de sábado da org (opcional). Quando definida e hoje é sábado, o
+   * expediente do dia passa a ser `[start, end)` para TODOS os consultores,
+   * independente do `AgentSchedule.weekdays` (que normalmente não inclui
+   * sábado). `null`/undefined = sábado fora do expediente (comportamento
+   * clássico).
+   */
+  saturdayWindow?: SaturdayWindow | null;
 }
 
 export interface EligibilityResult {
@@ -102,12 +126,12 @@ const WEEKDAY_MAP: Record<string, number> = {
   Sat: 6,
 };
 
-function localClockParts(
-  schedule: ScheduleLike,
+function clockPartsForTimezone(
+  timezone: string,
   now: Date,
 ): { currentWeekday: number; currentMinutes: number } {
   const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: schedule.timezone,
+    timeZone: timezone,
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
@@ -121,6 +145,13 @@ function localClockParts(
   const currentWeekday = WEEKDAY_MAP[weekdayStr] ?? now.getDay();
   const currentMinutes = parseInt(hour, 10) * 60 + parseInt(minute, 10);
   return { currentWeekday, currentMinutes };
+}
+
+function localClockParts(
+  schedule: ScheduleLike,
+  now: Date,
+): { currentWeekday: number; currentMinutes: number } {
+  return clockPartsForTimezone(schedule.timezone, now);
 }
 
 /**
@@ -211,7 +242,22 @@ export function evaluateResponsibleEligibility(
     reasons.push("OFFLINE");
   }
 
-  if (input.schedule) {
+  // Sábado com janela da org: governa o expediente do dia para TODOS (ignora
+  // o horário de semana e o almoço). Fora dela → OUTSIDE_WORKING_HOURS.
+  const sat = ctx.saturdayWindow ?? null;
+  const satTz = sat?.timezone ?? input.schedule?.timezone ?? "America/Sao_Paulo";
+  const isSaturdayNow = sat
+    ? clockPartsForTimezone(satTz, now).currentWeekday === 6
+    : false;
+
+  if (sat && isSaturdayNow) {
+    const { currentMinutes } = clockPartsForTimezone(satTz, now);
+    const startMinutes = parseTime(sat.start);
+    const endMinutes = parseTime(sat.end);
+    if (currentMinutes < startMinutes || currentMinutes >= endMinutes) {
+      reasons.push("OUTSIDE_WORKING_HOURS");
+    }
+  } else if (input.schedule) {
     const n = input.preLunchStopMinutes ?? 30;
     if (isInPreLunchOrLunchWindow(input.schedule, now, n)) {
       reasons.push("PRE_LUNCH");
