@@ -34,6 +34,16 @@ export function classifyAcademicDepartmentKey(
  * Inferência de departamento a partir da mensagem do aluno + funil atual.
  * Usado no handoff automático (baixa confiança) e como hint nas tools.
  */
+/** Rematrícula / prazo de rematrícula → Atendimento (nunca Acolhimento). */
+export function messageImpliesRematricula(userMessage?: string | null): boolean {
+  const msg = normalize(userMessage ?? "");
+  return (
+    /rematr/.test(msg) ||
+    /re[\s-]?matricula/.test(msg) ||
+    (/prazo/.test(msg) && /matricula/.test(msg))
+  );
+}
+
 export function inferDepartmentFromContext(args: {
   userMessage?: string | null;
   pipelineName?: string | null;
@@ -47,6 +57,11 @@ export function inferDepartmentFromContext(args: {
     /trocar\s+(de\s+)?(curso|polo)/.test(msg)
   ) {
     return "retencao";
+  }
+
+  // Antes do funil Acolhimento: rematrícula é operacional (SAC).
+  if (messageImpliesRematricula(args.userMessage)) {
+    return "atendimento";
   }
 
   const funnel = normalize(
@@ -313,11 +328,6 @@ export async function executeAcademicDepartmentHandoff(args: {
     pipelineName = deal?.stage?.pipeline?.name ?? null;
   }
 
-  let dept: { id: string; name: string } | null = null;
-  if (args.departmentName?.trim()) {
-    dept = await resolveDepartmentByName(args.departmentName);
-  }
-
   let userMessage = args.userMessage ?? null;
   if (!userMessage && args.conversationId) {
     const lastIn = await prisma.message.findFirst({
@@ -330,6 +340,18 @@ export async function executeAcademicDepartmentHandoff(args: {
       select: { content: true },
     });
     userMessage = lastIn?.content ?? null;
+  }
+
+  let dept: { id: string; name: string } | null = null;
+
+  // Rematrícula prevalece sobre o departmentName que a IA escolher
+  // (ex.: modelo mandando Acolhimento por engano).
+  if (messageImpliesRematricula(userMessage)) {
+    dept = await resolveDepartmentByKey("atendimento");
+  }
+
+  if (!dept && args.departmentName?.trim()) {
+    dept = await resolveDepartmentByName(args.departmentName);
   }
 
   // Antes de re-inferir pelo texto do aluno, respeita o departamento que

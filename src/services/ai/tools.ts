@@ -30,6 +30,8 @@ import { executeDistribution } from "@/services/distribution";
 import { addTagToContact } from "@/services/tags";
 import {
   resolveDepartmentByName,
+  resolveDepartmentByKey,
+  messageImpliesRematricula,
   executeAcademicDepartmentHandoff,
 } from "@/services/ai/academic-department-routing";
 import type { ActivityType, Prisma } from "@prisma/client";
@@ -725,7 +727,21 @@ function transferToDepartmentTool(ctx: RunContext) {
         if (!ctx.conversationId) return fail("Sem conversa ativa para rotear.");
         const name = departmentName.trim();
         if (!name) return fail("Nome de departamento vazio.");
-        const dept = await resolveDepartmentByName(name);
+
+        // Última mensagem do aluno — rematrícula força Atendimento.
+        const lastIn = await prisma.message.findFirst({
+          where: {
+            conversationId: ctx.conversationId,
+            direction: "in",
+            isPrivate: false,
+          },
+          orderBy: { createdAt: "desc" },
+          select: { content: true },
+        });
+        let dept = messageImpliesRematricula(lastIn?.content)
+          ? await resolveDepartmentByKey("atendimento")
+          : null;
+        if (!dept) dept = await resolveDepartmentByName(name);
         if (!dept)
           return fail(
             `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
