@@ -75,6 +75,9 @@ export async function resolveDepartmentByName(
   const trimmed = name.trim();
   if (!trimmed) return null;
 
+  const { getOrgIdOrThrow } = await import("@/lib/request-context");
+  const orgId = getOrgIdOrThrow();
+
   const key =
     classifyAcademicDepartmentKey(trimmed) ??
     (normalize(trimmed).includes("acolh")
@@ -85,9 +88,10 @@ export async function resolveDepartmentByName(
           ? "atendimento"
           : null);
 
-  // Prefere departamentos com membros HUMAN (evita IDs órfãos/duplicados
-  // sem roster — causa distribuição org-wide / falha de fila).
+  // SEMPRE escopado à org do contexto — evita pegar "Atendimento" de
+  // outra organização (bug cross-tenant EduIT → Cruzeiro).
   const all = await prisma.department.findMany({
+    where: { organizationId: orgId },
     select: {
       id: true,
       name: true,
@@ -97,9 +101,16 @@ export async function resolveDepartmentByName(
     },
     orderBy: { name: "asc" },
   });
-  const ranked = [...all].sort(
-    (a, b) => (b._count.members ?? 0) - (a._count.members ?? 0),
-  );
+
+  const score = (d: (typeof all)[number]) => {
+    const dn = normalize(d.name);
+    let s = (d._count.members ?? 0) * 10;
+    // Prefere "Atendimento - SAC" a um "Atendimento" genérico.
+    if (key === "atendimento" && dn.includes("sac")) s += 100;
+    if (key === "atendimento" && dn === "atendimento") s -= 20;
+    return s;
+  };
+  const ranked = [...all].sort((a, b) => score(b) - score(a));
 
   const exact = ranked.find(
     (d) => normalize(d.name) === normalize(trimmed),

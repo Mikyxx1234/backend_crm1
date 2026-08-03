@@ -101,6 +101,11 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "DistributionResponsible",
   "DistributionLog",
   "DistributionPending",
+  // Department / DepartmentMember — SEM isso, findMany() vazava depts de
+  // outras orgs (ex.: handoff IA resolvia "Atendimento" da EduIT dentro
+  // da Cruzeiro EaD e gravava departmentId cross-tenant).
+  "Department",
+  "DepartmentMember",
   "Segment",
   "Campaign",
   "CampaignRecipient",

@@ -602,7 +602,7 @@ export async function executeDistribution(
 
   // Pool explícito da automação (1+ departamentos no card) — força escopo
   // mesmo com respectDepartment=false na org.
-  const explicitDeptIds = Array.from(
+  const requestedDeptIds = Array.from(
     new Set(
       [
         ...(input.departmentIds ?? []),
@@ -610,6 +610,20 @@ export async function executeDistribution(
       ].filter((id): id is string => typeof id === "string" && id.length > 0),
     ),
   );
+  // Nunca aceita departmentId de outra organização (cross-tenant).
+  const orgIdForDept = getOrgIdOrThrow();
+  const explicitDeptIds =
+    requestedDeptIds.length > 0
+      ? (
+          await prisma.department.findMany({
+            where: {
+              organizationId: orgIdForDept,
+              id: { in: requestedDeptIds },
+            },
+            select: { id: true },
+          })
+        ).map((d) => d.id)
+      : [];
 
   let responsibles;
   let departmentScoped = false;
