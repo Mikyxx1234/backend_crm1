@@ -52,7 +52,9 @@ export {
 
 export {
   getDistributionLogs,
+  getDistributionDepartmentStats,
   type DistributionLogView,
+  type DepartmentDistributionStat,
 } from "./logs";
 
 export {
