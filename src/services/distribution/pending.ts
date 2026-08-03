@@ -6,6 +6,8 @@
  * critério da aba Entrada do inbox. A drenagem automática passa por
  * `processPendingDistributionQueue` (gatilhos: novo item, agente online,
  * elegibilidade, capacidade liberada, botão manual, cron de segurança).
+ * A drenagem é **por departamento**: quem fica elegível só abre a fila
+ * dos seus depts (FIFO + capacidade livre); outros depts permanecem na espera.
  *
  * Import unidirecional: pending → engine (evita ciclo de import).
  * O engine agenda drenagem via import dinâmico.
@@ -150,12 +152,17 @@ export type PendingQueueTrigger =
   | "manual"
   | "scheduled";
 
+/** Teto de segurança por departamento por passagem (evita lotes infinitos). */
+const SAFETY_CAP_PER_DEPT = 50;
+
 /** Debounce / lock in-memory por org (sem schema novo). */
 const drainState = new Map<
   string,
   {
     running: boolean;
     queuedTrigger: PendingQueueTrigger | null;
+    /** null = todos os depts com elegível; string = só depts desta pessoa. */
+    queuedUserId: string | null;
     timer: ReturnType<typeof setTimeout> | null;
   }
 >();
@@ -163,10 +170,49 @@ const drainState = new Map<
 function getDrainState(orgId: string) {
   let s = drainState.get(orgId);
   if (!s) {
-    s = { running: false, queuedTrigger: null, timer: null };
+    s = {
+      running: false,
+      queuedTrigger: null,
+      queuedUserId: null,
+      timer: null,
+    };
     drainState.set(orgId, s);
   }
   return s;
+}
+
+function freeCapacityForResponsible(r: {
+  queueLimit: number;
+  queueCount: number;
+}): number {
+  // 0 = sem limite → usa fatia de segurança nesta passagem.
+  if (r.queueLimit <= 0) return SAFETY_CAP_PER_DEPT;
+  return Math.max(0, r.queueLimit - r.queueCount);
+}
+
+/**
+ * Capacidade livre agregada dos elegíveis de um departamento
+ * (ou org-wide quando deptId é null).
+ */
+function takeLimitForDept(
+  eligible: Array<{
+    queueLimit: number;
+    queueCount: number;
+    departments: { id: string }[];
+  }>,
+  deptId: string | null,
+): number {
+  const inScope = eligible.filter((r) =>
+    deptId === null
+      ? true
+      : r.departments.some((d) => d.id === deptId),
+  );
+  if (inScope.length === 0) return 0;
+  const free = inScope.reduce(
+    (acc, r) => acc + freeCapacityForResponsible(r),
+    0,
+  );
+  return Math.min(Math.max(free, 0), SAFETY_CAP_PER_DEPT);
 }
 
 /**
@@ -429,11 +475,19 @@ export async function maybeDistributeNewInboundTicket(input: {
 
 /**
  * Função central de drenagem da fila de espera.
- * Reutiliza o motor `executeDistribution` (mesmas regras de elegibilidade).
- * Idempotente; segura se o módulo estiver desabilitado.
+ *
+ * Regra: drena **por departamento** — nunca mistura filas de depts diferentes
+ * num lote global. Com `userId` (agent_online / agent_eligible), só os depts
+ * dessa pessoa; sem `userId` (cron / manual / capacity), todos os depts que
+ * tenham pelo menos 1 humano elegível agora.
+ *
+ * Dentro de cada dept: FIFO (mais antigos primeiro) com teto = capacidade
+ * livre agregada dos elegíveis daquele dept (máx. SAFETY_CAP_PER_DEPT).
  */
 export async function processPendingDistributionQueue(opts: {
   trigger: PendingQueueTrigger;
+  /** Quando informado, restringe a drenagem aos departamentos desta pessoa. */
+  userId?: string | null;
 }): Promise<RetryResult> {
   const orgId = getOrgIdOrNull();
   if (!orgId) {
@@ -442,7 +496,14 @@ export async function processPendingDistributionQueue(opts: {
 
   const state = getDrainState(orgId);
   if (state.running) {
-    // Coalesca: marca para re-rodar ao terminar (pode ter entrado item novo).
+    // Coalesca: marca para re-rodar ao terminar.
+    // 2º evento enquanto roda → amplia (todos os depts com elegível),
+    // para não perder o dept de outro consultor que ficou elegível.
+    if (state.queuedTrigger) {
+      state.queuedUserId = null;
+    } else {
+      state.queuedUserId = opts.userId ?? null;
+    }
     state.queuedTrigger = opts.trigger;
     const pending = await prisma.conversation.count({
       where: ABERTA_SEM_RESPONSAVEL,
@@ -453,54 +514,59 @@ export async function processPendingDistributionQueue(opts: {
   state.running = true;
   try {
     const widgetActive = await hasOrganizationWidget("smart_distribution");
-    // #region agent log
     console.warn(
       "[DBG-e46688 retry] widget check",
-      JSON.stringify({ widgetActive, trigger: opts.trigger }),
+      JSON.stringify({
+        widgetActive,
+        trigger: opts.trigger,
+        userId: opts.userId ?? null,
+      }),
     );
-    // #endregion
     if (!widgetActive) {
       return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
     }
 
-    // Limpa pendências órfãs (conversa já encerrada / atribuída por outra via)
-    // antes de tentar distribuir. Sem isso o registro fica em `PENDING`
-    // eternamente e infla o dashboard com "aguardando" que não é fila real.
     let cancelledOrphans = 0;
     try {
       cancelledOrphans = await cancelStalePendingOrphans(orgId);
       if (cancelledOrphans > 0) {
         console.info(
           "[distribution] cancelStalePendingOrphans",
-          JSON.stringify({ orgId, trigger: opts.trigger, cancelled: cancelledOrphans }),
+          JSON.stringify({
+            orgId,
+            trigger: opts.trigger,
+            cancelled: cancelledOrphans,
+          }),
         );
       }
     } catch (e) {
       console.warn("[distribution] cancelStalePendingOrphans failed", e);
     }
 
-    // Gate: sem NENHUM consultor elegível agora, não percorre a fila
-    // (evita centenas de executeDistribution → CPU / log spam).
-    let anyEligible = false;
+    let views: Awaited<ReturnType<typeof getDistributionResponsibles>> = [];
     try {
-      const views = await getDistributionResponsibles();
-      anyEligible = views.some((r) => r.eligible);
+      views = await getDistributionResponsibles();
     } catch (e) {
       console.warn(
         "[distribution] processPending eligibility precheck failed",
         e,
       );
-      anyEligible = false;
     }
-    if (!anyEligible) {
+    const eligible = views.filter((r) => r.eligible);
+
+    if (eligible.length === 0) {
       const pending = await prisma.conversation.count({
         where: ABERTA_SEM_RESPONSAVEL,
       });
       console.info(
         "[distribution] processPending skip — nenhum consultor elegível",
-        JSON.stringify({ orgId, trigger: opts.trigger, pending, cancelledOrphans }),
+        JSON.stringify({
+          orgId,
+          trigger: opts.trigger,
+          pending,
+          cancelledOrphans,
+        }),
       );
-      // Mesmo sem elegíveis, cancelamento de órfãs conta como progresso.
       return {
         resolved: 0,
         cancelled: cancelledOrphans,
@@ -509,80 +575,112 @@ export async function processPendingDistributionQueue(opts: {
       };
     }
 
-    const items = await prisma.conversation.findMany({
-      where: ABERTA_SEM_RESPONSAVEL,
-      orderBy: { createdAt: "asc" },
-      select: { id: true, contactId: true, departmentId: true },
-      take: 50,
-    });
+    // Depts a drenar nesta passagem.
+    let targetDeptIds: string[] = [];
+    let includeOrgWide = false;
 
-    // #region agent log
-    console.warn(
-      "[DBG-e46688 retry] items found",
-      JSON.stringify({
-        count: items.length,
-        firstIds: items.slice(0, 5).map((i) => i.id),
-        trigger: opts.trigger,
-      }),
-    );
-    // #endregion
-
-    let resolved = 0;
-    // Fronteira de departamento ESTRITA: cada departamento tem capacidade
-    // independente. Em vez de parar o lote após N falhas seguidas (heurística
-    // global antiga), pulamos os itens de departamentos já esgotados NESTA
-    // passada — leads de um depto sem gente não impedem a drenagem de outro
-    // depto que tem capacidade. Limita as chamadas a (resolvidos + nº de
-    // departamentos distintos), evitando spam sem prender leads de outros deptos.
-    const ORG_WIDE_KEY = "__org_wide__";
-    const exhaustedDepartments = new Set<string>();
-
-    for (const it of items) {
-      const deptKey = it.departmentId ?? ORG_WIDE_KEY;
-      if (exhaustedDepartments.has(deptKey)) continue;
-      try {
-        // Passa departmentId explícito → motor filtra por DepartmentMember
-        // mesmo com distribution.respectDepartment=false (handoff acadêmico).
-        const result = await executeDistribution({
-          dealId: null,
-          contactId: it.contactId,
-          conversationId: it.id,
-          distributionType: null,
-          triggerSource: "SYSTEM",
-          departmentId: it.departmentId,
-          // Fronteira de departamento ESTRITA (ver maybeDistributeNewInboundTicket):
-          // lead roteado a um depto espera por alguém DAQUELE depto; nunca vai
-          // para outro. Sem departamento = org-wide desde o início.
-          allowOrgWideFallback: false,
+    if (opts.userId) {
+      const focus = views.find((r) => r.userId === opts.userId);
+      if (!focus?.eligible) {
+        const pending = await prisma.conversation.count({
+          where: ABERTA_SEM_RESPONSAVEL,
         });
-        // #region agent log
-        console.warn(
-          "[DBG-e46688 retry] executeDistribution",
+        console.info(
+          "[distribution] processPending skip — userId não elegível",
           JSON.stringify({
-            convId: it.id,
-            success: result.success,
-            reason: result.reason,
-            selectedUserId: result.selectedUserId,
+            orgId,
+            trigger: opts.trigger,
+            userId: opts.userId,
+            pending,
           }),
         );
-        // #endregion
-        if (result.success) {
-          resolved++;
-        } else if (
-          result.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
-          result.reason === "NO_DEPARTMENT"
-        ) {
-          // Departamento sem ninguém elegível agora → não tenta os próximos
-          // itens do MESMO depto nesta passada (drena quando alguém do depto
-          // ficar disponível: agent_online / capacity_released / cron).
-          exhaustedDepartments.add(deptKey);
-        }
-      } catch (e) {
-        console.error(
-          "[distribution] processPendingDistributionQueue item failed",
-          { conversationId: it.id, trigger: opts.trigger, err: e },
-        );
+        return {
+          resolved: 0,
+          cancelled: cancelledOrphans,
+          pending,
+          trigger: opts.trigger,
+        };
       }
+      targetDeptIds = focus.departments.map((d) => d.id);
+      // Sem dept: pode receber leads org-wide (sem departmentId na conversa).
+      includeOrgWide = targetDeptIds.length === 0;
+      // Com dept(s): também tenta org-wide (pool humano elegível inclui esta pessoa).
+      if (targetDeptIds.length > 0) includeOrgWide = true;
+    } else {
+      const deptSet = new Set<string>();
+      for (const r of eligible) {
+        for (const d of r.departments) deptSet.add(d.id);
+      }
+      targetDeptIds = Array.from(deptSet);
+      includeOrgWide = true;
+    }
+
+    let resolved = 0;
+    let scanned = 0;
+
+    const drainBucket = async (departmentId: string | null) => {
+      const take = takeLimitForDept(eligible, departmentId);
+      if (take <= 0) return;
+
+      const items = await prisma.conversation.findMany({
+        where: {
+          ...ABERTA_SEM_RESPONSAVEL,
+          departmentId: departmentId === null ? null : departmentId,
+        },
+        orderBy: { createdAt: "asc" },
+        select: { id: true, contactId: true, departmentId: true },
+        take,
+      });
+      scanned += items.length;
+
+      for (const it of items) {
+        try {
+          const result = await executeDistribution({
+            dealId: null,
+            contactId: it.contactId,
+            conversationId: it.id,
+            distributionType: null,
+            triggerSource: "SYSTEM",
+            departmentId: it.departmentId,
+            allowOrgWideFallback: false,
+          });
+          console.warn(
+            "[DBG-e46688 retry] executeDistribution",
+            JSON.stringify({
+              convId: it.id,
+              departmentId: it.departmentId,
+              success: result.success,
+              reason: result.reason,
+              selectedUserId: result.selectedUserId,
+            }),
+          );
+          if (result.success) {
+            resolved++;
+          } else if (
+            result.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+            result.reason === "NO_DEPARTMENT"
+          ) {
+            // Capacidade do dept esgotou nesta passagem — para o bucket.
+            break;
+          }
+        } catch (e) {
+          console.error(
+            "[distribution] processPendingDistributionQueue item failed",
+            {
+              conversationId: it.id,
+              trigger: opts.trigger,
+              err: e,
+            },
+          );
+        }
+      }
+    };
+
+    for (const deptId of targetDeptIds) {
+      await drainBucket(deptId);
+    }
+    if (includeOrgWide) {
+      await drainBucket(null);
     }
 
     const pending = await prisma.conversation.count({
@@ -600,19 +698,29 @@ export async function processPendingDistributionQueue(opts: {
         JSON.stringify({
           orgId,
           trigger: opts.trigger,
+          userId: opts.userId ?? null,
+          targetDeptIds,
+          includeOrgWide,
           resolved,
           cancelledOrphans,
           pending,
-          scanned: items.length,
+          scanned,
         }),
       );
     }
 
-    return { resolved, cancelled: cancelledOrphans, pending, trigger: opts.trigger };
+    return {
+      resolved,
+      cancelled: cancelledOrphans,
+      pending,
+      trigger: opts.trigger,
+    };
   } finally {
     state.running = false;
     const queued = state.queuedTrigger;
+    const queuedUserId = state.queuedUserId;
     state.queuedTrigger = null;
+    state.queuedUserId = null;
     // Só re-drena se alguém ficou elegível / capacidade / manual.
     // `new_item` NÃO reentra sozinho — evita loop quando a fila está
     // cheia e ninguém ONLINE.
@@ -626,6 +734,7 @@ export async function processPendingDistributionQueue(opts: {
       scheduleProcessPendingDistributionQueue({
         trigger: queued,
         delayMs: 500,
+        userId: queuedUserId,
       });
     }
   }
@@ -646,13 +755,30 @@ export function scheduleProcessPendingDistributionQueue(opts: {
   trigger: PendingQueueTrigger;
   /** Default 500ms — agrupa rajadas (ex.: vários leads entrando juntos). */
   delayMs?: number;
+  /** Restringe aos depts desta pessoa (agent_online / agent_eligible). */
+  userId?: string | null;
 }): void {
   const orgId = getOrgIdOrNull();
   if (!orgId) return;
 
   const delayMs = opts.delayMs ?? 500;
   const state = getDrainState(orgId);
+  // Debounce por org: vários gatilhos próximos viram uma única execução.
   state.queuedTrigger = opts.trigger;
+  if (
+    opts.userId &&
+    state.queuedUserId &&
+    opts.userId !== state.queuedUserId
+  ) {
+    state.queuedUserId = null;
+  } else if (!opts.userId) {
+    state.queuedUserId = null;
+  } else if (!state.timer) {
+    state.queuedUserId = opts.userId;
+  } else if (state.queuedUserId === opts.userId) {
+    state.queuedUserId = opts.userId;
+  }
+  // Se já havia timer com outro escopo amplo (null), mantém amplo.
 
   if (state.timer) {
     clearTimeout(state.timer);
@@ -661,7 +787,9 @@ export function scheduleProcessPendingDistributionQueue(opts: {
   state.timer = setTimeout(() => {
     state.timer = null;
     const trigger = state.queuedTrigger ?? opts.trigger;
+    const userId = state.queuedUserId;
     state.queuedTrigger = null;
+    state.queuedUserId = null;
 
     void runWithContext(
       {
@@ -674,7 +802,7 @@ export function scheduleProcessPendingDistributionQueue(opts: {
           sublabel: `queue:${trigger}`,
         },
       },
-      () => processPendingDistributionQueue({ trigger }),
+      () => processPendingDistributionQueue({ trigger, userId }),
     ).catch((e) => {
       console.error(
         "[distribution] scheduleProcessPendingDistributionQueue failed",

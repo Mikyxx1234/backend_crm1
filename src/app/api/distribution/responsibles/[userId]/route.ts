@@ -313,6 +313,7 @@ export async function PATCH(request: Request, context: RouteContext) {
         scheduleProcessPendingDistributionQueue({
           trigger: "agent_eligible",
           delayMs: 300,
+          userId,
         });
       }
 
