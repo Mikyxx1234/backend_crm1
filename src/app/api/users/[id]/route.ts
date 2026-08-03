@@ -226,7 +226,56 @@ export async function DELETE(_request: Request, context: RouteContext) {
     }
 
     try {
-      await prisma.user.delete({ where: { id: target.id } });
+      const reassignToId = r.session.user.id;
+      await prisma.$transaction(async (tx) => {
+        // Leads / ownership: ficam sem responsável (pedido da Equipe).
+        await tx.deal.updateMany({
+          where: { ownerId: target.id },
+          data: { ownerId: null },
+        });
+        await tx.contact.updateMany({
+          where: { assignedToId: target.id },
+          data: { assignedToId: null },
+        });
+        await tx.conversation.updateMany({
+          where: { assignedToId: target.id },
+          data: { assignedToId: null },
+        });
+
+        // Outros vínculos nullable que bloqueiam o DELETE (P2003).
+        await tx.activity.updateMany({
+          where: { userId: target.id },
+          data: { userId: null },
+        });
+        await tx.activityEvent.updateMany({
+          where: { actorUserId: target.id },
+          data: { actorUserId: null },
+        });
+        await tx.supportTicket.updateMany({
+          where: { assignedToId: target.id },
+          data: { assignedToId: null },
+        });
+        await tx.supportTicketMessage.updateMany({
+          where: { authorId: target.id },
+          data: { authorId: null },
+        });
+
+        // FKs obrigatórias: reatribui ao admin que está excluindo.
+        await tx.note.updateMany({
+          where: { userId: target.id },
+          data: { userId: reassignToId },
+        });
+        await tx.campaign.updateMany({
+          where: { createdById: target.id },
+          data: { createdById: reassignToId },
+        });
+        await tx.scheduledMessage.updateMany({
+          where: { createdById: target.id },
+          data: { createdById: reassignToId },
+        });
+
+        await tx.user.delete({ where: { id: target.id } });
+      });
       return NextResponse.json({ ok: true });
     } catch (e) {
       if (isP2025(e)) {
@@ -239,8 +288,11 @@ export async function DELETE(_request: Request, context: RouteContext) {
         (e as { code: string }).code === "P2003"
       ) {
         return NextResponse.json(
-          { message: "Não é possível excluir: existem registros vinculados a este usuário." },
-          { status: 409 }
+          {
+            message:
+              "Não é possível excluir: ainda existem registros vinculados a este usuário que não podem ser desassociados automaticamente.",
+          },
+          { status: 409 },
         );
       }
       throw e;
