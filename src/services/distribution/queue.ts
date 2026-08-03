@@ -7,26 +7,10 @@
  * Critério (ver AGENT.md 2026-07-30):
  *   `status = OPEN` AND `assignedToId = user` AND `hasError = false`
  *   AND (`hasHumanReply = false` OR `lastMessageDirection = "in"`)
- *   AND contato SEM automação RUNNING (robô/PIPE não conta no volume humano)
  *
- * Ou seja: só conta o que realmente depende do consultor agora.
- *   - "Entrada"    (`hasHumanReply=false`) → conta.
- *   - "Aguardando" (`hasHumanReply=true` + `lastMessageDirection="in"`) → conta.
- *   - "Respondidas" (`out`, esperando cliente) → NÃO conta (não é carga ativa,
- *     depende do cliente voltar; o ciclo é encerrado pela automação de
- *     inatividade em 30min).
- *   - "Erro" (`hasError=true`) → NÃO conta (precisa de correção, não é fila).
- *   - Automação RUNNING → NÃO conta (ainda no robô).
- *
- * Histórico (correção do caso "50 leads pra uma pessoa"): a versão anterior
- * contava TODAS as OPEN atribuídas, incluindo "Respondidas". O problema que
- * essa versão tentava evitar (consultor rápido zera fila e recebe leads sem
- * parar) é agora coberto pela cláusula `lastMessageDirection = "in"`: o
- * consultor só sai da fila quando **realmente** terminou o turno de fala
- * (respondeu por último). A pilha de "Respondidas" antigas depende da
- * automação "Aguardando Resposta" para encerrar/mover — sem ela, essas ficam
- * pra sempre, mas mesmo assim não travam a distribuição (que era o efeito
- * colateral da definição antiga).
+ * Quem já está atribuído ao consultor conta mesmo se o PIPE ainda não
+ * encerrou (handoff) — a carga é dele. Robô sem assignee não aparece aqui
+ * (não tem assignedToId).
  *
  * `Conversation` é org-scoped, então o filtro de organização é injetado pela
  * Prisma Extension. Uma única `groupBy` (sem N+1).
@@ -65,9 +49,6 @@ export async function getQueueCounts(
       ...(scopeDeptIds.length > 0
         ? { departmentId: { in: scopeDeptIds } }
         : {}),
-      contact: {
-        automationContexts: { none: { status: "RUNNING" } },
-      },
       OR: [
         { hasHumanReply: false },
         { lastMessageDirection: "in" },

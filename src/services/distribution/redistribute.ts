@@ -47,9 +47,6 @@ function queueWhere(
     return {
       ...base,
       hasHumanReply: false,
-      contact: {
-        automationContexts: { none: { status: "RUNNING" } },
-      },
       assignedTo: { is: { type: "HUMAN" } },
     };
   }
@@ -57,12 +54,9 @@ function queueWhere(
     // Cliente falou por último depois de atendimento humano.
     return { ...base, hasHumanReply: true, lastMessageDirection: "in" };
   }
-  // Escopo "all" = Entrada (sem robô) + Aguardando.
+  // Escopo "all" = Entrada + Aguardando do consultor.
   return {
     ...base,
-    contact: {
-      automationContexts: { none: { status: "RUNNING" } },
-    },
     OR: [{ lastMessageDirection: "in" }, { hasHumanReply: false }],
   };
 }

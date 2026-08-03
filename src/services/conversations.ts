@@ -229,18 +229,22 @@ function buildConversationSourceCondition(
 function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
   switch (tab) {
     case "entrada":
-      // Entrada = aguardando distribuição OU já com consultor humano sem a
-      // 1ª mensagem dele. Quem ainda fala com o robô (automation RUNNING)
-      // fica na aba Automação; assignee AI também não entra aqui.
+      // Entrada = (1) sem dono e fora do robô, OU (2) já com consultor
+      // humano aguardando a 1ª msg dele. Em (2) NÃO exigimos “sem RUNNING”:
+      // no handoff “Falar com equipe” o contexto PIPE pode ainda estar
+      // RUNNING por um instante — a pessoa já foi distribuída e precisa
+      // aparecer na Entrada do consultor.
       return {
         status: "OPEN",
         hasHumanReply: false,
         hasError: false,
-        contact: {
-          automationContexts: { none: { status: "RUNNING" } },
-        },
         OR: [
-          { assignedToId: null },
+          {
+            assignedToId: null,
+            contact: {
+              automationContexts: { none: { status: "RUNNING" } },
+            },
+          },
           { assignedTo: { is: { type: "HUMAN" } } },
         ],
       };
@@ -269,11 +273,13 @@ function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
         hasError: false,
       };
     case "automacao":
-      // Robô ativo (PIPE/salesbot) OU assignee IA (1º atendimento).
+      // Robô ativo sem dono humano, OU assignee IA. Quem já tem consultor
+      // humano vai para Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
       return {
         status: "OPEN",
         OR: [
           {
+            assignedToId: null,
             contact: {
               automationContexts: { some: { status: "RUNNING" } },
             },
