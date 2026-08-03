@@ -61,6 +61,53 @@ export const PAUSING_STEP_TYPES = new Set([
   "wait_for_reply",
 ]);
 
+/** Marcador de "fim de ramo" gravado pelo canvas em saídas não conectadas. */
+const NONE_STEP_ID = "__none__";
+
+/**
+ * `true` quando o step veio do editor de canvas com as saídas desenhadas à
+ * mão. Nesses steps NUNCA caímos no fallback linear (`steps[index + 1]`):
+ * `automation.steps` está ordenado por `position`, que é ordem de CRIAÇÃO
+ * no canvas e não do fluxo — em automações ramificadas o "próximo da array"
+ * pertence a outro ramo.
+ *
+ * Mesma guarda que `automation-executor.ts` já aplica nos dois loops de
+ * execução. Aqui ela cobre os pontos de RETOMADA (resposta do cliente e
+ * timeout), que era por onde o bug escapava.
+ */
+export function hasExplicitEdges(config: unknown): boolean {
+  return (
+    config !== null &&
+    typeof config === "object" &&
+    (config as Record<string, unknown>).__hasExplicitEdges === true
+  );
+}
+
+/**
+ * Próximo step por POSIÇÃO na array. Só é permitido em automações legadas
+ * (pré-canvas, sem `__hasExplicitEdges`); nas demais devolve `null` para o
+ * chamador tratar como fim de ramo.
+ */
+export function linearFallbackStepId(
+  steps: { id: string; config: unknown }[],
+  currentStepId: string,
+): string | null {
+  const idx = steps.findIndex((s) => s.id === currentStepId);
+  if (idx < 0) return null;
+  if (hasExplicitEdges(steps[idx].config)) return null;
+  return steps[idx + 1]?.id ?? null;
+}
+
+/** Lê uma referência de step do config, tratando `""`/`__none__` como ausente. */
+export function readStepRef(config: unknown, key: string): string | null {
+  if (config === null || typeof config !== "object") return null;
+  const v = (config as Record<string, unknown>)[key];
+  if (typeof v !== "string") return null;
+  const trimmed = v.trim();
+  if (!trimmed || trimmed === NONE_STEP_ID) return null;
+  return trimmed;
+}
+
 export async function getActiveContext(automationId: string, contactId: string) {
   return prisma.automationContext.findFirst({
     where: {
@@ -290,22 +337,23 @@ export async function processIncomingMessage(contactId: string, messageContent: 
       if (varName) {
         variables = { ...variables, [varName]: messageContent };
       }
-      const receivedGoto =
-        typeof config.receivedGotoStepId === "string" && config.receivedGotoStepId !== ""
-          ? (config.receivedGotoStepId as string)
-          : null;
+      const receivedGoto = readStepRef(config, "receivedGotoStepId");
       if (receivedGoto) {
         nextStepId = receivedGoto;
         log.info(
           `wait_for_reply resolvido — auto=${ctx.automation.name} contato=${contactId} → step=${nextStepId} (via receivedGotoStepId)`,
         );
       } else {
-        // Fallback: avança linearmente para o próximo step
-        const stepIndex = ctx.automation.steps.findIndex((s) => s.id === ctx.currentStepId);
-        nextStepId = ctx.automation.steps[stepIndex + 1]?.id ?? null;
-        log.info(
-          `wait_for_reply sem receivedGotoStepId — auto=${ctx.automation.name} → fallback linear step=${nextStepId ?? "(fim)"}`,
-        );
+        nextStepId = linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
+        if (nextStepId) {
+          log.info(
+            `wait_for_reply sem receivedGotoStepId — auto=${ctx.automation.name} → fallback linear step=${nextStepId}`,
+          );
+        } else {
+          log.warn(
+            `wait_for_reply sem receivedGotoStepId — auto=${ctx.automation.name} step=${currentStep.id} → fim de ramo (conecte a saída "resposta recebida" no canvas)`,
+          );
+        }
       }
     } else {
       const varName = String(config.saveToVariable ?? "lastResponse");
@@ -323,31 +371,61 @@ export async function processIncomingMessage(contactId: string, messageContent: 
           return label === normalized || btnId === normalized;
         });
 
-        if (matchedBtn && matchedBtn.gotoStepId) {
-          nextStepId = matchedBtn.gotoStepId;
-          log.info(
-            `botão "${matchedBtn.title || matchedBtn.text}" matched — auto=${ctx.automation.name} → step=${nextStepId}`,
-          );
-        } else if (
-          typeof config.elseGotoStepId === "string" &&
-          config.elseGotoStepId !== ""
-        ) {
-          nextStepId = config.elseGotoStepId;
+        const elseGoto = readStepRef(config, "elseGotoStepId");
+        // Saída padrão do passo. Em menus do canvas é comum vários botões
+        // convergirem pra ela; os que ficaram sem aresta herdam o destino.
+        const defaultOut = readStepRef(config, "nextStepId");
+
+        if (matchedBtn) {
+          // Escolha VÁLIDA do cliente. Não pode cair no ramo "nenhuma
+          // opção" só porque a aresta daquele botão ficou desconectada —
+          // herda a saída padrão do passo antes disso.
+          const btnGoto = readStepRef(matchedBtn, "gotoStepId");
+          nextStepId = btnGoto ?? defaultOut ?? elseGoto;
+          const btnLabel = matchedBtn.title || matchedBtn.text || matchedBtn.id;
+          if (nextStepId) {
+            const via = btnGoto
+              ? "aresta do botão"
+              : defaultOut
+                ? "saída padrão do passo"
+                : "saída 'nenhuma opção'";
+            log.info(
+              `botão "${btnLabel}" matched — auto=${ctx.automation.name} → step=${nextStepId} (via ${via})`,
+            );
+          } else {
+            log.warn(
+              `botão "${btnLabel}" matched mas sem nenhum destino — auto=${ctx.automation.name} step=${currentStep.id} → encerrando ramo (conecte esse botão no canvas)`,
+            );
+          }
+        } else if (elseGoto) {
+          nextStepId = elseGoto;
           log.info(
             `nenhum botão matched ("${normalized}") — auto=${ctx.automation.name} → fallback elseGotoStepId step=${nextStepId}`,
           );
+        } else if (hasExplicitEdges(config)) {
+          // Menu desenhado no canvas, cliente digitou texto livre e a saída
+          // "nenhuma opção" não foi conectada. Avançar pela array pularia
+          // pro ramo vizinho e fechar o contexto deixaria o cliente órfão:
+          // mantemos o fluxo parado NESTE passo, aguardando um clique
+          // válido (ou o timeout configurado).
+          log.warn(
+            `nenhum botão matched ("${normalized}") e sem elseGotoStepId — auto=${ctx.automation.name} step=${currentStep.id} → mantendo no mesmo passo (conecte a saída "nenhuma opção" no canvas)`,
+          );
+          return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
         } else {
-          const stepIndex = ctx.automation.steps.findIndex((s) => s.id === ctx.currentStepId);
-          nextStepId = ctx.automation.steps[stepIndex + 1]?.id ?? null;
+          nextStepId = linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
           log.info(
             `nenhum botão matched ("${normalized}") + sem elseGotoStepId — auto=${ctx.automation.name} → fallback linear step=${nextStepId ?? "(fim)"}`,
           );
         }
       } else {
-        const stepIndex = ctx.automation.steps.findIndex((s) => s.id === ctx.currentStepId);
-        nextStepId = ctx.automation.steps[stepIndex + 1]?.id ?? null;
+        // `question` de resposta aberta: a saída é única, então a aresta
+        // desenhada (`nextStepId`) manda. Array só em fluxos legados.
+        const openNext = readStepRef(config, "nextStepId");
+        nextStepId =
+          openNext ?? linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
         log.info(
-          `question sem botões — auto=${ctx.automation.name} → step=${nextStepId ?? "(fim)"}`,
+          `question sem botões — auto=${ctx.automation.name} → step=${nextStepId ?? "(fim)"}${openNext ? " (via nextStepId)" : ""}`,
         );
       }
     }
@@ -380,19 +458,17 @@ export async function processIncomingMessage(contactId: string, messageContent: 
         }
 
         if (targetStep.type === "wait_for_reply") {
-          const cfg = targetStep.config as Record<string, unknown>;
-          const receivedGoto =
-            typeof cfg.receivedGotoStepId === "string" && cfg.receivedGotoStepId !== ""
-              ? (cfg.receivedGotoStepId as string)
-              : null;
+          const receivedGoto = readStepRef(targetStep.config, "receivedGotoStepId");
           if (!receivedGoto) {
-            // Fallback: avança linearmente para o próximo step na cascata
-            const stepIdx = ctx.automation.steps.findIndex((s) => s.id === targetStep.id);
-            currentTargetId = ctx.automation.steps[stepIdx + 1]?.id ?? "";
-            if (!currentTargetId) {
+            const fallback = linearFallbackStepId(ctx.automation.steps, targetStep.id);
+            if (!fallback) {
+              log.warn(
+                `wait_for_reply (cascata) sem receivedGotoStepId — auto=${ctx.automation.name} step=${targetStep.id} → fim de ramo (conecte a saída "resposta recebida" no canvas)`,
+              );
               await advanceContext(ctx.id, null, variables);
               return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
             }
+            currentTargetId = fallback;
             log.info(
               `wait_for_reply (cascata) sem receivedGotoStepId — auto=${ctx.automation.name} → fallback linear step=${currentTargetId}`,
             );
@@ -537,10 +613,7 @@ export async function processTimeout(contextId: string) {
   };
 
   if (step.type === "wait_for_reply") {
-    const timeoutGoto =
-      typeof config.timeoutGotoStepId === "string" && config.timeoutGotoStepId !== ""
-        ? (config.timeoutGotoStepId as string)
-        : null;
+    const timeoutGoto = readStepRef(config, "timeoutGotoStepId");
     if (!timeoutGoto) {
       log.warn(
         `wait_for_reply timeout sem timeoutGotoStepId — auto=${ctx.automation.name} step=${step.id} → fechando contexto`,
@@ -565,11 +638,31 @@ export async function processTimeout(contextId: string) {
 
   let nextStepId: string | null = null;
 
-  if (action === "goto" && typeof config.timeoutGotoStepId === "string" && config.timeoutGotoStepId) {
-    nextStepId = config.timeoutGotoStepId;
+  // 03/ago/26 — Se o operador desenhou a aresta de timeout no canvas
+  // (`timeoutGotoStepId` preenchido), respeitamos SEMPRE — independente
+  // de `timeoutAction`. O editor grava a aresta mas nem sempre grava
+  // `timeoutAction: "goto"` (default fica "continue" em
+  // `automation-workflow.ts::defaultConfigForType`). Cair no fallback
+  // linear (stepIndex+1) num canvas multi-ramo pula pra step do RAMO
+  // VIZINHO por engano (bug INICIO-PIPE: timeout do interactive[2]
+  // caía em step[3] "Acesso à Plataforma" sem o cliente ter clicado,
+  // e o próximo timeout caía em step[6] "Já já um consultor...",
+  // movendo o lead pra "Em Atendimento" sozinho). `wait_for_reply`
+  // já respeita `timeoutGotoStepId` sempre — aqui deixamos consistente.
+  const explicitTimeoutGoto = readStepRef(config, "timeoutGotoStepId");
+
+  if (explicitTimeoutGoto) {
+    nextStepId = explicitTimeoutGoto;
   } else {
-    const stepIndex = ctx.automation.steps.findIndex((s) => s.id === ctx.currentStepId);
-    nextStepId = ctx.automation.steps[stepIndex + 1]?.id ?? null;
+    // Sem aresta de timeout desenhada: fallback linear, permitido apenas
+    // em automações legadas (`linearFallbackStepId` devolve null quando o
+    // step veio do canvas com arestas explícitas).
+    nextStepId = linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
+    log.warn(
+      nextStepId
+        ? `question/interactive timeout SEM timeoutGotoStepId — auto=${ctx.automation.name} step=${step.id} → fallback linear step=${nextStepId} (conecte a aresta de timeout no canvas p/ evitar surpresa em ramos paralelos)`
+        : `question/interactive timeout SEM timeoutGotoStepId — auto=${ctx.automation.name} step=${step.id} → encerrando fluxo (conecte a aresta de timeout no canvas)`,
+    );
   }
 
   log.info(
