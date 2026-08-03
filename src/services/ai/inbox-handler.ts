@@ -59,6 +59,13 @@ import {
   parseAgentConfidence,
   shouldHandoffOnLowConfidence,
 } from "@/services/ai/confidence";
+import {
+  buildHumanQueueWithHoursMessage,
+  buildHumanUnavailableOfferMessage,
+  messageLooksLikeHumanQueueNotice,
+  userWantsAiContinue,
+  userWantsHumanDistribution,
+} from "@/services/ai/human-queue-policy";
 import { runAgent } from "@/services/ai/runner";
 
 export type InboundAIArgs = {
@@ -202,7 +209,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       return;
     }
 
-    const conversation = await prisma.conversation.findUnique({
+    let conversation = await prisma.conversation.findUnique({
       where: { id: args.conversationId },
       select: {
         id: true,
@@ -214,7 +221,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     });
     if (!conversation?.assignedToId) {
       // Sem responsável: se está na fila de distribuição (handoff IA),
-      // tenta redistribuir e confirma ao aluno — nunca fica mudo.
+      // tenta redistribuir; se não houver humano, oferece continuar com a IA
+      // (exceto pedido explícito de fila/humano → avisa horário e mantém fila).
       const pending = await prisma.distributionPending.findFirst({
         where: {
           status: "PENDING",
@@ -249,69 +257,109 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
         const stillOpen = await prisma.conversation.findUnique({
           where: { id: args.conversationId },
-          select: { assignedToId: true },
+          select: {
+            assignedToId: true,
+            assignedTo: { select: { type: true } },
+          },
         });
-        if (!stillOpen?.assignedToId) {
-          const aiAgent = await prisma.user.findFirst({
-            where: {
-              type: "AI",
-              aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
-            },
-            select: { id: true },
-            orderBy: { createdAt: "asc" },
+        if (stillOpen?.assignedTo?.type === "HUMAN") {
+          logAi("waiting_queue_human_assigned", {
+            conversationId: args.conversationId,
+            pendingId: pending.id,
           });
-          if (aiAgent) {
-            const lastBotOut = await prisma.message.findFirst({
-              where: {
-                conversationId: args.conversationId,
-                direction: "out",
-                authorType: "bot",
-                isPrivate: false,
-                messageType: { not: "note" },
-              },
-              orderBy: { createdAt: "desc" },
-              select: { content: true },
-            });
-            const queueAckPatterns = [
-              "já está na fila",
-              "só mais um pouquinho",
-              "fala com você em breve",
-              "consultor(a) fala com você",
-              "vou te conectar",
-            ];
-            const isRecentQueueAck = queueAckPatterns.some((p) =>
-              lastBotOut?.content?.includes(p),
-            );
-            if (!isRecentQueueAck) {
-              await sendAgentMessage({
-                conversationId: args.conversationId,
-                contactId: args.contactId,
-                agentUserId: aiAgent.id,
-                autonomyMode: "AUTONOMOUS",
-                text: "Tudo bem, só mais um pouquinho e logo você será atendido(a).",
-                channel: args.channel,
-                kind: "text",
-                bypassAssigneeCheck: true,
-              }).catch(() => null);
-            } else {
-              logAi("waiting_queue_ack_skipped", {
-                conversationId: args.conversationId,
-                pendingId: pending.id,
-              });
-            }
-          }
+          return;
         }
-        logAi("waiting_queue_ack", {
+
+        const aiAgent = await prisma.user.findFirst({
+          where: {
+            type: "AI",
+            aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
+          },
+          select: { id: true },
+          orderBy: { createdAt: "asc" },
+        });
+        if (!aiAgent) {
+          logAi("waiting_queue_no_ai", {
+            conversationId: args.conversationId,
+            pendingId: pending.id,
+          });
+          return;
+        }
+
+        const lastBotOut = await prisma.message.findFirst({
+          where: {
+            conversationId: args.conversationId,
+            direction: "out",
+            authorType: "bot",
+            isPrivate: false,
+            messageType: { not: "note" },
+          },
+          orderBy: { createdAt: "desc" },
+          select: { content: true },
+        });
+
+        if (userWantsHumanDistribution(args.userMessage)) {
+          if (!messageLooksLikeHumanQueueNotice(lastBotOut?.content) ||
+              !lastBotOut?.content?.includes("expediente inicia")) {
+            await sendAgentMessage({
+              conversationId: args.conversationId,
+              contactId: args.contactId,
+              agentUserId: aiAgent.id,
+              autonomyMode: "AUTONOMOUS",
+              text: buildHumanQueueWithHoursMessage(),
+              channel: args.channel,
+              kind: "text",
+              bypassAssigneeCheck: true,
+            }).catch(() => null);
+          }
+          logAi("waiting_queue_human_requested", {
+            conversationId: args.conversationId,
+            pendingId: pending.id,
+          });
+          return;
+        }
+
+        // Reassume IA (fila permanece) para continuar o atendimento se o aluno quiser.
+        await prisma.$transaction(async (tx) => {
+          await tx.conversation.update({
+            where: { id: args.conversationId },
+            data: { assignedToId: aiAgent.id },
+          });
+          await tx.contact.update({
+            where: { id: args.contactId },
+            data: { assignedToId: aiAgent.id },
+          });
+        });
+        conversation = { ...conversation, assignedToId: aiAgent.id };
+
+        const alreadyOffered =
+          messageLooksLikeHumanQueueNotice(lastBotOut?.content) ||
+          Boolean(lastBotOut?.content?.includes("indisponível")) ||
+          Boolean(lastBotOut?.content?.includes("indisponivel"));
+        if (!alreadyOffered && !userWantsAiContinue(args.userMessage)) {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: aiAgent.id,
+            autonomyMode: "AUTONOMOUS",
+            text: buildHumanUnavailableOfferMessage(),
+            channel: args.channel,
+            kind: "text",
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        }
+        logAi("waiting_queue_ai_continue", {
           conversationId: args.conversationId,
           pendingId: pending.id,
         });
+        // Fall through: IA responde normalmente.
+      } else {
+        logAi("blocked", {
+          conversationId: args.conversationId,
+          reason: "no_assignee",
+        });
         return;
       }
-      logAi("blocked", {
-        conversationId: args.conversationId,
-        reason: "no_assignee",
-      });
-      return;
     }
 
     const channelConfig = conversation.channelRef?.config as
@@ -404,7 +452,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     });
 
     // ── 0b. Pending handoff while AI is still assignee ──────────────
-    // The conversation was queued for human distribution; AI must not reply.
+    // Fila ativa: tenta humano; se aluno pedir distribuição → horário + fila;
+    // senão a IA pode continuar respondendo (pending permanece).
     const pendingHandoff = await prisma.distributionPending.findFirst({
       where: {
         status: "PENDING",
@@ -417,43 +466,47 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       orderBy: { updatedAt: "desc" },
     });
     if (pendingHandoff) {
-      await executeAcademicDepartmentHandoff({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        dealId: openDeal?.id ?? null,
-        userMessage: args.userMessage,
-        reason: "IA ainda assignee com pending ativo — reencaminhando",
-      }).catch(() => null);
-      const stillOpen = await prisma.conversation.findUnique({
-        where: { id: args.conversationId },
-        select: { assignedToId: true },
+      const lastBotMsg = await prisma.message.findFirst({
+        where: {
+          conversationId: args.conversationId,
+          direction: "out",
+          authorType: "bot",
+          isPrivate: false,
+          messageType: { not: "note" },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { content: true },
       });
-      if (!stillOpen?.assignedToId || stillOpen.assignedToId === assignee.id) {
-        const lastBotMsg = await prisma.message.findFirst({
-          where: {
-            conversationId: args.conversationId,
-            direction: "out",
-            authorType: "bot",
-            isPrivate: false,
-            messageType: { not: "note" },
-          },
-          orderBy: { createdAt: "desc" },
-          select: { content: true },
+
+      if (userWantsHumanDistribution(args.userMessage)) {
+        await executeAcademicDepartmentHandoff({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          dealId: openDeal?.id ?? null,
+          userMessage: args.userMessage,
+          reason: "Aluno pediu fila/humano com pending ativo",
+        }).catch(() => null);
+        const afterHumanAsk = await prisma.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: { assignedTo: { select: { type: true } } },
         });
-        const queueAckPhrases = [
-          "já está na fila",
-          "só mais um pouquinho",
-          "fala com você em breve",
-          "consultor(a) fala com você",
-          "vou te conectar",
-        ];
-        if (!queueAckPhrases.some((p) => lastBotMsg?.content?.includes(p))) {
+        if (afterHumanAsk?.assignedTo?.type === "HUMAN") {
+          logAi("handoff_pending_human_assigned", {
+            conversationId: args.conversationId,
+            pendingId: pendingHandoff.id,
+          });
+          return;
+        }
+        if (
+          !lastBotMsg?.content?.includes("expediente inicia") &&
+          !lastBotMsg?.content?.includes("já está na *fila*")
+        ) {
           await sendAgentMessage({
             conversationId: args.conversationId,
             contactId: args.contactId,
             agentUserId: assignee.id,
             autonomyMode: cfg.autonomyMode,
-            text: "Tudo bem, só mais um pouquinho e logo você será atendido(a).",
+            text: buildHumanQueueWithHoursMessage(),
             channel: args.channel,
             kind: "text",
             humanBehavior,
@@ -461,17 +514,83 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             bypassAssigneeCheck: true,
           }).catch(() => null);
         }
+        logAi("handoff_pending_human_requested", {
+          conversationId: args.conversationId,
+          pendingId: pendingHandoff.id,
+        });
+        return;
       }
-      logAi("handoff_pending_ai_assignee", {
+
+      // Tenta redistribuir sem tirar a IA; se cair humano, para.
+      const convDept = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: { departmentId: true },
+      });
+      const { executeDistribution } = await import("@/services/distribution");
+      await executeDistribution({
+        dealId: openDeal?.id ?? null,
+        contactId: args.contactId,
+        conversationId: args.conversationId,
+        triggerSource: "SYSTEM",
+        departmentId: convDept?.departmentId ?? null,
+        allowOrgWideFallback: false,
+      }).catch(() => null);
+      const stillOpen = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: {
+          assignedToId: true,
+          assignedTo: { select: { type: true } },
+        },
+      });
+      if (stillOpen?.assignedTo?.type === "HUMAN") {
+        logAi("handoff_pending_human_assigned", {
+          conversationId: args.conversationId,
+          pendingId: pendingHandoff.id,
+        });
+        return;
+      }
+      // Garante IA assignee se a distribuição limpou sem humano.
+      if (!stillOpen?.assignedToId || stillOpen.assignedToId !== assignee.id) {
+        await prisma.$transaction(async (tx) => {
+          await tx.conversation.update({
+            where: { id: args.conversationId },
+            data: { assignedToId: assignee.id },
+          });
+          await tx.contact.update({
+            where: { id: args.contactId },
+            data: { assignedToId: assignee.id },
+          });
+        });
+      }
+
+      const alreadyOffered =
+        messageLooksLikeHumanQueueNotice(lastBotMsg?.content) ||
+        Boolean(lastBotMsg?.content?.includes("indisponível")) ||
+        Boolean(lastBotMsg?.content?.includes("indisponivel"));
+      if (!alreadyOffered && !userWantsAiContinue(args.userMessage)) {
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: buildHumanUnavailableOfferMessage(),
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+      }
+      logAi("handoff_pending_ai_continue", {
         conversationId: args.conversationId,
         pendingId: pendingHandoff.id,
       });
-      return;
+      // Fall through — IA responde.
     }
 
     // ── 0c. Post-handoff ack silence ──────────────────────────────────
-    // If the last bot message was a handoff/queue notification and the
-    // user just sent a short acknowledgement, do not invoke the LLM.
+    // Ack curto após aviso de fila/humano → confirma horário e mantém fila.
+    // Se o aluno pedir para a IA continuar, não silencia (segue pro LLM).
     {
       const lastBotOut = await prisma.message.findFirst({
         where: {
@@ -489,75 +608,82 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         "fala com você em breve",
         "já está na fila",
         "só mais um pouquinho",
+        "atendimento humano",
+        "indisponível",
+        "indisponivel",
+        "expediente inicia",
         "setor de",
         "Retenção",
         "Acolhimento",
       ];
       if (HANDOFF_PHRASES.some((p) => lastBotOut?.content?.includes(p))) {
-        const norm = args.userMessage
-          .normalize("NFD")
-          .replace(/\p{M}/gu, "")
-          .trim()
-          .toLowerCase();
-        const isAck =
-          /^(ok|obrigad[oa]|valeu|beleza|certo|ta|tá|tudo bem|pode deixar|aguardo|fico no aguardo|ah tudo bem)[\s!.]*$/i.test(
-            norm,
-          ) ||
-          (norm.length <= 40 &&
-            /obrigad[oa]|valeu|beleza|aguardo/.test(norm));
-        if (isAck) {
-          const curConv = await prisma.conversation.findUnique({
-            where: { id: args.conversationId },
-            select: { assignedToId: true },
-          });
-          if (curConv?.assignedToId === assignee.id) {
-            await prisma.$transaction(async (tx) => {
-              await tx.conversation.update({
-                where: { id: args.conversationId },
-                data: { assignedToId: null },
-              });
-              await tx.contact.update({
-                where: { id: args.contactId },
-                data: { assignedToId: null },
-              });
-              await tx.deal.updateMany({
-                where: { contactId: args.contactId, status: "OPEN" },
-                data: { ownerId: null },
-              });
+        if (userWantsAiContinue(args.userMessage)) {
+          // Aluno escolheu continuar com a IA — segue o fluxo normal.
+        } else {
+          const norm = args.userMessage
+            .normalize("NFD")
+            .replace(/\p{M}/gu, "")
+            .trim()
+            .toLowerCase();
+          const isAck =
+            /^(ok|obrigad[oa]|valeu|beleza|certo|ta|tá|tudo bem|pode deixar|aguardo|fico no aguardo|ah tudo bem)[\s!.]*$/i.test(
+              norm,
+            ) ||
+            (norm.length <= 40 &&
+              /obrigad[oa]|valeu|beleza|aguardo/.test(norm));
+          const wantsHuman =
+            userWantsHumanDistribution(args.userMessage) || isAck;
+          if (wantsHuman) {
+            const curConv = await prisma.conversation.findUnique({
+              where: { id: args.conversationId },
+              select: { assignedToId: true },
             });
-          }
-          await executeAcademicDepartmentHandoff({
-            conversationId: args.conversationId,
-            contactId: args.contactId,
-            dealId: openDeal?.id ?? null,
-            userMessage: args.userMessage,
-            reason: "Aluno confirmou handoff (ack pós-transferência)",
-          }).catch(() => null);
-          const queueAckPhrases2 = [
-            "já está na fila",
-            "só mais um pouquinho",
-            "fala com você em breve",
-            "vou te conectar",
-          ];
-          if (!queueAckPhrases2.some((p) => lastBotOut?.content?.includes(p))) {
-            await sendAgentMessage({
+            if (curConv?.assignedToId === assignee.id) {
+              await prisma.$transaction(async (tx) => {
+                await tx.conversation.update({
+                  where: { id: args.conversationId },
+                  data: { assignedToId: null },
+                });
+                await tx.contact.update({
+                  where: { id: args.contactId },
+                  data: { assignedToId: null },
+                });
+                await tx.deal.updateMany({
+                  where: { contactId: args.contactId, status: "OPEN" },
+                  data: { ownerId: null },
+                });
+              });
+            }
+            await executeAcademicDepartmentHandoff({
               conversationId: args.conversationId,
               contactId: args.contactId,
-              agentUserId: assignee.id,
-              autonomyMode: cfg.autonomyMode,
-              text: "Tudo bem, só mais um pouquinho e logo você será atendido(a).",
-              channel: args.channel,
-              kind: "text",
-              humanBehavior,
-              generationId: args.generationId,
-              bypassAssigneeCheck: true,
+              dealId: openDeal?.id ?? null,
+              userMessage: args.userMessage,
+              reason: "Aluno pediu/confirmou fila humana (ack pós-transferência)",
             }).catch(() => null);
+            if (
+              !lastBotOut?.content?.includes("expediente inicia") &&
+              !lastBotOut?.content?.includes("já está na *fila*")
+            ) {
+              await sendAgentMessage({
+                conversationId: args.conversationId,
+                contactId: args.contactId,
+                agentUserId: assignee.id,
+                autonomyMode: cfg.autonomyMode,
+                text: buildHumanQueueWithHoursMessage(),
+                channel: args.channel,
+                kind: "text",
+                humanBehavior,
+                generationId: args.generationId,
+                bypassAssigneeCheck: true,
+              }).catch(() => null);
+            }
+            logAi("handoff_ack_silence", {
+              conversationId: args.conversationId,
+              userMessage: args.userMessage.slice(0, 50),
+            });
+            return;
           }
-          logAi("handoff_ack_silence", {
-            conversationId: args.conversationId,
-            userMessage: args.userMessage.slice(0, 50),
-          });
-          return;
         }
       }
     }
@@ -896,6 +1022,45 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             ? "Handoff com tool — reforço distribuição/fila"
             : "Handoff por texto/nota — reforço backend",
         }).catch(() => null);
+      }
+      // Sem humano elegível: avisa indisponibilidade + oferta de continuar com IA
+      // e reassumimos a IA (a fila PENDING permanece para redistribuição).
+      const afterQueue = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: {
+          assignedToId: true,
+          assignedTo: { select: { type: true } },
+        },
+      });
+      if (afterQueue?.assignedTo?.type !== "HUMAN") {
+        await prisma.$transaction(async (tx) => {
+          await tx.conversation.update({
+            where: { id: args.conversationId },
+            data: { assignedToId: assignee.id },
+          });
+          await tx.contact.update({
+            where: { id: args.contactId },
+            data: { assignedToId: assignee.id },
+          });
+        });
+        const offerText = buildHumanUnavailableOfferMessage();
+        if (
+          !handoffText.includes("indisponível") &&
+          !handoffText.includes("indisponivel")
+        ) {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text: offerText,
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        }
       }
       logAi("handoff", {
         conversationId: args.conversationId,

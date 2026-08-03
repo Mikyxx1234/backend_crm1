@@ -691,15 +691,19 @@ function transferToHumanTool(ctx: RunContext) {
             selectedUserId: result.distribution?.selectedUserId ?? null,
           }).catch(() => {});
         }
+        const queuedWaiting =
+          result.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+          result.distribution?.reason === "NO_DEPARTMENT";
         return ok({
           transferred: true,
           departmentName: result.departmentName,
           assigned: Boolean(result.distribution?.success),
           assignedTo: result.distribution?.selectedUserName ?? null,
           distributionReason: result.distribution?.reason ?? null,
-          queuedWaiting:
-            result.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
-            result.distribution?.reason === "NO_DEPARTMENT",
+          queuedWaiting,
+          hint: queuedWaiting
+            ? "Ninguém disponível — lead na fila. Avise: humano indisponível agora; você pode continuar se o aluno quiser; expediente às 8h (seg–sex) / 9h (sábado). Se pedir fila, confirme fila + horário."
+            : undefined,
         });
       } catch (err) {
         return fail(err instanceof Error ? err.message : "Falha ao transferir.");
@@ -807,15 +811,19 @@ function executeDistributionTool(ctx: RunContext) {
               userMessage: ctx.userMessage ?? null,
               reason: reason ?? "execute_distribution via IA",
             });
+            const queuedWaiting =
+              handoff.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
+              handoff.distribution?.reason === "NO_DEPARTMENT";
             return ok({
               assigned: Boolean(handoff.distribution?.success),
               assignedTo: handoff.distribution?.selectedUserName ?? null,
               assignedUserId: handoff.distribution?.selectedUserId ?? null,
               departmentName: handoff.departmentName,
               reason: handoff.distribution?.reason ?? null,
-              queuedWaiting:
-                handoff.distribution?.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
-                handoff.distribution?.reason === "NO_DEPARTMENT",
+              queuedWaiting,
+              hint: queuedWaiting
+                ? "Ninguém disponível — lead na fila. Avise: humano indisponível agora; você pode continuar se o aluno quiser; expediente às 8h (seg–sex) / 9h (sábado). Se pedir fila, confirme fila + horário."
+                : undefined,
             });
           }
         }
@@ -867,7 +875,7 @@ function executeDistributionTool(ctx: RunContext) {
           reason: result.reason,
           hint:
             result.reason === "NO_ELIGIBLE_RESPONSIBLE"
-              ? "Ninguém disponível agora — o lead entrou na fila e será redistribuído. Avise o aluno que um atendente falará com ele em breve."
+              ? "Ninguém disponível agora — o lead entrou na fila. Avise que o atendimento humano está indisponível no momento, que VOCÊ pode continuar ajudando se o aluno quiser, e que o expediente humano inicia às 8h (seg–sex) ou 9h (sábado). Se o aluno pedir fila/humano, confirme a fila e o horário."
               : result.reason === "NO_DEPARTMENT"
                 ? "A conversa não está em um departamento com distribuição automática. Chame `transfer_to_department` primeiro."
                 : "Distribuição não realizada. Considere transferir para humano manualmente.",

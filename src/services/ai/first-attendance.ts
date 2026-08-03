@@ -276,27 +276,15 @@ export async function tryAssignFirstAttendanceAi(args: {
       select: { id: true, triggerSource: true },
     });
     if (aiWaitingHuman) {
-      await prisma.$transaction(async (tx) => {
-        await tx.conversation.update({
-          where: { id: args.conversationId },
-          data: { assignedToId: null },
-        });
-        await tx.contact.update({
-          where: { id: contactId },
-          data: { assignedToId: null },
-        });
-        await tx.deal.updateMany({
-          where: { contactId, status: "OPEN" },
-          data: { ownerId: null },
-        });
-      });
-      logAi("first_attendance_clear_ai_pending", {
+      // Mantém a IA: fila PENDING permanece para redistribuição humana, mas o
+      // aluno pode continuar com o agente até pedir fila/humano (inbox-handler).
+      logAi("first_attendance_keep_ai_pending", {
         conversationId: args.conversationId,
         contactId,
         pendingId: aiWaitingHuman.id,
         triggerSource: aiWaitingHuman.triggerSource,
       });
-      return null;
+      return conv.assignedToId;
     }
     // Conversa foi roteada para depto via handoff IA recente → não reclama.
     if (conv.departmentId) {
