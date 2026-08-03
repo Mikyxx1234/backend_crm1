@@ -44,17 +44,25 @@ function queueWhere(
     assignedToId: sourceUserId,
   };
   if (scope === "entrada") {
-    return { ...base, hasHumanReply: false };
+    return {
+      ...base,
+      hasHumanReply: false,
+      contact: {
+        automationContexts: { none: { status: "RUNNING" } },
+      },
+      assignedTo: { is: { type: "HUMAN" } },
+    };
   }
   if (scope === "aguardando") {
     // Cliente falou por último depois de atendimento humano.
     return { ...base, hasHumanReply: true, lastMessageDirection: "in" };
   }
-  // Escopo "all" da redistribuição = conversas pendentes de resposta do
-  // consultor (Entrada + Aguardando). Distinto de `getQueueCounts`, que agora
-  // mede a CARGA total (toda conversa OPEN) para limite/seleção.
+  // Escopo "all" = Entrada (sem robô) + Aguardando.
   return {
     ...base,
+    contact: {
+      automationContexts: { none: { status: "RUNNING" } },
+    },
     OR: [{ lastMessageDirection: "in" }, { hasHumanReply: false }],
   };
 }

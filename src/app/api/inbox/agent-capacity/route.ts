@@ -51,6 +51,9 @@ export async function GET() {
       status: "OPEN",
       assignedToId: userId,
       hasError: false,
+      contact: {
+        automationContexts: { none: { status: "RUNNING" } },
+      },
       OR: [
         { hasHumanReply: false },
         { lastMessageDirection: "in" },

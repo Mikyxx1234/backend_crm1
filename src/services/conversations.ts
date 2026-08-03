@@ -229,13 +229,21 @@ function buildConversationSourceCondition(
 function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
   switch (tab) {
     case "entrada":
-      // "Entrada" (= "Atendimento" no vocabulário do time) = o cliente mandou
-      // mensagem e AINDA NÃO recebeu nenhuma resposta HUMANA (`hasHumanReply =
-      // false`). Cobre tanto os novos sem responsável quanto os já
-      // auto-distribuídos em que só a automação/IA mandou o aviso — antes esses
-      // caíam em "Respondidas" (pareciam atendidos) e se perdiam. Automação/IA
-      // interagir não tira daqui; só a resposta de um humano.
-      return { status: "OPEN", hasHumanReply: false, hasError: false };
+      // Entrada = aguardando distribuição OU já com consultor humano sem a
+      // 1ª mensagem dele. Quem ainda fala com o robô (automation RUNNING)
+      // fica na aba Automação; assignee AI também não entra aqui.
+      return {
+        status: "OPEN",
+        hasHumanReply: false,
+        hasError: false,
+        contact: {
+          automationContexts: { none: { status: "RUNNING" } },
+        },
+        OR: [
+          { assignedToId: null },
+          { assignedTo: { is: { type: "HUMAN" } } },
+        ],
+      };
     case "esperando":
       // "Aguardando" = já teve atendimento humano e o cliente falou por último
       // (`lastMessageDirection = "in"`) — é a vez do consultor responder. O
@@ -261,11 +269,17 @@ function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
         hasError: false,
       };
     case "automacao":
+      // Robô ativo (PIPE/salesbot) OU assignee IA (1º atendimento).
       return {
         status: "OPEN",
-        contact: {
-          automationContexts: { some: { status: "RUNNING" } },
-        },
+        OR: [
+          {
+            contact: {
+              automationContexts: { some: { status: "RUNNING" } },
+            },
+          },
+          { assignedTo: { is: { type: "AI" } } },
+        ],
       };
     case "finalizados":
       return { status: "RESOLVED" };

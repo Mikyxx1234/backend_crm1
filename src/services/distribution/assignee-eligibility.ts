@@ -5,11 +5,39 @@
  */
 
 import { prisma } from "@/lib/prisma";
+import type { DistributionBlockReason } from "@/services/distribution/eligibility";
 import { getDistributionResponsibles } from "@/services/distribution/responsibles";
+
+/**
+ * Fila cheia ≠ offline: o dono humano continua responsável. Limpar ownership
+ * só por QUEUE_LIMIT devolve o lead à fila de espera sem ninguém elegível
+ * (loop de attempts). Offline / fora do expediente / etc. seguem limpando.
+ *
+ * Se houver vários motivos, limpa se QUALQUER um não for fila cheia
+ * (ex.: OFFLINE + QUEUE_LIMIT → limpa).
+ */
+export function shouldClearOwnershipOnIneligible(
+  reason: string | undefined,
+  blockedReasons?: readonly string[],
+): boolean {
+  const reasons =
+    blockedReasons && blockedReasons.length > 0
+      ? blockedReasons
+      : reason
+        ? [reason]
+        : [];
+  if (reasons.length === 0) return true;
+  return reasons.some((r) => r !== "QUEUE_LIMIT_REACHED");
+}
 
 export async function isAssigneeCurrentlyEligible(
   userId: string,
-): Promise<{ eligible: boolean; isAi: boolean; reason?: string }> {
+): Promise<{
+  eligible: boolean;
+  isAi: boolean;
+  reason?: string;
+  blockedReasons?: DistributionBlockReason[];
+}> {
   const user = await prisma.user.findUnique({
     where: { id: userId },
     select: { id: true, type: true },
@@ -29,6 +57,7 @@ export async function isAssigneeCurrentlyEligible(
         eligible: false,
         isAi: false,
         reason: view.blockedReasons[0] ?? "INELIGIBLE",
+        blockedReasons: view.blockedReasons,
       };
     }
     return { eligible: true, isAi: false };

@@ -27,6 +27,7 @@ import { hasOrganizationWidget } from "@/services/organization-widgets";
 import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
+  shouldClearOwnershipOnIneligible,
 } from "./assignee-eligibility";
 import type { DistributionBlockReason } from "./eligibility";
 import {
@@ -463,6 +464,25 @@ export async function executeDistribution(
           conversationId: input.conversationId,
           contactId,
         });
+      } else if (
+        !check.eligible &&
+        contactId &&
+        !shouldClearOwnershipOnIneligible(check.reason, check.blockedReasons)
+      ) {
+        // Fila cheia: mantém o dono humano e resolve pending.
+        await syncOwnershipForContact(contactId);
+        await resolvePendingFor(
+          input.dealId,
+          contactId,
+          already.assignedToId,
+        );
+        return {
+          success: true,
+          reason: "ASSIGNED",
+          selectedUserId: already.assignedToId,
+          selectedUserName: null,
+          evaluated: [],
+        };
       } else if (!check.eligible && contactId) {
         // Offline/indisponível herdado: limpa e segue redistribuição.
         await clearOwnershipForRedistribution({
@@ -524,12 +544,24 @@ export async function executeDistribution(
       const healed = await syncOwnershipForContact(contactId);
       if (healed && input.conversationId) {
         const healCheck = await isAssigneeCurrentlyEligible(healed);
-        if (!healCheck.eligible || healCheck.isAi) {
+        if (healCheck.isAi) {
           await clearOwnershipForRedistribution({
             conversationId: input.conversationId,
             contactId,
           });
-        } else {
+        } else if (
+          !healCheck.eligible &&
+          shouldClearOwnershipOnIneligible(healCheck.reason, healCheck.blockedReasons)
+        ) {
+          await clearOwnershipForRedistribution({
+            conversationId: input.conversationId,
+            contactId,
+          });
+        } else if (
+          healCheck.eligible ||
+          !shouldClearOwnershipOnIneligible(healCheck.reason, healCheck.blockedReasons)
+        ) {
+          // Elegível OU só fila cheia → mantém dono humano.
           const again = await prisma.conversation.findUnique({
             where: { id: input.conversationId },
             select: { assignedToId: true },

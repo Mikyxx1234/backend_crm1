@@ -7,6 +7,7 @@
  * Critério (ver AGENT.md 2026-07-30):
  *   `status = OPEN` AND `assignedToId = user` AND `hasError = false`
  *   AND (`hasHumanReply = false` OR `lastMessageDirection = "in"`)
+ *   AND contato SEM automação RUNNING (robô/PIPE não conta no volume humano)
  *
  * Ou seja: só conta o que realmente depende do consultor agora.
  *   - "Entrada"    (`hasHumanReply=false`) → conta.
@@ -15,6 +16,7 @@
  *     depende do cliente voltar; o ciclo é encerrado pela automação de
  *     inatividade em 30min).
  *   - "Erro" (`hasError=true`) → NÃO conta (precisa de correção, não é fila).
+ *   - Automação RUNNING → NÃO conta (ainda no robô).
  *
  * Histórico (correção do caso "50 leads pra uma pessoa"): a versão anterior
  * contava TODAS as OPEN atribuídas, incluindo "Respondidas". O problema que
@@ -63,6 +65,9 @@ export async function getQueueCounts(
       ...(scopeDeptIds.length > 0
         ? { departmentId: { in: scopeDeptIds } }
         : {}),
+      contact: {
+        automationContexts: { none: { status: "RUNNING" } },
+      },
       OR: [
         { hasHumanReply: false },
         { lastMessageDirection: "in" },

@@ -125,8 +125,15 @@ export async function getCockpitData(): Promise<CockpitData> {
           triggerSource: { contains: "AI_AGENT" },
         },
       }),
-      prisma.distributionPending.count({
-        where: { organizationId: orgId, status: "PENDING" },
+      prisma.conversation.count({
+        where: {
+          organizationId: orgId,
+          status: "OPEN",
+          assignedToId: null,
+          contact: {
+            automationContexts: { none: { status: "RUNNING" } },
+          },
+        },
       }),
     ]);
 
