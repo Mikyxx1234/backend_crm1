@@ -20,15 +20,17 @@ export async function GET(request: Request) {
     const users = await prisma.user.findMany({
       // Por padrão só humanos (Equipe / filtros). Com ?includeAi=1 inclui
       // agentes IA ativos — usado nos seletores de responsável (1º atendimento).
+      // Exclui anonimizados (soft-delete da Equipe / LGPD).
       where: includeAi
         ? {
             ...userOrgFilter(r.session),
+            isErased: false,
             OR: [
               { type: "HUMAN" },
               { type: "AI", aiAgentConfig: { active: true } },
             ],
           }
-        : { type: "HUMAN", ...userOrgFilter(r.session) },
+        : { type: "HUMAN", isErased: false, ...userOrgFilter(r.session) },
       orderBy: { name: "asc" },
       select: {
         id: true,
