@@ -27,7 +27,6 @@ import { hasOrganizationWidget } from "@/services/organization-widgets";
 import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
-  shouldClearOwnershipOnIneligible,
 } from "./assignee-eligibility";
 import type { DistributionBlockReason } from "./eligibility";
 import {
@@ -357,6 +356,22 @@ function mergeTriggerSources(
   return ordered.join("+");
 }
 
+async function resolveLogDepartmentId(
+  input: ExecuteDistributionInput,
+): Promise<string | null> {
+  const fromInput =
+    input.departmentId ??
+    input.departmentIds?.find((id) => typeof id === "string" && id.length > 0) ??
+    null;
+  if (fromInput) return fromInput;
+  if (!input.conversationId) return null;
+  const conv = await prisma.conversation.findUnique({
+    where: { id: input.conversationId },
+    select: { departmentId: true },
+  });
+  return conv?.departmentId ?? null;
+}
+
 async function writeLog(
   input: ExecuteDistributionInput,
   success: boolean,
@@ -367,6 +382,7 @@ async function writeLog(
   try {
     const orgId = getOrgIdOrThrow();
     const since = new Date(Date.now() - LOG_COALESCE_WINDOW_MS);
+    const departmentId = await resolveLogDepartmentId(input);
 
     // Mesmo atendimento/contato/deal + mesmo resultado em janela curta →
     // atualiza o log existente (junta AUTOMATION+SYSTEM) em vez de duplicar.
@@ -402,6 +418,7 @@ async function writeLog(
             dealId: input.dealId ?? undefined,
             contactId: input.contactId ?? undefined,
             conversationId: input.conversationId ?? undefined,
+            ...(departmentId ? { departmentId } : {}),
             evaluated: evaluated as unknown as Prisma.InputJsonValue,
           },
         });
@@ -416,6 +433,7 @@ async function writeLog(
         dealId: input.dealId ?? null,
         contactId: input.contactId ?? null,
         conversationId: input.conversationId ?? null,
+        departmentId,
         selectedUserId,
         success,
         reason,
@@ -464,25 +482,6 @@ export async function executeDistribution(
           conversationId: input.conversationId,
           contactId,
         });
-      } else if (
-        !check.eligible &&
-        contactId &&
-        !shouldClearOwnershipOnIneligible(check.reason, check.blockedReasons)
-      ) {
-        // Fila cheia: mantém o dono humano e resolve pending.
-        await syncOwnershipForContact(contactId);
-        await resolvePendingFor(
-          input.dealId,
-          contactId,
-          already.assignedToId,
-        );
-        return {
-          success: true,
-          reason: "ASSIGNED",
-          selectedUserId: already.assignedToId,
-          selectedUserName: null,
-          evaluated: [],
-        };
       } else if (!check.eligible && contactId) {
         // Offline/indisponível herdado: limpa e segue redistribuição.
         await clearOwnershipForRedistribution({
@@ -544,24 +543,12 @@ export async function executeDistribution(
       const healed = await syncOwnershipForContact(contactId);
       if (healed && input.conversationId) {
         const healCheck = await isAssigneeCurrentlyEligible(healed);
-        if (healCheck.isAi) {
+        if (!healCheck.eligible || healCheck.isAi) {
           await clearOwnershipForRedistribution({
             conversationId: input.conversationId,
             contactId,
           });
-        } else if (
-          !healCheck.eligible &&
-          shouldClearOwnershipOnIneligible(healCheck.reason, healCheck.blockedReasons)
-        ) {
-          await clearOwnershipForRedistribution({
-            conversationId: input.conversationId,
-            contactId,
-          });
-        } else if (
-          healCheck.eligible ||
-          !shouldClearOwnershipOnIneligible(healCheck.reason, healCheck.blockedReasons)
-        ) {
-          // Elegível OU só fila cheia → mantém dono humano.
+        } else {
           const again = await prisma.conversation.findUnique({
             where: { id: input.conversationId },
             select: { assignedToId: true },

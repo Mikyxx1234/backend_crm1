@@ -39,12 +39,202 @@ export interface DepartmentDistributionStat {
   pending: number;
 }
 
+const NOTE_DEPT_PREFIX = "Conversa distribuída para ";
+
 function parseCursor(raw: string | null): { createdAt: Date; id: string } | null {
   if (!raw) return null;
   const [tsStr, id] = raw.split("_");
   const ts = Number(tsStr);
   if (!Number.isFinite(ts) || !id) return null;
   return { createdAt: new Date(ts), id };
+}
+
+function normalizeDeptName(name: string): string {
+  return name
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .trim()
+    .toLocaleLowerCase("pt-BR");
+}
+
+/**
+ * Resolve departamento do log com prioridade:
+ * 1) snapshot no próprio DistributionLog
+ * 2) Conversation.departmentId atual
+ * 3) nota interna "Conversa distribuída para {Dept}"
+ * 4) (sucesso) único departamento acadêmico do consultor selecionado
+ */
+async function resolveDepartmentsForLogs(
+  items: Array<{
+    id: string;
+    conversationId: string | null;
+    selectedUserId: string | null;
+    success: boolean;
+    departmentId: string | null;
+  }>,
+  orgId: string,
+): Promise<Map<string, { departmentId: string | null; departmentName: string | null }>> {
+  const out = new Map<
+    string,
+    { departmentId: string | null; departmentName: string | null }
+  >();
+
+  const departments = await prisma.department.findMany({
+    where: { organizationId: orgId },
+    select: { id: true, name: true },
+  });
+  const deptById = new Map(departments.map((d) => [d.id, d.name]));
+  const deptByNormName = new Map(
+    departments.map((d) => [normalizeDeptName(d.name), d]),
+  );
+
+  const needFallback: typeof items = [];
+  for (const row of items) {
+    if (row.departmentId && deptById.has(row.departmentId)) {
+      out.set(row.id, {
+        departmentId: row.departmentId,
+        departmentName: deptById.get(row.departmentId) ?? null,
+      });
+    } else {
+      needFallback.push(row);
+    }
+  }
+
+  if (needFallback.length === 0) return out;
+
+  const conversationIds = [
+    ...new Set(
+      needFallback
+        .map((r) => r.conversationId)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ];
+
+  const conversations =
+    conversationIds.length > 0
+      ? await prisma.conversation.findMany({
+          where: { id: { in: conversationIds } },
+          select: {
+            id: true,
+            departmentId: true,
+            department: { select: { id: true, name: true } },
+          },
+        })
+      : [];
+  const convById = new Map(conversations.map((c) => [c.id, c]));
+
+  const stillNeed: typeof items = [];
+  for (const row of needFallback) {
+    const conv = row.conversationId ? convById.get(row.conversationId) : null;
+    if (conv?.departmentId) {
+      out.set(row.id, {
+        departmentId: conv.departmentId,
+        departmentName: conv.department?.name ?? deptById.get(conv.departmentId) ?? null,
+      });
+    } else {
+      stillNeed.push(row);
+    }
+  }
+
+  if (stillNeed.length === 0) return out;
+
+  // Notas de handoff do agente (snapshot textual do departamento).
+  const noteConvIds = [
+    ...new Set(
+      stillNeed
+        .map((r) => r.conversationId)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ];
+  const notes =
+    noteConvIds.length > 0
+      ? await prisma.message.findMany({
+          where: {
+            conversationId: { in: noteConvIds },
+            messageType: "note",
+            isPrivate: true,
+            content: { startsWith: NOTE_DEPT_PREFIX },
+          },
+          orderBy: { createdAt: "desc" },
+          select: { conversationId: true, content: true },
+        })
+      : [];
+  const noteDeptByConv = new Map<string, { id: string; name: string }>();
+  for (const note of notes) {
+    if (!note.conversationId || noteDeptByConv.has(note.conversationId)) continue;
+    const raw = note.content?.slice(NOTE_DEPT_PREFIX.length).trim() ?? "";
+    if (!raw || raw.toLocaleLowerCase("pt-BR").startsWith("a fila")) continue;
+    const dept = deptByNormName.get(normalizeDeptName(raw));
+    if (dept) noteDeptByConv.set(note.conversationId, dept);
+  }
+
+  const afterNotes: typeof items = [];
+  for (const row of stillNeed) {
+    const fromNote = row.conversationId
+      ? noteDeptByConv.get(row.conversationId)
+      : undefined;
+    if (fromNote) {
+      out.set(row.id, {
+        departmentId: fromNote.id,
+        departmentName: fromNote.name,
+      });
+    } else {
+      afterNotes.push(row);
+    }
+  }
+
+  if (afterNotes.length === 0) return out;
+
+  // Último recurso: consultor elegível em exatamente 1 dept acadêmico.
+  const academicNorms = new Set(
+    ["acolhimento", "retencao", "atendimento"].map((n) => n),
+  );
+  const academicDeptIds = new Set(
+    departments
+      .filter((d) => academicNorms.has(normalizeDeptName(d.name)))
+      .map((d) => d.id),
+  );
+  const userIds = [
+    ...new Set(
+      afterNotes
+        .filter((r) => r.success && r.selectedUserId)
+        .map((r) => r.selectedUserId!),
+    ),
+  ];
+  const memberships =
+    userIds.length > 0 && academicDeptIds.size > 0
+      ? await prisma.departmentMember.findMany({
+          where: {
+            organizationId: orgId,
+            userId: { in: userIds },
+            departmentId: { in: [...academicDeptIds] },
+          },
+          select: { userId: true, departmentId: true },
+        })
+      : [];
+  const deptsByUser = new Map<string, string[]>();
+  for (const m of memberships) {
+    const list = deptsByUser.get(m.userId) ?? [];
+    list.push(m.departmentId);
+    deptsByUser.set(m.userId, list);
+  }
+
+  for (const row of afterNotes) {
+    const userDepts = row.selectedUserId
+      ? deptsByUser.get(row.selectedUserId) ?? []
+      : [];
+    if (userDepts.length === 1) {
+      const id = userDepts[0]!;
+      out.set(row.id, {
+        departmentId: id,
+        departmentName: deptById.get(id) ?? null,
+      });
+    } else {
+      out.set(row.id, { departmentId: null, departmentName: null });
+    }
+  }
+
+  return out;
 }
 
 export async function getDistributionLogs(opts: {
@@ -74,6 +264,7 @@ export async function getDistributionLogs(opts: {
       selectedUserId: true,
       contactId: true,
       conversationId: true,
+      departmentId: true,
     },
   });
 
@@ -87,13 +278,8 @@ export async function getDistributionLogs(opts: {
   const contactIds = [
     ...new Set(items.map((r) => r.contactId).filter(Boolean) as string[]),
   ];
-  const conversationIds = [
-    ...new Set(
-      items.map((r) => r.conversationId).filter(Boolean) as string[],
-    ),
-  ];
 
-  const [users, contacts, conversations] = await Promise.all([
+  const [users, contacts, deptResolved] = await Promise.all([
     userIds.length
       ? prisma.user.findMany({
           where: { id: { in: userIds }, organizationId: orgId },
@@ -106,21 +292,11 @@ export async function getDistributionLogs(opts: {
           select: { id: true, name: true, phone: true },
         })
       : Promise.resolve([]),
-    conversationIds.length
-      ? prisma.conversation.findMany({
-          where: { id: { in: conversationIds } },
-          select: {
-            id: true,
-            departmentId: true,
-            department: { select: { id: true, name: true } },
-          },
-        })
-      : Promise.resolve([]),
+    resolveDepartmentsForLogs(items, orgId),
   ]);
 
   const userName = new Map(users.map((u) => [u.id, u.name]));
   const contactById = new Map(contacts.map((c) => [c.id, c]));
-  const convById = new Map(conversations.map((c) => [c.id, c]));
 
   const last = items[items.length - 1];
   const nextCursor =
@@ -129,7 +305,7 @@ export async function getDistributionLogs(opts: {
   return {
     items: items.map((r) => {
       const contact = r.contactId ? contactById.get(r.contactId) : null;
-      const conv = r.conversationId ? convById.get(r.conversationId) : null;
+      const dept = deptResolved.get(r.id);
       return {
         id: r.id,
         createdAt: r.createdAt.toISOString(),
@@ -144,8 +320,8 @@ export async function getDistributionLogs(opts: {
         contactName: contact?.name ?? null,
         contactPhone: contact?.phone ?? null,
         conversationId: r.conversationId,
-        departmentId: conv?.departmentId ?? null,
-        departmentName: conv?.department?.name ?? null,
+        departmentId: dept?.departmentId ?? null,
+        departmentName: dept?.departmentName ?? null,
       };
     }),
     nextCursor,
@@ -174,8 +350,12 @@ export async function getDistributionDepartmentStats(): Promise<{
     prisma.distributionLog.findMany({
       where: { success: true },
       select: {
+        id: true,
         triggerSource: true,
         conversationId: true,
+        selectedUserId: true,
+        success: true,
+        departmentId: true,
       },
     }),
     prisma.department.findMany({
@@ -186,23 +366,7 @@ export async function getDistributionDepartmentStats(): Promise<{
   ]);
 
   const deptName = new Map(departments.map((d) => [d.id, d.name]));
-  const convIds = [
-    ...new Set(
-      successLogs
-        .map((l) => l.conversationId)
-        .filter((id): id is string => Boolean(id)),
-    ),
-  ];
-  const convDepts =
-    convIds.length > 0
-      ? await prisma.conversation.findMany({
-          where: { id: { in: convIds } },
-          select: { id: true, departmentId: true },
-        })
-      : [];
-  const convDeptById = new Map(
-    convDepts.map((c) => [c.id, c.departmentId ?? null]),
-  );
+  const resolved = await resolveDepartmentsForLogs(successLogs, orgId);
 
   type Acc = {
     departmentId: string | null;
@@ -232,9 +396,7 @@ export async function getDistributionDepartmentStats(): Promise<{
   }
 
   for (const log of successLogs) {
-    const deptId = log.conversationId
-      ? (convDeptById.get(log.conversationId) ?? null)
-      : null;
+    const deptId = resolved.get(log.id)?.departmentId ?? null;
     const row = ensure(deptId);
     row.distributed += 1;
     if (log.triggerSource.includes("AI_AGENT")) {
@@ -242,7 +404,6 @@ export async function getDistributionDepartmentStats(): Promise<{
     }
   }
 
-  // Garante que depts cadastrados apareçam mesmo com zero.
   for (const d of departments) {
     ensure(d.id);
   }
