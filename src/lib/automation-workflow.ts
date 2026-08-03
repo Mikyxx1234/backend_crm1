@@ -433,17 +433,37 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
     case "create_activity":
       return { type: "TASK", title: "", description: "" };
     case "send_whatsapp_message":
-      return { content: "" };
+      return { content: "", failureAction: "stop", failureGotoStepId: "" };
     case "send_product":
       // content: texto livre com variáveis {{produto.*}}. Vazio = monta um
       // resumo padrão do produto no executor.
       return { productId: "", productName: "", content: "" };
     case "send_whatsapp_template":
-      return { templateName: "", languageCode: "pt_BR" };
+      return {
+        templateName: "",
+        languageCode: "pt_BR",
+        failureAction: "stop",
+        failureGotoStepId: "",
+      };
     case "send_whatsapp_media":
-      return { mediaType: "image", mediaUrl: "", caption: "" };
+      return {
+        mediaType: "image",
+        mediaUrl: "",
+        caption: "",
+        failureAction: "stop",
+        failureGotoStepId: "",
+      };
     case "send_whatsapp_interactive":
-      return { body: "", buttons: [], header: "", footer: "", elseGotoStepId: "", saveToVariable: "" };
+      return {
+        body: "",
+        buttons: [],
+        header: "",
+        footer: "",
+        elseGotoStepId: "",
+        saveToVariable: "",
+        failureAction: "stop",
+        failureGotoStepId: "",
+      };
     case "webhook":
       return { url: "", method: "POST" };
     case "delay":
@@ -472,6 +492,7 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
         message: "", buttons: [], saveToVariable: "",
         timeoutMs: 86_400_000, timeoutAction: "continue",
         timeoutGotoStepId: "", elseGotoStepId: "",
+        failureAction: "stop", failureGotoStepId: "",
       };
     case "wait_for_reply":
       return {

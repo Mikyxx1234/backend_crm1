@@ -73,6 +73,7 @@ function outgoingTargets(step: AutomationStep, stepIds: Set<string>): string[] {
   for (const b of buttons) push(b.gotoStepId);
   push(cfg.elseGotoStepId);
   push(cfg.timeoutGotoStepId);
+  if (cfg.failureAction === "goto") push(cfg.failureGotoStepId);
   push(cfg.nextStepId);
 
   return out;

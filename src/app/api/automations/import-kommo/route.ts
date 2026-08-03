@@ -18,6 +18,7 @@ function remapIds(config: Record<string, unknown>, idMap: Map<string, string>): 
     "_nextStepId", "_trueGotoStepId", "_falseGotoStepId",
     "timeoutGotoStepId", "elseGotoStepId", "_answeredGotoStepId",
     "targetStepId", "gotoStepId", "nextStepId", "receivedGotoStepId",
+    "failureGotoStepId",
   ];
 
   for (const field of stringFields) {

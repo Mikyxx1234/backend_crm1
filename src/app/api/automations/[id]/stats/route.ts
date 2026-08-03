@@ -50,13 +50,14 @@ export async function GET(_request: Request, context: RouteContext) {
           steps[sid] = { stepType: row.stepType ?? "", success: 0, failed: 0, skipped: 0 };
         }
         if (row.status === "SUCCESS") steps[sid].success += row._count.id;
-        else if (row.status === "FAILED") steps[sid].failed += row._count.id;
+        else if (row.status === "FAILED" || row.status === "FAILED_HANDLED")
+          steps[sid].failed += row._count.id;
         else if (row.status === "SKIPPED") steps[sid].skipped += row._count.id;
       }
 
-      // Recent errors for quick diagnosis
+      // Recent errors for quick diagnosis (inclui falhas com fallback conectado)
       const recentErrors = await prisma.automationLog.findMany({
-        where: { automationId: id, status: "FAILED" },
+        where: { automationId: id, status: { in: ["FAILED", "FAILED_HANDLED"] } },
         orderBy: { executedAt: "desc" },
         take: 10,
         select: {

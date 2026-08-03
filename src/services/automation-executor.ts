@@ -18,12 +18,14 @@ import {
   metaWhatsApp,
   metaClientFromConfig,
   formatMetaSendError,
+  isMetaGraphError,
   type MetaWhatsAppClient,
 } from "@/lib/meta-whatsapp/client";
 import {
   enrichTemplateComponentsForFlowSend,
   resolveTemplateHeaderMediaFormat,
 } from "@/lib/meta-whatsapp/enrich-template-flow";
+import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import { toAbsolutePublicMediaUrl } from "@/lib/meta-whatsapp/to-absolute-public-media-url";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -51,6 +53,112 @@ import {
 import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 
 const log = getLogger("automation");
+
+/** Passos Meta com saída síncrona "Falha ao enviar" (`failureAction` / `failureGotoStepId`). */
+const META_SEND_FAILURE_STEP_TYPES = new Set([
+  "send_whatsapp_message",
+  "send_whatsapp_template",
+  "send_whatsapp_media",
+  "send_whatsapp_interactive",
+  "question",
+]);
+
+/**
+ * Falha classificada de tentativa de envio Meta.
+ * Somente esta classe entra no fallback `failureGotoStepId`.
+ * Erros internos inesperados continuam como `Error` genérico e abortam.
+ */
+export class MetaSendFailureError extends Error {
+  readonly name = "MetaSendFailureError";
+  override readonly cause?: unknown;
+
+  constructor(message: string, cause?: unknown) {
+    super(message);
+    this.cause = cause;
+  }
+}
+
+function isMetaSendFailureError(err: unknown): err is MetaSendFailureError {
+  return err instanceof MetaSendFailureError;
+}
+
+/** Converte rejeição Graph / enrich / timeout / canal em falha classificada. */
+function toMetaSendFailure(err: unknown): MetaSendFailureError {
+  if (isMetaSendFailureError(err)) return err;
+  return new MetaSendFailureError(formatMetaSendError(err), err);
+}
+
+/**
+ * Classifica erros já lançados como falha de envio (Graph, enrich, timeout,
+ * canal/destino, header/template recusado). Retorna null para erros internos.
+ */
+function classifyMetaSendFailure(err: unknown): MetaSendFailureError | null {
+  if (isMetaSendFailureError(err)) return err;
+  if (isMetaGraphError(err) || isMetaFlowEnrichError(err)) return toMetaSendFailure(err);
+  const msg = err instanceof Error ? err.message : String(err);
+  if (
+    /nenhum canal META_CLOUD_API/i.test(msg) ||
+    /sem destino/i.test(msg) ||
+    /telefone inválido/i.test(msg) ||
+    /Tempo limite ao comunicar com a Meta/i.test(msg) ||
+    /headerMediaUrl inválida/i.test(msg) ||
+    /exige header\b/i.test(msg) ||
+    /arquivo do header não encontrado/i.test(msg) ||
+    /arquivo nao encontrado em storage/i.test(msg) ||
+    /toAbsolutePublicMediaUrl:/i.test(msg) ||
+    /^Meta WhatsApp:/i.test(msg)
+  ) {
+    return toMetaSendFailure(err);
+  }
+  return null;
+}
+
+/** Destino do fallback síncrono; `null` = stop (comportamento legado). */
+function resolveFailureGotoStepId(cfg: Record<string, unknown>): string | null {
+  const action = typeof cfg.failureAction === "string" ? cfg.failureAction : "stop";
+  if (action !== "goto") return null;
+  const id =
+    typeof cfg.failureGotoStepId === "string" ? cfg.failureGotoStepId.trim() : "";
+  if (!id || id === "__none__") return null;
+  return id;
+}
+
+/** Persiste tentativa falha no inbox + marca conversa com erro. */
+async function persistFailedAutomationOutbound(opts: {
+  conversationId: string | undefined | null;
+  content: string;
+  messageType: string;
+  senderName: string;
+  triggeredByName?: string | null;
+  error: unknown;
+  mediaUrl?: string | null;
+}): Promise<void> {
+  if (!opts.conversationId) return;
+  const sendError = formatMetaSendError(opts.error).slice(0, 500);
+  await prisma.message
+    .create({
+      data: withOrgFromCtx({
+        conversationId: opts.conversationId,
+        content: opts.content,
+        direction: "out",
+        messageType: opts.messageType,
+        senderName: opts.senderName,
+        authorType: "bot",
+        ...(opts.triggeredByName ? { triggeredByName: opts.triggeredByName } : {}),
+        sendStatus: "failed",
+        sendError,
+        ...(opts.mediaUrl ? { mediaUrl: opts.mediaUrl } : {}),
+      }),
+    })
+    .catch((e) => log.warn("Falha ao persistir mensagem de erro:", e));
+
+  await prisma.conversation
+    .update({
+      where: { id: opts.conversationId },
+      data: { hasError: true, updatedAt: new Date() },
+    })
+    .catch(() => {});
+}
 
 /**
  * Resolve a conversa WhatsApp de DESTINO para um envio de automação (robô).
@@ -292,7 +400,7 @@ async function resolveTemplateHeaderMediaParam(
         parsedStorage.fileName,
       );
       if (!stored) {
-        throw new Error(
+        throw new MetaSendFailureError(
           `send_whatsapp_template: arquivo do header não encontrado em storage (${trimmed})`,
         );
       }
@@ -303,7 +411,20 @@ async function resolveTemplateHeaderMediaParam(
       const { readFile } = await import("fs/promises");
       const { join, basename } = await import("path");
       const filePath = join(process.cwd(), "public", trimmed);
-      buffer = await readFile(filePath);
+      try {
+        buffer = await readFile(filePath);
+      } catch (fsErr) {
+        const code =
+          fsErr && typeof fsErr === "object" && "code" in fsErr
+            ? String((fsErr as { code: unknown }).code)
+            : "";
+        if (code === "ENOENT") {
+          throw new MetaSendFailureError(
+            `send_whatsapp_template: arquivo do header não encontrado em storage (${trimmed})`,
+          );
+        }
+        throw fsErr;
+      }
       resolvedFileName = basename(trimmed);
       mimeType = mimeFromFilename(resolvedFileName);
     }
@@ -317,7 +438,7 @@ async function resolveTemplateHeaderMediaParam(
     return { link: toAbsolutePublicMediaUrl(trimmed) };
   }
 
-  throw new Error(
+  throw new MetaSendFailureError(
     `send_whatsapp_template: headerMediaUrl inválida para ${mediaType} (use HTTPS público ou upload interno): ${trimmed}`,
   );
 }
@@ -1588,7 +1709,7 @@ async function executeStep(
         throw new Error("send_whatsapp_message: content obrigatório (mensagem vazia)");
       }
       if (!to && !recipient) {
-        throw new Error(
+        throw new MetaSendFailureError(
           `send_whatsapp_message: sem destino — contato não tem telefone nem BSUID. phone="${phoneRaw}" contactPhone="${rt.contact?.phone ?? "(null)"}"`
         );
       }
@@ -1607,7 +1728,7 @@ async function executeStep(
         dealId: rt.dealId ?? null,
       });
       if (!metaClient.configured) {
-        throw new Error(
+        throw new MetaSendFailureError(
           "send_whatsapp_message: nenhum canal META_CLOUD_API configurado para esta organização."
         );
       }
@@ -1667,34 +1788,16 @@ async function executeStep(
 
       if (hardFailure) {
         log.error(`Envio WhatsApp falhou (contato=${rt.contactId ?? "—"}): ${hardFailure.message}`);
-
-        // Registra a tentativa falha no chat pra o operador ver — senão
-        // o erro só fica no AutomationLog e a conversa dá impressão de
-        // que nada foi tentado.
-        if (conversationId) {
-          await prisma.message
-            .create({
-              data: withOrgFromCtx({
-                conversationId,
-                content,
-                direction: "out",
-                messageType: "text",
-                senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
-                sendStatus: "failed",
-                sendError: formatMetaSendError(hardFailure).slice(0, 500),
-              }),
-            })
-            .catch((err) => log.warn("Falha ao persistir mensagem de erro:", err));
-
-          await prisma.conversation
-            .update({
-              where: { id: conversationId },
-              data: { hasError: true, updatedAt: new Date() },
-            })
-            .catch(() => {});
-        }
-
-        throw hardFailure;
+        const classified = toMetaSendFailure(hardFailure);
+        await persistFailedAutomationOutbound({
+          conversationId,
+          content,
+          messageType: "text",
+          senderName: rt.automationName ?? "Automação",
+          triggeredByName: rt.triggeredByName,
+          error: classified,
+        });
+        throw classified;
       }
 
       if (conversationId) {
@@ -1795,82 +1898,106 @@ async function executeStep(
       const templateName = readString(cfg, "templateName");
       const langCode = readString(cfg, "languageCode") ?? "pt_BR";
       log.debug(`Enviando template "${templateName}" (${langCode}) → ${to ?? recipient ?? "—"}`);
-      if ((!to && !recipient) || !templateName) {
-        throw new Error(`send_whatsapp_template: templateName obrigatório; to=${to ?? "—"} bsuid=${recipient ?? "—"} templateName=${templateName ?? "(vazio)"}`);
-      }
-
-      let preTplConversationId: string | undefined;
-      if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId);
-        preTplConversationId = conv?.id;
-      }
-      const tplMetaClient = await resolveAutomationMetaClient({
-        automationId: rt.automationId,
-        conversationId: preTplConversationId,
-        contactId: rt.contactId ?? null,
-        dealId: rt.dealId ?? null,
-      });
-      if (!tplMetaClient.configured) {
+      if (!templateName) {
         throw new Error(
-          "send_whatsapp_template: nenhum canal META_CLOUD_API configurado para esta organização."
+          `send_whatsapp_template: templateName obrigatório; to=${to ?? "—"} bsuid=${recipient ?? "—"} templateName=(vazio)`,
         );
       }
-
-      const rawComponents = Array.isArray(cfg["components"])
-        ? (cfg["components"] as unknown[])
-        : undefined;
-      const flowToken = readString(cfg, "flowToken") ?? null;
-      const fad = cfg["flowActionData"];
-      const flowActionData =
-        fad && typeof fad === "object" && !Array.isArray(fad)
-          ? (fad as Record<string, unknown>)
-          : null;
-      let templateGraphId: string | null = null;
-      try {
-        const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
-          where: { metaTemplateName: templateName },
-          select: { metaTemplateId: true },
-        });
-        templateGraphId = gidRow?.metaTemplateId?.trim() || null;
-      } catch {
-        /* ignore */
+      if (!to && !recipient) {
+        throw new MetaSendFailureError(
+          `send_whatsapp_template: sem destino — to=— bsuid=— templateName=${templateName}`,
+        );
       }
-      const enrichTpl = await enrichTemplateComponentsForFlowSend(tplMetaClient, {
-        templateName,
-        languageCode: langCode,
-        components: rawComponents,
-        flowToken,
-        flowActionData,
-        templateGraphId,
-      });
-
-      const headerMediaUrlCfg = readString(cfg, "headerMediaUrl")?.trim() || null;
-      const headerMediaTypeCfg = readString(cfg, "headerMediaType")?.trim().toLowerCase();
-      const finalTplComponents = await injectTemplateHeaderMediaComponent(tplMetaClient, {
-        templateName,
-        languageCode: langCode,
-        templateGraphId,
-        components: enrichTpl.components,
-        headerMediaUrl: headerMediaUrlCfg,
-        headerMediaType:
-          headerMediaTypeCfg === "image" || headerMediaTypeCfg === "video" || headerMediaTypeCfg === "document"
-            ? headerMediaTypeCfg
-            : null,
-      });
-
-      const tplResult = await tplMetaClient.sendTemplate(
-        to,
-        templateName,
-        langCode,
-        finalTplComponents,
-        recipient,
-      );
-      const tplExternalId = tplResult?.messages?.[0]?.id ?? null;
 
       let tplConversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(rt.contactId);
         tplConversationId = conv?.id;
+      }
+      const tplMetaClient = await resolveAutomationMetaClient({
+        automationId: rt.automationId,
+        conversationId: tplConversationId,
+        contactId: rt.contactId ?? null,
+        dealId: rt.dealId ?? null,
+      });
+      if (!tplMetaClient.configured) {
+        throw new MetaSendFailureError(
+          "send_whatsapp_template: nenhum canal META_CLOUD_API configurado para esta organização."
+        );
+      }
+
+      const tplContentFallback = `[Template: ${templateName}]`;
+      let enrichFlowToken: string | null = null;
+      let tplExternalId: string | null = null;
+
+      try {
+        const rawComponents = Array.isArray(cfg["components"])
+          ? (cfg["components"] as unknown[])
+          : undefined;
+        const flowToken = readString(cfg, "flowToken") ?? null;
+        const fad = cfg["flowActionData"];
+        const flowActionData =
+          fad && typeof fad === "object" && !Array.isArray(fad)
+            ? (fad as Record<string, unknown>)
+            : null;
+        let templateGraphId: string | null = null;
+        try {
+          const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
+            where: { metaTemplateName: templateName },
+            select: { metaTemplateId: true },
+          });
+          templateGraphId = gidRow?.metaTemplateId?.trim() || null;
+        } catch {
+          /* ignore */
+        }
+        const enrichTpl = await enrichTemplateComponentsForFlowSend(tplMetaClient, {
+          templateName,
+          languageCode: langCode,
+          components: rawComponents,
+          flowToken,
+          flowActionData,
+          templateGraphId,
+        });
+        enrichFlowToken =
+          typeof enrichTpl.flowToken === "string" && enrichTpl.flowToken.trim()
+            ? enrichTpl.flowToken.trim()
+            : null;
+
+        const headerMediaUrlCfg = readString(cfg, "headerMediaUrl")?.trim() || null;
+        const headerMediaTypeCfg = readString(cfg, "headerMediaType")?.trim().toLowerCase();
+        const finalTplComponents = await injectTemplateHeaderMediaComponent(tplMetaClient, {
+          templateName,
+          languageCode: langCode,
+          templateGraphId,
+          components: enrichTpl.components,
+          headerMediaUrl: headerMediaUrlCfg,
+          headerMediaType:
+            headerMediaTypeCfg === "image" || headerMediaTypeCfg === "video" || headerMediaTypeCfg === "document"
+              ? headerMediaTypeCfg
+              : null,
+        });
+
+        const tplResult = await tplMetaClient.sendTemplate(
+          to,
+          templateName,
+          langCode,
+          finalTplComponents,
+          recipient,
+        );
+        tplExternalId = tplResult?.messages?.[0]?.id ?? null;
+      } catch (sendErr) {
+        const classified = classifyMetaSendFailure(sendErr);
+        if (!classified) throw sendErr;
+        log.error(`Envio template falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`);
+        await persistFailedAutomationOutbound({
+          conversationId: tplConversationId,
+          content: tplContentFallback,
+          messageType: "template",
+          senderName: rt.automationName ?? "Automação",
+          triggeredByName: rt.triggeredByName,
+          error: classified,
+        });
+        throw classified;
       }
 
       if (tplConversationId) {
@@ -1889,7 +2016,7 @@ async function executeStep(
         } catch {}
         const tplContent = tplBodyPreview
           ? `📋 *${templateName}*\n\n${tplBodyPreview}`
-          : `[Template: ${templateName}]`;
+          : tplContentFallback;
 
         const saved = await prisma.message.create({
           data: withOrgFromCtx({
@@ -1899,9 +2026,7 @@ async function executeStep(
             messageType: "template",
             senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId: tplExternalId,
-            ...(typeof enrichTpl.flowToken === "string" && enrichTpl.flowToken.trim()
-              ? { flowToken: enrichTpl.flowToken.trim() }
-              : {}),
+            ...(enrichFlowToken ? { flowToken: enrichFlowToken } : {}),
             ...(tplConfigId ? { templateConfigId: tplConfigId } : {}),
           }),
         });
@@ -1954,7 +2079,9 @@ async function executeStep(
       const digits = phoneRaw.replace(/\D/g, "");
       const to = digits.length >= 8 ? digits : undefined;
       const recipient = readString(cfg, "recipient")?.trim() || rt.contact?.whatsappBsuid?.trim() || undefined;
-      if (!to && !recipient) throw new Error("send_whatsapp_media: sem destino");
+      if (!to && !recipient) {
+        throw new MetaSendFailureError("send_whatsapp_media: sem destino");
+      }
 
       const mediaType = readString(cfg, "mediaType") ?? "image";
       const mediaUrl = readString(cfg, "mediaUrl");
@@ -1962,19 +2089,19 @@ async function executeStep(
       const caption = readString(cfg, "caption") ?? "";
       const filename = readString(cfg, "filename") ?? "";
 
-      let preMediaConversationId: string | undefined;
+      let mediaConversationId: string | undefined;
       if (rt.contactId) {
         const conv = await resolveAutomationSendConv(rt.contactId);
-        preMediaConversationId = conv?.id;
+        mediaConversationId = conv?.id;
       }
       const mediaMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
-        conversationId: preMediaConversationId,
+        conversationId: mediaConversationId,
         contactId: rt.contactId ?? null,
         dealId: rt.dealId ?? null,
       });
       if (!mediaMetaClient.configured) {
-        throw new Error(
+        throw new MetaSendFailureError(
           "send_whatsapp_media: nenhum canal META_CLOUD_API configurado para esta organização."
         );
       }
@@ -1982,102 +2109,132 @@ async function executeStep(
       let sendResult: { messages: Array<{ id: string }> };
       let displayContent: string;
 
-      // PR 1.3: aceita tanto URLs novas (`/api/storage/...` tenant-scoped)
-      // quanto legacy (`/uploads/...`). Se conseguirmos resolver localmente,
-      // fazemos upload pra Meta via media id (evita expor URL pública).
-      const { parseStoragePath, readStoredFile, mimeFromFilename } = await import(
-        "@/lib/storage/local"
-      );
-      const parsedStorage = parseStoragePath(mediaUrl);
-      const isLegacyLocal = !parsedStorage && mediaUrl.startsWith("/uploads/");
-      const isLocalFile = Boolean(parsedStorage) || isLegacyLocal;
-
-      if (isLocalFile) {
-        let buffer: Buffer | null = null;
-        let resolvedFileName: string;
-        let mimeType: string;
-
-        if (parsedStorage) {
-          const stored = await readStoredFile(
-            parsedStorage.orgId,
-            parsedStorage.bucket,
-            parsedStorage.fileName,
-          );
-          if (!stored) {
-            throw new Error(`send_whatsapp_media: arquivo nao encontrado em storage (${mediaUrl})`);
-          }
-          buffer = stored.buffer;
-          mimeType = stored.mimeType;
-          resolvedFileName = parsedStorage.fileName;
-        } else {
-          const { readFile } = await import("fs/promises");
-          const { join, basename } = await import("path");
-          const filePath = join(process.cwd(), "public", mediaUrl);
-          buffer = await readFile(filePath);
-          resolvedFileName = basename(mediaUrl);
-          mimeType = mimeFromFilename(resolvedFileName);
-        }
-
-        const fName = filename || resolvedFileName;
-        const metaMediaId = await mediaMetaClient.uploadMedia(buffer, mimeType, fName);
-        const mType = mediaType as "image" | "audio" | "video" | "document";
-        // filename só para document — image/video/audio a Meta rejeita (#100).
-        const sendFileName = mType === "document" ? fName : undefined;
-        sendResult = await mediaMetaClient.sendMediaById(
-          to,
-          metaMediaId,
-          mType,
-          caption || undefined,
-          sendFileName,
-          false,
-          recipient,
+      try {
+        // PR 1.3: aceita tanto URLs novas (`/api/storage/...` tenant-scoped)
+        // quanto legacy (`/uploads/...`). Se conseguirmos resolver localmente,
+        // fazemos upload pra Meta via media id (evita expor URL pública).
+        const { parseStoragePath, readStoredFile, mimeFromFilename } = await import(
+          "@/lib/storage/local"
         );
-        displayContent = caption || fName || `[${mediaType}]`;
-      } else {
-        switch (mediaType) {
-          case "video":
-            sendResult = await mediaMetaClient.sendVideo(to, mediaUrl, caption || undefined, recipient);
-            displayContent = caption || "[Vídeo]";
-            break;
-          case "audio":
-            sendResult = await mediaMetaClient.sendAudio(to, mediaUrl, recipient);
-            displayContent = "[Áudio]";
-            break;
-          case "document":
-            sendResult = await mediaMetaClient.sendDocument(to, mediaUrl, filename || "documento", caption || undefined, recipient);
-            displayContent = caption || filename || "[Documento]";
-            break;
-          default:
-            sendResult = await mediaMetaClient.sendImage(to, mediaUrl, caption || undefined, recipient);
-            displayContent = caption || "[Imagem]";
-            break;
+        const parsedStorage = parseStoragePath(mediaUrl);
+        const isLegacyLocal = !parsedStorage && mediaUrl.startsWith("/uploads/");
+        const isLocalFile = Boolean(parsedStorage) || isLegacyLocal;
+
+        if (isLocalFile) {
+          let buffer: Buffer | null = null;
+          let resolvedFileName: string;
+          let mimeType: string;
+
+          if (parsedStorage) {
+            const stored = await readStoredFile(
+              parsedStorage.orgId,
+              parsedStorage.bucket,
+              parsedStorage.fileName,
+            );
+            if (!stored) {
+              throw new MetaSendFailureError(
+                `send_whatsapp_media: arquivo nao encontrado em storage (${mediaUrl})`,
+              );
+            }
+            buffer = stored.buffer;
+            mimeType = stored.mimeType;
+            resolvedFileName = parsedStorage.fileName;
+          } else {
+            const { readFile } = await import("fs/promises");
+            const { join, basename } = await import("path");
+            const filePath = join(process.cwd(), "public", mediaUrl);
+            try {
+              buffer = await readFile(filePath);
+            } catch (fsErr) {
+              const code =
+                fsErr && typeof fsErr === "object" && "code" in fsErr
+                  ? String((fsErr as { code: unknown }).code)
+                  : "";
+              // Arquivo configurado inexistente = impossibilidade de envio.
+              // Demais erros de FS (permissão, I/O) seguem genéricos.
+              if (code === "ENOENT") {
+                throw new MetaSendFailureError(
+                  `send_whatsapp_media: arquivo nao encontrado em storage (${mediaUrl})`,
+                );
+              }
+              throw fsErr;
+            }
+            resolvedFileName = basename(mediaUrl);
+            mimeType = mimeFromFilename(resolvedFileName);
+          }
+
+          const fName = filename || resolvedFileName;
+          const metaMediaId = await mediaMetaClient.uploadMedia(buffer, mimeType, fName);
+          const mType = mediaType as "image" | "audio" | "video" | "document";
+          // filename só para document — image/video/audio a Meta rejeita (#100).
+          const sendFileName = mType === "document" ? fName : undefined;
+          sendResult = await mediaMetaClient.sendMediaById(
+            to,
+            metaMediaId,
+            mType,
+            caption || undefined,
+            sendFileName,
+            false,
+            recipient,
+          );
+          displayContent = caption || fName || `[${mediaType}]`;
+        } else {
+          switch (mediaType) {
+            case "video":
+              sendResult = await mediaMetaClient.sendVideo(to, mediaUrl, caption || undefined, recipient);
+              displayContent = caption || "[Vídeo]";
+              break;
+            case "audio":
+              sendResult = await mediaMetaClient.sendAudio(to, mediaUrl, recipient);
+              displayContent = "[Áudio]";
+              break;
+            case "document":
+              sendResult = await mediaMetaClient.sendDocument(to, mediaUrl, filename || "documento", caption || undefined, recipient);
+              displayContent = caption || filename || "[Documento]";
+              break;
+            default:
+              sendResult = await mediaMetaClient.sendImage(to, mediaUrl, caption || undefined, recipient);
+              displayContent = caption || "[Imagem]";
+              break;
+          }
         }
+      } catch (sendErr) {
+        const classified = classifyMetaSendFailure(sendErr);
+        if (!classified) throw sendErr;
+        log.error(`Envio mídia falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`);
+        await persistFailedAutomationOutbound({
+          conversationId: mediaConversationId,
+          content: caption || filename || `[${mediaType}]`,
+          messageType: mediaType,
+          senderName: rt.automationName ?? "Automação",
+          triggeredByName: rt.triggeredByName,
+          error: classified,
+          mediaUrl,
+        });
+        throw classified;
       }
 
       const mediaExternalId = sendResult.messages?.[0]?.id ?? null;
 
-      if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId);
-        if (conv) {
-          await prisma.message.create({
-            data: withOrgFromCtx({
-              conversationId: conv.id,
-              content: displayContent,
-              direction: "out",
-              messageType: mediaType,
-              senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
-              externalId: mediaExternalId,
-              mediaUrl,
-            }),
-          });
-          sseBus.publish("new_message", {
-            organizationId: getOrgIdOrNull(),
-            conversationId: conv.id,
-            contactId: rt.contactId,
-            direction: "out",
+      if (mediaConversationId) {
+        await prisma.message.create({
+          data: withOrgFromCtx({
+            conversationId: mediaConversationId,
             content: displayContent,
-          });
-        }
+            direction: "out",
+            messageType: mediaType,
+            senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
+            externalId: mediaExternalId,
+            mediaUrl,
+          }),
+        });
+        sseBus.publish("new_message", {
+          organizationId: getOrgIdOrNull(),
+          conversationId: mediaConversationId,
+          contactId: rt.contactId,
+          direction: "out",
+          content: displayContent,
+        });
       }
 
       return {};
@@ -2088,7 +2245,9 @@ async function executeStep(
       const digits = phoneRaw.replace(/\D/g, "");
       const to = digits.length >= 8 ? digits : undefined;
       const recipient = readString(cfg, "recipient")?.trim() || rt.contact?.whatsappBsuid?.trim() || undefined;
-      if (!to && !recipient) throw new Error("send_whatsapp_interactive: sem destino");
+      if (!to && !recipient) {
+        throw new MetaSendFailureError("send_whatsapp_interactive: sem destino");
+      }
 
       const interactiveVars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
       const bodyRaw = readString(cfg, "body");
@@ -2123,7 +2282,7 @@ async function executeStep(
         dealId: rt.dealId ?? null,
       });
       if (!interactiveMetaClient.configured) {
-        throw new Error(
+        throw new MetaSendFailureError(
           "send_whatsapp_interactive: nenhum canal META_CLOUD_API configurado para esta organização."
         );
       }
@@ -2133,27 +2292,17 @@ async function executeStep(
         const sendResult = await interactiveMetaClient.sendInteractiveButtons(to, body, buttons, header, footer, recipient);
         externalId = sendResult.messages?.[0]?.id ?? null;
       } catch (sendErr) {
-        const errMsg = formatMetaSendError(sendErr);
-        log.error(`Envio WhatsApp interativo falhou (contato=${rt.contactId ?? "—"}): ${errMsg}`);
-        if (conversationId) {
-          await prisma.message
-            .create({
-              data: withOrgFromCtx({
-                conversationId,
-                content: displayContent,
-                direction: "out",
-                messageType: "interactive",
-                senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
-                sendStatus: "failed",
-                sendError: errMsg.slice(0, 500),
-              }),
-            })
-            .catch((err) => log.warn("Falha ao persistir mensagem interativa de erro:", err));
-          await prisma.conversation
-            .update({ where: { id: conversationId }, data: { hasError: true } })
-            .catch(() => {});
-        }
-        throw sendErr instanceof Error ? sendErr : new Error(errMsg);
+        const classified = classifyMetaSendFailure(sendErr) ?? toMetaSendFailure(sendErr);
+        log.error(`Envio WhatsApp interativo falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`);
+        await persistFailedAutomationOutbound({
+          conversationId,
+          content: displayContent,
+          messageType: "interactive",
+          senderName: rt.automationName ?? "Automação",
+          triggeredByName: rt.triggeredByName,
+          error: classified,
+        });
+        throw classified;
       }
 
       if (conversationId) {
@@ -2509,30 +2658,49 @@ async function executeStep(
         const digits = phoneRaw.replace(/\D/g, "");
         const to = digits.length >= 8 ? digits : undefined;
         const recipient = rt.contact?.whatsappBsuid?.trim() || undefined;
-        if (to || recipient) {
-          const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
-          const interpolated = interpolateContextVariables(content, rt, vars);
+        if (!to && !recipient) {
+          throw new MetaSendFailureError(
+            `question: sem destino — contato não tem telefone nem BSUID`,
+          );
+        }
+        const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
+        const interpolated = interpolateContextVariables(content, rt, vars);
 
-          const conv = await resolveAutomationSendConv(rt.contactId);
-          const questionMetaClient = await resolveAutomationMetaClient({
-            automationId: rt.automationId,
-            conversationId: conv?.id,
-            contactId: rt.contactId ?? null,
-            dealId: rt.dealId ?? null,
-          });
-          if (!questionMetaClient.configured) {
-            throw new Error(
-              "question: nenhum canal META_CLOUD_API configurado para esta organização."
-            );
-          }
+        const conv = await resolveAutomationSendConv(rt.contactId);
+        const questionMetaClient = await resolveAutomationMetaClient({
+          automationId: rt.automationId,
+          conversationId: conv?.id,
+          contactId: rt.contactId ?? null,
+          dealId: rt.dealId ?? null,
+        });
+        if (!questionMetaClient.configured) {
+          throw new MetaSendFailureError(
+            "question: nenhum canal META_CLOUD_API configurado para esta organização."
+          );
+        }
+        let externalId: string | null = null;
+        try {
           const sendResult = await questionMetaClient.sendText(to, interpolated, recipient);
-          const externalId = sendResult.messages?.[0]?.id ?? null;
-          if (conv) {
-            await prisma.message.create({
-              data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId }),
-            });
-            sseBus.publish("new_message", { organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
-          }
+          externalId = sendResult.messages?.[0]?.id ?? null;
+        } catch (sendErr) {
+          // Catch restrito à chamada Meta — erros de DB/SSE não viram fallback.
+          const classified = toMetaSendFailure(sendErr);
+          log.error(`Envio question falhou (contato=${rt.contactId}): ${classified.message}`);
+          await persistFailedAutomationOutbound({
+            conversationId: conv?.id,
+            content: interpolated,
+            messageType: "text",
+            senderName: rt.automationName ?? "Automação",
+            triggeredByName: rt.triggeredByName,
+            error: classified,
+          });
+          throw classified;
+        }
+        if (conv) {
+          await prisma.message.create({
+            data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId }),
+          });
+          sseBus.publish("new_message", { organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
         }
       }
       const questionStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
@@ -3208,9 +3376,28 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       });
       if (result.skipRemaining && !result.gotoStepId) break;
     } catch (err) {
-      stepsFailed++;
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`[${traceId}] Falha no step "${step.type}":`, msg);
+
+      const sendFail =
+        META_SEND_FAILURE_STEP_TYPES.has(step.type) ? classifyMetaSendFailure(err) : null;
+      const failureGoto = sendFail ? resolveFailureGotoStepId(stepConfig) : null;
+      if (sendFail && failureGoto && stepById.has(failureGoto)) {
+        await logStep({
+          automationId,
+          contactId: rt.contactId,
+          dealId: rt.dealId,
+          stepId: step.id,
+          stepType: step.type,
+          status: "FAILED_HANDLED",
+          message: `${stepLabel} — falha de envio (fallback): ${msg}`,
+          payload: cleanConfig,
+        });
+        current = stepById.get(failureGoto);
+        continue;
+      }
+
+      stepsFailed++;
       await logStep({
         automationId,
         contactId: rt.contactId,
@@ -3512,6 +3699,23 @@ export async function continueFromStep(
       if (result.skipRemaining && !result.gotoStepId) break;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      const baseCfgForFail = step.config as Record<string, unknown>;
+      const sendFail =
+        META_SEND_FAILURE_STEP_TYPES.has(step.type) ? classifyMetaSendFailure(err) : null;
+      const failureGoto = sendFail ? resolveFailureGotoStepId(baseCfgForFail) : null;
+      if (sendFail && failureGoto && stepById.has(failureGoto)) {
+        await logStep({
+          automationId,
+          contactId,
+          dealId: deal?.id,
+          stepId: step.id,
+          stepType: step.type,
+          status: "FAILED_HANDLED",
+          message: `${stepLabel} — falha de envio (fallback): ${msg}`,
+        });
+        current = stepById.get(failureGoto);
+        continue;
+      }
       await logStep({
         automationId,
         contactId,

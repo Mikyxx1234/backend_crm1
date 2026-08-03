@@ -68,6 +68,7 @@ export type CopilotPatchOp =
         | "received"
         | "timeout"
         | "else"
+        | "failure"
         | `branch:${string}`
         | `button:${number}`;
     }
@@ -91,6 +92,7 @@ export type CopilotPatchOp =
         | "received"
         | "timeout"
         | "else"
+        | "failure"
         | `branch:${string}`
         | `button:${number}`;
     };
@@ -130,7 +132,8 @@ Handles de conexão por tipo de step:
   • linear (send_*, webhook, delay, set_variable, assign_owner, etc.): handle "next"
   • condition: handle "branch:<branchId>" (um por branch) e "else"
   • wait_for_reply: handles "received" e "timeout"
-  • question / send_whatsapp_interactive: "button:<index>" (para cada botão), "else", "timeout", e "next" (após envio linear)
+  • question / send_whatsapp_interactive: "button:<index>" (para cada botão), "else", "timeout", "next" (após envio linear) e "failure"
+  • send_whatsapp_message / send_whatsapp_template / send_whatsapp_media: "next" e "failure" (rejeição síncrona Meta)
   • business_hours: "next" (dentro do horário) e "else" (fora do horário)
 
 Campos disponíveis em conditions (lado esquerdo das rules — use sempre um destes):

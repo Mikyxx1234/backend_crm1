@@ -75,6 +75,7 @@ const STEP_ID_REF_KEYS = new Set([
   "elseGotoStepId",
   "timeoutGotoStepId",
   "receivedGotoStepId",
+  "failureGotoStepId",
   "targetStepId",
   "gotoStepId",
   "elseStepId",

@@ -108,6 +108,7 @@ function strOrEmpty(v: unknown): string {
  *  - business_hours.elseStepId (fora do horário)
  *  - wait_for_reply.receivedGotoStepId + timeoutGotoStepId
  *  - question/send_whatsapp_interactive.buttons[].gotoStepId + elseGotoStepId + timeoutGotoStepId
+ *  - failureGotoStepId (saída "Falha ao enviar" dos passos Meta)
  *  - goto.targetStepId
  *  - transfer_automation.targetAutomationId (cross — retornado como cross-ref)
  *
@@ -117,6 +118,14 @@ export type StepOutgoing = {
   local: Array<{ label: string; targetStepId: string }>;
   crossAutomation: Array<{ label: string; targetAutomationId: string }>;
 };
+
+const META_SEND_FAILURE_TYPES = new Set([
+  "send_whatsapp_message",
+  "send_whatsapp_template",
+  "send_whatsapp_media",
+  "send_whatsapp_interactive",
+  "question",
+]);
 
 export function getStepOutgoing(step: StepLike): StepOutgoing {
   const c = asRecord(step.config);
@@ -172,6 +181,10 @@ export function getStepOutgoing(step: StepLike): StepOutgoing {
       push("linear", c.nextStepId);
       break;
     }
+  }
+
+  if (META_SEND_FAILURE_TYPES.has(step.type) && c.failureAction === "goto") {
+    push("falha ao enviar", c.failureGotoStepId);
   }
 
   return { local, crossAutomation: cross };

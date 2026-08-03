@@ -5,6 +5,90 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-03 — Fallback síncrono de falha nos envios Meta
+
+**Modelos usados.** GPT-5.6 Sol (decisão principal) e Opus 4.7 isolado
+(avaliação arquitetural).
+
+**Decisão.** Passos que enviam conteúdo pela Meta passam a aceitar
+`failureAction: "stop" | "goto"` e `failureGotoStepId`. Rejeições detectadas
+durante a própria chamada de envio podem seguir a saída visual
+**"Falha ao enviar"**; sem saída conectada, o comportamento anterior é
+preservado e o fluxo para. O log do desvio é `FAILED_HANDLED`, separado de
+sucesso e de falha não tratada.
+
+Somente erros classificados como falha de envio entram no desvio (Graph API,
+timeout da chamada, canal/destino indisponível e mídia/template recusado).
+Erros internos inesperados, inclusive persistência depois de um envio aceito,
+continuam abortando. Tentativas recusadas são persistidas no inbox com
+`sendStatus = "failed"`, `sendError` e `conversation.hasError = true`.
+
+**Alternativas descartadas.**
+
+- Verificar `conversation.hasError` num node `condition`: há corrida com status
+  assíncrono e o fallback fica separado do envio que falhou.
+- Tratar já nesta entrega o webhook `status=failed`: a Meta pode aceitar o
+  envio e rejeitá-lo depois que o contexto avançou; retomar com segurança exige
+  correlação persistente Message/contexto/step e política de concorrência.
+- Converter qualquer exceção do step em saída de falha: esconderia bugs de
+  banco e implementação como se fossem restrições da Meta.
+
+**Escopo futuro.** Falhas assíncronas do webhook e do stale-outbound sweeper
+não retomam o fluxo nesta fase.
+
+---
+
+### 2026-07-30 — Produção rodava build anterior a 28/07; deploy da `main` é a correção [DECISÃO — agente OPUS]
+
+**Decisão.** Não alterar configuração da automação "Aguardando Resposta"
+(`cmrxn191x0uz7o101espk5e99`) para contornar as falhas do passo `assign_owner`.
+A correção é **rebuild da `main` no EasyPanel**. O passo está configurado com
+`{"target":"both","userId":""}` — limpar responsável de negócio e contato —, o
+builder apresenta isso como operação válida ("Limpar responsável") e o executor
+na `main` já trata `userId` vazio como `ownerId = null` desde `cc30581`
+(28/07 13:07, "assign_owner both/clear").
+
+**Contexto.** Produção devolvia `assign_owner: userId obrigatório` — 107 falhas
+entre 15:45 e 17:27 de 30/07. Essa string **não existe mais no repositório**;
+foi removida justamente em `cc30581`. Logo, o build em produção é anterior a
+28/07 13:07. Como `finish_conversation` roda **antes** do `assign_owner` no
+grafo do fluxo, as conversas eram encerradas normalmente; o que se perdia era a
+limpeza do responsável e todo o ramo `condition → move_stage` seguinte, além de
+deixar o contexto em `RUNNING`.
+
+**Retratação de diagnóstico anterior.** A parada do gatilho `message_sent`
+havia sido atribuída ao guard de `attendance-guards` (`7a58334`, 30/07 10:59).
+`cc30581` é ancestral de `7a58334`: qualquer build com o guard teria também o
+clear do `assign_owner`. Como produção não tem o segundo, não tem o primeiro —
+o guard **não** causou a interrupção. O ajuste feito em `6e6b160` (guard não
+suprime `message_sent`) continua válido como prevenção, mas não era a causa.
+
+**Alternativas descartadas:**
+
+- **Preencher um `userId` real no passo.** Para o sangramento imediato, mas
+  contraria a intenção declarada do fluxo (limpar o responsável para o negócio
+  voltar à distribuição).
+- **Remover o nó `assign_owner` do fluxo.** Mesma objeção, e exigiria religar
+  `finish_conversation → condition` à mão, com risco de errar as arestas.
+- **Fechar as 41 conversas abertas de contatos com `assign_owner` FAILED.**
+  Verificado que `finish_conversation` precede `assign_owner` no grafo — essas
+  conversas foram encerradas e reabriram por mensagem nova do aluno.
+  Encerrá-las de novo destruiria atendimento legítimo.
+
+**Impacto / pendências.**
+
+- `prisma/migrations` conferido contra `_prisma_migrations` do `db_crm`:
+  **0 migrations pendentes** (146 no repo, 148 aplicadas — o delta é o drift
+  histórico já documentado). Rebuild é seguro mantendo `SKIP_PRISMA_MIGRATE=1`.
+- Limpeza aplicada em 30/07: 186 contextos órfãos → `COMPLETED`
+  (91 "Aguardando Resposta" parados em `send_whatsapp_message`, 95
+  "Encerramento" parados em `condition`), via
+  `scripts/cleanup-stranded-contexts.mjs --apply`.
+- O acúmulo de órfãos volta a cada falha de passo enquanto `closeStrandedContext`
+  (`26c39dd`) não estiver em produção. O deploy encerra isso.
+
+---
+
 ### 2026-07-30 — `getQueueCounts` conta apenas "Entrada + Aguardando" (vez do agente)
 
 **Decisão.** A fila (`getQueueCounts` em `src/services/distribution/queue.ts`),
