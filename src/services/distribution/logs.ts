@@ -368,6 +368,10 @@ export async function getDistributionDepartmentStats(): Promise<{
   const deptName = new Map(departments.map((d) => [d.id, d.name]));
   const resolved = await resolveDepartmentsForLogs(successLogs, orgId);
 
+  /** Só conta IDs que existem nesta org — evita card fantasma "Departamento". */
+  const inOrg = (departmentId: string | null): string | null =>
+    departmentId && deptName.has(departmentId) ? departmentId : null;
+
   type Acc = {
     departmentId: string | null;
     distributed: number;
@@ -392,11 +396,11 @@ export async function getDistributionDepartmentStats(): Promise<{
   };
 
   for (const g of pendingGroups) {
-    ensure(g.departmentId).pending = g._count._all;
+    ensure(inOrg(g.departmentId)).pending += g._count._all;
   }
 
   for (const log of successLogs) {
-    const deptId = resolved.get(log.id)?.departmentId ?? null;
+    const deptId = inOrg(resolved.get(log.id)?.departmentId ?? null);
     const row = ensure(deptId);
     row.distributed += 1;
     if (log.triggerSource.includes("AI_AGENT")) {
@@ -412,7 +416,7 @@ export async function getDistributionDepartmentStats(): Promise<{
     .map((row) => ({
       departmentId: row.departmentId,
       departmentName: row.departmentId
-        ? deptName.get(row.departmentId) ?? "Departamento"
+        ? deptName.get(row.departmentId) ?? "Sem departamento"
         : "Sem departamento",
       distributed: row.distributed,
       distributedByAi: row.distributedByAi,
