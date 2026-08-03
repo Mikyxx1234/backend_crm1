@@ -161,6 +161,67 @@ async function persistFailedAutomationOutbound(opts: {
 }
 
 /**
+ * Janela máxima de espera pelo veredito de entrega da Meta, e intervalo de
+ * consulta. Configuráveis por env para ajuste em produção sem redeploy de
+ * código (`AUTOMATION_META_DELIVERY_WAIT_MS`).
+ */
+const META_DELIVERY_WAIT_MS = Math.max(
+  0,
+  Number(process.env.AUTOMATION_META_DELIVERY_WAIT_MS ?? 15_000),
+);
+const META_DELIVERY_POLL_MS = 700;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * A Meta pode aceitar o envio (devolve wamid) e só depois reportar falha pelo
+ * webhook — cód. 131042 (conta sem método de pagamento), número bloqueado,
+ * etc. Sem esperar esse veredito, o passo retornaria sucesso e o fluxo seguiria
+ * pelo ramo "Enviado" mesmo com a mensagem não entregue.
+ *
+ * Roda apenas quando o nó tem a saída "Falha ao enviar" conectada: quem não
+ * configurou o desvio não paga a espera. Encerra no primeiro status terminal;
+ * a janela é só o teto para quando nenhum status chega.
+ *
+ * Lança `MetaSendFailureError` no veredito `failed` — o `catch` do loop de
+ * execução cuida do desvio. NÃO persiste mensagem de erro: o webhook já gravou
+ * `sendError` na mensagem original e marcou a conversa com `hasError`.
+ */
+async function awaitMetaDeliveryVerdict(
+  messageId: string,
+  label: string,
+): Promise<void> {
+  if (META_DELIVERY_WAIT_MS <= 0) return;
+  const deadline = Date.now() + META_DELIVERY_WAIT_MS;
+  while (Date.now() < deadline) {
+    await sleep(META_DELIVERY_POLL_MS);
+    const row = await prisma.message
+      .findUnique({
+        where: { id: messageId },
+        select: { sendStatus: true, sendError: true },
+      })
+      .catch(() => null);
+    if (!row) return;
+    const status = (row.sendStatus ?? "").toLowerCase();
+    if (status === "failed") {
+      throw new MetaSendFailureError(
+        row.sendError?.trim() || "Falha no envio reportada pela Meta",
+      );
+    }
+    // `sent` NÃO encerra a espera: é o default do schema, gravado na criação
+    // da mensagem, e o webhook nem chega a reescrevê-lo (mesma prioridade).
+    // Sair nele faria a espera terminar sempre no primeiro poll. Confirmação
+    // real de entrega é `delivered`/`read`.
+    if (status === "delivered" || status === "read") return;
+  }
+  log.info(
+    `${label}: sem confirmação da Meta em ${META_DELIVERY_WAIT_MS}ms — seguindo pelo caminho de sucesso`,
+  );
+}
+
+/**
  * Resolve a conversa WhatsApp de DESTINO para um envio de automação (robô).
  *
  * Modelo de ticket (decisão do operador 17/jul/26): quando o robô envia uma
@@ -1843,6 +1904,10 @@ async function executeStep(
           content: sentContent,
           timestamp: saved.createdAt,
         });
+
+        if (resolveFailureGotoStepId(cfg)) {
+          await awaitMetaDeliveryVerdict(saved.id, "send_whatsapp_message");
+        }
       }
 
       return {};
@@ -1944,6 +2009,7 @@ async function executeStep(
       const tplContentFallback = `[Template: ${templateName}]`;
       let enrichFlowToken: string | null = null;
       let tplExternalId: string | null = null;
+      let tplSavedMessageId: string | null = null;
 
       try {
         const rawComponents = Array.isArray(cfg["components"])
@@ -2059,6 +2125,11 @@ async function executeStep(
           content: tplContent,
           timestamp: saved.createdAt,
         });
+        tplSavedMessageId = saved.id;
+      }
+
+      if (tplSavedMessageId && resolveFailureGotoStepId(cfg)) {
+        await awaitMetaDeliveryVerdict(tplSavedMessageId, "send_whatsapp_template");
       }
 
       // Roteamento por botão (quick-reply do template): se o nó tem botões
@@ -2232,7 +2303,7 @@ async function executeStep(
       const mediaExternalId = sendResult.messages?.[0]?.id ?? null;
 
       if (mediaConversationId) {
-        await prisma.message.create({
+        const saved = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: mediaConversationId,
             content: displayContent,
@@ -2250,6 +2321,10 @@ async function executeStep(
           direction: "out",
           content: displayContent,
         });
+
+        if (resolveFailureGotoStepId(cfg)) {
+          await awaitMetaDeliveryVerdict(saved.id, "send_whatsapp_media");
+        }
       }
 
       return {};
@@ -2321,7 +2396,7 @@ async function executeStep(
       }
 
       if (conversationId) {
-        await prisma.message.create({
+        const saved = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId,
             content: displayContent,
@@ -2339,6 +2414,10 @@ async function executeStep(
           direction: "out",
           content: displayContent,
         });
+
+        if (resolveFailureGotoStepId(cfg)) {
+          await awaitMetaDeliveryVerdict(saved.id, "send_whatsapp_interactive");
+        }
       }
 
       const stepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
@@ -2712,10 +2791,14 @@ async function executeStep(
           throw classified;
         }
         if (conv) {
-          await prisma.message.create({
+          const saved = await prisma.message.create({
             data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId }),
           });
           sseBus.publish("new_message", { organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
+
+          if (resolveFailureGotoStepId(cfg)) {
+            await awaitMetaDeliveryVerdict(saved.id, "question");
+          }
         }
       }
       const questionStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;

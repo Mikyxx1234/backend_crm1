@@ -5,6 +5,47 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-03 — Espera do veredito da Meta antes de escolher o ramo do envio [DECISÃO — agente OPUS]
+
+**Modelo usado.** GPT-5.6 Sol (orquestrador); implementação pelo Executor
+(Cursor Grok 4.5).
+
+**Problema.** A saída "Falha ao enviar" só reagia a rejeição **síncrona** da
+Graph API. Metade dos erros é assíncrona: a Meta aceita, devolve wamid, e o
+webhook reporta `failed` depois (cód. 131042, número bloqueado). Evidência em
+DEV: mensagem gravada às 18:53:26.879 com `externalId`, log
+`Template WhatsApp — OK` 12 ms depois e fluxo concluído pelo ramo de sucesso;
+`sendStatus: failed` só quando o webhook chegou.
+
+**Decisão.** Após persistir a mensagem, os cinco passos de envio Meta chamam
+`awaitMetaDeliveryVerdict`, que consulta `messages.sendStatus` até
+`AUTOMATION_META_DELIVERY_WAIT_MS` (padrão 15 s). Veredito `failed` lança
+`MetaSendFailureError` e o `catch` que já existia leva ao
+`failureGotoStepId`. A espera só roda quando `resolveFailureGotoStepId(cfg)`
+retorna id — quem não conectou a saída não paga latência. Em template,
+interactive e question a espera vem **antes** da pausa do fluxo: não faz
+sentido aguardar clique num botão que não chegou.
+
+**`sent` não encerra a espera.** `Message.sendStatus` tem
+`@default("sent")` no schema e o webhook nem reescreve esse valor (mesma
+prioridade na escala). Aceitar `sent` como confirmação faria a espera terminar
+sempre no primeiro poll, anulando a correção. Só `delivered`/`read` confirmam.
+
+**Sem persistência dupla.** O `throw` fica fora dos `try/catch` que chamam
+`persistFailedAutomationOutbound`: a mensagem já existe no inbox e o webhook já
+gravou `sendError` nela.
+
+**Alternativas descartadas.**
+
+- **(a) Gatilho novo `message_send_failed` com automação de reação separada.**
+  Chegou a ser implementado e foi revertido: tira a decisão de dentro do
+  desenho do fluxo, que é onde o operador espera vê-la.
+- **(b) Retomar o contexto no ramo de erro quando o webhook chegar.** O ramo
+  de sucesso já teria executado seus efeitos (mover estágio, tags, encerrar) e
+  os dois coexistiriam no mesmo negócio.
+
+---
+
 ### 2026-08-03 — Resolução de deal fechado em execução manual de automação [DECISÃO — agente OPUS]
 
 **Modelo usado.** Opus (orquestrador).
