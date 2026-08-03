@@ -919,7 +919,22 @@ async function resolveRuntimeContext(
       orderBy: { updatedAt: "desc" },
       select: { id: true },
     });
-    if (openDeal) dealId = openDeal.id;
+    if (openDeal) {
+      dealId = openDeal.id;
+    } else if (ctx.event === "manual") {
+      // 03/ago/26 — Execução manual é ação explícita do operador sobre a
+      // conversa que ele está vendo (negócio visível no painel). Sem
+      // fallback, `update_field` em deal abortava com "dealId ausente"
+      // quando o único negócio do contato estava LOST/WON. Escopo só
+      // `manual`: em gatilhos automáticos, cair no fechado faria
+      // `move_stage` reabrir LOST — o que não queremos.
+      const anyDeal = await prisma.deal.findFirst({
+        where: { contactId },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true },
+      });
+      if (anyDeal) dealId = anyDeal.id;
+    }
   }
 
   let deal: DealWithNames | null = null;

@@ -444,9 +444,6 @@ export async function fireTrigger(
           const activeCtx = await getActiveContext(automation.id, enriched.contactId);
 
           if (activeCtx) {
-            // #region agent log
-            fetch('http://127.0.0.1:7767/ingest/a84d1038-bd33-432e-81b0-7592338e5b66',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'90509a'},body:JSON.stringify({sessionId:'90509a',hypothesisId:'H2',location:'automation-triggers.ts:fireTrigger',message:'reentry-guard-skip',data:{event,automationId:automation.id,automationName:automation.name,contactId:enriched.contactId,activeContextId:activeCtx.id},timestamp:Date.now()})}).catch(()=>{});
-            // #endregion
             console.info(
               `[fireTrigger] skip "${automation.name}" (${event}) — execução já ativa (contexto=${activeCtx.id} contato=${enriched.contactId})`,
             );

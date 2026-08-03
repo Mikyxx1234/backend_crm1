@@ -5,6 +5,29 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-03 — Resolução de deal fechado em execução manual de automação [DECISÃO — agente OPUS]
+
+**Modelo usado.** Opus (orquestrador).
+
+**Decisão.** Execução manual de automação passa a resolver o negócio do
+contato mesmo quando fechado (LOST/WON), com prioridade para o aberto.
+Em `resolveRuntimeContext` (`automation-executor.ts`), sem `dealId`
+explícito: primeiro o OPEN mais recente; se não houver **e**
+`event === "manual"`, cai no mais recente de qualquer status. Gatilhos
+automáticos mantêm o comportamento anterior (só OPEN).
+
+**Alternativas descartadas.**
+
+- **(a) Aplicar o fallback a todos os gatilhos.** Descartado: passos como
+  `move_stage` moveriam negócios LOST e os reabririam.
+- **(b) Fazer o frontend enviar `dealId` nos três pickers do inbox**
+  (`slash-command-menu.tsx`, `agent-automation-picker-modal.tsx`,
+  `automation-picker-list.tsx`). Descartado: exigiria plumbing do negócio
+  através de composer e chat-window, com superfície de mudança muito
+  maior para o mesmo resultado.
+
+---
+
 ### 2026-08-03 — Fallback síncrono de falha nos envios Meta
 
 **Modelos usados.** GPT-5.6 Sol (decisão principal) e Opus 4.7 isolado
