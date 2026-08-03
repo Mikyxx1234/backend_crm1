@@ -98,6 +98,7 @@ export async function PUT(req: Request, ctx: Ctx) {
           try {
             const drain = await processPendingDistributionQueue({
               trigger: "agent_online",
+              userId: id,
             });
             // #region agent log
             console.warn(
