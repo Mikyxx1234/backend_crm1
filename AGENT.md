@@ -112,6 +112,102 @@ suprime `message_sent`) continua válido como prevenção, mas não era a causa.
 
 ---
 
+### 2026-08-03 — Retomada de automação respeita as arestas do canvas (`__hasExplicitEdges`)
+
+**Decisão.** `src/services/automation-context.ts` — que retoma o fluxo
+quando o cliente responde (`processIncomingMessage`) ou quando um passo
+pausante estoura o prazo (`processTimeout`) — passa a aplicar a MESMA
+guarda `__hasExplicitEdges` que `automation-executor.ts` já usava nos dois
+loops de execução. Três helpers puros centralizam a regra:
+
+- `hasExplicitEdges(config)` — step veio do editor de canvas.
+- `linearFallbackStepId(steps, id)` — `steps[index + 1]`, mas devolve
+  `null` quando o step tem arestas explícitas.
+- `readStepRef(config, key)` — lê referência de step tratando `""` e
+  `__none__` (marcador de fim-de-ramo do canvas) como ausentes.
+
+Além disso, `timeoutGotoStepId` passa a ser respeitado SEMPRE em
+`question`/`send_whatsapp_interactive`, independente de `timeoutAction`
+(antes exigia `timeoutAction === "goto"`), alinhando com `wait_for_reply`.
+
+**Contexto.** Caso Piettra Ferreira (Cruzeiro EaD, 2026-08-03), automação
+`inicio - pipe` (`cmryg1axs08p1rt01teyxspc8`, `message_received`, 25 nós
+ramificados). O cliente mandou UMA única mensagem e mesmo assim o bot
+percorreu dois ramos que ninguém pediu:
+
+- 16:28 — "Tenho outra dúvida" → step[0] "Olá" → step[2] interactive
+  "Selecione…" (pausa `timeoutMs=900000`).
+- 16:43 — Timeout. `timeoutGotoStepId` do step[2] aponta pra step[22]
+  "Essa conversa foi encerrada…", mas `timeoutAction` estava ausente
+  (default `"continue"`), então caiu no fallback linear
+  `steps[position=3]` = step[3] "Assista ao vídeo" — o ramo
+  "Acesso à Plataforma". Bot mandou vídeo + link do portal + novo menu.
+- 16:58 — Novo timeout, mesmo bug: `steps[position=6]` = "Já já um
+  consultor entrará em contato" (ramo "Falar com equipe"), seguido de
+  step[7] `move_stage` — o lead foi movido sozinho pra "Em Atendimento".
+
+Raiz: `automation.steps` é ordenado por `position`, que é ordem de
+CRIAÇÃO no canvas e não do fluxo. Em automações lineares o `index + 1`
+acidentalmente coincidia com o próximo passo; em fluxos ramificados
+aponta pra qualquer coisa. O `automation-executor.ts` já se protegia
+disso via `__hasExplicitEdges` (marcador que o canvas grava em todo step
+com saídas desenhadas à mão), mas os pontos de RETOMADA não — e é por
+onde passam todas as automações de atendimento com botões.
+
+**Alternativas descartadas:**
+
+- **Corrigir só o `processTimeout`.** Resolveria o incidente relatado mas
+  deixaria vivos os outros três fallbacks lineares do mesmo arquivo
+  (`wait_for_reply` sem `receivedGotoStepId`, botão não-casado sem
+  `elseGotoStepId`, cascata de `wait_for_reply`), que reproduzem o bug em
+  cenários vizinhos.
+- **Remover o fallback linear de vez.** Quebra automações legadas
+  (pré-canvas, sem `__hasExplicitEdges`) que dependem implicitamente
+  dele. A guarda por marcador preserva 100% desses fluxos.
+- **Backfill em produção setando `timeoutAction: "goto"` onde há
+  `timeoutGotoStepId`.** Migration cara, difícil de garantir cobertura e
+  sem proteção pra automações futuras ou importadas
+  (`kommo-bot-parser`, `digisac-bot-parser`, seeds).
+- **Consertar só o editor do frontend.** Não resolve o que já está em
+  produção; o backend seguiria vulnerável a qualquer config antiga.
+
+**Impacto.**
+
+- Automações desenhadas no canvas nunca mais saltam pro ramo vizinho:
+  sem aresta conectada, o ramo ENCERRA (com `log.warn` nomeando
+  automação e step pra o operador conectar a saída faltante).
+- Exceção deliberada — menu de botões sem `elseGotoStepId` conectado: o
+  contexto fica PARADO no mesmo passo aguardando clique válido ou o
+  timeout, em vez de encerrar. Fechar deixaria o cliente órfão no meio
+  do atendimento.
+- Botão VÁLIDO com aresta desconectada (`gotoStepId: ""`) herda a saída
+  padrão do passo (`nextStepId`) antes de considerar `elseGotoStepId`.
+  Encontrado na auditoria: "Follow-up de envio de vaga" (Dna Work) tem
+  `"✅ Consegui um emprego"` e `"Localização muito longe"` sem aresta,
+  enquanto todos os outros botões do mesmo menu convergem pro
+  `nextStepId`. Tratar clique certo como resposta inválida seria pior
+  que o bug original.
+- `question` de resposta aberta passa a seguir `nextStepId` (a aresta
+  única desenhada) antes de considerar a array.
+- Automações legadas sem `__hasExplicitEdges` mantêm o comportamento
+  linear anterior — zero quebra.
+- Regressão travada em `src/services/__tests__/automation-branch-routing.test.ts`
+  (20 casos, com recortes reais do INICIO-PIPE e do "Follow-up de envio
+  de vaga").
+
+**Pendência para o operador.** Auditoria de 2026-08-03 achou 19 passos
+pausantes ATIVOS (nas duas orgs) com aresta faltando — todos marcados
+como canvas, portanto afetados por esta mudança. Concentrados em:
+`Bem vindo - Lead de Entrada`, `BV - Calouros`, `Encerramento`,
+`Retenção`, `Teleatendimento - MSG` (Cruzeiro EaD) e
+`Follow-up de envio de vaga`, `Pós Vaga Aceita`,
+`receptivo_geral(junho2026)` (Dna Work). A maioria é aresta de timeout
+não conectada — antes vazava pro ramo vizinho, agora encerra o ramo com
+`log.warn`. Conectar essas saídas no editor é o que restaura a intenção
+original de cada fluxo.
+
+---
+
 ### 2026-07-30 — `getQueueCounts` conta apenas "Entrada + Aguardando" (vez do agente)
 
 **Decisão.** A fila (`getQueueCounts` em `src/services/distribution/queue.ts`),
