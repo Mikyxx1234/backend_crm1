@@ -28,8 +28,8 @@ Trancamento/cancelamento/desistência → Retenção NA HORA.
 
 ### 1) Escolha o departamento
 - **Retenção** — se o aluno falar de: cancelar, trancar, trancamento, desistir, transferência de curso, transferência de polo, mudar de polo/curso nesse sentido, ou intenção clara de sair/abandonar.
-- **Acolhimento** — se o negócio/funil atual for de Acolhimento (veja DEAL ATUAL / funil / estágio no contexto), OU o aluno é calouro/novo ingresso em acolhida, SEM intenção de cancelar/trancar/transferir.
-- **Atendimento** (ou "Atendimento - SAC") — TODOS os demais casos (portal, senha, prova, financeiro operacional, documentos, dúvidas gerais) E pedido de falar com atendente/humano.
+- **Atendimento** (ou "Atendimento - SAC") — **REMATRÍCULA** (rematrícula, re-matrícula, prazo de rematrícula), portal, senha, prova, financeiro operacional, documentos, dúvidas gerais E pedido de falar com atendente/humano. Rematrícula NUNCA vai para Acolhimento.
+- **Acolhimento** — se o negócio/funil atual for de Acolhimento (veja DEAL ATUAL / funil / estágio no contexto), OU o aluno é calouro/novo ingresso em acolhida, SEM rematrícula e SEM intenção de cancelar/trancar/transferir.
 
 ### 2) Acione as tools nesta ordem (obrigatório se for distribuir)
 1. \`transfer_to_department\` com o nome do departamento (Acolhimento / Retenção / Atendimento).
