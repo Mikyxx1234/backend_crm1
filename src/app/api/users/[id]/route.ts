@@ -227,66 +227,119 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
     try {
       const reassignToId = r.session.user.id;
-      await prisma.$transaction(async (tx) => {
-        // Leads / ownership: ficam sem responsável (pedido da Equipe).
-        await tx.deal.updateMany({
-          where: { ownerId: target.id },
-          data: { ownerId: null },
-        });
-        await tx.contact.updateMany({
-          where: { assignedToId: target.id },
-          data: { assignedToId: null },
-        });
-        await tx.conversation.updateMany({
-          where: { assignedToId: target.id },
-          data: { assignedToId: null },
-        });
-
-        // Outros vínculos nullable que bloqueiam o DELETE (P2003).
-        await tx.activity.updateMany({
-          where: { userId: target.id },
-          data: { userId: null },
-        });
-        await tx.activityEvent.updateMany({
-          where: { actorUserId: target.id },
-          data: { actorUserId: null },
-        });
-        await tx.supportTicket.updateMany({
-          where: { assignedToId: target.id },
-          data: { assignedToId: null },
-        });
-        await tx.supportTicketMessage.updateMany({
-          where: { authorId: target.id },
-          data: { authorId: null },
-        });
-
-        // FKs obrigatórias: reatribui ao admin que está excluindo.
-        await tx.note.updateMany({
-          where: { userId: target.id },
-          data: { userId: reassignToId },
-        });
-        await tx.campaign.updateMany({
-          where: { createdById: target.id },
-          data: { createdById: reassignToId },
-        });
-        await tx.scheduledMessage.updateMany({
-          where: { createdById: target.id },
-          data: { createdById: reassignToId },
-        });
-
-        await tx.user.delete({ where: { id: target.id } });
+      // Desassocia / reatribui FKs RESTRICT antes do DELETE.
+      // Feito fora de interactive transaction longa: updateMany grandes
+      // (centenas de notes) + delete com cascades ficam mais estáveis.
+      await prisma.deal.updateMany({
+        where: { ownerId: target.id },
+        data: { ownerId: null },
       });
-      return NextResponse.json({ ok: true });
+      await prisma.contact.updateMany({
+        where: { assignedToId: target.id },
+        data: { assignedToId: null },
+      });
+      await prisma.conversation.updateMany({
+        where: { assignedToId: target.id },
+        data: { assignedToId: null },
+      });
+      await prisma.activity.updateMany({
+        where: { userId: target.id },
+        data: { userId: null },
+      });
+      await prisma.activityEvent.updateMany({
+        where: { actorUserId: target.id },
+        data: { actorUserId: null },
+      });
+      await prisma.supportTicket.updateMany({
+        where: { assignedToId: target.id },
+        data: { assignedToId: null },
+      });
+      await prisma.supportTicketMessage.updateMany({
+        where: { authorId: target.id },
+        data: { authorId: null },
+      });
+
+      // FKs obrigatórias (RESTRICT no Postgres): reatribui ao admin.
+      await prisma.note.updateMany({
+        where: { userId: target.id },
+        data: { userId: reassignToId },
+      });
+      await prisma.campaign.updateMany({
+        where: { createdById: target.id },
+        data: { createdById: reassignToId },
+      });
+      await prisma.scheduledMessage.updateMany({
+        where: { createdById: target.id },
+        data: { createdById: reassignToId },
+      });
+      // Tabela legada do catálogo (sem model Prisma ativo) — RESTRICT NOT NULL.
+      try {
+        await prisma.$executeRaw`
+          UPDATE discount_requests
+          SET requested_by_id = ${reassignToId}
+          WHERE requested_by_id = ${target.id}
+        `;
+      } catch (rawErr) {
+        console.warn("[users.delete] discount_requests reassign skipped", rawErr);
+      }
+
+      try {
+        await prisma.user.delete({ where: { id: target.id } });
+        return NextResponse.json({ ok: true });
+      } catch (delErr) {
+        // Fallback: se ainda houver FK obscura, anonimiza e esconde da Equipe
+        // (mesmo padrão LGPD) em vez de 500 genérico.
+        const code =
+          typeof delErr === "object" &&
+          delErr !== null &&
+          "code" in delErr
+            ? String((delErr as { code: string }).code)
+            : null;
+        if (code === "P2003" || code === "P2014") {
+          const placeholderEmail = `erased+${target.id}@anon.local`;
+          await prisma.user.update({
+            where: { id: target.id },
+            data: {
+              name: "Usuario removido",
+              email: placeholderEmail,
+              hashedPassword: null,
+              phone: null,
+              avatarUrl: null,
+              signature: null,
+              closingMessage: null,
+              mfaSecret: null,
+              mfaEnabledAt: null,
+              isErased: true,
+              erasedAt: new Date(),
+              role: "MEMBER",
+            },
+          });
+          await prisma.distributionResponsible
+            .deleteMany({ where: { userId: target.id } })
+            .catch(() => null);
+          await prisma.departmentMember
+            .deleteMany({ where: { userId: target.id } })
+            .catch(() => null);
+          await prisma.agentStatus
+            .deleteMany({ where: { userId: target.id } })
+            .catch(() => null);
+          console.warn(
+            "[users.delete] hard delete blocked by FK; soft-erased user",
+            { userId: target.id, code },
+          );
+          return NextResponse.json({ ok: true, softDeleted: true });
+        }
+        throw delErr;
+      }
     } catch (e) {
       if (isP2025(e)) {
         return NextResponse.json({ message: "Usuário não encontrado." }, { status: 404 });
       }
-      if (
-        typeof e === "object" &&
-        e !== null &&
-        "code" in e &&
-        (e as { code: string }).code === "P2003"
-      ) {
+      const code =
+        typeof e === "object" && e !== null && "code" in e
+          ? String((e as { code: string }).code)
+          : null;
+      if (code === "P2003" || code === "P2014") {
         return NextResponse.json(
           {
             message:
@@ -295,10 +348,19 @@ export async function DELETE(_request: Request, context: RouteContext) {
           { status: 409 },
         );
       }
-      throw e;
+      console.error("[users.delete] failed", e);
+      const detail = e instanceof Error ? e.message : String(e);
+      return NextResponse.json(
+        { message: `Erro ao excluir usuário: ${detail.slice(0, 300)}` },
+        { status: 500 },
+      );
     }
   } catch (e) {
     console.error(e);
-    return NextResponse.json({ message: "Erro ao excluir usuário." }, { status: 500 });
+    const detail = e instanceof Error ? e.message : String(e);
+    return NextResponse.json(
+      { message: `Erro ao excluir usuário: ${detail.slice(0, 300)}` },
+      { status: 500 },
+    );
   }
 }
