@@ -433,7 +433,14 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
     case "create_activity":
       return { type: "TASK", title: "", description: "" };
     case "send_whatsapp_message":
-      return { content: "", failureAction: "stop", failureGotoStepId: "" };
+      return {
+        content: "",
+        failureAction: "stop",
+        failureGotoStepId: "",
+        timeoutMs: 86_400_000,
+        timeoutAction: "continue",
+        timeoutGotoStepId: "",
+      };
     case "send_product":
       // content: texto livre com variáveis {{produto.*}}. Vazio = monta um
       // resumo padrão do produto no executor.
@@ -444,6 +451,9 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
         languageCode: "pt_BR",
         failureAction: "stop",
         failureGotoStepId: "",
+        timeoutMs: 86_400_000,
+        timeoutAction: "continue",
+        timeoutGotoStepId: "",
       };
     case "send_whatsapp_media":
       return {
