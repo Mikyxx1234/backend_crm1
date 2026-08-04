@@ -390,6 +390,238 @@ export async function sendTextToConversation(args: {
   };
 }
 
+// ── Botões interativos WhatsApp ──────────────
+
+export type OutboundButton = { id?: string | null; title: string };
+
+/**
+ * Envia mensagem interativa "reply buttons" (Meta Cloud API) na conversa.
+ *
+ * Regras da Meta:
+ *  - 1 a 3 botões, `title` ≤ 20 chars, `id` ≤ 256 chars.
+ *  - `body` obrigatório, ≤ 1024 chars.
+ *  - `header` opcional (só texto aqui), ≤ 60 chars.
+ *  - `footer` opcional, ≤ 60 chars.
+ *
+ * Content salvo no Message segue o mesmo formato usado pelo `automation-executor`
+ * (`send_whatsapp_interactive`): `"body\n[Botões: t1, t2, t3]"`. Isso mantém a
+ * timeline igual quer a mensagem venha de automação ou de integração — quem
+ * clica registra a resposta como texto ("Sim", "Não", …), então a legenda entre
+ * colchetes já resolve a leitura no /inbox.
+ *
+ * Escopo: só WhatsApp Meta Cloud API. Baileys não suporta interactive (rejeita
+ * com 400) e IG/FB Messenger têm endpoints próprios (rejeita com 400).
+ */
+export async function sendInteractiveButtonsToConversation(args: {
+  conversationId: string;
+  actor: OutboundActor;
+  body: string;
+  buttons: OutboundButton[];
+  header?: string | null;
+  footer?: string | null;
+  channelId?: string | null;
+  stopAutomations?: boolean;
+}): Promise<OutboundResult> {
+  const body = args.body.trim();
+  if (!body) return { ok: false, status: 400, message: "body é obrigatório." };
+  if (body.length > 1024) {
+    return { ok: false, status: 400, message: "body excede 1024 caracteres (limite Meta)." };
+  }
+
+  const rawButtons = Array.isArray(args.buttons) ? args.buttons : [];
+  if (rawButtons.length === 0) {
+    return { ok: false, status: 400, message: "Informe ao menos 1 botão." };
+  }
+  if (rawButtons.length > 3) {
+    return { ok: false, status: 400, message: "Máximo de 3 botões por mensagem (limite Meta)." };
+  }
+
+  const buttons = rawButtons.map((b, i) => {
+    const title = typeof b?.title === "string" ? b.title.trim() : "";
+    return {
+      id: (typeof b?.id === "string" && b.id.trim() ? b.id.trim() : `btn_${i + 1}`).slice(0, 256),
+      title: title.slice(0, 20),
+    };
+  });
+  if (buttons.some((b) => !b.title)) {
+    return { ok: false, status: 400, message: "Todo botão precisa de um title." };
+  }
+
+  const header = args.header?.trim() || null;
+  if (header && header.length > 60) {
+    return { ok: false, status: 400, message: "header excede 60 caracteres (limite Meta)." };
+  }
+  const footer = args.footer?.trim() || null;
+  if (footer && footer.length > 60) {
+    return { ok: false, status: 400, message: "footer excede 60 caracteres (limite Meta)." };
+  }
+
+  const found = await getConversationLite(args.conversationId);
+  if (!found) return { ok: false, status: 404, message: "Conversa não encontrada." };
+  if (found.channel !== "whatsapp") {
+    return {
+      ok: false,
+      status: 400,
+      message: `Botões interativos são exclusivos de WhatsApp (canal da conversa: ${found.channel}).`,
+    };
+  }
+
+  const { conv, reopenedConversationId } = await reopenIfResolved(found);
+
+  const sendDenied = await requireChannelScope(
+    { id: args.actor.id, role: args.actor.role ?? undefined, organizationId: args.actor.organizationId, isSuperAdmin: args.actor.isSuperAdmin },
+    "send",
+    conv.channelId,
+  );
+  if (sendDenied) return denialToFailure(sendDenied);
+
+  const resolved = await resolveOutboundChannel({
+    conv: {
+      channelId: conv.channelId,
+      channelRef: conv.channelRef,
+      organizationId: conv.organizationId,
+    },
+    user: {
+      id: args.actor.id,
+      role: args.actor.role ?? null,
+      organizationId: args.actor.organizationId,
+      isSuperAdmin: args.actor.isSuperAdmin,
+    },
+    requestedChannelId: args.channelId ?? null,
+  });
+  if (!resolved.ok) return denialToFailure(resolved.response);
+
+  const outboundChannelRef = resolved.channelRef;
+  const outboundChannelId = resolved.channelId;
+  if (isBaileysChannel(outboundChannelRef)) {
+    return {
+      ok: false,
+      status: 400,
+      message: "Botões interativos não são suportados em canais WhatsApp QR (Baileys). Use texto ou template.",
+    };
+  }
+
+  const channelConfig = outboundChannelRef?.config as Record<string, unknown> | null | undefined;
+  const metaClient = metaClientFromConfig(channelConfig);
+  if (!metaClient.configured) {
+    return {
+      ok: false,
+      status: 503,
+      message:
+        "Canal WhatsApp da conversa sem credenciais Meta (accessToken/phoneNumberId). Configure em Canais ou defina META_WHATSAPP_* no env.",
+    };
+  }
+
+  const target = await getContactWhatsAppTargets(conv.contactId ?? "");
+  if (!target) {
+    return {
+      ok: false,
+      status: 400,
+      message: "Contato sem telefone nem BSUID WhatsApp (Meta).",
+    };
+  }
+  // `getContactWhatsAppTargets` já normaliza para `{ to?, recipient? }` —
+  // `sendInteractiveButtons` aceita ambos e escolhe o melhor via
+  // `recipientFields` (BSUID tem prioridade quando ambos existem).
+  const { to, recipient } = target;
+
+  const senderName = actorName(args.actor);
+  const btnLabels = buttons.map((b) => b.title).join(", ");
+  const displayContent = `${body}\n[Botões: ${btnLabels}]`;
+
+  // Persistir a Message ANTES do send falhar dá timeline confiável mesmo com
+  // erro na Meta — igual a `sendTextToConversation`. O externalId é
+  // preenchido depois do sucesso.
+  const saved = await prisma.message.create({
+    data: withOrgFromCtx({
+      conversationId: conv.id,
+      channelId: outboundChannelId ?? undefined,
+      content: displayContent,
+      direction: "out",
+      messageType: "interactive",
+      senderName,
+    }),
+  });
+
+  let externalId: string | null = null;
+  let sendError: string | undefined;
+  try {
+    const result = await metaClient.sendInteractiveButtons(
+      to,
+      body,
+      buttons,
+      header ?? undefined,
+      footer ?? undefined,
+      recipient,
+    );
+    externalId = result.messages?.[0]?.id ?? null;
+    if (externalId) {
+      await prisma.message
+        .update({ where: { id: saved.id }, data: { externalId, sendStatus: "sent" } })
+        .catch(() => {});
+    }
+  } catch (e: unknown) {
+    sendError = e instanceof Error ? e.message : "Falha ao enviar botões pelo WhatsApp.";
+    console.error("[meta-send-interactive]", e);
+    await prisma.message
+      .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
+      .catch(() => {});
+  }
+
+  try {
+    await prisma.conversation.update({
+      where: { id: conv.id },
+      data: {
+        lastMessageDirection: "out",
+        hasAgentReply: true,
+        hasError: Boolean(sendError),
+      },
+    });
+  } catch {
+    // colunas opcionais em bases antigas
+  }
+
+  if (!sendError) {
+    void logEvent({
+      type: "MESSAGE_SENT",
+      entityType: "MESSAGE",
+      entityId: saved.id,
+      entityLabel: senderName,
+      conversationId: conv.id,
+      contactId: conv.contactId,
+      meta: {
+        preview: body.slice(0, 200),
+        channel: "WhatsApp",
+        kind: "interactive",
+        buttons: buttons.map((b) => ({ id: b.id, title: b.title })),
+        externalId,
+      },
+    });
+  }
+
+  publishNewMessage(conv, displayContent, saved.createdAt);
+  await afterOutboundSideEffects(conv, args.actor.id, displayContent, args.stopAutomations !== false);
+
+  if (sendError) {
+    return { ok: false, status: 502, message: sendError };
+  }
+
+  return {
+    ok: true,
+    conversationId: conv.id,
+    ...(reopenedConversationId ? { reopenedConversationId } : {}),
+    message: {
+      id: saved.id,
+      content: displayContent,
+      createdAt: saved.createdAt.toISOString(),
+      direction: "out",
+      messageType: "interactive",
+      senderName,
+      externalId,
+    },
+  };
+}
+
 // ── Template Meta ────────────────────────────
 
 export type SendTemplateArgs = {
