@@ -29,6 +29,20 @@ export interface RechamadoSample {
   conversationId: string | null;
 }
 
+export interface RechamadoDeptRow {
+  departmentId: string | null;
+  departmentName: string;
+  recontato: number;
+  mesmoDepto: number;
+  cruzado: number;
+}
+
+export interface RechamadoRouteRow {
+  from: string;
+  to: string;
+  count: number;
+}
+
 export interface RechamadoMetrics {
   /** Janela: meia-noite SP de hoje → agora (eventos de retorno "hoje"). */
   since: string;
@@ -41,7 +55,11 @@ export interface RechamadoMetrics {
     /** Contatos distintos com pelo menos 1 recontato hoje. */
     uniqueContacts: number;
   };
-  /** Últimos casos (para validar no cockpit). */
+  /** Destino da redistribuição (departamento atual). */
+  byDepartment: RechamadoDeptRow[];
+  /** Principais rotas origem → destino. */
+  topRoutes: RechamadoRouteRow[];
+  /** Últimos casos (amostra curta no cockpit). */
   samples: RechamadoSample[];
 }
 
@@ -74,7 +92,7 @@ export async function getRechamadoMetrics(args: {
   sampleLimit?: number;
 }): Promise<RechamadoMetrics> {
   const now = args.now ?? new Date();
-  const sampleLimit = args.sampleLimit ?? 20;
+  const sampleLimit = args.sampleLimit ?? 8;
   const lookbackStart = new Date(args.since.getTime() - MS_24H);
 
   const logs = await prisma.distributionLog.findMany({
@@ -151,7 +169,7 @@ export async function getRechamadoMetrics(args: {
   const contactIds = [...new Set(sampleHits.map((h) => h.contactId))];
   const deptIds = [
     ...new Set(
-      sampleHits.flatMap((h) =>
+      hits.flatMap((h) =>
         [h.prior.departmentId, h.current.departmentId].filter(
           (id): id is string => Boolean(id),
         ),
@@ -176,6 +194,53 @@ export async function getRechamadoMetrics(args: {
 
   const contactMap = new Map(contacts.map((c) => [c.id, c]));
   const deptMap = new Map(departments.map((d) => [d.id, d.name]));
+  const deptLabel = (id: string | null) =>
+    id ? (deptMap.get(id) ?? "—") : "—";
+
+  const byDeptMap = new Map<
+    string,
+    {
+      departmentId: string | null;
+      recontato: number;
+      mesmoDepto: number;
+      cruzado: number;
+    }
+  >();
+  const routeMap = new Map<string, number>();
+  for (const h of hits) {
+    const key = h.current.departmentId ?? "__none__";
+    const row = byDeptMap.get(key) ?? {
+      departmentId: h.current.departmentId,
+      recontato: 0,
+      mesmoDepto: 0,
+      cruzado: 0,
+    };
+    row.recontato++;
+    if (h.band === "mesmo_depto") row.mesmoDepto++;
+    else row.cruzado++;
+    byDeptMap.set(key, row);
+
+    const rk = `${deptLabel(h.prior.departmentId)}→${deptLabel(h.current.departmentId)}`;
+    routeMap.set(rk, (routeMap.get(rk) ?? 0) + 1);
+  }
+
+  const byDepartment: RechamadoDeptRow[] = [...byDeptMap.entries()]
+    .map(([, v]) => ({
+      departmentId: v.departmentId,
+      departmentName: deptLabel(v.departmentId),
+      recontato: v.recontato,
+      mesmoDepto: v.mesmoDepto,
+      cruzado: v.cruzado,
+    }))
+    .sort((a, b) => b.recontato - a.recontato);
+
+  const topRoutes: RechamadoRouteRow[] = [...routeMap.entries()]
+    .map(([k, count]) => {
+      const [from, to] = k.split("→");
+      return { from: from || "—", to: to || "—", count };
+    })
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 8);
 
   const samples: RechamadoSample[] = sampleHits.map((h) => {
     const c = contactMap.get(h.contactId);
@@ -207,6 +272,8 @@ export async function getRechamadoMetrics(args: {
       cruzado,
       uniqueContacts: unique.size,
     },
+    byDepartment,
+    topRoutes,
     samples,
   };
 }
