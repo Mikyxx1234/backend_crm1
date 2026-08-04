@@ -699,6 +699,70 @@ function interpolateContextVariables(
   );
 }
 
+/**
+ * Responsável do lead para os tokens `{{assignee.*}}` / `{{responsavel.*}}`.
+ * Prioridade: consultor da conversa (quem está atendendo) → dono do negócio.
+ * Sem responsável, os tokens resolvem para string vazia como qualquer outro.
+ */
+async function resolveLeadAssigneeVars(
+  rt: RuntimeContext,
+): Promise<Record<string, unknown>> {
+  let userId = rt.conversation?.assignedToId ?? null;
+
+  // Gatilhos de deal/contato não carregam snapshot de conversa — busca a
+  // conversa aberta mais recente do contato antes de cair no dono do deal.
+  if (!userId && rt.contactId) {
+    const conv = await prisma.conversation.findFirst({
+      where: {
+        contactId: rt.contactId,
+        status: { not: "RESOLVED" },
+        assignedToId: { not: null },
+      },
+      orderBy: { updatedAt: "desc" },
+      select: { assignedToId: true },
+    });
+    userId = conv?.assignedToId ?? null;
+  }
+  if (!userId) userId = rt.deal?.ownerId ?? null;
+  if (!userId) return {};
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, name: true, email: true },
+  });
+  if (!user) return {};
+
+  const name = user.name?.trim() ?? "";
+  const firstName = name.split(/\s+/)[0] ?? "";
+  return {
+    assignee: { id: user.id, name, firstName, email: user.email ?? "" },
+    // Alias pt-BR para quem digita o token na mão.
+    responsavel: { nome: name, primeiroNome: firstName, email: user.email ?? "" },
+  };
+}
+
+const ASSIGNEE_TOKEN_RE = /\{\{\s*(assignee|responsavel)\s*\./i;
+
+/**
+ * `interpolateContextVariables` + responsável do lead. Só consulta o banco
+ * quando o texto realmente usa `{{assignee.*}}`/`{{responsavel.*}}`, então o
+ * caminho comum de envio continua sem query extra.
+ */
+async function interpolateMessageVariables(
+  template: string,
+  rt: RuntimeContext,
+  flowVars: Record<string, unknown> | undefined,
+): Promise<string> {
+  if (!ASSIGNEE_TOKEN_RE.test(template)) {
+    return interpolateContextVariables(template, rt, flowVars);
+  }
+  const assigneeVars = await resolveLeadAssigneeVars(rt);
+  return interpolateContextVariables(template, rt, {
+    ...(flowVars ?? {}),
+    ...assigneeVars,
+  });
+}
+
 function readBoolean(obj: Record<string, unknown>, key: string): boolean | undefined {
   const v = obj[key];
   if (typeof v === "boolean") return v;
@@ -1854,7 +1918,7 @@ async function executeStep(
       const contentRaw = readString(cfg, "content");
       const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
       const content = contentRaw
-        ? interpolateContextVariables(contentRaw, rt, vars)
+        ? await interpolateMessageVariables(contentRaw, rt, vars)
         : contentRaw;
 
       log.debug(`Enviando WhatsApp: contato=${rt.contactId ?? "—"} destino=${to ?? recipient ?? "—"} texto="${content?.slice(0, 60) ?? "(vazio)"}"`);
@@ -2458,7 +2522,7 @@ async function executeStep(
       const interactiveVars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
       const bodyRaw = readString(cfg, "body");
       if (!bodyRaw) throw new Error("send_whatsapp_interactive: body obrigatório");
-      const body = interpolateContextVariables(bodyRaw, rt, interactiveVars);
+      const body = await interpolateMessageVariables(bodyRaw, rt, interactiveVars);
 
       const rawButtons = Array.isArray(cfg.buttons) ? cfg.buttons as { id?: string; title?: string; text?: string; gotoStepId?: string }[] : [];
       const buttons = rawButtons.slice(0, 3).map((b, i) => ({
@@ -2469,8 +2533,8 @@ async function executeStep(
 
       const headerRaw = readString(cfg, "header");
       const footerRaw = readString(cfg, "footer");
-      const header = headerRaw ? interpolateContextVariables(headerRaw, rt, interactiveVars) : headerRaw;
-      const footer = footerRaw ? interpolateContextVariables(footerRaw, rt, interactiveVars) : footerRaw;
+      const header = headerRaw ? await interpolateMessageVariables(headerRaw, rt, interactiveVars) : headerRaw;
+      const footer = footerRaw ? await interpolateMessageVariables(footerRaw, rt, interactiveVars) : footerRaw;
 
       const btnLabels = buttons.map((b) => b.title).join(", ");
       const displayContent = `${body}\n[Botões: ${btnLabels}]`;
@@ -2874,7 +2938,7 @@ async function executeStep(
           );
         }
         const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
-        const interpolated = interpolateContextVariables(content, rt, vars);
+        const interpolated = await interpolateMessageVariables(content, rt, vars);
 
         const conv = await resolveAutomationSendConv(rt.contactId);
         const questionMetaClient = await resolveAutomationMetaClient({
