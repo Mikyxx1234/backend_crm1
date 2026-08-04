@@ -58,6 +58,7 @@ export const PAUSING_STEP_TYPES = new Set([
   "question",
   "send_whatsapp_interactive",
   "send_whatsapp_template",
+  "send_whatsapp_message",
   "wait_for_reply",
 ]);
 

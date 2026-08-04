@@ -168,6 +168,20 @@ export function getStepOutgoing(step: StepLike): StepOutgoing {
       push("linear (após enviar)", c.nextStepId);
       break;
     }
+    case "send_whatsapp_message":
+    case "send_whatsapp_template": {
+      if (step.type === "send_whatsapp_template") {
+        const buttons = Array.isArray(c.buttons) ? (c.buttons as Record<string, unknown>[]) : [];
+        buttons.forEach((b, i) => {
+          const label = strOrEmpty(b.title) || strOrEmpty(b.text) || `botão #${i + 1}`;
+          push(label, b.gotoStepId);
+        });
+        push("else (nenhum botão bateu)", c.elseGotoStepId);
+      }
+      push("timeout (sem resposta)", c.timeoutGotoStepId);
+      push("linear", c.nextStepId);
+      break;
+    }
     case "goto": {
       push("goto", c.targetStepId ?? c.nextStepId);
       break;
