@@ -622,6 +622,308 @@ export async function sendInteractiveButtonsToConversation(args: {
   };
 }
 
+// ── Lista interativa WhatsApp ────────────────
+
+export type OutboundListRow = {
+  id?: string | null;
+  title: string;
+  description?: string | null;
+};
+
+export type OutboundListSection = {
+  title?: string | null;
+  rows: OutboundListRow[];
+};
+
+/**
+ * Envia mensagem interativa "list" (Meta Cloud API) na conversa.
+ *
+ * Diferente dos botões (`type=button`, máx 3), a list mostra um único botão
+ * `action.button` que abre um menu com até 10 opções — o padrão oficial da
+ * Meta para menus mais longos.
+ *
+ * Aceita duas formas de entrada (o node usa a primeira, integrações manuais
+ * podem usar a segunda):
+ *   1. `rows` no top-level (+ `sectionTitle` opcional): vira `sections=[{ title, rows }]`.
+ *   2. `sections` no top-level: passa direto, respeitando múltiplas seções.
+ *
+ * Limites Meta validados antes do envio: 1-10 rows totais, body ≤ 4096,
+ * button ≤ 20, header/footer ≤ 60, cada row.title ≤ 24, description ≤ 72.
+ *
+ * Persiste `Message.messageType="interactive"` com
+ * `content = "body\n[Lista: title1, title2, ...]"` — mesmo shape usado por
+ * `sendInteractiveButtonsToConversation`, timeline unificada no /inbox.
+ *
+ * Escopo: só WhatsApp Meta Cloud API. Rejeita Baileys e canais não-WhatsApp.
+ */
+export async function sendInteractiveListToConversation(args: {
+  conversationId: string;
+  actor: OutboundActor;
+  body: string;
+  button: string;
+  sections?: OutboundListSection[] | null;
+  rows?: OutboundListRow[] | null;
+  sectionTitle?: string | null;
+  header?: string | null;
+  footer?: string | null;
+  channelId?: string | null;
+  stopAutomations?: boolean;
+}): Promise<OutboundResult> {
+  const body = args.body.trim();
+  if (!body) return { ok: false, status: 400, message: "body é obrigatório." };
+  if (body.length > 4096) {
+    return { ok: false, status: 400, message: "body excede 4096 caracteres (limite Meta)." };
+  }
+
+  const button = args.button.trim();
+  if (!button) return { ok: false, status: 400, message: "button é obrigatório (rótulo do botão que abre a lista)." };
+  if (button.length > 20) {
+    return { ok: false, status: 400, message: "button excede 20 caracteres (limite Meta)." };
+  }
+
+  // Normaliza para o formato `sections`. `rows` no top-level tem prioridade
+  // porque é o caminho amigável usado pelo node do n8n; `sections` é o
+  // caminho avançado (múltiplas seções via HTTP direto).
+  let sectionsInput: OutboundListSection[];
+  if (Array.isArray(args.rows) && args.rows.length > 0) {
+    sectionsInput = [
+      { title: args.sectionTitle?.trim() || null, rows: args.rows },
+    ];
+  } else if (Array.isArray(args.sections) && args.sections.length > 0) {
+    sectionsInput = args.sections;
+  } else {
+    return { ok: false, status: 400, message: "Informe rows (ou sections) com ao menos 1 item." };
+  }
+
+  const totalRows = sectionsInput.reduce(
+    (n, s) => n + (Array.isArray(s.rows) ? s.rows.length : 0),
+    0,
+  );
+  if (totalRows === 0) {
+    return { ok: false, status: 400, message: "Informe ao menos 1 row na lista." };
+  }
+  if (totalRows > 10) {
+    return { ok: false, status: 400, message: "Máximo de 10 rows na lista (limite Meta)." };
+  }
+  if (sectionsInput.length > 10) {
+    return { ok: false, status: 400, message: "Máximo de 10 seções na lista (limite Meta)." };
+  }
+
+  // Validação prévia (antes do map final): garante que qualquer erro de
+  // shape volta como HTTP 400 do service, e não como exceção não tratada.
+  for (const s of sectionsInput) {
+    if (!Array.isArray(s.rows)) {
+      return { ok: false, status: 400, message: "Toda seção precisa ter rows." };
+    }
+    for (const r of s.rows) {
+      if (!r || typeof r.title !== "string" || !r.title.trim()) {
+        return { ok: false, status: 400, message: "Toda row precisa de um title." };
+      }
+    }
+  }
+
+  const rowTitlesForContent: string[] = [];
+  let rowIdx = 0;
+  const sections = sectionsInput.map((s) => ({
+    title: s.title?.trim() || null,
+    rows: s.rows.map((r) => {
+      rowIdx += 1;
+      const title = r.title.trim();
+      rowTitlesForContent.push(title.length > 24 ? title.slice(0, 24) : title);
+      const id =
+        typeof r.id === "string" && r.id.trim()
+          ? r.id.trim()
+          : `row_${rowIdx}`;
+      return {
+        id: id.slice(0, 200),
+        title: title.slice(0, 24),
+        description:
+          typeof r.description === "string" && r.description.trim()
+            ? r.description.trim().slice(0, 72)
+            : null,
+      };
+    }),
+  }));
+
+  const header = args.header?.trim() || null;
+  if (header && header.length > 60) {
+    return { ok: false, status: 400, message: "header excede 60 caracteres (limite Meta)." };
+  }
+  const footer = args.footer?.trim() || null;
+  if (footer && footer.length > 60) {
+    return { ok: false, status: 400, message: "footer excede 60 caracteres (limite Meta)." };
+  }
+
+  const found = await getConversationLite(args.conversationId);
+  if (!found) return { ok: false, status: 404, message: "Conversa não encontrada." };
+  if (found.channel !== "whatsapp") {
+    return {
+      ok: false,
+      status: 400,
+      message: `Listas interativas são exclusivas de WhatsApp (canal da conversa: ${found.channel}).`,
+    };
+  }
+
+  const { conv, reopenedConversationId } = await reopenIfResolved(found);
+
+  const sendDenied = await requireChannelScope(
+    { id: args.actor.id, role: args.actor.role ?? undefined, organizationId: args.actor.organizationId, isSuperAdmin: args.actor.isSuperAdmin },
+    "send",
+    conv.channelId,
+  );
+  if (sendDenied) return denialToFailure(sendDenied);
+
+  const resolved = await resolveOutboundChannel({
+    conv: {
+      channelId: conv.channelId,
+      channelRef: conv.channelRef,
+      organizationId: conv.organizationId,
+    },
+    user: {
+      id: args.actor.id,
+      role: args.actor.role ?? null,
+      organizationId: args.actor.organizationId,
+      isSuperAdmin: args.actor.isSuperAdmin,
+    },
+    requestedChannelId: args.channelId ?? null,
+  });
+  if (!resolved.ok) return denialToFailure(resolved.response);
+
+  const outboundChannelRef = resolved.channelRef;
+  const outboundChannelId = resolved.channelId;
+  if (isBaileysChannel(outboundChannelRef)) {
+    return {
+      ok: false,
+      status: 400,
+      message: "Listas interativas não são suportadas em canais WhatsApp QR (Baileys). Use texto ou template.",
+    };
+  }
+
+  const channelConfig = outboundChannelRef?.config as Record<string, unknown> | null | undefined;
+  const metaClient = metaClientFromConfig(channelConfig);
+  if (!metaClient.configured) {
+    return {
+      ok: false,
+      status: 503,
+      message:
+        "Canal WhatsApp da conversa sem credenciais Meta (accessToken/phoneNumberId). Configure em Canais ou defina META_WHATSAPP_* no env.",
+    };
+  }
+
+  const target = await getContactWhatsAppTargets(conv.contactId ?? "");
+  if (!target) {
+    return {
+      ok: false,
+      status: 400,
+      message: "Contato sem telefone nem BSUID WhatsApp (Meta).",
+    };
+  }
+  const { to, recipient } = target;
+
+  const senderName = actorName(args.actor);
+  const displayContent = `${body}\n[Lista: ${rowTitlesForContent.join(", ")}]`;
+
+  const saved = await prisma.message.create({
+    data: withOrgFromCtx({
+      conversationId: conv.id,
+      channelId: outboundChannelId ?? undefined,
+      content: displayContent,
+      direction: "out",
+      messageType: "interactive",
+      senderName,
+    }),
+  });
+
+  let externalId: string | null = null;
+  let sendError: string | undefined;
+  try {
+    // `sendInteractiveList` corta títulos/descriptions internamente, então
+    // `sections` já vai no shape aceito pela Cloud API.
+    const result = await metaClient.sendInteractiveList(
+      to,
+      body,
+      button,
+      sections.map((s) => ({
+        title: s.title,
+        rows: s.rows.map((r) => ({
+          id: r.id,
+          title: r.title,
+          description: r.description,
+        })),
+      })),
+      header ?? undefined,
+      footer ?? undefined,
+      recipient,
+    );
+    externalId = result.messages?.[0]?.id ?? null;
+    if (externalId) {
+      await prisma.message
+        .update({ where: { id: saved.id }, data: { externalId, sendStatus: "sent" } })
+        .catch(() => {});
+    }
+  } catch (e: unknown) {
+    sendError = e instanceof Error ? e.message : "Falha ao enviar lista pelo WhatsApp.";
+    console.error("[meta-send-list]", e);
+    await prisma.message
+      .update({ where: { id: saved.id }, data: { sendStatus: "failed" } })
+      .catch(() => {});
+  }
+
+  try {
+    await prisma.conversation.update({
+      where: { id: conv.id },
+      data: {
+        lastMessageDirection: "out",
+        hasAgentReply: true,
+        hasError: Boolean(sendError),
+      },
+    });
+  } catch {
+    // colunas opcionais em bases antigas
+  }
+
+  if (!sendError) {
+    void logEvent({
+      type: "MESSAGE_SENT",
+      entityType: "MESSAGE",
+      entityId: saved.id,
+      entityLabel: senderName,
+      conversationId: conv.id,
+      contactId: conv.contactId,
+      meta: {
+        preview: body.slice(0, 200),
+        channel: "WhatsApp",
+        kind: "list",
+        button,
+        rowTitles: rowTitlesForContent,
+        externalId,
+      },
+    });
+  }
+
+  publishNewMessage(conv, displayContent, saved.createdAt);
+  await afterOutboundSideEffects(conv, args.actor.id, displayContent, args.stopAutomations !== false);
+
+  if (sendError) {
+    return { ok: false, status: 502, message: sendError };
+  }
+
+  return {
+    ok: true,
+    conversationId: conv.id,
+    ...(reopenedConversationId ? { reopenedConversationId } : {}),
+    message: {
+      id: saved.id,
+      content: displayContent,
+      createdAt: saved.createdAt.toISOString(),
+      direction: "out",
+      messageType: "interactive",
+      senderName,
+      externalId,
+    },
+  };
+}
+
 // ── Template Meta ────────────────────────────
 
 export type SendTemplateArgs = {

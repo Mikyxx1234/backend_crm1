@@ -47,20 +47,51 @@ import { createDealEvent } from "@/services/deals";
 import {
   createInternalNoteOnConversation,
   sendInteractiveButtonsToConversation,
+  sendInteractiveListToConversation,
   sendTemplateToConversation,
   sendTextToConversation,
   type OutboundActor,
   type OutboundButton,
+  type OutboundListRow,
   type OutboundResult,
 } from "@/services/outbound-messaging";
 import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-const VALID_KINDS = ["note", "text", "template", "interactive"] as const;
+const VALID_KINDS = ["note", "text", "template", "interactive", "list"] as const;
 type MessageKind = (typeof VALID_KINDS)[number];
 
 const VALID_COMPONENTS: TemplateVariableComponent[] = ["body", "header", "button"];
+
+/**
+ * Aceita `[{ id?, title, description? }]` (usada pelo node) ou lista curta
+ * `["Opção 1","Opção 2"]` (chamadas manuais). Preserva a ordem — vira o
+ * layout da lista no WhatsApp. IDs em branco viram `row_1..10` no service.
+ */
+function parseRows(raw: unknown): OutboundListRow[] {
+  if (!Array.isArray(raw)) return [];
+  const out: OutboundListRow[] = [];
+  for (const entry of raw) {
+    if (typeof entry === "string") {
+      const title = entry.trim();
+      if (title) out.push({ title });
+      continue;
+    }
+    if (entry && typeof entry === "object") {
+      const r = entry as Record<string, unknown>;
+      const title = typeof r.title === "string" ? r.title.trim() : "";
+      if (!title) continue;
+      const id = typeof r.id === "string" && r.id.trim() ? r.id.trim() : null;
+      const description =
+        typeof r.description === "string" && r.description.trim()
+          ? r.description.trim()
+          : null;
+      out.push({ title, id, description });
+    }
+  }
+  return out;
+}
 
 /**
  * Aceita a lista `[{ id?, title }]` (usada pelo node) ou o formato curto
@@ -315,6 +346,46 @@ export async function POST(request: Request, ctx: Ctx) {
             actor,
             body: interactiveBody,
             buttons: parseButtons(body.buttons),
+            header: typeof body.header === "string" ? body.header : null,
+            footer: typeof body.footer === "string" ? body.footer : null,
+            channelId: typeof body.channelId === "string" ? body.channelId : null,
+            stopAutomations: body.stopAutomations !== false,
+          }),
+        );
+      }
+
+      if (kind === "list") {
+        // Duas formas de entrada:
+        //   - `rows` no top-level (+ `sectionTitle` opcional): vira uma seção só.
+        //     É o caminho usado pelo node do n8n.
+        //   - `sections` no top-level: passa direto, permitindo múltiplas
+        //     seções. Escape hatch para integrações manuais.
+        const listBody = typeof body.body === "string" ? body.body : "";
+        const listButton = typeof body.button === "string" ? body.button : "";
+        return toResponse(
+          kind,
+          dealId,
+          await sendInteractiveListToConversation({
+            conversationId,
+            actor,
+            body: listBody,
+            button: listButton,
+            rows: parseRows(body.rows),
+            sectionTitle: typeof body.sectionTitle === "string" ? body.sectionTitle : null,
+            sections: Array.isArray(body.sections)
+              ? (body.sections as unknown[])
+                  .map((s) => {
+                    if (!s || typeof s !== "object") return null;
+                    const sec = s as Record<string, unknown>;
+                    const rows = parseRows(sec.rows);
+                    if (rows.length === 0) return null;
+                    return {
+                      title: typeof sec.title === "string" ? sec.title : null,
+                      rows,
+                    };
+                  })
+                  .filter((s): s is { title: string | null; rows: OutboundListRow[] } => s !== null)
+              : null,
             header: typeof body.header === "string" ? body.header : null,
             footer: typeof body.footer === "string" ? body.footer : null,
             channelId: typeof body.channelId === "string" ? body.channelId : null,

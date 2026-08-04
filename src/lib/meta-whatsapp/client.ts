@@ -438,6 +438,67 @@ export class MetaWhatsAppClient {
     });
   }
 
+  // ── Send interactive list ─────────────────────
+  //
+  // Interactive List Message da Cloud API: até 10 opções em 1 ou mais sections.
+  // A mensagem aparece com um botão único (`action.button`, ex.: "Ver opções")
+  // que, ao ser tocado, abre uma lista rolável. É o caminho oficial da Meta
+  // para menus com >3 opções — `type=button` está limitado a 3 reply buttons.
+  //
+  // Limites Meta:
+  //   body.text       ≤ 4096 chars, obrigatório
+  //   action.button   ≤ 20 chars, obrigatório (rótulo do botão que abre a lista)
+  //   sections        1-10, cada section com title opcional ≤ 24
+  //   rows            total 1-10 across sections; id ≤ 200, title ≤ 24, description ≤ 72
+  //   header.text     ≤ 60 chars, opcional
+  //   footer.text     ≤ 60 chars, opcional
+  //
+  // Ao clicar, o webhook recebe `interactive.list_reply.{id,title,description}` —
+  // já processado hoje em `lib/meta-webhook/handler.ts`.
+  async sendInteractiveList(
+    to: string | undefined,
+    body: string,
+    button: string,
+    sections: {
+      title?: string | null;
+      rows: { id: string; title: string; description?: string | null }[];
+    }[],
+    header?: string,
+    footer?: string,
+    recipient?: string
+  ): Promise<{ messages: Array<{ id: string }> }> {
+    const dest = MetaWhatsAppClient.recipientFields(to, recipient);
+    const interactive: Record<string, unknown> = {
+      type: "list",
+      body: { text: body },
+      action: {
+        button: button.slice(0, 20),
+        sections: sections.slice(0, 10).map((s) => ({
+          ...(s.title?.trim() ? { title: s.title.trim().slice(0, 24) } : {}),
+          rows: s.rows.slice(0, 10).map((r) => ({
+            id: r.id.slice(0, 200),
+            title: r.title.slice(0, 24),
+            ...(r.description?.trim()
+              ? { description: r.description.trim().slice(0, 72) }
+              : {}),
+          })),
+        })),
+      },
+    };
+    if (header) interactive.header = { type: "text", text: header };
+    if (footer) interactive.footer = { text: footer };
+
+    return this.graphFetch(`${this.phoneNumberId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({
+        messaging_product: "whatsapp",
+        ...dest,
+        type: "interactive",
+        interactive,
+      }),
+    });
+  }
+
   // ── Send interactive buttons ──────────────────
 
   async sendInteractiveButtons(
