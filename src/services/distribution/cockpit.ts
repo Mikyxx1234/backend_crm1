@@ -13,6 +13,10 @@
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 
+import {
+  getRechamadoMetrics,
+  type RechamadoMetrics,
+} from "./rechamado";
 import { getDistributionResponsibles } from "./responsibles";
 
 export interface CockpitAgent {
@@ -58,6 +62,11 @@ export interface CockpitData {
     /** Leads na fila de espera (sem responsável elegível). */
     pendingQueue: number;
   };
+  /**
+   * Rechamado (hoje): recontato 24h / mesmo depto / cruzado.
+   * Ver `rechamado.ts` — painel para calibração ao longo dos dias.
+   */
+  rechamado: RechamadoMetrics;
   agents: CockpitAgent[];
   consultants: CockpitConsultant[];
 }
@@ -87,6 +96,7 @@ export async function getCockpitData(): Promise<CockpitData> {
     convByAgent,
     byAgentToday,
     pendingQueue,
+    rechamado,
   ] = await Promise.all([
       prisma.aIAgentConfig.findMany({
         where: { organizationId: orgId },
@@ -137,6 +147,7 @@ export async function getCockpitData(): Promise<CockpitData> {
           },
         },
       }),
+      getRechamadoMetrics({ organizationId: orgId, since }),
     ]);
 
   const receivedByUser = new Map<string, number>();
@@ -197,6 +208,7 @@ export async function getCockpitData(): Promise<CockpitData> {
       attendingNow,
       pendingQueue,
     },
+    rechamado,
     agents,
     consultants,
   };
