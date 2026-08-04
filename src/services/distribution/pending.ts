@@ -47,22 +47,29 @@ export interface PendingDistributionView {
 }
 
 /**
- * Critério da fila = atendimentos ABERTOS SEM responsável (`assignedToId=null`).
+ * Critério da fila = atendimentos ABERTOS SEM responsável (`assignedToId=null`)
+ * em que o contato JÁ RESPONDEU pelo menos uma vez (`lastInboundAt` preenchido).
+ *
+ * Calouros que só receberam template "BV / Bem-vindo" e nunca responderam
+ * NÃO entram na fila de espera nem na drenagem — só passam a contar quando
+ * houver inbound real do aluno.
  *
  * NÃO usamos `hasAgentReply` de propósito: uma resposta de AUTOMAÇÃO/IA marca
  * `hasAgentReply=true` e tiraria o lead da aba "Entrada", mas ele continua SEM
- * responsável humano e PRECISA ser distribuído. A distribuição propaga o
- * responsável para a conversa (`assignedToId`), então `null` = ainda não
- * distribuído — independente de automação/IA já ter interagido.
+ * responsável humano e PRECISA ser distribuído (desde que já tenha inbound).
  */
-const ABERTA_SEM_RESPONSAVEL: Prisma.ConversationWhereInput = {
+export const ABERTA_SEM_RESPONSAVEL: Prisma.ConversationWhereInput = {
   status: "OPEN",
   assignedToId: null,
+  lastInboundAt: { not: null },
 };
 
 export async function getPendingDistributions(): Promise<
   PendingDistributionView[]
 > {
+  // Limpa pendências de quem só recebeu template e nunca respondeu.
+  await purgeUnansweredFromPendingQueue().catch(() => 0);
+
   const items = await prisma.conversation.findMany({
     where: ABERTA_SEM_RESPONSAVEL,
     orderBy: { createdAt: "asc" },
@@ -247,6 +254,7 @@ function hasRemainingCapacityInScope(
  *   - Conversa OPEN mas já atribuída por outro caminho (agente manual,
  *     herança de contato/deal, `maybeAssignExisting…`)
  *   - Conversa deletada
+ *   - Conversa sem nenhuma mensagem inbound do aluno (só template BV / outbound)
  *
  * Sem essa limpeza, o motor rescheduling ficava batendo em pendências
  * fantasma (uma delas chegou a `attempts=1077` em prod — Cruzeiro EaD
@@ -273,8 +281,7 @@ async function cancelStalePendingOrphans(orgId: string): Promise<number> {
   const stillActive = await prisma.conversation.findMany({
     where: {
       id: { in: convIds },
-      status: "OPEN",
-      assignedToId: null,
+      ...ABERTA_SEM_RESPONSAVEL,
     },
     select: { id: true },
   });
@@ -292,6 +299,58 @@ async function cancelStalePendingOrphans(orgId: string): Promise<number> {
       resolvedAt: new Date(),
     },
   });
+  return res.count;
+}
+
+/**
+ * Remove da fila de espera (lista + DistributionPending) conversas OPEN sem
+ * responsável em que o aluno nunca respondeu — tipicamente calouros que só
+ * receberam template de bem-vindo. Chamada no GET da fila para limpar o
+ * dashboard imediatamente, sem depender do cron de drenagem.
+ */
+export async function purgeUnansweredFromPendingQueue(): Promise<number> {
+  const orgId = getOrgIdOrNull();
+  if (!orgId) return 0;
+
+  const unanswered = await prisma.conversation.findMany({
+    where: {
+      status: "OPEN",
+      assignedToId: null,
+      lastInboundAt: null,
+    },
+    select: { id: true, contactId: true },
+    take: 2000,
+  });
+  if (unanswered.length === 0) return 0;
+
+  const convIds = unanswered.map((c) => c.id);
+  const contactIds = unanswered
+    .map((c) => c.contactId)
+    .filter((id): id is string => Boolean(id));
+
+  const res = await prisma.distributionPending.updateMany({
+    where: {
+      organizationId: orgId,
+      status: "PENDING",
+      OR: [
+        { conversationId: { in: convIds } },
+        ...(contactIds.length > 0
+          ? [{ contactId: { in: contactIds }, conversationId: null }]
+          : []),
+      ],
+    },
+    data: {
+      status: "RESOLVED",
+      resolvedAt: new Date(),
+    },
+  });
+
+  if (res.count > 0) {
+    console.info(
+      "[distribution] purgeUnansweredFromPendingQueue",
+      JSON.stringify({ orgId, conversations: unanswered.length, resolved: res.count }),
+    );
+  }
   return res.count;
 }
 

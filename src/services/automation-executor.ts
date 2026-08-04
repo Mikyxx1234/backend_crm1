@@ -123,6 +123,43 @@ function resolveFailureGotoStepId(cfg: Record<string, unknown>): string | null {
   return id;
 }
 
+/** Aresta "Sem resposta" desenhada no canvas (`timeoutGotoStepId`). */
+function resolveTimeoutGotoStepId(cfg: Record<string, unknown>): string | null {
+  const id =
+    typeof cfg.timeoutGotoStepId === "string" ? cfg.timeoutGotoStepId.trim() : "";
+  if (!id || id === "__none__") return null;
+  return id;
+}
+
+const DEFAULT_WAIT_TIMEOUT_MS = 86_400_000;
+
+/**
+ * Pausa o fluxo no step atual aguardando resposta (ou timeout).
+ * Usado por message/template quando a aresta "Sem resposta" está conectada,
+ * e por template com botões roteados.
+ */
+async function pauseAwaitingReply(
+  cfg: Record<string, unknown>,
+  rt: { automationId: string; contactId?: string | null },
+  timeoutMs: number | undefined,
+): Promise<StepResult> {
+  const stepId = cfg.__stepId as string | undefined;
+  if (stepId && rt.contactId) {
+    const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
+    if (existingCtx) {
+      await advanceContext(
+        existingCtx.id,
+        stepId,
+        (existingCtx.variables as Record<string, unknown>) ?? {},
+        timeoutMs,
+      );
+    } else {
+      await createContext(rt.automationId, rt.contactId, stepId, timeoutMs);
+    }
+  }
+  return { skipRemaining: true };
+}
+
 /** Persiste tentativa falha no inbox + marca conversa com erro. */
 async function persistFailedAutomationOutbound(opts: {
   conversationId: string | undefined | null;
@@ -1910,6 +1947,15 @@ async function executeStep(
         }
       }
 
+      // "Sem resposta": só pausa se a aresta de timeout estiver conectada —
+      // senão segue linear (comportamento antigo dos fluxos só-Enviado).
+      if (resolveTimeoutGotoStepId(cfg)) {
+        const rawTimeout = readNumber(cfg, "timeoutMs");
+        const timeoutMs =
+          rawTimeout && rawTimeout > 0 ? rawTimeout : DEFAULT_WAIT_TIMEOUT_MS;
+        return pauseAwaitingReply(cfg, rt, timeoutMs);
+      }
+
       return {};
     }
 
@@ -2132,29 +2178,26 @@ async function executeStep(
         await awaitMetaDeliveryVerdict(tplSavedMessageId, "send_whatsapp_template");
       }
 
-      // Roteamento por botão (quick-reply do template): se o nó tem botões
-      // com `gotoStepId`, PAUSA o fluxo e registra contexto — o clique volta
-      // pelo webhook (message.button.text) e o processIncomingMessage casa o
-      // título do botão com `config.buttons[].gotoStepId`. Sem botões
-      // roteados, segue linear (comportamento antigo).
+      // Pausa quando:
+      //  1) há botões com `gotoStepId` (clique volta pelo webhook), ou
+      //  2) a aresta "Sem resposta" (`timeoutGotoStepId`) está conectada.
+      // Sem nenhum dos dois, segue linear (comportamento antigo).
       const tplButtons = Array.isArray(cfg.buttons)
         ? (cfg.buttons as { gotoStepId?: string }[])
         : [];
       const tplHasRouting = tplButtons.some(
         (b) => typeof b?.gotoStepId === "string" && b.gotoStepId.trim() !== "",
       );
-      if (tplHasRouting) {
-        const tplStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
-        const tplTimeoutMs = readNumber(cfg, "timeoutMs");
-        if (tplStepId && rt.contactId) {
-          const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
-          if (existingCtx) {
-            await advanceContext(existingCtx.id, tplStepId, (existingCtx.variables as Record<string, unknown>) ?? {}, tplTimeoutMs);
-          } else {
-            await createContext(rt.automationId, rt.contactId, tplStepId, tplTimeoutMs);
-          }
-        }
-        return { skipRemaining: true };
+      const tplHasTimeout = !!resolveTimeoutGotoStepId(cfg);
+      if (tplHasRouting || tplHasTimeout) {
+        const rawTimeout = readNumber(cfg, "timeoutMs");
+        const tplTimeoutMs =
+          tplHasTimeout
+            ? rawTimeout && rawTimeout > 0
+              ? rawTimeout
+              : DEFAULT_WAIT_TIMEOUT_MS
+            : rawTimeout;
+        return pauseAwaitingReply(cfg, rt, tplTimeoutMs);
       }
 
       return {};

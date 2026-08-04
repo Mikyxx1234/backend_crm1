@@ -247,6 +247,72 @@
 
       .empty { padding: 28px; text-align: center; color: var(--muted); font-size: 13px; }
       .hidden { display: none !important; }
+
+      /* ── Rechamado ───────────────────────────── */
+      .rechamado-panel {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 18px 18px 8px;
+        margin-bottom: 8px;
+        position: relative;
+        overflow: hidden;
+      }
+      .rechamado-panel::before {
+        content: "";
+        position: absolute;
+        inset: 0 0 auto 0;
+        height: 3px;
+        background: linear-gradient(90deg, #f59e0b, #ef4444 45%, #8b5cf6);
+      }
+      .rechamado-head {
+        display: flex; align-items: flex-start; justify-content: space-between;
+        gap: 12px; margin-bottom: 14px; flex-wrap: wrap;
+      }
+      .rechamado-head h3 {
+        margin: 0; font-size: 15px; font-weight: 700; letter-spacing: -0.01em;
+      }
+      .rechamado-head p {
+        margin: 4px 0 0; font-size: 12px; color: var(--muted); max-width: 520px;
+      }
+      .rechamado-pill {
+        font-size: 11px; font-weight: 600; color: var(--warn);
+        background: var(--warn-bg); border: 1px solid rgba(245,158,11,0.25);
+        padding: 4px 10px; border-radius: 999px; white-space: nowrap;
+      }
+      .rechamado-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        margin-bottom: 14px;
+      }
+      @media (max-width: 720px) { .rechamado-grid { grid-template-columns: 1fr; } }
+      .r-card {
+        background: rgba(255,255,255,0.03);
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        padding: 14px 14px 12px;
+      }
+      .r-card .r-label {
+        font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+        color: var(--muted); font-weight: 600;
+      }
+      .r-card .r-value {
+        margin-top: 6px; font-size: 28px; font-weight: 800;
+        font-variant-numeric: tabular-nums; letter-spacing: -0.02em;
+      }
+      .r-card .r-hint { margin-top: 2px; font-size: 11px; color: var(--muted-2); }
+      .r-card.r-all { --r: var(--warn); }
+      .r-card.r-same { --r: var(--danger); }
+      .r-card.r-cross { --r: #8b5cf6; }
+      .r-card .r-value { color: var(--r, var(--text)); }
+
+      .r-samples { margin: 0 -18px; }
+      .r-samples table th, .r-samples table td { font-size: 12px; padding: 10px 14px; }
+      .band-same { color: var(--danger); background: var(--danger-bg); }
+      .band-cross { color: #c4b5fd; background: rgba(139,92,246,0.14); }
+      .r-arrow { color: var(--muted-2); margin: 0 4px; }
+      .r-muted { color: var(--muted); font-size: 11px; }
     </style>
   </head>
   <body>
@@ -300,6 +366,52 @@
             <div class="label">Fila de espera</div>
             <div class="value" id="t-pend">—</div>
             <div class="sub">sem responsável elegível</div>
+          </div>
+        </div>
+
+        <div class="section-title">Rechamado</div>
+        <div class="rechamado-panel">
+          <div class="rechamado-head">
+            <div>
+              <h3>Retornos em 24h · hoje</h3>
+              <p>
+                Mesmo aluno (telefone/contato) redistribuído após um atendimento
+                anterior. Três faixas para calibrar: recontato, mesmo departamento
+                e cruzado (ex.: Retenção → Atendimento).
+              </p>
+            </div>
+            <span class="rechamado-pill" id="r-unique">— contatos</span>
+          </div>
+          <div class="rechamado-grid">
+            <div class="r-card r-all">
+              <div class="r-label">Recontato 24h</div>
+              <div class="r-value" id="r-recontato">—</div>
+              <div class="r-hint">voltou · qualquer depto</div>
+            </div>
+            <div class="r-card r-same">
+              <div class="r-label">Mesmo departamento</div>
+              <div class="r-value" id="r-mesmo">—</div>
+              <div class="r-hint">sinal mais forte de não resolução</div>
+            </div>
+            <div class="r-card r-cross">
+              <div class="r-label">Cruzado</div>
+              <div class="r-value" id="r-cruzado">—</div>
+              <div class="r-hint">depto diferente na volta</div>
+            </div>
+          </div>
+          <div class="r-samples table-card" style="border: none; border-radius: 0; border-top: 1px solid var(--border)">
+            <table>
+              <thead>
+                <tr>
+                  <th>Contato</th>
+                  <th>Faixa</th>
+                  <th>Roteamento</th>
+                  <th>Quando</th>
+                </tr>
+              </thead>
+              <tbody id="r-samples"></tbody>
+            </table>
+            <div id="r-samples-empty" class="empty hidden">Nenhum recontato hoje ainda — ótimo, ou ainda cedo no dia.</div>
           </div>
         </div>
 
@@ -472,11 +584,72 @@
         return '<div class="queue-cell"><span>' + text + "</span>" + bar + "</div>";
       }
 
+      function fmtTime(iso) {
+        if (!iso) return "—";
+        try {
+          return new Date(iso).toLocaleString("pt-BR", {
+            timeZone: "America/Sao_Paulo",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit",
+          });
+        } catch (e) {
+          return iso;
+        }
+      }
+
+      function renderRechamado(r) {
+        if (!r || !r.totals) {
+          document.getElementById("r-recontato").textContent = "0";
+          document.getElementById("r-mesmo").textContent = "0";
+          document.getElementById("r-cruzado").textContent = "0";
+          document.getElementById("r-unique").textContent = "0 contatos";
+          document.getElementById("r-samples").innerHTML = "";
+          document.getElementById("r-samples-empty").classList.remove("hidden");
+          return;
+        }
+        document.getElementById("r-recontato").textContent = r.totals.recontato;
+        document.getElementById("r-mesmo").textContent = r.totals.mesmoDepto;
+        document.getElementById("r-cruzado").textContent = r.totals.cruzado;
+        document.getElementById("r-unique").textContent =
+          r.totals.uniqueContacts + " contato" + (r.totals.uniqueContacts === 1 ? "" : "s");
+
+        var tbody = document.getElementById("r-samples");
+        var emptyEl = document.getElementById("r-samples-empty");
+        var samples = r.samples || [];
+        if (!samples.length) {
+          tbody.innerHTML = "";
+          emptyEl.classList.remove("hidden");
+          return;
+        }
+        emptyEl.classList.add("hidden");
+        tbody.innerHTML = samples
+          .map(function (s) {
+            var label = s.phone || s.name || s.contactId.slice(0, 8);
+            var bandCls = s.band === "mesmo_depto" ? "band-same" : "band-cross";
+            var bandTxt = s.band === "mesmo_depto" ? "Mesmo depto" : "Cruzado";
+            var fromD = s.fromDepartmentName || "—";
+            var toD = s.toDepartmentName || "—";
+            return (
+              "<tr><td><div class=\"cname\">" + esc(label) + "</div>" +
+              (s.name && s.phone ? '<div class="r-muted">' + esc(s.name) + "</div>" : "") +
+              "</td>" +
+              '<td><span class="badge ' + bandCls + '">' + bandTxt + "</span></td>" +
+              "<td>" + esc(fromD) + '<span class="r-arrow">→</span>' + esc(toD) + "</td>" +
+              '<td><div>' + fmtTime(s.currentAt) + '</div><div class="r-muted">antes ' +
+              fmtTime(s.priorAt) + "</div></td></tr>"
+            );
+          })
+          .join("");
+      }
+
       function render(data) {
         document.getElementById("t-dist").textContent = data.totals.attendancesToday;
         document.getElementById("t-agent").textContent = data.totals.distributedByAgentToday;
         document.getElementById("t-att").textContent = data.totals.attendingNow;
         document.getElementById("t-pend").textContent = data.totals.pendingQueue;
+        renderRechamado(data.rechamado);
 
         var agentsEl = document.getElementById("agents");
         if (!data.agents.length) {

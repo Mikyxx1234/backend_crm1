@@ -37,38 +37,60 @@
         font-size: 14px;
         line-height: 1.5;
       }
-      .wrap { max-width: 1120px; margin: 0 auto; padding: 20px 20px 48px; }
+      .shell {
+        display: grid;
+        grid-template-columns: 220px 1fr;
+        min-height: 100vh;
+      }
+      @media (max-width: 860px) {
+        .shell { grid-template-columns: 1fr; }
+        .sidebar { position: sticky; top: 0; z-index: 5; }
+        .side-nav { display: flex; flex-direction: row; gap: 8px; overflow-x: auto; }
+        .pipe { flex: none; }
+      }
 
-      /* Pipeline */
-      .pipeline-bar {
-        display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-        margin-bottom: 22px; padding: 10px 12px;
-        background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+      .sidebar {
+        background: rgba(15, 22, 40, 0.92);
+        border-right: 1px solid var(--border);
+        padding: 20px 14px;
+        display: flex; flex-direction: column; gap: 20px;
       }
-      .pipe {
-        display: inline-flex; align-items: center; gap: 8px;
-        padding: 10px 16px; border-radius: var(--radius-sm);
-        border: 1px solid var(--border-strong); background: var(--card-2);
-        color: var(--muted); font-weight: 600; font-size: 13px; cursor: pointer;
-        transition: all 0.15s;
-      }
-      .pipe:hover { color: var(--text); border-color: rgba(255,255,255,0.22); }
-      .pipe.active {
-        color: #fff; border-color: transparent;
-        background: linear-gradient(135deg, var(--primary), #8b5cf6);
-        box-shadow: 0 4px 14px rgba(91, 111, 245, 0.35);
-      }
-      .pipe-arrow { color: var(--muted-2); font-size: 18px; user-select: none; }
-
-      header { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
-      .brand { display: flex; align-items: center; gap: 12px; }
+      .brand { display: flex; align-items: center; gap: 12px; padding: 0 6px; }
       .brand .logo {
         width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center;
         background: linear-gradient(135deg, var(--primary), #8b5cf6);
-        box-shadow: 0 6px 20px rgba(91, 111, 245, 0.45); font-size: 20px;
+        box-shadow: 0 6px 20px rgba(91, 111, 245, 0.45); font-size: 20px; flex: none;
       }
-      .brand h1 { margin: 0; font-size: 18px; font-weight: 700; }
-      .brand p { margin: 2px 0 0; font-size: 12px; color: var(--muted); }
+      .brand h1 { margin: 0; font-size: 16px; font-weight: 700; }
+      .brand p { margin: 2px 0 0; font-size: 11px; color: var(--muted); }
+
+      .side-nav { display: flex; flex-direction: column; gap: 6px; }
+      .pipe {
+        display: flex; align-items: center; gap: 10px; width: 100%;
+        padding: 11px 12px; border-radius: var(--radius-sm);
+        border: 1px solid transparent; background: transparent;
+        color: var(--muted); font-weight: 600; font-size: 13px; cursor: pointer;
+        transition: all 0.15s; text-align: left;
+      }
+      .pipe:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+      .pipe.active {
+        color: #fff;
+        background: linear-gradient(135deg, var(--primary), #8b5cf6);
+        box-shadow: 0 4px 14px rgba(91, 111, 245, 0.35);
+      }
+      .pipe .ico { width: 1.4em; text-align: center; }
+
+      .main {
+        max-width: 1120px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 22px 22px 48px;
+      }
+      .topbar {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; margin-bottom: 18px; flex-wrap: wrap;
+      }
+      .topbar h2 { margin: 0; font-size: 18px; font-weight: 700; }
       .head-actions { display: flex; align-items: center; gap: 10px; }
       .updated { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
       .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--success-bg); }
@@ -157,11 +179,48 @@
       .bar > i.full { background: var(--danger); }
       .empty { padding: 28px; text-align: center; color: var(--muted); font-size: 13px; }
       .hidden { display: none !important; }
+
+      .rechamado-panel {
+        background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+        padding: 18px 18px 8px; margin-bottom: 8px; position: relative; overflow: hidden;
+      }
+      .rechamado-panel::before {
+        content: ""; position: absolute; inset: 0 0 auto 0; height: 3px;
+        background: linear-gradient(90deg, #f59e0b, #ef4444 45%, #8b5cf6);
+      }
+      .rechamado-head {
+        display: flex; align-items: flex-start; justify-content: space-between;
+        gap: 12px; margin-bottom: 14px; flex-wrap: wrap;
+      }
+      .rechamado-head h3 { margin: 0; font-size: 15px; font-weight: 700; }
+      .rechamado-head p { margin: 4px 0 0; font-size: 12px; color: var(--muted); max-width: 540px; }
+      .rechamado-pill {
+        font-size: 11px; font-weight: 600; color: var(--warn); background: var(--warn-bg);
+        border: 1px solid rgba(245,158,11,0.25); padding: 4px 10px; border-radius: 999px;
+      }
+      .rechamado-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 14px; }
+      @media (max-width: 720px) { .rechamado-grid { grid-template-columns: 1fr; } }
+      .r-card {
+        background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+        border-radius: var(--radius-sm); padding: 14px;
+      }
+      .r-card .r-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 600; }
+      .r-card .r-value { margin-top: 6px; font-size: 28px; font-weight: 800; font-variant-numeric: tabular-nums; color: var(--r, var(--text)); }
+      .r-card .r-hint { margin-top: 2px; font-size: 11px; color: var(--muted-2); }
+      .r-card.r-all { --r: var(--warn); }
+      .r-card.r-same { --r: var(--danger); }
+      .r-card.r-cross { --r: #8b5cf6; }
+      .r-samples { margin: 0 -18px; }
+      .r-samples table th, .r-samples table td { font-size: 12px; padding: 10px 14px; }
+      .band-same { color: var(--danger); background: var(--danger-bg); }
+      .band-cross { color: #c4b5fd; background: rgba(139,92,246,0.14); }
+      .r-arrow { color: var(--muted-2); margin: 0 4px; }
+      .r-muted { color: var(--muted); font-size: 11px; }
     </style>
   </head>
   <body>
-    <div class="wrap">
-      <header>
+    <div class="shell">
+      <aside class="sidebar">
         <div class="brand">
           <div class="logo">🤖</div>
           <div>
@@ -169,24 +228,24 @@
             <p>Cruzeiro do Sul · hub CRM</p>
           </div>
         </div>
-        <div class="head-actions">
-          <div class="updated"><span id="status-dot" class="dot"></span><span id="updated-txt">—</span></div>
-        </div>
-      </header>
+        <nav class="side-nav" aria-label="Navegação do hub">
+          <button type="button" class="pipe active" data-stage="monitor"><span class="ico">📊</span> Monitor</button>
+          <button type="button" class="pipe" data-stage="frontend"><span class="ico">🖥</span> Frontend</button>
+          <button type="button" class="pipe" data-stage="backend"><span class="ico">⚙</span> Backend</button>
+        </nav>
+      </aside>
 
-      <nav class="pipeline-bar" aria-label="Pipeline CRM">
-        <button type="button" class="pipe active" data-stage="monitor">📊 Monitor</button>
-        <span class="pipe-arrow" aria-hidden="true">→</span>
-        <button type="button" class="pipe" data-stage="frontend">🖥 Frontend</button>
-        <span class="pipe-arrow" aria-hidden="true">→</span>
-        <button type="button" class="pipe" data-stage="backend">⚙ Backend</button>
-      </nav>
+      <div class="main">
+        <div class="topbar">
+          <h2 id="page-title">Monitor</h2>
+          <div class="head-actions">
+            <div class="updated"><span id="status-dot" class="dot"></span><span id="updated-txt">—</span></div>
+            <button type="button" class="btn" id="btn-refresh" onclick="refreshMonitor(true)">Atualizar</button>
+          </div>
+        </div>
 
       <!-- MONITOR -->
       <section id="stage-monitor" class="stage">
-        <div class="head-actions" style="margin-bottom:14px;justify-content:flex-end;">
-          <button type="button" class="btn" onclick="refreshMonitor(true)">Atualizar</button>
-        </div>
         <div class="totals">
           <div class="stat" style="--accent: var(--primary)">
             <div class="label">Atendimentos hoje</div>
@@ -209,6 +268,47 @@
             <div class="sub">sem responsável elegível</div>
           </div>
         </div>
+
+        <div class="section-title">Rechamado</div>
+        <div class="rechamado-panel">
+          <div class="rechamado-head">
+            <div>
+              <h3>Retornos em 24h · hoje</h3>
+              <p>
+                Mesmo aluno redistribuído após atendimento anterior.
+                Faixas: recontato, mesmo departamento e cruzado.
+              </p>
+            </div>
+            <span class="rechamado-pill" id="r-unique">— contatos</span>
+          </div>
+          <div class="rechamado-grid">
+            <div class="r-card r-all">
+              <div class="r-label">Recontato 24h</div>
+              <div class="r-value" id="r-recontato">—</div>
+              <div class="r-hint">voltou · qualquer depto</div>
+            </div>
+            <div class="r-card r-same">
+              <div class="r-label">Mesmo departamento</div>
+              <div class="r-value" id="r-mesmo">—</div>
+              <div class="r-hint">sinal mais forte de não resolução</div>
+            </div>
+            <div class="r-card r-cross">
+              <div class="r-label">Cruzado</div>
+              <div class="r-value" id="r-cruzado">—</div>
+              <div class="r-hint">depto diferente na volta</div>
+            </div>
+          </div>
+          <div class="r-samples table-card" style="border:none;border-radius:0;border-top:1px solid var(--border)">
+            <table>
+              <thead>
+                <tr><th>Contato</th><th>Faixa</th><th>Roteamento</th><th>Quando</th></tr>
+              </thead>
+              <tbody id="r-samples"></tbody>
+            </table>
+            <div id="r-samples-empty" class="empty hidden">Nenhum recontato hoje ainda.</div>
+          </div>
+        </div>
+
         <div class="section-title">Agentes de IA</div>
         <div id="agents" class="agents"></div>
         <div class="section-title">Consultores</div>
@@ -253,6 +353,7 @@
           </div>
         </div>
       </section>
+      </div>
     </div>
 
     <script src="/config.js"></script>
@@ -292,6 +393,10 @@
         ["monitor", "frontend", "backend"].forEach(function (s) {
           document.getElementById("stage-" + s).classList.toggle("hidden", s !== stage);
         });
+        var titles = { monitor: "Monitor", frontend: "Frontend", backend: "Backend" };
+        document.getElementById("page-title").textContent = titles[stage] || stage;
+        var refreshBtn = document.getElementById("btn-refresh");
+        if (refreshBtn) refreshBtn.classList.toggle("hidden", stage !== "monitor");
         location.hash = stage;
         if (stage === "frontend") renderFrontend();
         if (stage === "backend") renderBackend();
@@ -369,11 +474,63 @@
         });
       }
 
+      function fmtTime(iso) {
+        if (!iso) return "—";
+        try {
+          return new Date(iso).toLocaleString("pt-BR", {
+            timeZone: "America/Sao_Paulo",
+            day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
+          });
+        } catch (e) { return iso; }
+      }
+
+      function renderRechamado(r) {
+        if (!r || !r.totals) {
+          document.getElementById("r-recontato").textContent = "0";
+          document.getElementById("r-mesmo").textContent = "0";
+          document.getElementById("r-cruzado").textContent = "0";
+          document.getElementById("r-unique").textContent = "0 contatos";
+          document.getElementById("r-samples").innerHTML = "";
+          document.getElementById("r-samples-empty").classList.remove("hidden");
+          return;
+        }
+        document.getElementById("r-recontato").textContent = r.totals.recontato;
+        document.getElementById("r-mesmo").textContent = r.totals.mesmoDepto;
+        document.getElementById("r-cruzado").textContent = r.totals.cruzado;
+        document.getElementById("r-unique").textContent =
+          r.totals.uniqueContacts + " contato" + (r.totals.uniqueContacts === 1 ? "" : "s");
+        var tbody = document.getElementById("r-samples");
+        var emptyEl = document.getElementById("r-samples-empty");
+        var samples = r.samples || [];
+        if (!samples.length) {
+          tbody.innerHTML = "";
+          emptyEl.classList.remove("hidden");
+          return;
+        }
+        emptyEl.classList.add("hidden");
+        tbody.innerHTML = samples.map(function (s) {
+          var label = s.phone || s.name || String(s.contactId || "").slice(0, 8);
+          var bandCls = s.band === "mesmo_depto" ? "band-same" : "band-cross";
+          var bandTxt = s.band === "mesmo_depto" ? "Mesmo depto" : "Cruzado";
+          var fromD = s.fromDepartmentName || "—";
+          var toD = s.toDepartmentName || "—";
+          return (
+            "<tr><td><b>" + esc(label) + "</b>" +
+            (s.name && s.phone ? '<div class="r-muted">' + esc(s.name) + "</div>" : "") +
+            "</td><td><span class=\"badge " + bandCls + '">' + bandTxt + "</span></td>" +
+            "<td>" + esc(fromD) + '<span class="r-arrow">→</span>' + esc(toD) + "</td>" +
+            "<td><div>" + fmtTime(s.currentAt) + '</div><div class="r-muted">antes ' +
+            fmtTime(s.priorAt) + "</div></td></tr>"
+          );
+        }).join("");
+      }
+
       function renderMonitor(data) {
         document.getElementById("t-dist").textContent = data.totals.attendancesToday;
         document.getElementById("t-agent").textContent = data.totals.distributedByAgentToday;
         document.getElementById("t-att").textContent = data.totals.attendingNow;
         document.getElementById("t-pend").textContent = data.totals.pendingQueue;
+        renderRechamado(data.rechamado);
         var agentsEl = document.getElementById("agents");
         if (!data.agents.length) {
           agentsEl.innerHTML = '<div class="empty">Nenhum agente de IA configurado.</div>';

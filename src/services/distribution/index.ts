@@ -40,7 +40,9 @@ export {
 } from "./engine";
 
 export {
+  ABERTA_SEM_RESPONSAVEL,
   getPendingDistributions,
+  purgeUnansweredFromPendingQueue,
   retryPendingDistributions,
   processPendingDistributionQueue,
   scheduleProcessPendingDistributionQueue,
