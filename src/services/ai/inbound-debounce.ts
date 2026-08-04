@@ -54,7 +54,10 @@ async function resolveDebounceMs(): Promise<number> {
     const raw = await getOrgSetting("ai.inboundDebounceMs");
     if (raw) {
       const n = Number.parseInt(raw, 10);
-      if (Number.isFinite(n) && n >= 0 && n <= 30_000) return n;
+      // Piso 1500ms: debounce 0 gera 1 resposta por bolha (triplica "vou te conectar").
+      if (Number.isFinite(n) && n >= 0 && n <= 30_000) {
+        return Math.max(1500, n);
+      }
     }
   } catch {
     /* fora de RequestContext */

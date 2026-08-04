@@ -26,7 +26,6 @@ import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
 import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
-  shouldClearOwnershipOnIneligible,
 } from "@/services/distribution/assignee-eligibility";
 
 import { executeDistribution } from "./engine";
@@ -48,9 +47,7 @@ export interface PendingDistributionView {
 }
 
 /**
- * Critério da fila = atendimentos ABERTOS SEM responsável (`assignedToId=null`)
- * e FORA do robô (sem automation RUNNING). Quem está no PIPE não é
- * "aguardando distribuição humana" — está na aba Automação.
+ * Critério da fila = atendimentos ABERTOS SEM responsável (`assignedToId=null`).
  *
  * NÃO usamos `hasAgentReply` de propósito: uma resposta de AUTOMAÇÃO/IA marca
  * `hasAgentReply=true` e tiraria o lead da aba "Entrada", mas ele continua SEM
@@ -61,23 +58,11 @@ export interface PendingDistributionView {
 const ABERTA_SEM_RESPONSAVEL: Prisma.ConversationWhereInput = {
   status: "OPEN",
   assignedToId: null,
-  contact: {
-    automationContexts: { none: { status: "RUNNING" } },
-  },
 };
 
 export async function getPendingDistributions(): Promise<
   PendingDistributionView[]
 > {
-  const orgId = getOrgIdOrNull();
-  if (orgId) {
-    try {
-      await cancelStalePendingOrphans(orgId);
-    } catch (e) {
-      console.warn("[distribution] cancelStalePendingOrphans on list failed", e);
-    }
-  }
-
   const items = await prisma.conversation.findMany({
     where: ABERTA_SEM_RESPONSAVEL,
     orderBy: { createdAt: "asc" },
@@ -167,8 +152,8 @@ export type PendingQueueTrigger =
   | "manual"
   | "scheduled";
 
-/** Teto de segurança por departamento por passagem (evita lotes infinitos). */
-const SAFETY_CAP_PER_DEPT = 50;
+/** Teto de segurança por consultor por passagem quando queueLimit=0 (sem limite configurado). */
+const SAFETY_CAP_PER_USER = 25;
 
 /** Debounce / lock in-memory por org (sem schema novo). */
 const drainState = new Map<
@@ -196,38 +181,62 @@ function getDrainState(orgId: string) {
   return s;
 }
 
-function freeCapacityForResponsible(r: {
+type ResponsibleCapacity = {
+  userId: string;
   queueLimit: number;
   queueCount: number;
-}): number {
-  // 0 = sem limite → usa fatia de segurança nesta passagem.
-  if (r.queueLimit <= 0) return SAFETY_CAP_PER_DEPT;
-  return Math.max(0, r.queueLimit - r.queueCount);
+  departments: { id: string }[];
+};
+
+/** Capacidade livre ao vivo de um consultor, descontando atribuições desta passagem. */
+function liveFreeCapacityForUser(
+  r: Pick<ResponsibleCapacity, "userId" | "queueLimit" | "queueCount">,
+  assignedDeltaByUser: Map<string, number>,
+): number {
+  const delta = assignedDeltaByUser.get(r.userId) ?? 0;
+  const loaded = r.queueCount + delta;
+  // Sem limite configurado: ainda assim não ultrapassa o teto de segurança
+  // por consultor (conta carga atual + o que já entrou nesta passagem).
+  const cap = r.queueLimit > 0 ? r.queueLimit : SAFETY_CAP_PER_USER;
+  return Math.max(0, cap - loaded);
 }
 
-/**
- * Capacidade livre agregada dos elegíveis de um departamento
- * (ou org-wide quando deptId é null).
- */
-function takeLimitForDept(
-  eligible: Array<{
-    queueLimit: number;
-    queueCount: number;
-    departments: { id: string }[];
-  }>,
+function eligibleInDeptScope(
+  eligible: ResponsibleCapacity[],
   deptId: string | null,
-): number {
-  const inScope = eligible.filter((r) =>
+): ResponsibleCapacity[] {
+  return eligible.filter((r) =>
     deptId === null
       ? true
       : r.departments.some((d) => d.id === deptId),
   );
+}
+
+/**
+ * Capacidade livre agregada dos elegíveis de um departamento
+ * (ou org-wide quando deptId é null), com delta desta passagem.
+ */
+function takeLimitForDept(
+  eligible: ResponsibleCapacity[],
+  deptId: string | null,
+  assignedDeltaByUser: Map<string, number>,
+): number {
+  const inScope = eligibleInDeptScope(eligible, deptId);
   if (inScope.length === 0) return 0;
-  const free = inScope.reduce(
-    (acc, r) => acc + freeCapacityForResponsible(r),
+  return inScope.reduce(
+    (acc, r) => acc + liveFreeCapacityForUser(r, assignedDeltaByUser),
     0,
   );
-  return Math.min(Math.max(free, 0), SAFETY_CAP_PER_DEPT);
+}
+
+function hasRemainingCapacityInScope(
+  eligible: ResponsibleCapacity[],
+  deptId: string | null,
+  assignedDeltaByUser: Map<string, number>,
+): boolean {
+  return eligibleInDeptScope(eligible, deptId).some(
+    (r) => liveFreeCapacityForUser(r, assignedDeltaByUser) > 0,
+  );
 }
 
 /**
@@ -238,8 +247,6 @@ function takeLimitForDept(
  *   - Conversa OPEN mas já atribuída por outro caminho (agente manual,
  *     herança de contato/deal, `maybeAssignExisting…`)
  *   - Conversa deletada
- *   - PENDING sem conversationId cujo contato já tem conversa OPEN atribuída
- *     ou contact.assignedToId setado
  *
  * Sem essa limpeza, o motor rescheduling ficava batendo em pendências
  * fantasma (uma delas chegou a `attempts=1077` em prod — Cruzeiro EaD
@@ -253,72 +260,33 @@ async function cancelStalePendingOrphans(orgId: string): Promise<number> {
     where: {
       organizationId: orgId,
       status: "PENDING",
+      conversationId: { not: null },
     },
-    select: { id: true, conversationId: true, contactId: true },
+    select: { id: true, conversationId: true },
   });
   if (stale.length === 0) return 0;
 
-  const withConv = stale.filter((p) => p.conversationId);
-  const withoutConv = stale.filter((p) => !p.conversationId && p.contactId);
-
-  const convIds = withConv
+  const convIds = stale
     .map((p) => p.conversationId)
     .filter((id): id is string => Boolean(id));
 
-  const stillActive =
-    convIds.length > 0
-      ? await prisma.conversation.findMany({
-          where: {
-            id: { in: convIds },
-            status: "OPEN",
-            assignedToId: null,
-          },
-          select: { id: true },
-        })
-      : [];
+  const stillActive = await prisma.conversation.findMany({
+    where: {
+      id: { in: convIds },
+      status: "OPEN",
+      assignedToId: null,
+    },
+    select: { id: true },
+  });
   const activeSet = new Set(stillActive.map((c) => c.id));
 
-  const toResolve = new Set(
-    withConv
-      .filter((p) => !p.conversationId || !activeSet.has(p.conversationId))
-      .map((p) => p.id),
-  );
-
-  // PENDING sem conversationId: resolve se o contato já tem dono
-  // (conversa OPEN atribuída ou contact.assignedToId).
-  if (withoutConv.length > 0) {
-    const contactIds = withoutConv
-      .map((p) => p.contactId)
-      .filter((id): id is string => Boolean(id));
-    const [assignedContacts, assignedConvs] = await Promise.all([
-      prisma.contact.findMany({
-        where: { id: { in: contactIds }, assignedToId: { not: null } },
-        select: { id: true },
-      }),
-      prisma.conversation.findMany({
-        where: {
-          contactId: { in: contactIds },
-          status: "OPEN",
-          assignedToId: { not: null },
-        },
-        select: { contactId: true },
-      }),
-    ]);
-    const ownedContacts = new Set([
-      ...assignedContacts.map((c) => c.id),
-      ...assignedConvs.map((c) => c.contactId),
-    ]);
-    for (const p of withoutConv) {
-      if (p.contactId && ownedContacts.has(p.contactId)) {
-        toResolve.add(p.id);
-      }
-    }
-  }
-
-  if (toResolve.size === 0) return 0;
+  const toResolve = stale
+    .filter((p) => !p.conversationId || !activeSet.has(p.conversationId))
+    .map((p) => p.id);
+  if (toResolve.length === 0) return 0;
 
   const res = await prisma.distributionPending.updateMany({
-    where: { id: { in: [...toResolve] } },
+    where: { id: { in: toResolve } },
     data: {
       status: "RESOLVED",
       resolvedAt: new Date(),
@@ -367,30 +335,57 @@ export async function maybeDistributeNewInboundTicket(input: {
       return;
     }
     if (check.eligible) {
-      // Humano elegível já é o dono: mantém (Entrada = aguardando 1ª msg dele).
-      // Não zerar para 1º atendimento IA — isso atropelava distribuição.
-      console.warn(
-        "[DBG-e46688 maybeDist] keep_eligible_assignee",
-        JSON.stringify({
-          convId: input.conversationId,
-          assignee,
-          isAi: check.isAi,
-        }),
-      );
-      return;
-    } else {
-      // Fila cheia: mantém o dono (já distribuído). Só limpa se offline/etc.
-      if (!shouldClearOwnershipOnIneligible(check.reason, check.blockedReasons)) {
+      // IA herdada: mantém. Humano elegível sem reply nesta conversa:
+      // libera p/ 1º atendimento IA (substitui INICIO-PIPE).
+      if (!check.isAi) {
+        const conv = await prisma.conversation.findUnique({
+          where: { id: input.conversationId },
+          select: { hasHumanReply: true },
+        });
+        if (!conv?.hasHumanReply) {
+          console.warn(
+            "[DBG-e46688 maybeDist] release_human_for_first_attendance",
+            JSON.stringify({
+              convId: input.conversationId,
+              assignee,
+            }),
+          );
+          try {
+            await clearOwnershipForRedistribution({
+              conversationId: input.conversationId,
+              contactId: input.contactId,
+            });
+          } catch (e) {
+            console.error(
+              "[distribution] clearOwnershipForRedistribution failed",
+              e,
+            );
+            return;
+          }
+          assignee = null;
+        } else {
+          console.warn(
+            "[DBG-e46688 maybeDist] keep_eligible_assignee",
+            JSON.stringify({
+              convId: input.conversationId,
+              assignee,
+              isAi: check.isAi,
+            }),
+          );
+          return;
+        }
+      } else {
         console.warn(
-          "[DBG-e46688 maybeDist] keep_queue_full_assignee",
+          "[DBG-e46688 maybeDist] keep_eligible_assignee",
           JSON.stringify({
             convId: input.conversationId,
             assignee,
-            reason: check.reason,
+            isAi: check.isAi,
           }),
         );
         return;
       }
+    } else {
       console.warn(
         "[DBG-e46688 maybeDist] clear_ineligible_assignee",
         JSON.stringify({
@@ -511,7 +506,9 @@ export async function maybeDistributeNewInboundTicket(input: {
  * tenham pelo menos 1 humano elegível agora.
  *
  * Dentro de cada dept: FIFO (mais antigos primeiro) com teto = capacidade
- * livre agregada dos elegíveis daquele dept (máx. SAFETY_CAP_PER_DEPT).
+ * livre agregada dos elegíveis daquele dept. Capacidade é **global por
+ * consultor** (não multiplica por dept); atribuições desta passagem entram
+ * no delta antes de abrir o próximo bucket.
  */
 export async function processPendingDistributionQueue(opts: {
   trigger: PendingQueueTrigger;
@@ -646,9 +643,26 @@ export async function processPendingDistributionQueue(opts: {
 
     let resolved = 0;
     let scanned = 0;
+    /** Atribuições bem-sucedidas nesta passagem, por consultor (capacidade global). */
+    const assignedDeltaByUser = new Map<string, number>();
 
     const drainBucket = async (departmentId: string | null) => {
-      const take = takeLimitForDept(eligible, departmentId);
+      if (
+        !hasRemainingCapacityInScope(
+          eligible,
+          departmentId,
+          assignedDeltaByUser,
+        )
+      ) {
+        return;
+      }
+
+      let take = takeLimitForDept(
+        eligible,
+        departmentId,
+        assignedDeltaByUser,
+      );
+
       if (take <= 0) return;
 
       const items = await prisma.conversation.findMany({
@@ -663,6 +677,26 @@ export async function processPendingDistributionQueue(opts: {
       scanned += items.length;
 
       for (const it of items) {
+        if (
+          !hasRemainingCapacityInScope(
+            eligible,
+            departmentId,
+            assignedDeltaByUser,
+          )
+        ) {
+          console.info(
+            "[distribution] processPending cap — scope capacity exhausted",
+            JSON.stringify({
+              orgId,
+              trigger: opts.trigger,
+              userId: opts.userId ?? null,
+              departmentId,
+              assignedDeltaByUser: Object.fromEntries(assignedDeltaByUser),
+            }),
+          );
+          break;
+        }
+
         try {
           const result = await executeDistribution({
             dealId: null,
@@ -685,6 +719,32 @@ export async function processPendingDistributionQueue(opts: {
           );
           if (result.success) {
             resolved++;
+            if (result.selectedUserId) {
+              const uid = result.selectedUserId;
+              assignedDeltaByUser.set(
+                uid,
+                (assignedDeltaByUser.get(uid) ?? 0) + 1,
+              );
+
+              if (opts.userId && uid === opts.userId) {
+                const focus = eligible.find((r) => r.userId === opts.userId);
+                if (
+                  focus &&
+                  liveFreeCapacityForUser(focus, assignedDeltaByUser) <= 0
+                ) {
+                  console.info(
+                    "[distribution] processPending cap — user budget exhausted",
+                    JSON.stringify({
+                      orgId,
+                      trigger: opts.trigger,
+                      userId: opts.userId,
+                      departmentId,
+                      assignedInPass: assignedDeltaByUser.get(opts.userId) ?? 0,
+                    }),
+                  );
+                }
+              }
+            }
           } else if (
             result.reason === "NO_ELIGIBLE_RESPONSIBLE" ||
             result.reason === "NO_DEPARTMENT"
