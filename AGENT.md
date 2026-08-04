@@ -5,6 +5,111 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-04 — `/api/leads` idempotente: reaproveitar negócio aberto e não sobrescrever campo preenchido
+
+**Problema.** `POST /api/leads` tratava toda chamada como fato novo: criava um
+negócio a cada request e mandava todos os campos do contato para
+`updateContact`. Integrações não se comportam assim. A mesma pessoa chega duas
+vezes por motivos banais — item duplicado na lista de origem, retry do
+workflow, dois ramos que terminam no mesmo node, reexecução manual. O resultado
+aparece em produção como negócio repetido no kanban (Rosilene com 4 cartões no
+mesmo pipeline) e, pior, como dado bom substituído por dado velho: a segunda
+chamada trazia o telefone antigo do mesmo contato e sobrescrevia o que a
+primeira tinha gravado certo. O usuário via o número errado no CRM e o número
+certo na saída do n8n, sem explicação aparente.
+
+**Decisão.** Duas travas opcionais no corpo da request, em `options`:
+
+- `reuseOpenDeal` — antes de criar, procura negócio `OPEN` do contato no mesmo
+  pipeline do stage informado e reaproveita o mais antigo. Campos
+  personalizados continuam sendo aplicados no negócio reaproveitado; o que não
+  acontece é a criação de um segundo cartão. A resposta ganhou `dealReused`
+  para a origem saber o que houve.
+- `fillEmptyContactFieldsOnly` — em contato já existente, só escreve nos campos
+  hoje vazios. `leadScore` fica fora da regra de propósito: é numérico, `0` é
+  valor legítimo e "vazio" não significa nada ali.
+
+Ambas ficam desligadas na API (compatibilidade com quem já chama) e **ligadas
+por padrão no node do n8n**, que é a origem onde o reprocessamento acontece.
+
+**Alternativas descartadas.**
+
+- *Chave de idempotência na request.* Correto em teoria, mas exige que a origem
+  produza e mantenha a chave. O n8n reexecuta com o mesmo payload e chave nova;
+  não resolveria o caso real.
+- *Dedupe por janela de tempo.* Frágil: acerta a duplicata de 2 segundos e erra
+  a de 10 minutos, ou bloqueia negócio legítimo de um cliente recorrente.
+- *Bloquear no node, sem mexer na API.* Deixaria a API vulnerável a qualquer
+  outra integração e não protegeria as chamadas já existentes.
+- *Ligar por padrão na API.* Mudaria o comportamento de quem depende de criar
+  vários negócios para o mesmo contato no mesmo pipeline.
+
+**Impacto.** Reprocessar o mesmo lead deixou de ser destrutivo: o negócio é o
+mesmo e o telefone já correto permanece. Quem quiser o comportamento antigo
+manda `options` vazio ou os dois flags em `false`. No node
+`Create Deal With Contact`, as opções aparecem como *Avoid Duplicate Deal* e
+*Only Fill Empty Contact Fields*, ambas ligadas.
+
+---
+
+### 2026-08-04 — Telefone de contato: rejeitar na borda em vez de gravar o valor cru
+
+**Problema.** `normalizeContactPhoneInput` fazia `return normalized ?? trimmed`
+— quando `normalizePhone` falhava, o valor cru era gravado, sob a premissa de
+"não descartar entrada do usuário". Integrações não são usuário: uma varredura
+em produção achou 44 contatos com telefone impossível de discar, sendo 32 na
+org Cruzeiro EaD. Amostras reais: `"+5585991940125, +558591940125"` (dois
+números na mesma string, ~20 casos), `"+5511958101572languageSalesforce,
++5511958101572"`, `"Farmácia"`, `"Perícia Judicial E Extrajudicial"` e
+`"5.52198E+12"` (notação científica vazada do Excel).
+
+O dano não é cosmético. O envio de WhatsApp faz `phone.replace(/\D/g, "")`, e
+o teste de sanidade é só `digits.length >= 8` — então `"+5585991940125,
++558591940125"` vira um número de 25 dígitos que a Meta rejeita. O campo
+*parece* preenchido na UI e o contato fica inalcançável, sem erro em lugar
+nenhum. Falhar silenciosamente aqui é o pior desfecho possível.
+
+**Decisão.** Validar na borda e rejeitar com 400. `parseContactPhoneInput`
+(em `lib/phone.ts`) devolve `{ ok, value }` ou `{ ok: false, reason }`, e é
+chamada em `POST /api/leads`, `POST /api/contacts` e `PATCH /api/contacts/:id`.
+A mensagem de erro nomeia os números reconhecidos ("contém mais de um número
+(+A, +B). Envie apenas um.") para o operador corrigir a origem sem abrir
+chamado — o node do n8n mostra esse texto direto.
+
+Nada muda para quem já mandava certo: `+5511999998888`, `5511999998888`,
+`11999998888` e `(11) 99999-8888` continuam todos válidos, pois `normalizePhone`
+já aceitava com ou sem `+`, com ou sem DDI e com qualquer máscara.
+
+**No service, descartar em vez de rejeitar.** `createContact`/`updateContact`
+também recebem chamadas de caminhos internos (webhook Meta, importação, merge)
+onde não há ninguém para corrigir na hora. Lançar exceção ali derrubaria
+processamento de inbound por causa de um campo secundário. Então o service
+grava `null` e emite `log.warn` — campo vazio é honesto, telefone falso não.
+
+**Alternativas descartadas.** *Extrair o primeiro número válido na ingestão*:
+recupera o dado, mas escolhe em silêncio entre dois números que podem ser de
+pessoas diferentes (`"+5511973504595, +5511973504594"` é um caso real) e
+esconde para sempre o defeito da origem. *Gravar null sem falhar*: some com o
+dado sem avisar quem enviou. *Manter como está*: era o comportamento que
+produziu os 44 registros.
+
+**Backfill.** `scripts/fix-invalid-contact-phones.mjs` (dry-run por padrão,
+`--apply` para gravar). Ali a extração automática *é* apropriada — são dados
+históricos, sem remetente para avisar. Regra: número único reconhecível vence;
+entre variantes do mesmo número prefere a forma **com** o 9º dígito, que é a
+usada pela Meta (`"+551186636819, +5511986636819"` → `+5511986636819`); entre
+números distintos mantém o primeiro; sem número reconhecível limpa o campo.
+Rodado em 04/ago/26: 36 corrigidos, 8 limpos, 0 inválidos restantes. Backup dos
+valores anteriores em JSON e um `CONTACT_FIELD_CHANGED` por contato, para o
+rastro aparecer na timeline.
+
+**Impacto operacional.** Origens que hoje mandam dois números por campo passam
+a receber 400 em vez de gravar lixo. Isso é intencional e foi a escolha
+explícita — mas significa que integrações com esse defeito param de ingerir até
+serem ajustadas.
+
+---
+
 ### 2026-08-03 — Espera do veredito da Meta antes de escolher o ramo do envio [DECISÃO — agente OPUS]
 
 **Modelo usado.** GPT-5.6 Sol (orquestrador); implementação pelo Executor

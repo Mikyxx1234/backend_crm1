@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { getLogger } from "@/lib/logger";
+import { parseContactPhoneInput } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { logEvent } from "@/services/activity-log";
 import {
@@ -119,7 +120,13 @@ export async function PUT(request: Request, context: RouteContext) {
       data.email = b.email === null ? null : typeof b.email === "string" ? b.email.trim().toLowerCase() : undefined;
     }
     if (b.phone !== undefined) {
-      data.phone = b.phone === null ? null : typeof b.phone === "string" ? b.phone.trim() : undefined;
+      if (typeof b.phone === "string") {
+        const parsed = parseContactPhoneInput(b.phone);
+        if (!parsed.ok) return NextResponse.json({ message: parsed.reason }, { status: 400 });
+        data.phone = parsed.value;
+      } else if (b.phone === null) {
+        data.phone = null;
+      }
     }
     if (b.avatarUrl !== undefined) {
       data.avatarUrl =

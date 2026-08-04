@@ -16,8 +16,17 @@ const log = getLogger("contacts-service");
 /**
  * Normaliza o telefone recebido em Create/Update para E.164 (BR-first).
  * Se o input for null/undefined, propaga o valor original.
- * Se a normalização falhar (input não reconhecido), mantém o valor original
- * já trimado para não descartar entrada do usuário.
+ *
+ * Até 04/ago/26 o valor cru era mantido quando a normalização falhava, "para
+ * não descartar entrada do usuário". O efeito real foi o oposto: integrações
+ * gravaram coisas como `"+5585991940125, +558591940125"` e `"Farmácia"`, que
+ * passam no `replace(/\D/g, "")` do envio e viram números impossíveis na
+ * Meta — contato inalcançável sem nenhum sinal de erro.
+ *
+ * As rotas de escrita rejeitam com 400 (`parseContactPhoneInput`). Aqui, nos
+ * caminhos internos que não têm ninguém para corrigir na hora (webhook Meta,
+ * importação, merge), descartamos e registramos: campo vazio é honesto,
+ * telefone falso não.
  */
 function normalizeContactPhoneInput(
   input: string | null | undefined,
@@ -27,7 +36,11 @@ function normalizeContactPhoneInput(
   const trimmed = input.trim();
   if (!trimmed) return null;
   const normalized = normalizePhone(trimmed);
-  return normalized ?? trimmed;
+  if (!normalized) {
+    log.warn({ phone: trimmed }, "telefone nao normalizavel descartado");
+    return null;
+  }
+  return normalized;
 }
 
 const LIFECYCLE_STAGES: LifecycleStage[] = [
