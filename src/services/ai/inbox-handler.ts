@@ -62,6 +62,7 @@ import {
 import {
   buildHumanQueueWithHoursMessage,
   buildHumanUnavailableOfferMessage,
+  isNearDuplicateBotText,
   messageLooksLikeHumanQueueNotice,
   userWantsAiContinue,
   userWantsHumanDistribution,
@@ -332,25 +333,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         });
         conversation = { ...conversation, assignedToId: aiAgent.id };
 
-        const alreadyOffered =
-          messageLooksLikeHumanQueueNotice(lastBotOut?.content) ||
-          Boolean(lastBotOut?.content?.includes("indisponível")) ||
-          Boolean(lastBotOut?.content?.includes("indisponivel"));
-        if (!alreadyOffered && !userWantsAiContinue(args.userMessage)) {
-          await sendAgentMessage({
-            conversationId: args.conversationId,
-            contactId: args.contactId,
-            agentUserId: aiAgent.id,
-            autonomyMode: "AUTONOMOUS",
-            text: buildHumanUnavailableOfferMessage(),
-            channel: args.channel,
-            kind: "text",
-            bypassAssigneeCheck: true,
-          }).catch(() => null);
-        }
+        // Não envia oferta aqui — a IA responde uma vez (evita bolha duplicada
+        // oferta + LLM). Aviso de fila/indisponível fica no pós-handoff.
         logAi("waiting_queue_ai_continue", {
           conversationId: args.conversationId,
           pendingId: pending.id,
+          alreadyNoticed: messageLooksLikeHumanQueueNotice(lastBotOut?.content),
         });
         // Fall through: IA responde normalmente.
       } else {
@@ -563,29 +551,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         });
       }
 
-      const alreadyOffered =
-        messageLooksLikeHumanQueueNotice(lastBotMsg?.content) ||
-        Boolean(lastBotMsg?.content?.includes("indisponível")) ||
-        Boolean(lastBotMsg?.content?.includes("indisponivel"));
-      if (!alreadyOffered && !userWantsAiContinue(args.userMessage)) {
-        await sendAgentMessage({
-          conversationId: args.conversationId,
-          contactId: args.contactId,
-          agentUserId: assignee.id,
-          autonomyMode: cfg.autonomyMode,
-          text: buildHumanUnavailableOfferMessage(),
-          channel: args.channel,
-          kind: "text",
-          humanBehavior,
-          generationId: args.generationId,
-          bypassAssigneeCheck: true,
-        }).catch(() => null);
-      }
       logAi("handoff_pending_ai_continue", {
         conversationId: args.conversationId,
         pendingId: pendingHandoff.id,
+        alreadyNoticed: messageLooksLikeHumanQueueNotice(lastBotMsg?.content),
       });
-      // Fall through — IA responde.
+      // Fall through — IA responde (sem oferta prévia duplicada).
     }
 
     // ── 0c. Post-handoff ack silence ──────────────────────────────────
@@ -973,22 +944,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         "retencao"
           ? RETENTION_HANDOFF_MESSAGE
           : GENERIC_QUEUE_HANDOFF_MESSAGE);
-      // Tools já podem ter limpo o assignee — bypass para a msg chegar no WhatsApp.
-      await sendAgentMessage({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: assignee.id,
-        autonomyMode: cfg.autonomyMode,
-        text: handoffText,
-        channel: args.channel,
-        kind: "text",
-        humanBehavior,
-        generationId: args.generationId,
-        bypassAssigneeCheck: true,
-      }).catch(() => null);
-      // Padrão: aviso de handoff (texto/tool) → humano ou fila.
-      // Se tools já atribuíram humano, só garante "Em Atendimento".
-      // Senão (só transfer_to_department / só texto) → distribui de verdade.
+      // Distribui primeiro; só depois envia UMA mensagem ao aluno.
       const afterHandoff = await prisma.conversation.findUnique({
         where: { id: args.conversationId },
         select: {
@@ -1023,8 +979,6 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             : "Handoff por texto/nota — reforço backend",
         }).catch(() => null);
       }
-      // Sem humano elegível: avisa indisponibilidade + oferta de continuar com IA
-      // e reassumimos a IA (a fila PENDING permanece para redistribuição).
       const afterQueue = await prisma.conversation.findUnique({
         where: { id: args.conversationId },
         select: {
@@ -1032,7 +986,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           assignedTo: { select: { type: true } },
         },
       });
-      if (afterQueue?.assignedTo?.type !== "HUMAN") {
+      const gotHuman = afterQueue?.assignedTo?.type === "HUMAN";
+      if (!gotHuman) {
         await prisma.$transaction(async (tx) => {
           await tx.conversation.update({
             where: { id: args.conversationId },
@@ -1043,28 +998,68 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
             data: { assignedToId: assignee.id },
           });
         });
-        const offerText = buildHumanUnavailableOfferMessage();
+      }
+
+      const recentBot = await prisma.message.findMany({
+        where: {
+          conversationId: args.conversationId,
+          direction: "out",
+          authorType: "bot",
+          isPrivate: false,
+          messageType: { not: "note" },
+          createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+        },
+        orderBy: { createdAt: "desc" },
+        take: 6,
+        select: { content: true },
+      });
+      const alreadyNoticed = recentBot.some((m) =>
+        messageLooksLikeHumanQueueNotice(m.content),
+      );
+      const llmCoversQueue =
+        messageLooksLikeHumanQueueNotice(handoffText) ||
+        /fila|indispon|posso continuar|a partir das\s*\d/i.test(handoffText);
+
+      let outbound: string | null = null;
+      if (gotHuman) {
+        outbound = handoffText;
+      } else if (alreadyNoticed) {
+        // Já avisou fila/indisponível — só envia se o LLM trouxe info nova
+        // (ex.: motivo da retenção) e não for near-duplicate.
         if (
-          !handoffText.includes("indisponível") &&
-          !handoffText.includes("indisponivel")
+          replyText.trim() &&
+          !recentBot.some(
+            (m) => m.content && isNearDuplicateBotText(handoffText, m.content),
+          )
         ) {
-          await sendAgentMessage({
-            conversationId: args.conversationId,
-            contactId: args.contactId,
-            agentUserId: assignee.id,
-            autonomyMode: cfg.autonomyMode,
-            text: offerText,
-            channel: args.channel,
-            kind: "text",
-            humanBehavior,
-            generationId: args.generationId,
-            bypassAssigneeCheck: true,
-          }).catch(() => null);
+          outbound = handoffText;
         }
+      } else if (llmCoversQueue) {
+        outbound = handoffText;
+      } else {
+        // Uma mensagem só: política de indisponível (não soma "vou te conectar" + oferta).
+        outbound = buildHumanUnavailableOfferMessage();
+      }
+
+      if (outbound) {
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: outbound,
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
       }
       logAi("handoff", {
         conversationId: args.conversationId,
         reason: "tool_transfer",
+        gotHuman,
+        alreadyNoticed,
         durationMs: Date.now() - startedAt.getTime(),
       });
       return;
@@ -1072,6 +1067,31 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
     const parsed = parseAgentConfidence(result.text.trim());
     let text = parsed.text;
+    // Evita eco de resposta idêntica/quase idêntica sem o aluno ter avançado.
+    if (text) {
+      const recentSame = await prisma.message.findFirst({
+        where: {
+          conversationId: args.conversationId,
+          direction: "out",
+          authorType: "bot",
+          isPrivate: false,
+          messageType: { not: "note" },
+          createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+        },
+        orderBy: { createdAt: "desc" },
+        select: { content: true },
+      });
+      if (
+        recentSame?.content &&
+        isNearDuplicateBotText(text, recentSame.content)
+      ) {
+        logAi("reply_near_duplicate_skipped", {
+          conversationId: args.conversationId,
+          durationMs: Date.now() - startedAt.getTime(),
+        });
+        return;
+      }
+    }
     // Persiste a confiança auto-declarada no run (métrica de qualidade).
     if (parsed.confidence !== null) {
       await prisma.aIAgentRun

@@ -101,6 +101,36 @@ export async function sendAgentMessage(args: {
   const text = args.text.trim();
   if (!text) return { status: "skipped", reason: "empty" };
 
+  // Anti-spam: não reenvia a mesma informação se o bot já disse algo
+  // muito parecido nos últimos minutos (fila/conexão ou overlap alto).
+  try {
+    const { isNearDuplicateBotText } = await import(
+      "@/services/ai/human-queue-policy"
+    );
+    const recentBot = await prisma.message.findMany({
+      where: {
+        conversationId: args.conversationId,
+        direction: "out",
+        authorType: "bot",
+        isPrivate: false,
+        messageType: { not: "note" },
+        createdAt: { gte: new Date(Date.now() - 5 * 60 * 1000) },
+      },
+      orderBy: { createdAt: "desc" },
+      take: 6,
+      select: { content: true },
+    });
+    if (
+      recentBot.some(
+        (m) => m.content && isNearDuplicateBotText(text, m.content),
+      )
+    ) {
+      return { status: "skipped", reason: "near_duplicate" };
+    }
+  } catch {
+    /* best-effort */
+  }
+
   // Kill-switch absoluto: não envia WhatsApp fora da allowlist.
   try {
     const { isContactAllowedForAi } = await import(

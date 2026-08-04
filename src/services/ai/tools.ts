@@ -702,7 +702,7 @@ function transferToHumanTool(ctx: RunContext) {
           distributionReason: result.distribution?.reason ?? null,
           queuedWaiting,
           hint: queuedWaiting
-            ? "Ninguém disponível — lead na fila. Avise: humano indisponível agora; você pode continuar se o aluno quiser; expediente às 8h (seg–sex) / 9h (sábado). Se pedir fila, confirme fila + horário."
+            ? "Ninguém disponível — lead na fila. Avise UMA vez: humano indisponível; você pode continuar se o aluno quiser. Só cite 8h/9h se ainda for fora do expediente; dentro do horário diga que atendem quando houver consultor. NÃO repita mensagem de conexão."
             : undefined,
         });
       } catch (err) {
@@ -822,7 +822,7 @@ function executeDistributionTool(ctx: RunContext) {
               reason: handoff.distribution?.reason ?? null,
               queuedWaiting,
               hint: queuedWaiting
-                ? "Ninguém disponível — lead na fila. Avise: humano indisponível agora; você pode continuar se o aluno quiser; expediente às 8h (seg–sex) / 9h (sábado). Se pedir fila, confirme fila + horário."
+                ? "Ninguém disponível — lead na fila. Avise UMA vez: humano indisponível; você pode continuar se o aluno quiser. Só cite 8h/9h se ainda for fora do expediente; dentro do horário diga que atendem quando houver consultor. NÃO repita mensagem de conexão."
                 : undefined,
             });
           }
@@ -875,7 +875,7 @@ function executeDistributionTool(ctx: RunContext) {
           reason: result.reason,
           hint:
             result.reason === "NO_ELIGIBLE_RESPONSIBLE"
-              ? "Ninguém disponível agora — o lead entrou na fila. Avise que o atendimento humano está indisponível no momento, que VOCÊ pode continuar ajudando se o aluno quiser, e que o expediente humano inicia às 8h (seg–sex) ou 9h (sábado). Se o aluno pedir fila/humano, confirme a fila e o horário."
+              ? "Ninguém disponível — lead na fila. Avise UMA vez: humano indisponível; você pode continuar se o aluno quiser. Só cite 8h/9h se ainda for fora do expediente; dentro do horário diga que atendem quando houver consultor. NÃO repita mensagem de conexão."
               : result.reason === "NO_DEPARTMENT"
                 ? "A conversa não está em um departamento com distribuição automática. Chame `transfer_to_department` primeiro."
                 : "Distribuição não realizada. Considere transferir para humano manualmente.",
