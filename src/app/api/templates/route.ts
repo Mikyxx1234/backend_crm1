@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { withApiAuthContext } from "@/lib/api-auth";
 import { withOrgContext } from "@/lib/auth-helpers";
 import {
   createTemplate,
@@ -18,8 +19,12 @@ import {
 //     erro genérico capturado pelo catch.
 // UI mostrava "Criar" sem efeito visual — clique morria no 500.
 // Migrado pra `withOrgContext` (padrão das demais 26 rotas corrigidas).
-export async function GET() {
-  return withOrgContext(async () => {
+// Auth hibrida (Bearer OU sessao) no GET: o node do n8n monta o dropdown de
+// "modelo interno" a partir daqui. Leitura ja e tenant-scoped pela Prisma
+// Extension via `withApiAuthContext`. O POST segue so por sessao — criar
+// modelo continua sendo acao de UI.
+export async function GET(request: Request) {
+  return withApiAuthContext(request, async () => {
     try {
       const templates = await getTemplates();
       return NextResponse.json(templates);

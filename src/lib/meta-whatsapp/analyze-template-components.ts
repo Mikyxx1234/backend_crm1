@@ -17,6 +17,8 @@ export type TemplateComponentsAnalysis = {
   buttons: TemplateButton[];
   /** Texto do componente BODY (para preview). */
   bodyText: string | null;
+  /** Texto do componente HEADER quando `format = TEXT` (pode ter placeholders). */
+  headerText: string | null;
   hasVariables: boolean;
   flowAction: string | null;
   flowId: string | null;
@@ -44,6 +46,7 @@ export function analyzeTemplateComponents(
   const buttonTypesSet = new Set<string>();
   const buttons: TemplateButton[] = [];
   let bodyText: string | null = null;
+  let headerText: string | null = null;
   let hasVariables = false;
   let flowAction: string | null = null;
   let flowId: string | null = null;
@@ -59,6 +62,7 @@ export function analyzeTemplateComponents(
       buttonTypes: [],
       buttons: [],
       bodyText: null,
+      headerText: null,
       hasVariables,
       flowAction: null,
       flowId: null,
@@ -74,6 +78,7 @@ export function analyzeTemplateComponents(
     if (type === "BODY" || type === "HEADER") {
       const text = typeof comp.text === "string" ? comp.text : "";
       if (type === "BODY" && text) bodyText = text;
+      if (type === "HEADER" && text) headerText = text;
       if (textHasVariablePlaceholders(text)) hasVariables = true;
       const pf = String(comp.parameter_format ?? comp.parameterFormat ?? "").toUpperCase();
       if (pf === "NAMED") hasVariables = true;
@@ -122,6 +127,7 @@ export function analyzeTemplateComponents(
     buttonTypes,
     buttons,
     bodyText,
+    headerText,
     hasVariables,
     flowAction,
     flowId,
