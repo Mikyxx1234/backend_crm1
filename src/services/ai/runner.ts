@@ -73,6 +73,7 @@ const ACADEMIC_RUNTIME_TOOLS = [
   "transfer_to_department",
   "execute_distribution",
   "transfer_to_human",
+  "close_conversation",
 ] as const;
 
 export async function runAgent(args: RunArgs): Promise<RunResult> {

@@ -44,6 +44,114 @@ export function messageImpliesRematricula(userMessage?: string | null): boolean 
   );
 }
 
+/**
+ * Casos operacionais de aluno já matriculado → Atendimento (SAC).
+ * Sobrescreve escolha errada de Acolhimento pelo LLM (ex.: disciplina
+ * pendente / último semestre).
+ */
+export function messageImpliesOperationalAtendimento(
+  userMessage?: string | null,
+): boolean {
+  const msg = normalize(userMessage ?? "");
+  if (!msg) return false;
+  if (messageImpliesRematricula(msg)) return true;
+  if (
+    /ultim[oa]\s+semestre|semestre\s+final|formand|conclusao\s+de\s+curso|concluir\s+o\s+curso/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /disciplina/.test(msg) &&
+    /(pendente|nao\s+(esta|aparece)|faltando|liberar|acrescent)/.test(msg)
+  ) {
+    return true;
+  }
+  if (
+    /(nao\s+(esta|aparece)|faltando).{0,40}(plataforma|blackboard|ava|ambiente)/.test(
+      msg,
+    ) ||
+    /(plataforma|blackboard|ava).{0,40}(nao\s+(esta|aparece)|faltando|sem\s+a\s+disciplina)/.test(
+      msg,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+const ACOLHIMENTO_MATRICULA_MAX_AGE_DAYS = 60;
+
+/**
+ * Bloqueia Acolhimento quando o relatório de matriculados indica aluno
+ * veterano/rematriculado (não calouro). Sem registro → não bloqueia.
+ */
+export async function shouldBlockAcolhimentoFromMatricula(
+  contactId: string | null | undefined,
+): Promise<{
+  block: boolean;
+  reason?: "REMATRICULA" | "DATA_MATRICULA_OLD";
+}> {
+  if (!contactId) return { block: false };
+  try {
+    const { getOrgIdOrThrow } = await import("@/lib/request-context");
+    const orgId = getOrgIdOrThrow();
+    const contact = await prisma.contact.findUnique({
+      where: { id: contactId },
+      select: { phone: true, email: true },
+    });
+    if (!contact) return { block: false };
+
+    const { lookupStudent } = await import("@/services/academic-records");
+    const records = await lookupStudent(orgId, {
+      phone: contact.phone,
+      email: contact.email,
+    });
+    if (!records.length) return { block: false };
+
+    // lookupStudent já ordena: ativo + matrícula mais recente primeiro.
+    const top = records[0];
+    const tipo = normalize(top.tipoMatricula ?? "");
+    if (tipo.includes("rematric")) {
+      return { block: true, reason: "REMATRICULA" };
+    }
+
+    const data = top.dataMatricula;
+    if (data instanceof Date && !Number.isNaN(data.getTime())) {
+      const ageMs = Date.now() - data.getTime();
+      const ageDays = ageMs / (1000 * 60 * 60 * 24);
+      if (ageDays > ACOLHIMENTO_MATRICULA_MAX_AGE_DAYS) {
+        return { block: true, reason: "DATA_MATRICULA_OLD" };
+      }
+    }
+    return { block: false };
+  } catch (e) {
+    console.warn(
+      "[academic-handoff] shouldBlockAcolhimentoFromMatricula failed",
+      e,
+    );
+    return { block: false };
+  }
+}
+
+/**
+ * Se o dept atual for Acolhimento e o relatório bloquear, força Atendimento.
+ */
+export async function enforceAtendimentoIfAcolhimentoBlocked(args: {
+  contactId: string | null | undefined;
+  dept: { id: string; name: string } | null;
+}): Promise<{ id: string; name: string } | null> {
+  if (!args.dept) return null;
+  if (classifyAcademicDepartmentKey(args.dept.name) !== "acolhimento") {
+    return args.dept;
+  }
+  const gate = await shouldBlockAcolhimentoFromMatricula(args.contactId);
+  if (!gate.block) return args.dept;
+  const atendimento = await resolveDepartmentByKey("atendimento");
+  return atendimento ?? args.dept;
+}
+
 export function inferDepartmentFromContext(args: {
   userMessage?: string | null;
   pipelineName?: string | null;
@@ -59,8 +167,11 @@ export function inferDepartmentFromContext(args: {
     return "retencao";
   }
 
-  // Antes do funil Acolhimento: rematrícula é operacional (SAC).
-  if (messageImpliesRematricula(args.userMessage)) {
+  // Antes do funil Acolhimento: rematrícula / operacional (SAC).
+  if (
+    messageImpliesRematricula(args.userMessage) ||
+    messageImpliesOperationalAtendimento(args.userMessage)
+  ) {
     return "atendimento";
   }
 
@@ -329,24 +440,37 @@ export async function executeAcademicDepartmentHandoff(args: {
   }
 
   let userMessage = args.userMessage ?? null;
-  if (!userMessage && args.conversationId) {
-    const lastIn = await prisma.message.findFirst({
+  // Junta as últimas inbound: o LLM às vezes chama a tool só com o
+  // nome da disciplina, e o motivo ("pendente na plataforma") ficou
+  // na mensagem anterior — sem isso o override de Atendimento falha.
+  let recentInboundBlob = userMessage ?? "";
+  if (args.conversationId) {
+    const recentIn = await prisma.message.findMany({
       where: {
         conversationId: args.conversationId,
         direction: "in",
         isPrivate: false,
       },
       orderBy: { createdAt: "desc" },
+      take: 6,
       select: { content: true },
     });
-    userMessage = lastIn?.content ?? null;
+    if (!userMessage) {
+      userMessage = recentIn[0]?.content ?? null;
+    }
+    recentInboundBlob = [userMessage, ...recentIn.map((m) => m.content ?? "")]
+      .filter(Boolean)
+      .join("\n");
   }
 
   let dept: { id: string; name: string } | null = null;
 
-  // Rematrícula prevalece sobre o departmentName que a IA escolher
-  // (ex.: modelo mandando Acolhimento por engano).
-  if (messageImpliesRematricula(userMessage)) {
+  // Rematrícula / operacional (disciplina pendente, último semestre…)
+  // prevalece sobre o departmentName que a IA escolher (ex.: Acolhimento).
+  if (
+    messageImpliesRematricula(recentInboundBlob) ||
+    messageImpliesOperationalAtendimento(recentInboundBlob)
+  ) {
     dept = await resolveDepartmentByKey("atendimento");
   }
 
@@ -378,6 +502,22 @@ export async function executeAcademicDepartmentHandoff(args: {
     dept = await resolveDepartmentByKey(key);
   }
 
+  // Garante contactId cedo: gate de Acolhimento + DistributionPending.
+  let contactId = args.contactId;
+  if (!contactId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: { contactId: true },
+    });
+    contactId = conv?.contactId ?? null;
+  }
+
+  // Relatório de matriculados: rematrícula / data > 60d → nunca Acolhimento.
+  dept = await enforceAtendimentoIfAcolhimentoBlocked({
+    contactId,
+    dept,
+  });
+
   if (dept) {
     await prisma.conversation.update({
       where: { id: args.conversationId },
@@ -397,18 +537,6 @@ export async function executeAcademicDepartmentHandoff(args: {
         updatedAt: new Date(),
       },
     });
-  }
-
-  // Garante contactId para enfileirar em DistributionPending se ninguém
-  // elegível (queueLimit / offline / dept) — senão a aba mostra a conversa
-  // mas sem origem "Agente IA".
-  let contactId = args.contactId;
-  if (!contactId) {
-    const conv = await prisma.conversation.findUnique({
-      where: { id: args.conversationId },
-      select: { contactId: true },
-    });
-    contactId = conv?.contactId ?? null;
   }
 
   // AI_AGENT: se ninguém elegível (offline / fila cheia / fora do dept),

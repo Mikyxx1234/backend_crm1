@@ -32,8 +32,11 @@ import {
   resolveDepartmentByName,
   resolveDepartmentByKey,
   messageImpliesRematricula,
+  messageImpliesOperationalAtendimento,
   executeAcademicDepartmentHandoff,
+  enforceAtendimentoIfAcolhimentoBlocked,
 } from "@/services/ai/academic-department-routing";
+import { closeAiOnlyConversation } from "@/services/ai/academic-closure";
 import type { ActivityType, Prisma } from "@prisma/client";
 
 export type RunContext = {
@@ -732,20 +735,33 @@ function transferToDepartmentTool(ctx: RunContext) {
         const name = departmentName.trim();
         if (!name) return fail("Nome de departamento vazio.");
 
-        // Última mensagem do aluno — rematrícula força Atendimento.
-        const lastIn = await prisma.message.findFirst({
+        // Últimas inbound — rematrícula / operacional forçam Atendimento
+        // (mesmo se o LLM mandar Acolhimento).
+        const recentIn = await prisma.message.findMany({
           where: {
             conversationId: ctx.conversationId,
             direction: "in",
             isPrivate: false,
           },
           orderBy: { createdAt: "desc" },
+          take: 6,
           select: { content: true },
         });
-        let dept = messageImpliesRematricula(lastIn?.content)
-          ? await resolveDepartmentByKey("atendimento")
-          : null;
+        const inboundBlob = recentIn.map((m) => m.content ?? "").join("\n");
+        let dept =
+          messageImpliesRematricula(inboundBlob) ||
+          messageImpliesOperationalAtendimento(inboundBlob)
+            ? await resolveDepartmentByKey("atendimento")
+            : null;
         if (!dept) dept = await resolveDepartmentByName(name);
+        if (!dept)
+          return fail(
+            `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
+          );
+        dept = await enforceAtendimentoIfAcolhimentoBlocked({
+          contactId: ctx.contactId,
+          dept,
+        });
         if (!dept)
           return fail(
             `Departamento "${name}" não encontrado. Use Acolhimento, Retenção ou Atendimento.`,
@@ -980,6 +996,50 @@ function consultarMatriculaTool(ctx: RunContext) {
   });
 }
 
+// ── close_conversation ─────────────────────────────────────────
+
+function closeConversationTool(ctx: RunContext) {
+  return tool({
+    description:
+      "Encerra a conversa atual SOMENTE se o atendimento foi só da IA (nenhum humano respondeu ainda). Dispara a automação de Encerramento do CRM. Use quando o aluno pedir explicitamente para encerrar/finalizar o atendimento com você. NÃO use se já houver consultor humano na conversa.",
+    inputSchema: z.object({
+      reason: z
+        .string()
+        .optional()
+        .describe("Motivo curto do encerramento (ex.: 'Aluno pediu para encerrar')."),
+    }),
+    execute: async ({ reason }) => {
+      try {
+        if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        const result = await closeAiOnlyConversation({
+          conversationId: ctx.conversationId,
+          contactId: ctx.contactId ?? null,
+          reason: reason ?? "close_conversation via IA",
+        });
+        if (!result.closed) {
+          return fail(
+            result.reason === "HAS_HUMAN_REPLY"
+              ? "Já houve resposta humana — não posso encerrar por aqui. Transfira ou deixe o consultor encerrar."
+              : result.reason === "NOT_AI_ASSIGNEE"
+                ? "A conversa não está com a IA — não encerro."
+                : result.reason === "ALREADY_CLOSED"
+                  ? "Conversa já encerrada."
+                  : `Não foi possível encerrar (${result.reason}).`,
+          );
+        }
+        return ok({
+          closed: true,
+          hint: "Conversa encerrada e automação Encerramento acionada. Confirme ao aluno em uma frase curta.",
+        });
+      } catch (err) {
+        return fail(
+          err instanceof Error ? err.message : "Falha ao encerrar conversa.",
+        );
+      }
+    },
+  });
+}
+
 // ── ToolSet builder ────────────────────────────────────────────
 
 // Usamos `any` pro Tool porque cada tool tem um inputSchema e output
@@ -998,6 +1058,7 @@ const FACTORY_MAP: Record<string, (ctx: RunContext) => AnyTool> = {
   execute_distribution: executeDistributionTool,
   consultar_matricula: consultarMatriculaTool,
   transfer_to_human: transferToHumanTool,
+  close_conversation: closeConversationTool,
 };
 
 export function buildToolSet(ctx: RunContext, enabledIds: string[]): ToolSet {

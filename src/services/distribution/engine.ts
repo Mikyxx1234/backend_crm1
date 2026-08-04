@@ -205,6 +205,20 @@ export function selectResponsible(
 async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
   if (!input.dealId && !input.contactId) return;
   try {
+    // Sem inbound do aluno (ex.: só template BV/Bem-vindo) não entra na fila.
+    if (input.conversationId) {
+      const conv = await prisma.conversation.findUnique({
+        where: { id: input.conversationId },
+        select: { lastInboundAt: true },
+      });
+      if (!conv?.lastInboundAt) {
+        console.info(
+          "[distribution] enqueuePending skip — sem inbound do aluno",
+          JSON.stringify({ conversationId: input.conversationId }),
+        );
+        return;
+      }
+    }
     const existing = await prisma.distributionPending.findFirst({
       where: {
         status: "PENDING",
@@ -762,18 +776,29 @@ export async function executeDistribution(
   );
 
   // Handoff acadêmico / drenagem da fila → estágio "Em Atendimento".
+  // Await: o card precisa estar no funil operacional assim que o consultor
+  // humano for responsável (fire-and-forget perdia corridas com o inbox).
   if (
     input.triggerSource === "AI_AGENT" ||
     (input.triggerSource === "SYSTEM" && Boolean(input.departmentId))
   ) {
-    void import("@/services/ai/academic-department-routing")
-      .then((m) =>
-        m.moveOpenDealToEmAtendimento({
+    try {
+      const assigneeType = await prisma.user.findUnique({
+        where: { id: selected.userId },
+        select: { type: true },
+      });
+      if (assigneeType?.type === "HUMAN") {
+        const { moveOpenDealToEmAtendimento } = await import(
+          "@/services/ai/academic-department-routing"
+        );
+        await moveOpenDealToEmAtendimento({
           dealId: assignedDealId,
           contactId: input.contactId ?? null,
-        }),
-      )
-      .catch(() => null);
+        });
+      }
+    } catch (e) {
+      console.error("[distribution] moveOpenDealToEmAtendimento failed", e);
+    }
   }
 
   return {
