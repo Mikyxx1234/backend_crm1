@@ -46,19 +46,49 @@ import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
 import {
   createInternalNoteOnConversation,
+  sendInteractiveButtonsToConversation,
   sendTemplateToConversation,
   sendTextToConversation,
   type OutboundActor,
+  type OutboundButton,
   type OutboundResult,
 } from "@/services/outbound-messaging";
 import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-const VALID_KINDS = ["note", "text", "template"] as const;
+const VALID_KINDS = ["note", "text", "template", "interactive"] as const;
 type MessageKind = (typeof VALID_KINDS)[number];
 
 const VALID_COMPONENTS: TemplateVariableComponent[] = ["body", "header", "button"];
+
+/**
+ * Aceita a lista `[{ id?, title }]` (usada pelo node) ou o formato curto
+ * `["Sim","Não"]` (chamadas manuais). Preserva a ordem — a Meta usa a ordem
+ * como layout dos botões. IDs em branco viram `btn_1..3` no service.
+ */
+function parseButtons(raw: unknown): OutboundButton[] {
+  if (!Array.isArray(raw)) return [];
+  const out: OutboundButton[] = [];
+  for (const entry of raw) {
+    if (typeof entry === "string") {
+      const title = entry.trim();
+      if (title) out.push({ title });
+      continue;
+    }
+    if (entry && typeof entry === "object") {
+      const r = entry as Record<string, unknown>;
+      const title = typeof r.title === "string" ? r.title.trim() : "";
+      if (!title) continue;
+      const id =
+        typeof r.id === "string" && r.id.trim()
+          ? r.id.trim()
+          : null;
+      out.push({ id, title });
+    }
+  }
+  return out;
+}
 
 /**
  * Aceita tanto a lista explícita (`[{ key, value }]`, usada pelo node) quanto
@@ -266,6 +296,27 @@ export async function POST(request: Request, ctx: Ctx) {
             conversationId,
             actor,
             content,
+            channelId: typeof body.channelId === "string" ? body.channelId : null,
+            stopAutomations: body.stopAutomations !== false,
+          }),
+        );
+      }
+
+      if (kind === "interactive") {
+        // `body.body` = texto principal exibido acima dos botões. Usamos o nome
+        // `body` (padrão da Cloud API) para não conflitar com `content` (que já
+        // é o campo dos kinds text/note).
+        const interactiveBody = typeof body.body === "string" ? body.body : "";
+        return toResponse(
+          kind,
+          dealId,
+          await sendInteractiveButtonsToConversation({
+            conversationId,
+            actor,
+            body: interactiveBody,
+            buttons: parseButtons(body.buttons),
+            header: typeof body.header === "string" ? body.header : null,
+            footer: typeof body.footer === "string" ? body.footer : null,
             channelId: typeof body.channelId === "string" ? body.channelId : null,
             stopAutomations: body.stopAutomations !== false,
           }),
