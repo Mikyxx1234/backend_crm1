@@ -210,6 +210,33 @@
         background: var(--primary-soft); border: 1px solid rgba(59,130,246,0.25);
         font-size: 12px; color: var(--muted);
       }
+      .table-toolbar {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; flex-wrap: wrap; padding: 12px 14px;
+        border-bottom: 1px solid var(--border);
+      }
+      .table-toolbar .tb-label {
+        font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+        color: var(--muted); font-weight: 700; margin-right: 4px;
+      }
+      .filter-group { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+      .filter-chip {
+        border: 1px solid var(--border-strong); background: transparent;
+        color: var(--muted); border-radius: 999px; padding: 5px 12px;
+        font-size: 12px; font-weight: 600; cursor: pointer; font-family: inherit;
+      }
+      .filter-chip:hover { color: var(--text); border-color: var(--primary); }
+      .filter-chip.active { color: #fff; background: var(--primary-soft); border-color: var(--primary); }
+      .filter-chip.active.same { color: var(--danger); background: var(--danger-bg); border-color: rgba(239,68,68,0.4); }
+      .filter-chip.active.cross { color: #c4b5fd; background: rgba(139,92,246,0.14); border-color: rgba(139,92,246,0.4); }
+      .pager {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; flex-wrap: wrap; padding: 12px 14px;
+        border-top: 1px solid var(--border);
+      }
+      .pager .info { font-size: 12px; color: var(--muted); }
+      .pager .actions { display: flex; align-items: center; gap: 8px; }
+      .pager button:disabled { opacity: 0.4; cursor: not-allowed; }
     </style>
   </head>
   <body>
@@ -378,6 +405,15 @@
           </div>
           <div class="section-title">Amostra recente · validação</div>
           <div class="table-card">
+            <div class="table-toolbar">
+              <div class="filter-group">
+                <span class="tb-label">Faixa</span>
+                <button type="button" class="filter-chip active" data-band="all">Todas</button>
+                <button type="button" class="filter-chip" data-band="cruzado">Cruzado</button>
+                <button type="button" class="filter-chip" data-band="mesmo_depto">Mesmo depto</button>
+              </div>
+              <div class="muted" id="r-samples-count">—</div>
+            </div>
             <table>
               <thead>
                 <tr><th>Contato</th><th>Faixa</th><th>Roteamento</th><th>Quando</th></tr>
@@ -385,6 +421,13 @@
               <tbody id="r-samples"></tbody>
             </table>
             <div id="r-samples-empty" class="empty hidden">Nenhum recontato hoje.</div>
+            <div class="pager" id="r-samples-pager">
+              <div class="info" id="r-samples-page-info">—</div>
+              <div class="actions">
+                <button type="button" class="btn" id="r-page-prev">Anterior</button>
+                <button type="button" class="btn" id="r-page-next">Próxima</button>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -420,8 +463,14 @@
     <script src="/config.js"></script>
     <script>
       var REFRESH_MS = 15000;
+      var SAMPLE_PAGE_SIZE = 8;
       var timer = null;
-      var state = { stage: "dashboard", data: null };
+      var state = {
+        stage: "dashboard",
+        data: null,
+        sampleBand: "all",
+        samplePage: 0,
+      };
       var META = {
         dashboard: { title: "Dashboard", sub: "Visão geral do dia · gráficos e totais" },
         distribuicao: { title: "Distribuição", sub: "Agente, fila e consultores" },
@@ -627,29 +676,72 @@
           return { label: d.departmentName, value: d.recontato, cls: "violet" };
         }));
 
+        paintSamples();
+      }
+
+      function deptLabel(name) {
+        if (!name || name === "—" || name === "-") return "Sem depto";
+        return name;
+      }
+
+      function filteredSamples() {
+        var samples = (state.data && state.data.rechamado && state.data.rechamado.samples) || [];
+        if (state.sampleBand === "all") return samples;
+        return samples.filter(function (s) { return s.band === state.sampleBand; });
+      }
+
+      function paintSamples() {
         var sbody = document.getElementById("r-samples");
         var sempty = document.getElementById("r-samples-empty");
-        var samples = r.samples || [];
-        if (!samples.length) {
+        var pager = document.getElementById("r-samples-pager");
+        var all = filteredSamples();
+        var pages = Math.max(1, Math.ceil(all.length / SAMPLE_PAGE_SIZE) || 1);
+        if (state.samplePage >= pages) state.samplePage = Math.max(0, pages - 1);
+        if (state.samplePage < 0) state.samplePage = 0;
+        var start = state.samplePage * SAMPLE_PAGE_SIZE;
+        var pageRows = all.slice(start, start + SAMPLE_PAGE_SIZE);
+
+        document.querySelectorAll(".filter-chip").forEach(function (el) {
+          var band = el.getAttribute("data-band");
+          el.classList.toggle("active", band === state.sampleBand);
+          el.classList.toggle("same", band === "mesmo_depto" && band === state.sampleBand);
+          el.classList.toggle("cross", band === "cruzado" && band === state.sampleBand);
+        });
+
+        document.getElementById("r-samples-count").textContent =
+          all.length + " caso" + (all.length === 1 ? "" : "s") +
+          (state.sampleBand === "all" ? "" : " · filtro ativo");
+
+        if (!all.length) {
           sbody.innerHTML = "";
           sempty.classList.remove("hidden");
-        } else {
-          sempty.classList.add("hidden");
-          sbody.innerHTML = samples.map(function (s) {
-            var label = s.phone || s.name || String(s.contactId || "").slice(0, 8);
-            var bandCls = s.band === "mesmo_depto" ? "band-same" : "band-cross";
-            var bandTxt = s.band === "mesmo_depto" ? "Mesmo depto" : "Cruzado";
-            return (
-              "<tr><td><b>" + esc(label) + "</b>" +
-              (s.name && s.phone ? '<div class="muted">' + esc(s.name) + "</div>" : "") +
-              '</td><td><span class="badge ' + bandCls + '">' + bandTxt + "</span></td>" +
-              '<td class="route"><b>' + esc(s.fromDepartmentName || "—") + "</b> → <b>" +
-              esc(s.toDepartmentName || "—") + "</b></td>" +
-              "<td><div>" + fmtTime(s.currentAt) + '</div><div class="muted">antes ' +
-              fmtTime(s.priorAt) + "</div></td></tr>"
-            );
-          }).join("");
+          pager.classList.add("hidden");
+          return;
         }
+        sempty.classList.add("hidden");
+        pager.classList.remove("hidden");
+        sbody.innerHTML = pageRows.map(function (s) {
+          var label = s.phone || s.name || String(s.contactId || "").slice(0, 8);
+          var bandCls = s.band === "mesmo_depto" ? "band-same" : "band-cross";
+          var bandTxt = s.band === "mesmo_depto" ? "Mesmo depto" : "Cruzado";
+          return (
+            "<tr><td><b>" + esc(label) + "</b>" +
+            (s.name && s.phone ? '<div class="muted">' + esc(s.name) + "</div>" : "") +
+            '</td><td><span class="badge ' + bandCls + '">' + bandTxt + "</span></td>" +
+            '<td class="route"><b>' + esc(deptLabel(s.fromDepartmentName)) + "</b> → <b>" +
+            esc(deptLabel(s.toDepartmentName)) + "</b></td>" +
+            "<td><div>" + fmtTime(s.currentAt) + '</div><div class="muted">antes ' +
+            fmtTime(s.priorAt) + "</div></td></tr>"
+          );
+        }).join("");
+
+        var from = start + 1;
+        var to = start + pageRows.length;
+        document.getElementById("r-samples-page-info").textContent =
+          "Página " + (state.samplePage + 1) + " de " + pages +
+          " · mostrando " + from + "–" + to + " de " + all.length;
+        document.getElementById("r-page-prev").disabled = state.samplePage <= 0;
+        document.getElementById("r-page-next").disabled = state.samplePage >= pages - 1;
       }
 
       function fetchCockpit() {
@@ -685,6 +777,27 @@
         btn.addEventListener("click", function () {
           setStage(btn.getAttribute("data-stage"));
         });
+      });
+
+      document.querySelectorAll(".filter-chip").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          state.sampleBand = btn.getAttribute("data-band") || "all";
+          state.samplePage = 0;
+          paintSamples();
+        });
+      });
+      document.getElementById("r-page-prev").addEventListener("click", function () {
+        if (state.samplePage > 0) {
+          state.samplePage -= 1;
+          paintSamples();
+        }
+      });
+      document.getElementById("r-page-next").addEventListener("click", function () {
+        var pages = Math.max(1, Math.ceil(filteredSamples().length / SAMPLE_PAGE_SIZE) || 1);
+        if (state.samplePage < pages - 1) {
+          state.samplePage += 1;
+          paintSamples();
+        }
       });
 
       function boot() {
