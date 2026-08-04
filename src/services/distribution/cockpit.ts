@@ -147,7 +147,7 @@ export async function getCockpitData(): Promise<CockpitData> {
           },
         },
       }),
-      getRechamadoMetrics({ organizationId: orgId, since }),
+      getRechamadoMetrics({ organizationId: orgId, since, sampleLimit: 80 }),
     ]);
 
   const receivedByUser = new Map<string, number>();
