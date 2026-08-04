@@ -6,6 +6,7 @@ import {
   requirePermissionForUser,
   requireStageScope,
 } from "@/lib/authz/resource-policy";
+import { parseContactPhoneInput } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { fireTrigger } from "@/services/automation-triggers";
@@ -18,7 +19,12 @@ import {
   upsertContactCustomFieldValues,
   upsertDealCustomFieldValues,
 } from "@/services/custom-fields";
-import { createDeal, createDealEvent, isValidDealStatus } from "@/services/deals";
+import {
+  createDeal,
+  createDealEvent,
+  findOpenDealForContactInPipeline,
+  isValidDealStatus,
+} from "@/services/deals";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -148,6 +154,45 @@ type ContactPayload = {
   customFields?: CustomFieldInput[];
 };
 
+/**
+ * Modificadores de idempotência do lead.
+ *
+ * Ambos são opt-in: o comportamento padrão ("última escrita vence", deal
+ * sempre novo) é o que integrações antigas já esperam, e mudá-lo no servidor
+ * quebraria quem depende dele. Quem quer a proteção liga explicitamente — o
+ * node do n8n liga as duas por padrão.
+ */
+type LeadOptions = {
+  /**
+   * Reaproveita o negócio aberto que o contato já tem **no mesmo pipeline**
+   * do `stageId` informado, em vez de criar outro.
+   *
+   * Escopo é o pipeline e não a etapa porque um lead que avançou de
+   * "Acolhimento" para "Matrícula" continua sendo o mesmo negócio: comparar
+   * por etapa recriaria uma duplicata a cada avanço.
+   */
+  reuseOpenDeal?: boolean;
+  /**
+   * Em contato já existente, só grava nos campos que estão vazios. Impede que
+   * uma segunda chamada com dado pior sobrescreva nome/telefone/e-mail bons.
+   */
+  fillEmptyContactFieldsOnly?: boolean;
+};
+
+function parseLeadOptions(input: unknown): LeadOptions {
+  if (!input || typeof input !== "object") return {};
+  const o = input as Record<string, unknown>;
+  return {
+    reuseOpenDeal: o.reuseOpenDeal === true,
+    fillEmptyContactFieldsOnly: o.fillEmptyContactFieldsOnly === true,
+  };
+}
+
+/** Vazio para efeito de "não sobrescrever": null, string em branco ou ausente. */
+function isBlank(v: unknown): boolean {
+  return v == null || (typeof v === "string" && v.trim() === "");
+}
+
 type DealPayload = {
   title?: string;
   stageId: string;
@@ -187,7 +232,11 @@ function parseContactPayload(input: unknown): ContactPayload | { error: string }
     if (b.phone === null) {
       out.phone = null;
     } else if (typeof b.phone === "string") {
-      out.phone = b.phone.trim() || null;
+      // Falha alto: um telefone que não normaliza torna o contato
+      // inalcançável no WhatsApp sem nenhum sinal. Ver parseContactPhoneInput.
+      const parsed = parseContactPhoneInput(b.phone);
+      if (!parsed.ok) return { error: `contact.phone: ${parsed.reason}` };
+      out.phone = parsed.value;
     } else {
       return { error: "contact.phone inválido." };
     }
@@ -328,8 +377,11 @@ export async function POST(request: Request) {
       return NextResponse.json({ message: deal.error }, { status: 400 });
     }
 
+    const options = parseLeadOptions(root.options);
+
     const denied = await requirePermissionForUser(authResult.user, "contact:create");
     if (denied) return denied;
+    let stagePipelineId: string | null = null;
     if (deal) {
       const dealDenied = await requirePermissionForUser(authResult.user, "deal:create");
       if (dealDenied) return dealDenied;
@@ -339,7 +391,7 @@ export async function POST(request: Request) {
       const orgId = getOrgIdOrThrow();
       const stageExists = await prisma.stage.findFirst({
         where: { id: deal.stageId, pipeline: { organizationId: orgId } },
-        select: { id: true },
+        select: { id: true, pipelineId: true },
       });
       if (!stageExists) {
         return NextResponse.json(
@@ -347,6 +399,7 @@ export async function POST(request: Request) {
           { status: 400 },
         );
       }
+      stagePipelineId = stageExists.pipelineId;
     }
 
     try {
@@ -373,6 +426,36 @@ export async function POST(request: Request) {
           companyId: contact.companyId,
           assignedToId: contact.assignedToId,
         };
+
+        if (options.fillEmptyContactFieldsOnly) {
+          const current = await prisma.contact.findUnique({
+            where: { id: contactId },
+            select: {
+              name: true,
+              email: true,
+              phone: true,
+              avatarUrl: true,
+              lifecycleStage: true,
+              source: true,
+              companyId: true,
+              assignedToId: true,
+            },
+          });
+          if (current) {
+            // `leadScore` fica de fora de propósito: é numérico e 0 é valor
+            // legítimo, então "vazio" não significa nada — quem manda score
+            // quer atualizá-lo.
+            if (!isBlank(current.name)) updates.name = undefined;
+            if (!isBlank(current.email)) updates.email = undefined;
+            if (!isBlank(current.phone)) updates.phone = undefined;
+            if (!isBlank(current.avatarUrl)) updates.avatarUrl = undefined;
+            if (!isBlank(current.lifecycleStage)) updates.lifecycleStage = undefined;
+            if (!isBlank(current.source)) updates.source = undefined;
+            if (!isBlank(current.companyId)) updates.companyId = undefined;
+            if (!isBlank(current.assignedToId)) updates.assignedToId = undefined;
+          }
+        }
+
         const hasUpdates = Object.values(updates).some((v) => v !== undefined);
         if (hasUpdates) {
           await updateContact(contactId, updates);
@@ -410,7 +493,24 @@ export async function POST(request: Request) {
 
       let dealResult: Awaited<ReturnType<typeof createDeal>> | null = null;
       let dealCreated = false;
+      let dealReused = false;
       if (deal) {
+        // Reaproveitamento: a origem pode mandar o mesmo lead duas vezes
+        // (lista com duplicata, retry, dois ramos do mesmo workflow). Sem
+        // isso, cada chamada cria um negócio novo e o kanban duplica.
+        if (options.reuseOpenDeal && stagePipelineId) {
+          const openDeal = await findOpenDealForContactInPipeline(
+            contactId,
+            stagePipelineId,
+          );
+          if (openDeal) {
+            dealResult = openDeal;
+            dealReused = true;
+          }
+        }
+      }
+
+      if (deal && !dealReused) {
         const fallbackTitle =
           deal.title && deal.title.trim()
             ? deal.title.trim()
@@ -429,14 +529,6 @@ export async function POST(request: Request) {
         });
         dealCreated = true;
 
-        if (deal.customFields && deal.customFields.length > 0) {
-          const r = await resolveCustomFields("deal", deal.customFields);
-          missingFields.deal = r.missing;
-          if (r.resolved.length > 0) {
-            await upsertDealCustomFieldValues(dealResult.id, r.resolved);
-          }
-        }
-
         createDealEvent(dealResult.id, authResult.user.id, "CREATED", {
           stageId: deal.stageId,
           via: "api/leads",
@@ -450,6 +542,17 @@ export async function POST(request: Request) {
           contactId,
           data: { stageId: deal.stageId, toStageId: deal.stageId },
         }).catch(() => {});
+      }
+
+      // Campos personalizados valem para os dois casos: no negócio
+      // reaproveitado eles atualizam o que a origem trouxe de novo, sem
+      // recriar o registro.
+      if (deal && dealResult && deal.customFields && deal.customFields.length > 0) {
+        const r = await resolveCustomFields("deal", deal.customFields);
+        missingFields.deal = r.missing;
+        if (r.resolved.length > 0) {
+          await upsertDealCustomFieldValues(dealResult.id, r.resolved);
+        }
       }
 
       // NB (jul/26): NÃO criamos mais Conversation WhatsApp antecipadamente ao
@@ -474,6 +577,7 @@ export async function POST(request: Request) {
           contactCreated,
           deal: dealResult,
           dealCreated,
+          dealReused,
           missingCustomFields:
             missingFields.contact.length > 0 || missingFields.deal.length > 0
               ? missingFields

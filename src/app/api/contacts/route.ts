@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { parseContactPhoneInput } from "@/lib/phone";
 import {
   createContact,
   getContacts,
@@ -169,6 +170,15 @@ export async function POST(request: Request) {
       }
     }
 
+    let phone: string | null | undefined;
+    if (typeof b.phone === "string") {
+      const parsed = parseContactPhoneInput(b.phone);
+      if (!parsed.ok) return NextResponse.json({ message: parsed.reason }, { status: 400 });
+      phone = parsed.value;
+    } else if (b.phone === null) {
+      phone = null;
+    }
+
     const contact = await createContact({
       name: b.name.trim(),
       email:
@@ -177,8 +187,7 @@ export async function POST(request: Request) {
           : typeof b.email === "string"
             ? b.email.trim().toLowerCase()
             : undefined,
-      phone:
-        b.phone === null ? null : typeof b.phone === "string" ? b.phone.trim() : undefined,
+      phone,
       avatarUrl:
         b.avatarUrl === null
           ? null

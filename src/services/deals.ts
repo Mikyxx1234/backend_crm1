@@ -473,6 +473,27 @@ export async function createDeal(data: CreateDealInput) {
   throw lastErr ?? new Error("Falha ao alocar Deal.number apos retries");
 }
 
+/**
+ * Negócio aberto que o contato já tem no pipeline — o mais antigo, que é o
+ * que acumulou histórico.
+ *
+ * Serve às integrações que podem reprocessar o mesmo lead (ver
+ * `options.reuseOpenDeal` em `POST /api/leads`). O escopo é o pipeline e não
+ * a etapa: um lead que avançou de etapa continua sendo o mesmo negócio.
+ * Retorna no mesmo formato de `createDeal` para que quem chama devolva uma
+ * resposta idêntica nos dois caminhos.
+ */
+export async function findOpenDealForContactInPipeline(
+  contactId: string,
+  pipelineId: string,
+) {
+  return prisma.deal.findFirst({
+    where: { contactId, status: "OPEN", stage: { pipelineId } },
+    orderBy: { createdAt: "asc" },
+    include: listInclude,
+  });
+}
+
 export type UpdateDealInput = {
   title?: string;
   externalId?: string | null;

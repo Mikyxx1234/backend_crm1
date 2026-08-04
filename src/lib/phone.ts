@@ -94,6 +94,82 @@ function normalizeBrLocal(local: string): string | null {
   return null;
 }
 
+/** Separadores usados por planilhas e CRMs de origem para juntar dois números. */
+const MULTI_NUMBER_SPLIT_RE = /[,;/|]+|\s+e\s+/i;
+
+/**
+ * Quebra uma entrada em candidatos e devolve os que normalizam para E.164.
+ *
+ * Base de `parseContactPhoneInput` (rejeita) e do backfill (recupera o
+ * primeiro). Como `normalizePhone` já descarta tudo que não é dígito, um
+ * candidato sujo como `"+5511958101572languageSalesforce"` ainda é
+ * recuperado — o que atrapalha é só a presença de DOIS números na mesma
+ * string, que vira um amontoado de 20+ dígitos.
+ */
+export function extractPhoneCandidates(raw: string): string[] {
+  const out: string[] = [];
+  for (const part of raw.split(MULTI_NUMBER_SPLIT_RE)) {
+    const normalized = normalizePhone(part);
+    if (normalized && !out.includes(normalized)) out.push(normalized);
+  }
+  return out;
+}
+
+export type PhoneParseResult =
+  | { ok: true; value: string | null }
+  | { ok: false; reason: string };
+
+/**
+ * Valida o telefone recebido pelas rotas de escrita de contato.
+ *
+ * Motivo (04/ago/26): `normalizeContactPhoneInput` gravava o valor cru quando
+ * a normalização falhava, sob a premissa de "não descartar entrada do
+ * usuário". Na prática as integrações não são usuário: 32 contatos da org
+ * Cruzeiro EaD acabaram com telefones como `"+5585991940125, +558591940125"`,
+ * `"+5511958101572languageSalesforce, +5511958101572"` e até `"Farmácia"`.
+ * Nenhum deles é discável — e o envio de WhatsApp faz `replace(/\D/g, "")`,
+ * então viram um número de 25 dígitos que a Meta rejeita. O contato fica
+ * silenciosamente inalcançável, que é o pior desfecho possível.
+ *
+ * Falhar alto na borda transforma isso em erro visível no node do n8n, no
+ * momento em que dá para corrigir a origem.
+ *
+ * Aceita com ou sem `+`, com ou sem DDI 55, e com qualquer máscara —
+ * `+5511999998888`, `5511999998888`, `11999998888` e `(11) 99999-8888`
+ * chegam todos ao mesmo E.164. String vazia limpa o campo (`null`).
+ */
+export function parseContactPhoneInput(raw: string | null | undefined): PhoneParseResult {
+  if (raw == null) return { ok: true, value: null };
+
+  const trimmed = raw.trim();
+  if (!trimmed) return { ok: true, value: null };
+
+  const normalized = normalizePhone(trimmed);
+  if (normalized) return { ok: true, value: normalized };
+
+  // Não adivinhamos qual número o remetente queria, mas dizemos quais
+  // reconhecemos: é a diferença entre o operador corrigir a origem em 10
+  // segundos e abrir um chamado.
+  const candidates = extractPhoneCandidates(trimmed);
+  if (candidates.length > 1) {
+    return {
+      ok: false,
+      reason: `Telefone inválido: "${trimmed}" contém mais de um número (${candidates.join(", ")}). Envie apenas um.`,
+    };
+  }
+  if (candidates.length === 1) {
+    return {
+      ok: false,
+      reason: `Telefone inválido: "${trimmed}" tem caracteres a mais. Envie apenas "${candidates[0]}".`,
+    };
+  }
+
+  return {
+    ok: false,
+    reason: `Telefone inválido: "${trimmed}". Envie um único número com DDD, com ou sem +55 — ex.: +5511999998888, 5511999998888 ou 11999998888.`,
+  };
+}
+
 /**
  * Verifica se dois números de telefone são equivalentes após normalização.
  *
