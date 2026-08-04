@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { withOrgContext } from "@/lib/auth-helpers";
+import { withApiAuthContext } from "@/lib/api-auth";
 import { analyzeTemplateComponents } from "@/lib/meta-whatsapp/analyze-template-components";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import { prisma } from "@/lib/prisma";
@@ -28,12 +28,16 @@ function extractAfter(raw: unknown): string | undefined {
   return typeof a === "string" && a.length > 0 ? a : undefined;
 }
 
-export async function GET() {
-  return withOrgContext(async (session) => {
+// Auth hibrida (Bearer OU sessao): alem dos seletores de automacao no
+// frontend, esta rota alimenta o dropdown de template do node do n8n. E
+// leitura escopada pela org do token — nao expoe credencial da WABA, so
+// nome/idioma/corpo/botoes dos templates ja aprovados.
+export async function GET(request: Request) {
+  return withApiAuthContext(request, async (user) => {
     try {
       const resolved = await resolveMetaTemplatesClient({
-        organizationId: session.user.organizationId,
-        isSuperAdmin: session.user.isSuperAdmin,
+        organizationId: user.organizationId,
+        isSuperAdmin: user.isSuperAdmin,
       });
       // Sem canal/credenciais Meta na org: nada aprovado para listar.
       if (!resolved.ok) {
@@ -84,6 +88,7 @@ export async function GET() {
             category: typeof row.category === "string" ? row.category : null,
             agentEnabled: agentByName.get(name) ?? false,
             bodyPreview: analysis.bodyText ?? "",
+            headerPreview: analysis.headerText ?? "",
             hasButtons: analysis.hasButtons,
             buttonTypes: analysis.buttonTypes,
             buttons: analysis.buttons,

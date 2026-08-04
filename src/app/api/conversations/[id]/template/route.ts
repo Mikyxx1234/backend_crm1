@@ -1,16 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
-import { requireChannelScope } from "@/lib/authz/resource-policy";
 import { requireConversationAccess } from "@/lib/conversation-access";
-import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
-import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
-import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
-import { prisma } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
-import { reopenResolvedAsNewTicket } from "@/services/conversations";
-import { cancelPendingForConversation } from "@/services/scheduled-messages";
+import { sendTemplateToConversation } from "@/services/outbound-messaging";
 
 import type { InboxMessageDto } from "../messages/route";
 
@@ -29,251 +21,79 @@ type TemplateBody = {
   flowActionData?: unknown;
 };
 
-// Bug 24/abr/26: usavamos `auth()` direto. O handler depende da Prisma
-// extension multi-tenant pra resolver organizationId em queries de
-// conversation/whatsAppTemplateConfig/message.create. Sem o
-// AsyncLocalStorage scope ativo o envio falhava silenciosamente
-// (templates "nao saiam"). withOrgContext envolve em runWithContext.
+// Bug 24/abr/26: usavamos `auth()` direto. O envio depende da Prisma
+// extension multi-tenant pra resolver organizationId; sem o AsyncLocalStorage
+// scope ativo o template "nao saia". withOrgContext envolve em runWithContext.
+//
+// 03/ago/26: a logica de envio saiu daqui para `services/outbound-messaging`,
+// compartilhada com `POST /api/deals/:id/messages` (node do n8n). Esta rota
+// permanece como a porta de entrada da UI: sessao + acesso a conversa.
 export async function POST(request: Request, context: RouteContext) {
   return withOrgContext(async (session) => {
-   try {
-    const { id } = await context.params;
-    const denied = await requireConversationAccess(session, id);
-    if (denied) return denied;
-
-    let body: unknown;
     try {
-      body = await request.json();
-    } catch {
-      return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
-    }
+      const { id } = await context.params;
+      const denied = await requireConversationAccess(session, id);
+      if (denied) return denied;
 
-    const b = body as TemplateBody;
-    const templateName =
-      typeof b.templateName === "string" ? b.templateName.trim() : "";
-    if (!templateName) {
-      return NextResponse.json(
-        { message: "templateName é obrigatório." },
-        { status: 400 }
-      );
-    }
-
-    const languageCode =
-      typeof b.languageCode === "string" && b.languageCode.trim().length > 0
-        ? b.languageCode.trim()
-        : "pt_BR";
-
-    const components = Array.isArray(b.components)
-      ? (b.components as unknown[])
-      : undefined;
-
-    const flowToken =
-      typeof b.flowToken === "string" && b.flowToken.trim().length > 0
-        ? b.flowToken.trim()
-        : null;
-    let flowActionData: Record<string, unknown> | null = null;
-    if (b.flowActionData && typeof b.flowActionData === "object" && !Array.isArray(b.flowActionData)) {
-      flowActionData = b.flowActionData as Record<string, unknown>;
-    }
-
-    const templateGraphIdFromBody =
-      typeof b.templateGraphId === "string" && b.templateGraphId.trim().length > 0
-        ? b.templateGraphId.trim()
-        : null;
-
-    const bodyPreview =
-      typeof b.bodyPreview === "string" && b.bodyPreview.trim().length > 0
-        ? b.bodyPreview.trim()
-        : null;
-
-    const findConvFull = (convId: string) =>
-      prisma.conversation.findUnique({
-        where: { id: convId },
-        include: {
-          contact: { select: { phone: true, whatsappBsuid: true } },
-          // CRITICO: trazer config do canal para resolver o cliente Meta correto
-          // por canal/org. Antes usavamos o singleton global metaWhatsApp (env)
-          // que rotava TODO mundo pelo numero da primeira org configurada -> leak
-          // entre tenants (templates da DNA saiam pelo numero da Eduit).
-          channelRef: { select: { id: true, provider: true, config: true } },
-        },
-      });
-
-    let conv = await findConvFull(id);
-
-    if (!conv) {
-      return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
-    }
-
-    // Regra "reabrir = novo id": template em conversa ENCERRADA reabre como
-    // NOVO ticket (mesmo comportamento do POST /messages e /attachments).
-    let reopenedConversationId: string | null = null;
-    if (conv.status === "RESOLVED" && conv.contactId) {
-      const reopened = await reopenResolvedAsNewTicket(conv.id);
-      if (reopened.id !== conv.id) {
-        const fresh = await findConvFull(reopened.id);
-        if (fresh) {
-          reopenedConversationId = reopened.id;
-          conv = fresh;
-        }
+      let body: unknown;
+      try {
+        body = await request.json();
+      } catch {
+        return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
       }
-    }
 
-    const sendDenied = await requireChannelScope(session.user, "send", conv.channelId);
-    if (sendDenied) return sendDenied;
-
-    if (conv.channelRef?.provider === "BAILEYS_MD") {
-      return NextResponse.json(
-        { message: "Templates não são suportados em canais WhatsApp QR (Baileys). Use mensagem de texto." },
-        { status: 400 },
-      );
-    }
-
-    const digits = conv.contact?.phone?.replace(/\D/g, "") ?? "";
-    const to = digits.length >= 8 ? digits : undefined;
-    const recipient = conv.contact?.whatsappBsuid?.trim() || undefined;
-    if (!to && !recipient) {
-      return NextResponse.json(
-        { message: "Contato sem telefone nem BSUID WhatsApp (Meta)." },
-        { status: 400 }
-      );
-    }
-
-    const channelConfig = conv.channelRef?.config as Record<string, unknown> | null | undefined;
-    const metaClient = metaClientFromConfig(channelConfig);
-
-    if (!metaClient.configured) {
-      return NextResponse.json(
-        {
-          message:
-            "Canal WhatsApp da conversa sem credenciais Meta (accessToken/phoneNumberId). Configure em Canais ou defina META_WHATSAPP_* no env.",
+      const b = body as TemplateBody;
+      const result = await sendTemplateToConversation({
+        conversationId: id,
+        actor: {
+          id: session.user.id as string,
+          name: session.user.name,
+          email: session.user.email,
+          role: session.user.role,
+          organizationId: session.user.organizationId,
+          isSuperAdmin: session.user.isSuperAdmin,
         },
-        { status: 503 }
-      );
-    }
-
-    const senderName = session.user.name ?? session.user.email ?? "Agente";
-
-    let templateCategory: string | null = null;
-    let templateGraphId: string | null = templateGraphIdFromBody;
-    // CRÍTICO: capturar `id` da config aqui é o que permite ao resolver de
-    // Flow inbound identificar o flow correto quando a resposta voltar.
-    // Sem isso, o resolver caía em heurístico que pegava "qualquer template
-    // com flowId" da org e gravava as respostas no flow errado.
-    let templateConfigId: string | null = null;
-    try {
-      const cfg = await prisma.whatsAppTemplateConfig.findFirst({
-        where: { metaTemplateName: templateName },
-        select: { id: true, category: true, metaTemplateId: true },
+        templateName: typeof b.templateName === "string" ? b.templateName : "",
+        languageCode: typeof b.languageCode === "string" ? b.languageCode : null,
+        components: Array.isArray(b.components) ? (b.components as unknown[]) : null,
+        bodyPreview: typeof b.bodyPreview === "string" ? b.bodyPreview : null,
+        templateGraphId: typeof b.templateGraphId === "string" ? b.templateGraphId : null,
+        flowToken: typeof b.flowToken === "string" ? b.flowToken : null,
+        flowActionData:
+          b.flowActionData && typeof b.flowActionData === "object" && !Array.isArray(b.flowActionData)
+            ? (b.flowActionData as Record<string, unknown>)
+            : null,
       });
-      templateCategory = cfg?.category ?? null;
-      templateConfigId = cfg?.id ?? null;
-      if (!templateGraphId && cfg?.metaTemplateId?.trim()) {
-        templateGraphId = cfg.metaTemplateId.trim();
+
+      if (!result.ok) {
+        return NextResponse.json({ message: result.message }, { status: result.status });
       }
-    } catch {}
-    if (!templateCategory) {
-      const metaTemplates = await metaClient.listMessageTemplates({ limit: 200 }).catch(() => null) as { data?: { name: string; category?: string }[] } | null;
-      const match = metaTemplates?.data?.find((t) => t.name === templateName);
-      if (match?.category) templateCategory = match.category;
-    }
 
-    const content = buildOutboundTemplateMessageContent(templateName, "generic", templateCategory, bodyPreview);
-
-    let externalId: string | null = null;
-    let resolvedFlowToken: string | null = null;
-    try {
-      // strictFlowEnrich=false: se a consulta da definição do template na Meta
-      // falhar (token sem permissão de GET individual, template fora da primeira
-      // página de listagem, etc.), NÃO bloqueia o envio. Templates simples (só
-      // BODY) funcionam sem enrichment. Templates com Flow perdem o botão
-      // interativo mas ainda enviam — Meta reporta o erro real, se houver, em
-      // vez de a CRM lançar `MetaFlowEnrichError`.
-      const enrichResult = await enrichTemplateComponentsForFlowSend(metaClient, {
-        templateName,
-        languageCode,
-        components,
-        flowToken,
-        flowActionData,
-        templateGraphId,
-        strictFlowEnrich: false,
-      });
-      resolvedFlowToken = enrichResult.flowToken;
-      const result = await metaClient.sendTemplate(
-        to,
-        templateName,
-        languageCode,
-        enrichResult.components,
-        recipient
-      );
-      externalId = result.messages?.[0]?.id ?? null;
-      console.log(
-        `[meta-send-template] template=${templateName} channel=${conv.channelRef?.id ?? "ENV"} to=${to ?? "—"}/${recipient ?? "—"} wamid=${externalId}`,
-      );
-    } catch (e: unknown) {
-      console.error("[meta-send-template]", e);
-      const msg =
-        e instanceof Error ? e.message : "Falha ao enviar template pelo WhatsApp.";
-      return NextResponse.json({ message: msg }, { status: 502 });
-    }
-
-    const saved = await prisma.message.create({
-      data: withOrgFromCtx({
-        conversationId: conv.id,
-        channelId: conv.channelRef?.id ?? undefined,
-        content,
+      // Contrato preservado: a UI espera `message.id` = wamid quando existe,
+      // para casar com o status de entrega vindo do webhook.
+      const dto: InboxMessageDto = {
+        id: result.message.externalId ?? result.message.id,
+        content: result.message.content,
+        createdAt: result.message.createdAt,
         direction: "out",
         messageType: "template",
-        senderName,
-        ...(externalId ? { externalId } : {}),
-        ...(typeof resolvedFlowToken === "string" && resolvedFlowToken.trim()
-          ? { flowToken: resolvedFlowToken.trim() }
-          : {}),
-        ...(templateConfigId ? { templateConfigId } : {}),
-      }),
-    });
+        senderName: result.message.senderName,
+      };
 
-    const dto: InboxMessageDto = {
-      id: externalId ?? saved.id,
-      content,
-      createdAt: saved.createdAt.toISOString(),
-      direction: "out",
-      messageType: "template",
-      senderName,
-    };
-
-    // Template manual tambem cancela agendamentos pendentes.
-    cancelPendingForConversation(conv.id, "agent_reply", session.user.id as string).catch(
-      (err) =>
-        console.warn(
-          "[scheduled-messages] falha ao cancelar apos envio de template:",
-          err,
-        ),
-    );
-
-    // Tempo real: SSE pra movimentar a conversa entre tabs sem polling.
-    try {
-      sseBus.publish("new_message", {
-        organizationId: conv.organizationId,
-        conversationId: conv.id,
-        contactId: conv.contactId,
-        direction: "out",
-        content,
-        timestamp: saved.createdAt,
-      });
-    } catch {
-      // best-effort
+      return NextResponse.json(
+        {
+          message: dto,
+          conversationId: result.conversationId,
+          ...(result.reopenedConversationId
+            ? { reopenedConversationId: result.reopenedConversationId }
+            : {}),
+        },
+        { status: 201 },
+      );
+    } catch (e: unknown) {
+      console.error(e);
+      const msg = e instanceof Error ? e.message : "Erro ao enviar template.";
+      return NextResponse.json({ message: msg }, { status: 500 });
     }
-
-    return NextResponse.json({
-      message: dto,
-      conversationId: conv.id,
-      ...(reopenedConversationId ? { reopenedConversationId } : {}),
-    }, { status: 201 });
-   } catch (e: unknown) {
-    console.error(e);
-    const msg = e instanceof Error ? e.message : "Erro ao enviar template.";
-    return NextResponse.json({ message: msg }, { status: 500 });
-   }
   });
 }

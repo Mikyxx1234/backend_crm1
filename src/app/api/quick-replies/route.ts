@@ -1,17 +1,22 @@
 import { NextResponse } from "next/server";
 
+import { withApiAuthContext } from "@/lib/api-auth";
 import { auth } from "@/lib/auth";
 import { createQuickReply, getQuickReplies, reorderQuickReplies } from "@/services/quick-replies";
 
-export async function GET() {
-  try {
-    const session = await auth();
-    if (!session?.user) return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    const replies = await getQuickReplies();
-    return NextResponse.json(replies);
-  } catch (e) {
-    return NextResponse.json({ message: e instanceof Error ? e.message : "Erro." }, { status: 500 });
-  }
+// Auth hibrida (Bearer OU sessao) no GET: alimenta o dropdown de resposta
+// rapida do node do n8n. Alem de liberar o token, `withApiAuthContext`
+// corrige um bug latente do `auth()` cru — sem RequestContext ativo a
+// Prisma Extension nao tinha organizationId para escopar `getQuickReplies`.
+export async function GET(request: Request) {
+  return withApiAuthContext(request, async () => {
+    try {
+      const replies = await getQuickReplies();
+      return NextResponse.json(replies);
+    } catch (e) {
+      return NextResponse.json({ message: e instanceof Error ? e.message : "Erro." }, { status: 500 });
+    }
+  });
 }
 
 export async function POST(request: Request) {

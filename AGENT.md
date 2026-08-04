@@ -46,6 +46,68 @@ gravou `sendError` nela.
 
 ---
 
+### 2026-08-03 — Envio de mensagem por integração: endpoint agregado por deal
+
+**Modelo usado.** Opus 5 (orquestrador).
+
+**Decisão.** Integrações passam a enviar mensagem pelo negócio, via
+`POST /api/deals/:id/messages` (Bearer OU sessão), com três modos:
+`kind: "note" | "text" | "template"`. A rota resolve o contato do deal e a
+conversa de WhatsApp usando `ensureWhatsAppConversationForContact` — a mesma
+função que a automação já usa — reusando o ticket em aberto ou abrindo um
+novo no canal Meta padrão da org.
+
+A lógica de envio saiu dos handlers e virou `services/outbound-messaging.ts`
+(`createInternalNoteOnConversation`, `sendTextToConversation`,
+`sendTemplateToConversation`). `POST /api/conversations/:id/template` foi
+reduzida a uma casca fina sobre o service, então UI e integração compartilham
+exatamente as mesmas regras de escopo de canal, reabertura de ticket, SSE e
+activity log.
+
+Variáveis de template chegam como `[{ component, key, value }]` e o servidor
+monta o `components` da Cloud API (`lib/meta-whatsapp/build-template-components.ts`),
+decidindo entre parâmetros posicionais e nomeados por componente. Idioma e
+corpo do template, quando omitidos, são resolvidos da Graph e o preview é
+renderizado com as variáveis.
+
+Cinco rotas GET passaram a aceitar Bearer para alimentar os dropdowns do node:
+`whatsapp-template-configs/approved`, `templates`, `quick-replies`,
+`whatsapp-flow-definitions` e `whatsapp-flow-definitions/:id`. Escrita em todas
+elas continua exclusiva de sessão.
+
+**Contexto.** O node do n8n precisava enviar mensagem a partir de um deal, mas
+só `POST /api/conversations/:id/messages` aceitava token — e exige um
+`conversationId` que a integração não tem. Criar a conversa dependia de
+`POST /api/conversations/create`, restrito a sessão. Na prática, envio por
+integração era impossível, o que estava documentado como limitação do node.
+
+**Alternativas descartadas.**
+
+- **(a) Só liberar Bearer nas rotas existentes e deixar o node orquestrar**
+  (`GET /api/deals/:id` → `GET /api/conversations?contactId=` → criar conversa
+  → enviar). Descartado: expõe ao token o caminho de `conversations/create`
+  que envia mensagem e exige `channelId`, amplia a superfície Bearer de rotas
+  desenhadas para UI e coloca a regra de "qual conversa usar" no cliente, onde
+  ela divergiria da automação.
+- **(b) Duplicar o handler de template numa rota nova.** Descartado: criaria
+  duas verdades sobre o que acontece ao enviar (SSE, reabertura de ticket,
+  cancelamento de agendamento, log), que divergiriam na primeira correção
+  aplicada só de um lado.
+- **(c) Aceitar `components` da Cloud API cru vindo do node.** Descartado: é a
+  principal fonte de erro 132000/132012 e contraria o requisito de o node ser
+  todo por seleção. O array cru segue aceito como escape hatch, mas não é o
+  caminho normal.
+
+**Impacto.** `POST /api/conversations/:id/messages` não foi tocada — Messenger,
+Instagram, reply e Baileys continuam exclusivos dela. Texto por integração é
+restrito a WhatsApp e falha com mensagem clara em outros canais. Nota interna
+em contato sem telefone (ou org sem canal conectado) degrada para nota apenas
+no negócio, com `warning` na resposta, em vez de falhar o passo do workflow.
+Suíte: 226 testes passando; typecheck sem erros novos (45 pré-existentes antes
+e depois).
+
+---
+
 ### 2026-08-03 — Resolução de deal fechado em execução manual de automação [DECISÃO — agente OPUS]
 
 **Modelo usado.** Opus (orquestrador).
