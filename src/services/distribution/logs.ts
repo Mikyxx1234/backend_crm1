@@ -344,6 +344,8 @@ export async function getDistributionDepartmentStats(): Promise<{
         organizationId: orgId,
         status: "OPEN",
         assignedToId: null,
+        // Alinha com a fila de espera: só quem já respondeu.
+        lastInboundAt: { not: null },
       },
       _count: { _all: true },
     }),

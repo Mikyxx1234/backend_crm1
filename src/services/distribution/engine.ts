@@ -205,6 +205,20 @@ export function selectResponsible(
 async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
   if (!input.dealId && !input.contactId) return;
   try {
+    // Sem inbound do aluno (ex.: só template BV/Bem-vindo) não entra na fila.
+    if (input.conversationId) {
+      const conv = await prisma.conversation.findUnique({
+        where: { id: input.conversationId },
+        select: { lastInboundAt: true },
+      });
+      if (!conv?.lastInboundAt) {
+        console.info(
+          "[distribution] enqueuePending skip — sem inbound do aluno",
+          JSON.stringify({ conversationId: input.conversationId }),
+        );
+        return;
+      }
+    }
     const existing = await prisma.distributionPending.findFirst({
       where: {
         status: "PENDING",

@@ -130,6 +130,8 @@ export async function getCockpitData(): Promise<CockpitData> {
           organizationId: orgId,
           status: "OPEN",
           assignedToId: null,
+          // Só conta quem já respondeu (exclui calouros só com template BV).
+          lastInboundAt: { not: null },
           contact: {
             automationContexts: { none: { status: "RUNNING" } },
           },
