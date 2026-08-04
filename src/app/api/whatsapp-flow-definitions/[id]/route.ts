@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 
+import { withApiAuthContext } from "@/lib/api-auth";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { resolveMetaTemplatesClient } from "@/lib/meta-whatsapp/resolve-templates-client";
 import {
@@ -20,9 +21,12 @@ function requireAdminOrManager(session: { user?: { role?: string } }): NextRespo
 
 type RouteContext = { params: Promise<{ id: string }> };
 
-export async function GET(_request: Request, context: RouteContext) {
-  return withOrgContext(async (session) => {
-    const denied = requireAdminOrManager(session);
+// Auth hibrida (Bearer OU sessao) no GET: o node do n8n le as telas/campos do
+// flow para o operador montar o `flow_action_data` por selecao, em vez de
+// digitar as chaves na mao. Escrita (PUT/DELETE) continua so por sessao.
+export async function GET(request: Request, context: RouteContext) {
+  return withApiAuthContext(request, async (user) => {
+    const denied = requireAdminOrManager({ user: { role: user.role } });
     if (denied) return denied;
     const { id } = await context.params;
     if (!id) return NextResponse.json({ message: "ID inválido." }, { status: 400 });
