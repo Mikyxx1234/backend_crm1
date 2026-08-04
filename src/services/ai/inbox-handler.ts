@@ -55,6 +55,10 @@ import {
   textImpliesAcademicHandoff,
 } from "@/services/ai/academic-department-routing";
 import {
+  closeAiOnlyConversation,
+  userWantsAiConversationClose,
+} from "@/services/ai/academic-closure";
+import {
   LOW_CONFIDENCE_HANDOFF_MESSAGE,
   parseAgentConfidence,
   shouldHandoffOnLowConfidence,
@@ -67,6 +71,7 @@ import {
   userWantsAiContinue,
   userWantsHumanDistribution,
 } from "@/services/ai/human-queue-policy";
+import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { runAgent } from "@/services/ai/runner";
 
 export type InboundAIArgs = {
@@ -697,6 +702,48 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         }).catch(() => null);
       }
       return;
+    }
+
+    // ── 1c. Encerramento pedido pelo aluno (somente atendimento IA) ──
+    if (userWantsAiConversationClose(args.userMessage)) {
+      const closeGate = await prisma.conversation.findUnique({
+        where: { id: args.conversationId },
+        select: {
+          status: true,
+          hasHumanReply: true,
+          assignedTo: { select: { type: true } },
+        },
+      });
+      const canAiClose =
+        closeGate?.status !== "RESOLVED" &&
+        closeGate?.hasHumanReply === false &&
+        closeGate?.assignedTo?.type === "AI";
+      if (canAiClose) {
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: "Combinado! Estou encerrando seu atendimento por aqui. Se precisar de algo depois, é só chamar, tá? 🙂",
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+        }).catch(() => null);
+        const closed = await closeAiOnlyConversation({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          reason: "Aluno pediu encerramento (detector IA)",
+        });
+        if (closed.closed) {
+          cancelAiReplyDebounce(args.conversationId);
+          logAi("closed", {
+            conversationId: args.conversationId,
+            reason: "ai_only_close",
+          });
+          return;
+        }
+      }
     }
 
     // ── 2. Keyword handoff ────────────────────────────────────

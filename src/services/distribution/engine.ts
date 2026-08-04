@@ -776,18 +776,29 @@ export async function executeDistribution(
   );
 
   // Handoff acadêmico / drenagem da fila → estágio "Em Atendimento".
+  // Await: o card precisa estar no funil operacional assim que o consultor
+  // humano for responsável (fire-and-forget perdia corridas com o inbox).
   if (
     input.triggerSource === "AI_AGENT" ||
     (input.triggerSource === "SYSTEM" && Boolean(input.departmentId))
   ) {
-    void import("@/services/ai/academic-department-routing")
-      .then((m) =>
-        m.moveOpenDealToEmAtendimento({
+    try {
+      const assigneeType = await prisma.user.findUnique({
+        where: { id: selected.userId },
+        select: { type: true },
+      });
+      if (assigneeType?.type === "HUMAN") {
+        const { moveOpenDealToEmAtendimento } = await import(
+          "@/services/ai/academic-department-routing"
+        );
+        await moveOpenDealToEmAtendimento({
           dealId: assignedDealId,
           contactId: input.contactId ?? null,
-        }),
-      )
-      .catch(() => null);
+        });
+      }
+    } catch (e) {
+      console.error("[distribution] moveOpenDealToEmAtendimento failed", e);
+    }
   }
 
   return {
