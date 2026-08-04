@@ -39,6 +39,8 @@ export interface PendingDistributionView {
   label: string;
   /** Canal de origem da conversa (WHATSAPP, INSTAGRAM, FACEBOOK, EMAIL, WEBCHAT). */
   channel: string;
+  departmentId: string | null;
+  departmentName: string | null;
   distributionType: string | null;
   triggerSource: string;
   attempts: number;
@@ -70,16 +72,46 @@ export async function getPendingDistributions(): Promise<
   // Limpa pendências de quem só recebeu template e nunca respondeu.
   await purgeUnansweredFromPendingQueue().catch(() => 0);
 
+  // Inclui também conversas OPEN sem dono enfileiradas MANUALMENTE mesmo
+  // sem lastInboundAt (redistribuição p/ depto com fila cheia).
+  const manualPending = await prisma.distributionPending.findMany({
+    where: {
+      status: "PENDING",
+      triggerSource: "MANUAL",
+      conversationId: { not: null },
+    },
+    select: { conversationId: true },
+    take: 500,
+  });
+  const manualConvIds = manualPending
+    .map((p) => p.conversationId)
+    .filter((id): id is string => Boolean(id));
+
   const items = await prisma.conversation.findMany({
-    where: ABERTA_SEM_RESPONSAVEL,
+    where: {
+      OR: [
+        ABERTA_SEM_RESPONSAVEL,
+        ...(manualConvIds.length > 0
+          ? [
+              {
+                id: { in: manualConvIds },
+                status: "OPEN" as const,
+                assignedToId: null,
+              },
+            ]
+          : []),
+      ],
+    },
     orderBy: { createdAt: "asc" },
     select: {
       id: true,
       channel: true,
       contactId: true,
+      departmentId: true,
       createdAt: true,
       updatedAt: true,
       contact: { select: { name: true, phone: true } },
+      department: { select: { id: true, name: true } },
     },
   });
 
@@ -135,6 +167,8 @@ export async function getPendingDistributions(): Promise<
       contactId: c.contactId,
       label: c.contact?.phone || c.contact?.name || "Atendimento",
       channel: c.channel ?? "",
+      departmentId: c.departmentId ?? c.department?.id ?? null,
+      departmentName: c.department?.name ?? null,
       distributionType: meta?.distributionType ?? null,
       triggerSource: meta?.triggerSource ?? "INBOUND",
       attempts: meta?.attempts ?? 0,
@@ -270,7 +304,7 @@ async function cancelStalePendingOrphans(orgId: string): Promise<number> {
       status: "PENDING",
       conversationId: { not: null },
     },
-    select: { id: true, conversationId: true },
+    select: { id: true, conversationId: true, triggerSource: true },
   });
   if (stale.length === 0) return 0;
 
@@ -281,14 +315,21 @@ async function cancelStalePendingOrphans(orgId: string): Promise<number> {
   const stillActive = await prisma.conversation.findMany({
     where: {
       id: { in: convIds },
-      ...ABERTA_SEM_RESPONSAVEL,
+      OR: [
+        ABERTA_SEM_RESPONSAVEL,
+        // Redistribuição manual: OPEN sem dono conta mesmo sem inbound.
+        { status: "OPEN", assignedToId: null },
+      ],
     },
     select: { id: true },
   });
   const activeSet = new Set(stillActive.map((c) => c.id));
 
   const toResolve = stale
-    .filter((p) => !p.conversationId || !activeSet.has(p.conversationId))
+    .filter((p) => {
+      if (!p.conversationId || !activeSet.has(p.conversationId)) return true;
+      return false;
+    })
     .map((p) => p.id);
   if (toResolve.length === 0) return 0;
 
@@ -328,10 +369,12 @@ export async function purgeUnansweredFromPendingQueue(): Promise<number> {
     .map((c) => c.contactId)
     .filter((id): id is string => Boolean(id));
 
+  // Não purga redistribuição MANUAL — operador mandou p/ fila de propósito.
   const res = await prisma.distributionPending.updateMany({
     where: {
       organizationId: orgId,
       status: "PENDING",
+      NOT: { triggerSource: "MANUAL" },
       OR: [
         { conversationId: { in: convIds } },
         ...(contactIds.length > 0

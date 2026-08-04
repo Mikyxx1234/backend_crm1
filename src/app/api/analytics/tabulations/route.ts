@@ -1,0 +1,46 @@
+import { NextResponse } from "next/server";
+
+import { requireManager } from "@/lib/auth-helpers";
+import { getTabulationAnalytics } from "@/services/tabulation-analytics";
+
+function parseDate(raw: string | null): Date | null {
+  if (!raw) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+export async function GET(request: Request) {
+  try {
+    const gate = await requireManager();
+    if (!gate.ok) return gate.response;
+
+    const { searchParams } = new URL(request.url);
+    const now = new Date();
+    const from =
+      parseDate(searchParams.get("from")) ??
+      new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+    const to = parseDate(searchParams.get("to")) ?? now;
+    const actorUserId = searchParams.get("actorUserId");
+    const departmentId = searchParams.get("departmentId");
+    const tabulationId = searchParams.get("tabulationId");
+    const page = Number(searchParams.get("page") ?? "1");
+    const perPage = Number(searchParams.get("perPage") ?? "25");
+
+    const data = await getTabulationAnalytics({
+      from,
+      to,
+      actorUserId: actorUserId || null,
+      departmentId: departmentId || null,
+      tabulationId: tabulationId || null,
+      page: Number.isFinite(page) ? page : 1,
+      perPage: Number.isFinite(perPage) ? perPage : 25,
+    });
+    return NextResponse.json(data);
+  } catch (e) {
+    console.error("[analytics/tabulations]", e);
+    return NextResponse.json(
+      { message: "Erro ao carregar analytics de tabulações." },
+      { status: 500 },
+    );
+  }
+}

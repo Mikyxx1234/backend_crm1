@@ -624,10 +624,15 @@ export async function POST(request: Request, context: RouteContext) {
         const rawTab = typeof b.tabulationId === "string" ? b.tabulationId.trim() : "";
         const requires = !!dept?.department?.requireTabulationOnClose;
         if (requires && !rawTab) {
+          // Encerramento MANUAL (esta rota). Bots/automações usam
+          // updateConversationStatusInDb direto e NÃO passam por aqui —
+          // logo não há obrigatoriedade de tabulação em "Aguardando resposta"
+          // nem em finish_conversation.
           return NextResponse.json(
             {
               message: "Este departamento exige uma tabulacao ao encerrar.",
               code: "TABULATION_REQUIRED",
+              departmentId: dept?.departmentId ?? null,
             },
             { status: 400 },
           );

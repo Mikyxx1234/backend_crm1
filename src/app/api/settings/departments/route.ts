@@ -25,7 +25,15 @@ export async function GET() {
       if (!isManagerUp) {
         const departments = await prisma.department.findMany({
           where: { organizationId: orgId },
-          select: { id: true, name: true, color: true, icon: true },
+          select: {
+            id: true,
+            name: true,
+            color: true,
+            icon: true,
+            // Necessário no inbox: após "Distribuir p/ departamento", o FE
+            // atualiza o sticky com o flag de tabulação do novo depto.
+            requireTabulationOnClose: true,
+          },
           orderBy: { name: "asc" },
         });
         return NextResponse.json(departments);

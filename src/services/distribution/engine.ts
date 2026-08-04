@@ -202,19 +202,49 @@ export function selectResponsible(
  * responsável estava elegível. Idempotente: se já existe um PENDING para o
  * mesmo deal/contato, apenas incrementa `attempts`/`lastAttemptAt`.
  */
+/**
+ * Garante contactId/dealId a partir da conversa — o handoff manual do inbox
+ * às vezes manda só conversationId; sem isso o enqueue era no-op e o lead
+ * sumia da fila de espera.
+ */
+async function hydrateDistributionIds(
+  input: ExecuteDistributionInput,
+): Promise<ExecuteDistributionInput> {
+  if ((input.dealId && input.contactId) || !input.conversationId) return input;
+  const conv = await prisma.conversation.findUnique({
+    where: { id: input.conversationId },
+    select: { contactId: true },
+  });
+  const contactId = input.contactId ?? conv?.contactId ?? null;
+  let dealId = input.dealId ?? null;
+  if (!dealId && contactId) {
+    const openDeal = await prisma.deal.findFirst({
+      where: { contactId, status: "OPEN" },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true },
+    });
+    dealId = openDeal?.id ?? null;
+  }
+  return { ...input, contactId, dealId };
+}
+
 async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
-  if (!input.dealId && !input.contactId) return;
+  const hydrated = await hydrateDistributionIds(input);
+  if (!hydrated.dealId && !hydrated.contactId) return;
   try {
-    // Sem inbound do aluno (ex.: só template BV/Bem-vindo) não entra na fila.
-    if (input.conversationId) {
+    // Sem inbound do aluno (ex.: só template BV/Bem-vindo) não entra na fila —
+    // exceto redistribuição MANUAL (operador mandou p/ departamento com fila
+    // cheia): aí o lead precisa aparecer na espera mesmo sem novo inbound.
+    const isManual = hydrated.triggerSource === "MANUAL";
+    if (hydrated.conversationId && !isManual) {
       const conv = await prisma.conversation.findUnique({
-        where: { id: input.conversationId },
+        where: { id: hydrated.conversationId },
         select: { lastInboundAt: true },
       });
       if (!conv?.lastInboundAt) {
         console.info(
           "[distribution] enqueuePending skip — sem inbound do aluno",
-          JSON.stringify({ conversationId: input.conversationId }),
+          JSON.stringify({ conversationId: hydrated.conversationId }),
         );
         return;
       }
@@ -222,9 +252,9 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
     const existing = await prisma.distributionPending.findFirst({
       where: {
         status: "PENDING",
-        ...(input.dealId
-          ? { dealId: input.dealId }
-          : { contactId: input.contactId }),
+        ...(hydrated.dealId
+          ? { dealId: hydrated.dealId }
+          : { contactId: hydrated.contactId }),
       },
       select: { id: true, attempts: true, triggerSource: true },
     });
@@ -236,11 +266,11 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
           lastAttemptAt: new Date(),
           // Preserva origem IA se a tentativa atual (ou anterior) veio do agente.
           triggerSource: mergeTriggerSources(
-            existing.triggerSource ?? input.triggerSource,
-            input.triggerSource,
+            existing.triggerSource ?? hydrated.triggerSource,
+            hydrated.triggerSource,
           ),
-          ...(input.conversationId
-            ? { conversationId: input.conversationId }
+          ...(hydrated.conversationId
+            ? { conversationId: hydrated.conversationId }
             : {}),
         },
       });
@@ -248,11 +278,11 @@ async function enqueuePending(input: ExecuteDistributionInput): Promise<void> {
       await prisma.distributionPending.create({
         data: {
           organizationId: getOrgIdOrThrow(),
-          dealId: input.dealId ?? null,
-          contactId: input.contactId ?? null,
-          conversationId: input.conversationId ?? null,
-          distributionType: input.distributionType ?? null,
-          triggerSource: input.triggerSource,
+          dealId: hydrated.dealId ?? null,
+          contactId: hydrated.contactId ?? null,
+          conversationId: hydrated.conversationId ?? null,
+          distributionType: hydrated.distributionType ?? null,
+          triggerSource: hydrated.triggerSource,
           status: "PENDING",
           attempts: 1,
           lastAttemptAt: new Date(),
@@ -466,7 +496,7 @@ async function writeLog(
  * Deve rodar dentro de `withOrgContext` / contexto org-scoped.
  */
 export async function executeDistribution(
-  input: ExecuteDistributionInput,
+  rawInput: ExecuteDistributionInput,
 ): Promise<DistributionResult> {
   if (!(await hasOrganizationWidget("smart_distribution"))) {
     return {
@@ -477,6 +507,8 @@ export async function executeDistribution(
       evaluated: [],
     };
   }
+
+  const input = await hydrateDistributionIds(rawInput);
 
   // Idempotente: se a conversa já tem responsável (ex.: inbound acabou de
   // distribuir e a automação dispara execute_distribution de novo), não
@@ -748,6 +780,32 @@ export async function executeDistribution(
       await prisma.$transaction((tx) =>
         propagateOwnerToContactAndChat(tx, contactId, selected.userId),
       );
+    }
+  } else if (input.conversationId) {
+    // Fallback: só conversationId — atribui o chat direto (e o deal aberto
+    // do contato, se houver) para não "sucesso" sem dono após reassign.
+    await prisma.conversation.update({
+      where: { id: input.conversationId },
+      data: { assignedToId: selected.userId },
+    });
+    const conv = await prisma.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { contactId: true },
+    });
+    if (conv?.contactId) {
+      const openDeal = await prisma.deal.findFirst({
+        where: { contactId: conv.contactId, status: "OPEN" },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true },
+      });
+      if (openDeal) {
+        assignedDealId = openDeal.id;
+        await assignDealOwner(openDeal.id, selected.userId);
+      } else {
+        await prisma.$transaction((tx) =>
+          propagateOwnerToContactAndChat(tx, conv.contactId!, selected.userId),
+        );
+      }
     }
   }
 

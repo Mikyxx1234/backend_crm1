@@ -306,6 +306,10 @@ const detailInclude = {
           id: true, number: true, externalId: true, channel: true,
           status: true, inboxName: true, closedAt: true,
           createdAt: true, updatedAt: true,
+          departmentId: true,
+          department: {
+            select: { id: true, name: true, requireTabulationOnClose: true },
+          },
           assignedTo: { select: { id: true, name: true } },
         },
       },

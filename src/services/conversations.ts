@@ -230,22 +230,30 @@ function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
   switch (tab) {
     case "entrada":
       // Entrada = (1) sem dono e fora do robô, OU (2) já com consultor
-      // humano aguardando a 1ª msg dele. Em (2) NÃO exigimos “sem RUNNING”:
-      // no handoff “Falar com equipe” o contexto PIPE pode ainda estar
-      // RUNNING por um instante — a pessoa já foi distribuída e precisa
-      // aparecer na Entrada do consultor.
+      // humano aguardando a 1ª msg dele, OU (3) sem dono após redistribuição
+      // manual com fila cheia (hasHumanReply=true — antes sumia das abas).
+      // Em (2) NÃO exigimos “sem RUNNING”: no handoff “Falar com equipe” o
+      // contexto PIPE pode ainda estar RUNNING por um instante.
       return {
         status: "OPEN",
-        hasHumanReply: false,
         hasError: false,
         OR: [
           {
-            assignedToId: null,
-            contact: {
-              automationContexts: { none: { status: "RUNNING" } },
-            },
+            hasHumanReply: false,
+            OR: [
+              {
+                assignedToId: null,
+                contact: {
+                  automationContexts: { none: { status: "RUNNING" } },
+                },
+              },
+              { assignedTo: { is: { type: "HUMAN" } } },
+            ],
           },
-          { assignedTo: { is: { type: "HUMAN" } } },
+          {
+            hasHumanReply: true,
+            assignedToId: null,
+          },
         ],
       };
     case "esperando":
