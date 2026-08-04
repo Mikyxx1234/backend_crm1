@@ -292,6 +292,47 @@ async function resolveAutomationSendConv(
 }
 
 /**
+ * Quem assina o outbound da automação no inbox.
+ * - `bot` (padrão): authorType bot — não marca hasHumanReply (fica em Entrada).
+ * - `assignee`: se a conversa tem consultor HUMAN, grava como resposta dele
+ *   (hasHumanReply=true → Respondidas). Sem responsável humano → fallback bot.
+ */
+async function resolveOutboundAuthor(
+  conversationId: string | undefined,
+  sendAsRaw: string | undefined,
+  fallbackSenderName: string,
+): Promise<{
+  authorType: "bot" | "human";
+  senderName: string;
+  asHuman: boolean;
+}> {
+  const sendAs = sendAsRaw === "assignee" ? "assignee" : "bot";
+  if (sendAs !== "assignee" || !conversationId) {
+    return { authorType: "bot", senderName: fallbackSenderName, asHuman: false };
+  }
+
+  const conv = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: {
+      assignedTo: { select: { id: true, name: true, type: true } },
+    },
+  });
+  const assignee = conv?.assignedTo;
+  if (assignee?.type === "HUMAN" && assignee.id) {
+    return {
+      authorType: "human",
+      senderName: assignee.name?.trim() || fallbackSenderName,
+      asHuman: true,
+    };
+  }
+
+  log.warn(
+    `sendAs=assignee sem consultor humano na conversa ${conversationId} — fallback bot`,
+  );
+  return { authorType: "bot", senderName: fallbackSenderName, asHuman: false };
+}
+
+/**
  * Resolve o cliente Meta WhatsApp correto para uma automação multi-tenant.
  *
  * Estrategia:
@@ -1914,13 +1955,26 @@ async function executeStep(
       }
 
       if (conversationId) {
+        const author = await resolveOutboundAuthor(
+          conversationId,
+          readString(cfg, "sendAs"),
+          rt.automationName ?? "Automação",
+        );
+
         const saved = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId,
             content: sentContent,
             direction: "out",
             messageType: msgType,
-            senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
+            senderName: author.senderName,
+            authorType: author.authorType,
+            // Assinando como o consultor, não marca `triggeredByName`: o inbox
+            // usa esse campo pra desenhar o avatar de robô + selo "Manual",
+            // o que denunciaria a automação na bolha do consultor.
+            ...(rt.triggeredByName && !author.asHuman
+              ? { triggeredByName: rt.triggeredByName }
+              : {}),
             externalId,
             ...(typeof outFlowToken === "string" && outFlowToken.trim()
               ? { flowToken: outFlowToken.trim() }
@@ -1930,8 +1984,27 @@ async function executeStep(
 
         await prisma.conversation.update({
           where: { id: conversationId },
-          data: { lastMessageDirection: "out", hasAgentReply: true, updatedAt: new Date() },
+          data: {
+            lastMessageDirection: "out",
+            hasAgentReply: true,
+            ...(author.asHuman ? { hasHumanReply: true } : {}),
+            updatedAt: new Date(),
+          },
         }).catch(() => {});
+
+        // Resposta "como responsável" libera vaga na fila (sai de Entrada
+        // no volume do consultor) — igual ao POST manual do inbox.
+        // NÃO chama stopAutomationsAfterHumanReply: o fluxo deve continuar.
+        if (author.asHuman) {
+          void import("@/services/distribution/pending")
+            .then((m) =>
+              m.scheduleProcessPendingDistributionQueue({
+                trigger: "capacity_released",
+                delayMs: 400,
+              }),
+            )
+            .catch(() => {});
+        }
 
         sseBus.publish("new_message", {
           organizationId: getOrgIdOrNull(),

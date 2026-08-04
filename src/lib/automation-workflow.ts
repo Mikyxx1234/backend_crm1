@@ -264,9 +264,12 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
     case "create_activity":
       return c.title ? String(c.title) : "Nova atividade";
     case "send_whatsapp_message":
+      // sendAs: "bot" (padrão) | "assignee" (como o consultor responsável)
       return c.content
-        ? String(c.content).slice(0, 40) + (String(c.content).length > 40 ? "…" : "")
-        : "Mensagem";
+        ? `${c.sendAs === "assignee" ? "[Responsável] " : ""}${String(c.content).slice(0, 40)}${String(c.content).length > 40 ? "…" : ""}`
+        : c.sendAs === "assignee"
+          ? "Mensagem (como responsável)"
+          : "Mensagem";
     case "send_whatsapp_template": {
       const tplLabel = c.templateLabel ? String(c.templateLabel) : "";
       const tplName = c.templateName ? String(c.templateName) : "";
@@ -433,8 +436,14 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
     case "create_activity":
       return { type: "TASK", title: "", description: "" };
     case "send_whatsapp_message":
+      // sendAs: "bot" | "assignee"
+      // - bot (padrão): authorType bot — conversa distribuída permanece em Entrada
+      // - assignee: grava como o consultor HUMAN da conversa (hasHumanReply=true
+      //   → Respondidas). Sem responsável humano → fallback bot.
+      // UI do builder (frontend): dropdown "Enviar como" persistindo config.sendAs.
       return {
         content: "",
+        sendAs: "bot",
         failureAction: "stop",
         failureGotoStepId: "",
         timeoutMs: 86_400_000,
