@@ -49,7 +49,7 @@ export async function GET() {
       : {
           bottomNav: DEFAULT_BOTTOM_NAV,
           enabled: DEFAULT_ENABLED,
-          startRoute: "/inbox",
+          startRoute: "/dashboard",
           brandColor: null,
           version: 0,
         };
@@ -97,7 +97,7 @@ export async function PUT(request: Request) {
     // bottomNav após filtro pode ter perdido o required — re-injeta.
     if (!bottomNav.includes("inbox")) bottomNav.unshift("inbox");
 
-    const startRoute = (body.startRoute ?? "/inbox").trim() || "/inbox";
+    const startRoute = (body.startRoute ?? "/dashboard").trim() || "/dashboard";
     const brandColor =
       typeof body.brandColor === "string" && /^#[0-9a-fA-F]{6}$/.test(body.brandColor)
         ? body.brandColor
