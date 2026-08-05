@@ -44,6 +44,7 @@ export async function GET() {
           }),
           startRoute: row.startRoute,
           brandColor: row.brandColor,
+          visualChrome: row.visualChrome ?? false,
           version: row.version,
         }
       : {
@@ -51,6 +52,7 @@ export async function GET() {
           enabled: DEFAULT_ENABLED,
           startRoute: "/dashboard",
           brandColor: null,
+          visualChrome: false,
           version: 0,
         };
 
@@ -60,15 +62,18 @@ export async function GET() {
 
 /**
  * PUT /api/mobile-layout
- * Sobrescreve a configuração global. Apenas ADMIN.
+ * Sobrescreve a configuração global. ADMIN ou MANAGER.
  * Valida e sanitiza tudo no servidor (não confia no cliente).
  */
 export async function PUT(request: Request) {
   return withOrgContext(async (session) => {
     const role = (session.user as { role?: AppUserRole }).role;
-    if (role !== "ADMIN") {
+    if (role !== "ADMIN" && role !== "MANAGER") {
       return NextResponse.json(
-        { error: "forbidden", message: "Apenas administradores podem editar o layout do app." },
+        {
+          error: "forbidden",
+          message: "Apenas administradores e gestores podem editar o layout do app.",
+        },
         { status: 403 },
       );
     }
@@ -78,6 +83,7 @@ export async function PUT(request: Request) {
       enabled?: string[];
       startRoute?: string;
       brandColor?: string | null;
+      visualChrome?: boolean;
     };
     try {
       body = await request.json();
@@ -104,6 +110,8 @@ export async function PUT(request: Request) {
         : body.brandColor === null
           ? null
           : undefined; // ignora valor inválido
+    const visualChrome =
+      typeof body.visualChrome === "boolean" ? body.visualChrome : undefined;
 
     const updated = await prisma.mobileLayoutConfig.upsert({
       where: { id: SINGLETON_ID },
@@ -113,6 +121,7 @@ export async function PUT(request: Request) {
         enabledModuleIds: serializeModuleIds(enabled),
         startRoute,
         brandColor: brandColor ?? null,
+        visualChrome: visualChrome ?? false,
         version: 1,
         updatedBy: session.user.id ?? null,
       }),
@@ -121,6 +130,7 @@ export async function PUT(request: Request) {
         enabledModuleIds: serializeModuleIds(enabled),
         startRoute,
         ...(brandColor !== undefined ? { brandColor } : {}),
+        ...(visualChrome !== undefined ? { visualChrome } : {}),
         version: { increment: 1 },
         updatedBy: session.user.id ?? null,
       },
@@ -131,6 +141,7 @@ export async function PUT(request: Request) {
       enabled,
       startRoute: updated.startRoute,
       brandColor: updated.brandColor,
+      visualChrome: updated.visualChrome ?? false,
       version: updated.version,
     };
 
