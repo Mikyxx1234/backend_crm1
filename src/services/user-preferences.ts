@@ -298,4 +298,58 @@ export async function saveDashboardPreferences(
   return normalized;
 }
 
+// ── Appearance (tema UI) ───────────────────────────────────────────────
+// Escopo por usuario. Shape persistido: { theme: "light" | "dark" | null }.
+// Upsert parcial — nao apaga sidebar/dashboard.
+
+export type AppearanceTheme = "light" | "dark";
+
+export interface AppearancePreferences {
+  theme: AppearanceTheme | null;
+}
+
+const DEFAULT_APPEARANCE: AppearancePreferences = { theme: null };
+
+function parseAppearance(raw: unknown): AppearancePreferences {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ...DEFAULT_APPEARANCE };
+  }
+  const theme = (raw as { theme?: unknown }).theme;
+  if (theme === "light" || theme === "dark") {
+    return { theme };
+  }
+  return { ...DEFAULT_APPEARANCE };
+}
+
+/** Preferencia de tema do usuario. Default `{ theme: null }` se nunca salvou. */
+export async function getAppearancePreferences(
+  userId: string,
+): Promise<AppearancePreferences> {
+  const pref = await prisma.userPreference.findUnique({
+    where: { userId },
+    select: { appearance: true },
+  });
+  return parseAppearance(pref?.appearance);
+}
+
+/**
+ * Salva (upsert) o tema. Atualiza apenas `appearance` — preserva
+ * sidebar/dashboard existentes.
+ */
+export async function saveAppearancePreferences(
+  userId: string,
+  theme: AppearanceTheme,
+): Promise<AppearancePreferences> {
+  const appearance: AppearancePreferences = { theme };
+  const appearanceJson = appearance as unknown as Prisma.InputJsonValue;
+
+  await prisma.userPreference.upsert({
+    where: { userId },
+    update: { appearance: appearanceJson },
+    create: { userId, appearance: appearanceJson },
+  });
+
+  return appearance;
+}
+
 export { SIDEBAR_KEYS };

@@ -1,7 +1,7 @@
 /**
  * GET /api/profile/preferences
- * Preferencias pessoais do usuario autenticado: `sidebar` e `dashboard`.
- * Se nunca salvou, retorna o padrao (catalogo, todos habilitados).
+ * Preferencias pessoais do usuario autenticado: `sidebar`, `dashboard`
+ * e `appearance`. Se nunca salvou, retorna o padrao (catalogo / theme null).
  *
  * Tambem devolve `availableKeys`: o conjunto de keys de sidebar liberadas
  * para o usuario (gateadas por permission + widgets ativos da org). O
@@ -15,6 +15,7 @@ import { can, loadAuthzContext } from "@/lib/authz";
 import { getActiveWidgetSlugs } from "@/services/organization-widgets";
 import {
   computeAvailableKeys,
+  getAppearancePreferences,
   getDashboardPreferences,
   getSidebarPreferences,
 } from "@/services/user-preferences";
@@ -33,13 +34,15 @@ export async function GET() {
         (slug) => activeSlugs.has(slug),
       );
 
-      const [sidebar, dashboard] = await Promise.all([
+      const [sidebar, dashboard, appearance] = await Promise.all([
         getSidebarPreferences(session.user.id, availableKeys),
         getDashboardPreferences(session.user.id),
+        getAppearancePreferences(session.user.id),
       ]);
       return NextResponse.json({
         sidebar,
         dashboard,
+        appearance,
         availableKeys: [...availableKeys],
       });
     } catch (e) {

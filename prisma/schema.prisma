@@ -590,6 +590,8 @@ model UserPreference {
   sidebar   Json?
   /// { blocks: [{ key, enabled, order }] } — layout do dashboard comercial.
   dashboard Json?
+  /// { theme: "light" | "dark" | null } — tema UI (paridade browser/APK).
+  appearance Json?
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
