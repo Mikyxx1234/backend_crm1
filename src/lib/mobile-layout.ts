@@ -173,6 +173,7 @@ export interface MobileLayoutConfigDto {
   enabled: MobileModuleId[];
   startRoute: string;
   brandColor: string | null;
+  visualChrome: boolean;
   version: number;
 }
 
