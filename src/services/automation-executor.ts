@@ -1459,11 +1459,30 @@ async function executeStep(
       // Loga STAGE_CHANGED na timeline do negócio (paridade com o move
       // manual/kanban/bulk). Antes o move por automação não registrava o
       // evento — só disparava o trigger encadeado abaixo.
+      //
+      // O `actorOverride` faz a timeline exibir "por Automação: <nome>"
+      // em vez de "por Sistema" — sem isso o operador não distingue
+      // movimentação automática de intervenção manual (ver incidente
+      // Dna Work 2026-08-05: deals sumindo em "Formalização feita" sem
+      // rastro visível). `automationId`/`automationName` também vão no
+      // meta pra permitir filtros/consultas.
       if (currentDeal?.stageId && currentDeal.stageId !== stageId) {
-        createDealEvent(targetDealId, null, "STAGE_CHANGED", {
-          from: { id: currentDeal.stageId, name: currentDeal.stage?.name ?? currentDeal.stageId },
-          to: { id: stageId, name: targetStage?.name ?? stageId },
-        }).catch(() => {});
+        createDealEvent(
+          targetDealId,
+          null,
+          "STAGE_CHANGED",
+          {
+            from: { id: currentDeal.stageId, name: currentDeal.stage?.name ?? currentDeal.stageId },
+            to: { id: stageId, name: targetStage?.name ?? stageId },
+            automationId: rt.automationId,
+            ...(rt.automationName ? { automationName: rt.automationName } : {}),
+          },
+          {
+            type: "AUTOMATION",
+            label: rt.automationName ? `Automação: ${rt.automationName}` : "Automação",
+            ref: rt.automationId,
+          },
+        ).catch(() => {});
       }
       // Dispara "mudança de fase" (encadeado, com guarda anti-loop) pra que
       // automações "quando entra na fase X" também rodem quando OUTRA
@@ -3742,14 +3761,24 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
   });
 
   if (rt.dealId) {
-    createDealEvent(rt.dealId, null, "AUTOMATION_EXECUTED", {
-      automationId,
-      automationName: automation.name,
-      event: context.event,
-      stepsTotal: automation.steps.length,
-      stepsFailed,
-      status,
-    }).catch(() => {});
+    createDealEvent(
+      rt.dealId,
+      null,
+      "AUTOMATION_EXECUTED",
+      {
+        automationId,
+        automationName: automation.name,
+        event: context.event,
+        stepsTotal: automation.steps.length,
+        stepsFailed,
+        status,
+      },
+      {
+        type: "AUTOMATION",
+        label: automation.name ? `Automação: ${automation.name}` : "Automação",
+        ref: automationId,
+      },
+    ).catch(() => {});
   } else if (rt.contactId) {
     // Sem deal: ainda registramos no feed (/logs) pra dar visibilidade da
     // execução — importante para automações manuais disparadas pela conversa.
@@ -4050,13 +4079,23 @@ export async function continueFromStep(
   });
 
   if (deal?.id) {
-    createDealEvent(deal.id, null, "AUTOMATION_EXECUTED", {
-      automationId,
-      automationName: automation.name,
-      event: "continue",
-      stepsTotal: automation.steps.length,
-      status: "COMPLETED",
-    }).catch(() => {});
+    createDealEvent(
+      deal.id,
+      null,
+      "AUTOMATION_EXECUTED",
+      {
+        automationId,
+        automationName: automation.name,
+        event: "continue",
+        stepsTotal: automation.steps.length,
+        status: "COMPLETED",
+      },
+      {
+        type: "AUTOMATION",
+        label: automation.name ? `Automação: ${automation.name}` : "Automação",
+        ref: automationId,
+      },
+    ).catch(() => {});
   }
     },
   );

@@ -3,7 +3,7 @@ import { Prisma, type DealRole, type DealStatus } from "@prisma/client";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { logEvent } from "@/services/activity-log";
 import { getStageMetrics } from "@/services/analytics";
@@ -80,6 +80,15 @@ export function createDealEvent(
   userId: string | null,
   type: string,
   meta: Record<string, unknown> = {},
+  /**
+   * Override do ator gravado em `activity_events` (não afeta o legado
+   * `deal_events`). Use quando o evento tem uma origem específica que o
+   * `RequestContext` não captura — ex.: `move_stage` disparado por
+   * automação passa `{ type: "AUTOMATION", label: "Automação: <nome>" }`
+   * para que a timeline mostre "por Automação: <nome>" em vez de
+   * "por Sistema". Sem override, o `logEvent` usa o ator do contexto.
+   */
+  actorOverride?: ContextActor,
 ) {
   const metaJson = meta as Prisma.InputJsonValue;
 
@@ -113,6 +122,7 @@ export function createDealEvent(
     oldValue,
     newValue,
     meta,
+    ...(actorOverride ? { actor: actorOverride } : {}),
   });
 
   return prisma.dealEvent
