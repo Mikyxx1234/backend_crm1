@@ -5,6 +5,49 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-05 — `reopenDeal` não move mais o deal (deixa no estágio atual)
+
+**Decisão.** `reopenDeal` em `src/services/deals.ts` passa a **apenas trocar
+o status** (`LOST`/`WON` → `OPEN`, com `closedAt=null` e `lostReason=null`)
+e mantém o `stageId` do deal inalterado. Se o deal estiver num estágio
+terminal (`isLost`/`isWon`), ele continua ali visualmente, agora com
+`status=OPEN` — cabe ao operador definir o destino via automação ou
+kanban.
+
+**Contexto.** A implementação anterior, ao detectar estágio terminal,
+buscava `stages WHERE isWon=false AND isLost=false ORDER BY position DESC
+LIMIT 1` e movia o deal pra lá dentro da mesma transação. Isso empurrava
+qualquer reopen de LOST direto pra etapa quase-final do funil (na Dna
+Work, "Formalização feita", position 12). Como `reopenDeal` faz
+`prisma.deal.update` sem passar por `updateDeal`, a movimentação NÃO
+gerava `STAGE_CHANGED` em `deal_events` — timeline mentia, comportamento
+opaco (incidente Dna Work 2026-08-05: 49 deals reabertos por
+whatsapp-flow em 24h, dos quais 7+ caíram silenciosamente em
+"Formalização feita").
+
+**Alternativas descartadas.**
+- *Mover pro último estágio operacional real do deal (via histórico).*
+  Depende de `deal_events` completos, exige leitura extra na transação,
+  ainda é decisão implícita — melhor deixar a automação decidir.
+- *Mover pro primeiro estágio (position 0).* Semântica clara ("reabri,
+  começa de novo") mas ignora o contexto do deal e força retrabalho no
+  kanban de organizações que reabrem com frequência.
+
+**Impacto.**
+- Callers de `reopenDeal` (`whatsapp-flow-response.ts`,
+  `/api/deals/:id/status`) continuam registrando `STATUS_CHANGED` na
+  timeline — comportamento inalterado sob esse ângulo.
+- Deal reaberto fica com `status=OPEN` e `stageId` de um estágio LOST/WON
+  temporariamente. O board (`getDealBoard`) filtra por status, então o
+  card volta a aparecer nas colunas OPEN normais; o kanban não confia em
+  `isLost` do stage pra derivar status do card.
+- Movimentação pra estágio destino passa a ser responsabilidade explícita
+  de automação (trigger `message_received` com filtro por estágio) ou
+  ação manual — ambos caminhos já emitem `STAGE_CHANGED` correto
+  (`automation-executor.ts` L1124 e `/api/deals/[id]/route.ts`).
+
+---
+
 ### 2026-08-04 — `/api/leads` idempotente: reaproveitar negócio aberto e não sobrescrever campo preenchido
 
 **Problema.** `POST /api/leads` tratava toda chamada como fato novo: criava um

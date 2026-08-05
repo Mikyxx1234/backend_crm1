@@ -996,42 +996,27 @@ export async function markDealLost(id: string, lostReason?: string | null) {
 }
 
 export async function reopenDeal(id: string) {
-  const result = await prisma.$transaction(async (tx) => {
-    const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
-    if (!deal) throw new Error("NOT_FOUND");
-
-    // Se o deal está num estágio terminal, reabrir o devolve pro último
-    // estágio operacional do pipeline (o mais próximo do fechamento).
-    let movePatch: Prisma.DealUncheckedUpdateInput = {};
-    const current = await tx.stage.findUnique({
-      where: { id: deal.stageId },
-      select: { pipelineId: true, isWon: true, isLost: true },
-    });
-    if (current && (current.isWon || current.isLost)) {
-      const target = await tx.stage.findFirst({
-        where: { pipelineId: current.pipelineId, isWon: false, isLost: false },
-        orderBy: { position: "desc" },
-        select: { id: true },
-      });
-      if (target) {
-        const max = await tx.deal.aggregate({
-          where: { stageId: target.id },
-          _max: { position: true },
-        });
-        movePatch = { stageId: target.id, position: (max._max.position ?? -1) + 1 };
-      }
-    }
-
-    return tx.deal.update({
-      where: { id },
-      data: {
-        status: "OPEN",
-        closedAt: null,
-        lostReason: null,
-        ...movePatch,
-      },
-      include: listInclude,
-    });
+  // Reabrir SÓ troca o status (LOST/WON → OPEN) e mantém o `stageId` atual.
+  //
+  // Antes movíamos o deal automaticamente para o "último estágio operacional"
+  // do pipeline (findFirst com `isWon=false AND isLost=false ORDER BY position
+  // desc`) — o que na prática empurrava deals reabertos direto pra etapa
+  // quase-final do funil (ex.: "Formalização feita" na Dna Work), sem
+  // registrar `STAGE_CHANGED` na timeline. Comportamento surpreendente e
+  // sem auditoria — ver incidente 2026-08-05.
+  //
+  // Agora o deal fica onde estava e o operador decide o destino via
+  // automação (trigger `message_received` com filtro `stage == Perdido`, por
+  // exemplo) ou movendo manualmente no kanban — ambos caminhos JÁ registram
+  // `STAGE_CHANGED` corretamente (automation-executor L1124 / route deals).
+  const result = await prisma.deal.update({
+    where: { id },
+    data: {
+      status: "OPEN",
+      closedAt: null,
+      lostReason: null,
+    },
+    include: listInclude,
   });
   // Reabertura: estorna alocações consumidas no ganho (lança inversos).
   void import("@/services/product-fulfillment").then((m) => m.onDealReverted(id));
