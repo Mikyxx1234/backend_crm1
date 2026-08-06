@@ -495,6 +495,20 @@ async function persistCampaignOutboundMessage(input: {
     }),
   });
 
+  // Modelo de ticket para campanhas: se a conversa foi CRIADA agora só pra
+  // registrar o disparo (contato não tinha conversa OPEN no momento), a
+  // fechamos imediatamente após gravar a mensagem. Assim o histórico do
+  // envio fica preservado, mas o inbox NÃO recebe uma "Entrada" fantasma
+  // — a conversa só aparecerá quando o cliente responder (o webhook Meta
+  // em `findOrCreateConversation` cria nova conversa OPEN para inbound
+  // sobre contato só com RESOLVED — comportamento já implementado).
+  //
+  // Se `ensured.status === "already_ok"` (contato tinha atendimento em
+  // curso) NÃO fechamos — a mensagem entra no chat aberto normalmente.
+  // Incidente: campanha 2026-08-06 gerou 1660 conversas fantasma no inbox
+  // da Cruzeiro EaD porque toda conversa ensured=created ficava OPEN sem
+  // resposta do cliente (herdando ainda o `assignedToId` do contato).
+  const shouldAutoResolve = ensured.status === "created";
   await prisma.conversation
     .update({
       where: { id: conversationId },
@@ -502,6 +516,13 @@ async function persistCampaignOutboundMessage(input: {
         lastMessageDirection: "out",
         hasAgentReply: true,
         updatedAt: new Date(),
+        ...(shouldAutoResolve
+          ? {
+              status: "RESOLVED" as const,
+              closedAt: new Date(),
+              assignedToId: null,
+            }
+          : {}),
       },
     })
     .catch(() => {});

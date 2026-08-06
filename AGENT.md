@@ -5,6 +5,62 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-06 — Campanha auto-fecha conversa criada só pro disparo
+
+**Decisão.** Em `src/workers/campaign-worker.ts:persistCampaignOutboundMessage`,
+quando `ensureWhatsAppConversationForContact` retorna `status: "created"`
+(conversa nasceu neste momento apenas para hospedar a mensagem da
+campanha), o update pós-`message.create` inclui
+`status: "RESOLVED", closedAt: NOW(), assignedToId: null`. Se o retorno é
+`already_ok`/`backfilled_channel` (contato já tinha conversa OPEN por
+atendimento em curso), mantemos o comportamento atual — a mensagem só
+entra no chat existente.
+
+**Contexto.** A campanha "adimplente rematricula 0608"
+(`cmshq35do1ujdoy016inhpw74`, org Cruzeiro EaD) foi disparada para 2049
+contatos e gerou **1660 conversas OPEN** onde o cliente nunca respondeu.
+Todas com `hasHumanReply=false`, `lastMessageDirection=out` — perfil que
+o critério de `tabToWhere("entrada")` em `services/conversations.ts`
+casa direto. Resultado: inbox da equipe inundado com 1589 conversas sem
+responsável + 71 já herdando o `contact.assignedToId` (Danubia recebeu
+32, Wesley 19, Joyce 8…), sem que nenhum cliente tivesse escrito.
+
+O modelo de ticket em `meta-webhook/handler.ts:findOrCreateConversation`
+(L708-767) já cria nova conversa OPEN para inbound sobre contato só com
+RESOLVED. Fechar a conversa recém-criada pela campanha aproveita esse
+mesmo caminho: o histórico do disparo fica encapsulado no ticket
+fechado, e a resposta do cliente instancia ticket novo — aí sim ele
+aparece em "Entrada" e dispara a distribuição normal.
+
+**Alternativas descartadas.**
+- *Não criar conversa no disparo, gravar `Message` sem `conversationId`.*
+  Quebra a UI do inbox (mensagem sem chat pai não renderiza) e a
+  auditoria de campanha (deixa de conseguir listar mensagens enviadas do
+  contato pelo ticket).
+- *Reabrir a mesma conversa quando cliente responder (em vez de novo
+  ticket).* Exigiria mudar `findOrCreateConversation` também — mais
+  cirurgias em ponto crítico. E quebra o modelo de ticket já
+  estabilizado (dna_work / Cruzeiro).
+- *Marcar campo dedicado `campaignCreated=true` e ocultar da "Entrada"
+  via filtro.* Introduz estado escondido; qualquer feature nova de aba
+  precisa lembrar de considerar essa flag. RESOLVED é o estado canônico.
+
+**Impacto.**
+- Campanhas passam a NÃO inundar o inbox. Só aparece quando o cliente
+  responde.
+- Contatos já em atendimento (conversa OPEN existente) não sofrem
+  alteração — a mensagem da campanha entra no chat atual como sempre.
+- `campaign_recipients.sentAt`/`sentCount` seguem contando os envios;
+  métricas do painel de campanhas não mudam.
+- Histórico do disparo continua consultável pela lista de conversas
+  RESOLVED do contato (aba "Finalizadas") e pelo relatório da campanha.
+- Limpeza retroativa das 1660 conversas antigas via
+  `_diag/close-campaign-orphan-convs.js` (dry-run + `--apply`) —
+  preserva 148 conversas onde cliente respondeu + 15 com histórico
+  inbound anterior ao disparo.
+
+---
+
 ### 2026-08-05 — `reopenDeal` não move mais o deal (deixa no estágio atual)
 
 **Decisão.** `reopenDeal` em `src/services/deals.ts` passa a **apenas trocar
