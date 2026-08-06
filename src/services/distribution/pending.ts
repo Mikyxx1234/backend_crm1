@@ -767,10 +767,38 @@ export async function processPendingDistributionQueue(opts: {
 
       if (take <= 0) return;
 
+      // Também drena conversas ainda na IA com DistributionPending PENDING
+      // (handoff noturno: a IA reassumiu para continuar o atendimento, mas
+      // o lead precisa ir ao humano quando alguém ficar elegível).
+      const pendingOwnedByAi = await prisma.distributionPending.findMany({
+        where: {
+          organizationId: orgId,
+          status: "PENDING",
+          conversationId: { not: null },
+        },
+        select: { conversationId: true },
+        take: 500,
+      });
+      const pendingAiConvIds = pendingOwnedByAi
+        .map((p) => p.conversationId)
+        .filter((id): id is string => Boolean(id));
+
       const items = await prisma.conversation.findMany({
         where: {
-          ...ABERTA_SEM_RESPONSAVEL,
+          status: "OPEN",
+          lastInboundAt: { not: null },
           departmentId: departmentId === null ? null : departmentId,
+          OR: [
+            { assignedToId: null },
+            ...(pendingAiConvIds.length > 0
+              ? [
+                  {
+                    id: { in: pendingAiConvIds },
+                    assignedTo: { type: "AI" as const },
+                  },
+                ]
+              : []),
+          ],
         },
         orderBy: { createdAt: "asc" },
         select: { id: true, contactId: true, departmentId: true },
@@ -807,6 +835,8 @@ export async function processPendingDistributionQueue(opts: {
             distributionType: null,
             triggerSource: "SYSTEM",
             departmentId: it.departmentId,
+            // Handoff com IA ainda assignee (após fila noturna) precisa reassign.
+            reassign: true,
             allowOrgWideFallback: false,
           });
           console.warn(

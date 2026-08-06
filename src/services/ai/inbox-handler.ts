@@ -52,20 +52,20 @@ import {
   inferDepartmentFromContext,
   isCourseShoppingInquiry,
   moveOpenDealToEmAtendimento,
-  textImpliesAcademicHandoff,
 } from "@/services/ai/academic-department-routing";
 import {
   closeAiOnlyConversation,
   userWantsAiConversationClose,
 } from "@/services/ai/academic-closure";
 import {
-  LOW_CONFIDENCE_HANDOFF_MESSAGE,
   parseAgentConfidence,
   shouldHandoffOnLowConfidence,
 } from "@/services/ai/confidence";
 import {
   buildHumanQueueWithHoursMessage,
   buildHumanUnavailableOfferMessage,
+  humanAttendanceStartHint,
+  isHumanAttendanceWindowOpen,
   isNearDuplicateBotText,
   messageLooksLikeHumanQueueNotice,
   userWantsAiContinue,
@@ -107,11 +107,26 @@ function isBareGreetingMessage(raw: string): boolean {
   );
 }
 
-const RETENTION_HANDOFF_MESSAGE =
-  "Entendi! Sobre *trancamento/cancelamento* vou te conectar com o setor de *Retenção*. Um(a) consultor(a) fala com você em breve, tá?";
+function buildRetentionHandoffMessage(now = new Date()): string {
+  if (isHumanAttendanceWindowOpen(now)) {
+    return (
+      "Entendi! Sobre *trancamento/cancelamento* já pedi para o setor de *Retenção* " +
+      "te atender. Assim que um(a) consultor(a) puder, continua com você. " +
+      "Enquanto isso, se quiser tirar alguma dúvida, *estou aqui* contigo 💛"
+    );
+  }
+  const { startHour, dayLabel } = humanAttendanceStartHint(now);
+  return (
+    `Entendi! Sobre *trancamento/cancelamento* já registrei seu pedido com *Retenção*. ` +
+    `O atendimento humano retoma às *${startHour}h* ${dayLabel}. ` +
+    `Enquanto isso, se quiser tirar alguma dúvida, *estou aqui* contigo 💛`
+  );
+}
 
-const GENERIC_QUEUE_HANDOFF_MESSAGE =
-  "Vou te conectar com um(a) consultor(a) que vai te ajudar direitinho, tá? Só um instante.";
+/** Mensagem genérica de fila — respeita expediente (não promete "em breve" à noite). */
+function buildGenericQueueHandoffMessage(now = new Date()): string {
+  return buildHumanUnavailableOfferMessage(now);
+}
 
 function stripConfidenceTag(text: string): string {
   return parseAgentConfidence(text).text.trim();
@@ -588,6 +603,10 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         "indisponível",
         "indisponivel",
         "expediente inicia",
+        "atendimento humano retoma",
+        "já pedi para a equipe",
+        "já registrei seu pedido",
+        "estou aqui contigo",
         "setor de",
         "Retenção",
         "Acolhimento",
@@ -755,21 +774,6 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       const deptKey = inferDepartmentFromContext({
         userMessage: args.userMessage,
       });
-      const handoffText =
-        deptKey === "retencao"
-          ? RETENTION_HANDOFF_MESSAGE
-          : GENERIC_QUEUE_HANDOFF_MESSAGE;
-      await sendAgentMessage({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: assignee.id,
-        autonomyMode: cfg.autonomyMode,
-        text: handoffText,
-        channel: args.channel,
-        kind: "text",
-        humanBehavior,
-        generationId: args.generationId,
-      }).catch(() => null);
       await executeAcademicDepartmentHandoff({
         conversationId: args.conversationId,
         contactId: args.contactId,
@@ -783,6 +787,22 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               : "Atendimento",
         reason: `Palavra-chave disparou handoff: "${keyword}"`,
       });
+      const keywordText =
+        deptKey === "retencao"
+          ? buildRetentionHandoffMessage()
+          : buildGenericQueueHandoffMessage();
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: keywordText,
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+        bypassAssigneeCheck: true,
+      }).catch(() => null);
       logAi("handoff", {
         conversationId: args.conversationId,
         reason: "keyword",
@@ -795,17 +815,6 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     // ── 2b. Curso/valor/grade (não do curso atual) → consultor ─
     // Nunca site institucional (Cruzeiro etc.): sempre humano.
     if (isCourseShoppingInquiry(args.userMessage)) {
-      await sendAgentMessage({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: assignee.id,
-        autonomyMode: cfg.autonomyMode,
-        text: GENERIC_QUEUE_HANDOFF_MESSAGE,
-        channel: args.channel,
-        kind: "text",
-        humanBehavior,
-        generationId: args.generationId,
-      }).catch(() => null);
       await executeAcademicDepartmentHandoff({
         conversationId: args.conversationId,
         contactId: args.contactId,
@@ -815,6 +824,18 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         reason:
           "Dúvida sobre valor/grade/info de curso — handoff obrigatório (sem site)",
       });
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: buildGenericQueueHandoffMessage(),
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+        bypassAssigneeCheck: true,
+      }).catch(() => null);
       logAi("handoff", {
         conversationId: args.conversationId,
         reason: "course_shopping",
@@ -829,17 +850,6 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       userMessage: args.userMessage,
     });
     if (retentionKey === "retencao") {
-      await sendAgentMessage({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: assignee.id,
-        autonomyMode: cfg.autonomyMode,
-        text: RETENTION_HANDOFF_MESSAGE,
-        channel: args.channel,
-        kind: "text",
-        humanBehavior,
-        generationId: args.generationId,
-      }).catch(() => null);
       await executeAcademicDepartmentHandoff({
         conversationId: args.conversationId,
         contactId: args.contactId,
@@ -848,6 +858,18 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         departmentName: "Retenção",
         reason: "Intenção de trancamento/cancelamento (regra determinística)",
       });
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: buildRetentionHandoffMessage(),
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+        bypassAssigneeCheck: true,
+      }).catch(() => null);
       logAi("handoff", {
         conversationId: args.conversationId,
         reason: "retention_intent",
@@ -961,7 +983,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         contactId: args.contactId,
         agentUserId: assignee.id,
         autonomyMode: cfg.autonomyMode,
-        text: GENERIC_QUEUE_HANDOFF_MESSAGE,
+        text: buildGenericQueueHandoffMessage(),
         channel: args.channel,
         kind: "text",
         humanBehavior,
@@ -981,16 +1003,17 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     const replyText = stripConfidenceTag(result.text || "");
     const transferred =
       result.status === "HANDOFF" ||
-      runHadTransferTools(result.toolCalls) ||
-      textImpliesAcademicHandoff(replyText);
+      runHadTransferTools(result.toolCalls);
+    // Texto "vou te conectar" sozinho NÃO dispara distribuição (evita promessa
+    // sem tool / sem fila real). Só reforça se já houve tool ou status HANDOFF.
 
     if (transferred) {
       const handoffText =
         replyText ||
         (inferDepartmentFromContext({ userMessage: args.userMessage }) ===
         "retencao"
-          ? RETENTION_HANDOFF_MESSAGE
-          : GENERIC_QUEUE_HANDOFF_MESSAGE);
+          ? buildRetentionHandoffMessage()
+          : buildGenericQueueHandoffMessage());
       // Distribui primeiro; só depois envia UMA mensagem ao aluno.
       const afterHandoff = await prisma.conversation.findUnique({
         where: { id: args.conversationId },
@@ -1067,25 +1090,43 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         messageLooksLikeHumanQueueNotice(handoffText) ||
         /fila|indispon|posso continuar|a partir das\s*\d/i.test(handoffText);
 
+      const retentionDept =
+        inferDepartmentFromContext({ userMessage: args.userMessage }) ===
+        "retencao";
+      const policyQueueText = retentionDept
+        ? buildRetentionHandoffMessage()
+        : buildHumanUnavailableOfferMessage();
+      const llmPromisesSoon =
+        /em breve|logo algu[eé]m|s[oó] um instante|já te conectar/i.test(
+          handoffText,
+        );
+
       let outbound: string | null = null;
       if (gotHuman) {
         outbound = handoffText;
       } else if (alreadyNoticed) {
-        // Já avisou fila/indisponível — só envia se o LLM trouxe info nova
-        // (ex.: motivo da retenção) e não for near-duplicate.
+        // Já avisou fila — não repete; só envia se o LLM trouxe info nova
+        // e não for near-duplicate / promessa falsa de "em breve".
         if (
           replyText.trim() &&
+          !llmPromisesSoon &&
+          isHumanAttendanceWindowOpen() &&
           !recentBot.some(
             (m) => m.content && isNearDuplicateBotText(handoffText, m.content),
           )
         ) {
           outbound = handoffText;
         }
-      } else if (llmCoversQueue) {
-        outbound = handoffText;
+      } else if (
+        !isHumanAttendanceWindowOpen() ||
+        llmPromisesSoon ||
+        !llmCoversQueue
+      ) {
+        // Fora do expediente, promessa de "em breve", ou LLM sem aviso de fila:
+        // usa mensagem de política (horário + empatia).
+        outbound = policyQueueText;
       } else {
-        // Uma mensagem só: política de indisponível (não soma "vou te conectar" + oferta).
-        outbound = buildHumanUnavailableOfferMessage();
+        outbound = handoffText;
       }
 
       if (outbound) {
@@ -1173,17 +1214,6 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         });
         return;
       }
-      await sendAgentMessage({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: assignee.id,
-        autonomyMode: cfg.autonomyMode,
-        text: LOW_CONFIDENCE_HANDOFF_MESSAGE,
-        channel: args.channel,
-        kind: "text",
-        humanBehavior,
-        generationId: args.generationId,
-      }).catch(() => null);
       await executeAcademicDepartmentHandoff({
         conversationId: args.conversationId,
         contactId: args.contactId,
@@ -1191,6 +1221,18 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         userMessage: args.userMessage,
         reason: `Baixa confiança da IA (${parsed.confidence?.toFixed(2)})`,
       });
+      await sendAgentMessage({
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        agentUserId: assignee.id,
+        autonomyMode: cfg.autonomyMode,
+        text: buildHumanUnavailableOfferMessage(),
+        channel: args.channel,
+        kind: "text",
+        humanBehavior,
+        generationId: args.generationId,
+        bypassAssigneeCheck: true,
+      }).catch(() => null);
       await prisma.aIAgentRun
         .update({
           where: { id: result.runId },

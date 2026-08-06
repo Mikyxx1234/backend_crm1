@@ -47,9 +47,9 @@ async function main() {
       const tools = Array.from(
         new Set([...(a.enabledTools ?? []), ...ACADEMIC_TOOLS]),
       );
-      const keywords = Array.from(
-        new Set([...(a.keywordHandoffs ?? []), ...ACADEMIC_HANDOFF_KEYWORDS]),
-      );
+      // Substitui keywords (não faz merge): termos soltos antigos
+      // ("atendimento", "humano") transferiam sem o aluno pedir.
+      const keywords = [...ACADEMIC_HANDOFF_KEYWORDS];
       await prisma.aIAgentConfig.update({
         where: { id: a.id },
         data: {

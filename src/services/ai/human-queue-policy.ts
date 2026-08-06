@@ -1,11 +1,19 @@
 /**
  * Política quando não há consultor humano elegível:
- *  - avisa indisponibilidade e oferece continuar com a IA;
- *  - se o aluno pedir distribuição/humano fora do expediente, informa horário;
- *  - dentro do expediente, não diz "inicia às 8h" (já começou).
+ *  - avisa com empatia e oferece continuar com a IA;
+ *  - fora do expediente (antes das 8h/9h ou a partir da pausa pré-fim), informa o próximo horário;
+ *  - dentro do expediente, não promete "em breve" como se já houvesse alguém na linha.
+ *
+ * Expediente humano (SP): seg–sex 8h–19h, sábado 9h–19h.
+ * Pausa na fila: 30 min antes da saída → janela efetiva até 18h30.
  */
 
 const TZ = "America/Sao_Paulo";
+
+/** Fim oficial do expediente (hora cheia). */
+export const HUMAN_ATTENDANCE_END_HOUR = 19;
+/** Minutos de pausa na fila antes da saída (não oferece lead perto do fim). */
+export const HUMAN_ATTENDANCE_PRE_END_MINUTES = 30;
 
 function normalizeMsg(raw: string): string {
   return raw
@@ -36,61 +44,94 @@ function clockInSaoPaulo(now = new Date()): {
   return { weekday, hour: hour === 24 ? 0 : hour, minute };
 }
 
-/** Seg–sex → 8h; sábado → 9h; domingo → segunda às 8h. */
+/** Minuto-do-dia em que a janela fecha (19h − 30min = 18h30). */
+export function humanAttendanceEffectiveEndMinutes(): number {
+  return HUMAN_ATTENDANCE_END_HOUR * 60 - HUMAN_ATTENDANCE_PRE_END_MINUTES;
+}
+
+/**
+ * Próximo horário de início do atendimento humano (SP).
+ * Considera manhã (ainda não abriu) e noite (já fechou / pausa pré-fim).
+ */
 export function humanAttendanceStartHint(now = new Date()): {
   startHour: 8 | 9;
   dayLabel: string;
 } {
-  const { weekday } = clockInSaoPaulo(now);
-  if (weekday === "Sat") {
-    return { startHour: 9, dayLabel: "hoje (sábado)" };
-  }
+  const { weekday, hour, minute } = clockInSaoPaulo(now);
+  const mins = hour * 60 + minute;
+  const endMins = humanAttendanceEffectiveEndMinutes();
+
   if (weekday === "Sun") {
     return { startHour: 8, dayLabel: "segunda-feira" };
+  }
+
+  if (weekday === "Sat") {
+    if (mins < 9 * 60) {
+      return { startHour: 9, dayLabel: "hoje (sábado)" };
+    }
+    // Após pausa pré-fim / fechamento no sábado → segunda.
+    if (mins >= endMins) {
+      return { startHour: 8, dayLabel: "segunda-feira" };
+    }
+    return { startHour: 9, dayLabel: "hoje (sábado)" };
+  }
+
+  // Seg–sex
+  if (mins < 8 * 60) {
+    return { startHour: 8, dayLabel: "hoje" };
+  }
+  if (mins >= endMins) {
+    if (weekday === "Fri") {
+      return { startHour: 8, dayLabel: "segunda-feira" };
+    }
+    return { startHour: 8, dayLabel: "amanhã" };
   }
   return { startHour: 8, dayLabel: "hoje" };
 }
 
-/** True se já estamos no horário de início do atendimento humano (SP). */
+/**
+ * True se estamos na janela em que faz sentido prometer atendimento humano
+ * "no mesmo dia" (SP): após abertura e antes da pausa pré-fim (18h30).
+ */
 export function isHumanAttendanceWindowOpen(now = new Date()): boolean {
   const { weekday, hour, minute } = clockInSaoPaulo(now);
   if (weekday === "Sun") return false;
   const startHour = weekday === "Sat" ? 9 : 8;
   const mins = hour * 60 + minute;
-  return mins >= startHour * 60;
+  const endMins = humanAttendanceEffectiveEndMinutes();
+  return mins >= startHour * 60 && mins < endMins;
 }
 
 function hoursFooter(now = new Date()): string {
   if (isHumanAttendanceWindowOpen(now)) {
     return (
-      `Assim que um(a) consultor(a) estiver disponível, te atendem ` +
-      `(expediente: segunda a sexta a partir das 8h e sábado a partir das 9h).`
+      `Assim que um(a) consultor(a) puder, te atendem ` +
+      `(expediente: segunda a sexta das 8h às 19h e sábado das 9h às 19h).`
     );
   }
   const { startHour, dayLabel } = humanAttendanceStartHint(now);
   return (
-    `O atendimento humano inicia às *${startHour}h* ${dayLabel} ` +
-    `(segunda a sexta às 8h e sábado às 9h).`
+    `O atendimento humano retoma às *${startHour}h* ${dayLabel} ` +
+    `(segunda a sexta das 8h às 19h e sábado das 9h às 19h).`
   );
 }
 
 export function buildHumanUnavailableOfferMessage(now = new Date()): string {
   if (isHumanAttendanceWindowOpen(now)) {
     return (
-      `No momento o *atendimento humano* está indisponível ` +
-      `(nenhum consultor elegível agora). ` +
-      `Se quiser, *eu posso continuar* te ajudando por aqui. ` +
-      `Se preferir aguardar um(a) consultor(a), é só pedir — ` +
-      `você fica na fila e te atendem assim que alguém estiver disponível.`
+      `Combinado — já pedi para a equipe te atender. Assim que um(a) ` +
+      `consultor(a) puder, continua com você por aqui, tá? ` +
+      `Enquanto isso, se quiser tirar alguma dúvida, *estou aqui* contigo. ` +
+      `Se preferir só esperar com calma, também tudo bem — me avisa 💛`
     );
   }
   const { startHour, dayLabel } = humanAttendanceStartHint(now);
   return (
-    `No momento o *atendimento humano* está indisponível. ` +
-    `Se quiser, *eu posso continuar* te ajudando por aqui. ` +
-    `Se preferir aguardar um(a) consultor(a), é só pedir — ` +
-    `o atendimento humano inicia às *${startHour}h* ${dayLabel} ` +
-    `(segunda a sexta às 8h e sábado às 9h) e você fica na fila.`
+    `Combinado — já registrei seu pedido com a equipe. O atendimento humano ` +
+    `retoma às *${startHour}h* ${dayLabel} ` +
+    `(segunda a sexta das 8h às 19h e sábado das 9h às 19h). ` +
+    `Enquanto isso, se quiser tirar alguma dúvida, *estou aqui* contigo. ` +
+    `Se preferir só esperar, também tudo bem — me avisa 💛`
   );
 }
 
@@ -142,10 +183,26 @@ export function userWantsAiContinue(userMessage: string): boolean {
 
 /** Mensagens já usadas neste fluxo (dedupe). */
 export const HUMAN_QUEUE_MSG_PATTERNS = [
+  "já pedi para a equipe",
+  "ja pedi para a equipe",
+  "já pedi para um(a) consultor",
+  "ja pedi para um(a) consultor",
+  "já registrei seu pedido",
+  "ja registrei seu pedido",
+  "estou aqui contigo",
+  "em breve alguém da equipe",
+  "o atendimento humano retoma",
+  "já te encaminhei para a equipe",
+  "ja te encaminhei para a equipe",
+  "já te deixei na fila",
+  "ja te deixei na fila",
+  "assim que estiver livre",
   "atendimento humano está indisponível",
   "atendimento humano esta indisponivel",
   "nenhum consultor elegivel",
   "nenhum consultor elegível",
+  "ninguém está disponível",
+  "ninguem esta disponivel",
   "eu posso continuar",
   "já está na fila",
   "ja esta na fila",
@@ -153,6 +210,7 @@ export const HUMAN_QUEUE_MSG_PATTERNS = [
   "atendimento humano inicia",
   "segunda a sexta às 8h",
   "segunda a sexta as 8h",
+  "segunda a sexta das 8h",
   "a partir das 8h",
   "só mais um pouquinho",
   "so mais um pouquinho",

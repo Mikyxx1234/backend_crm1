@@ -551,17 +551,34 @@ export async function executeAcademicDepartmentHandoff(args: {
     reassign: true,
   });
 
-  // Nota interna de distribuição (privada, não duplica em 2 min)
-  const noteContent = dept
-    ? `Conversa distribuída para ${dept.name}`
-    : `Conversa distribuída para a fila de atendimento`;
+  // Nota interna: distingue atribuído de verdade vs só enfileirado.
+  const selectedUserId =
+    distribution?.success && distribution.selectedUserId
+      ? distribution.selectedUserId
+      : null;
+  const selectedUser = selectedUserId
+    ? await prisma.user.findUnique({
+        where: { id: selectedUserId },
+        select: { type: true, name: true },
+      })
+    : null;
+  const selectedIsHuman = selectedUser?.type === "HUMAN";
+  const deptLabel = dept?.name ?? "atendimento";
+  const noteContent = selectedIsHuman
+    ? `Conversa distribuída para ${deptLabel}` +
+      (selectedUser?.name ? ` → ${selectedUser.name}` : "")
+    : `Conversa enfileirada para ${deptLabel} — aguardando consultor elegível` +
+      (distribution?.reason ? ` (${distribution.reason})` : "");
   const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
   const existingNote = await prisma.message.findFirst({
     where: {
       conversationId: args.conversationId,
       messageType: "note",
       isPrivate: true,
-      content: { startsWith: "Conversa distribuída para" },
+      OR: [
+        { content: { startsWith: "Conversa distribuída para" } },
+        { content: { startsWith: "Conversa enfileirada para" } },
+      ],
       createdAt: { gte: twoMinutesAgo },
     },
     select: { id: true },
@@ -584,17 +601,11 @@ export async function executeAcademicDepartmentHandoff(args: {
   }
 
   // Consultor humano atribuído → funil operacional "Em Atendimento".
-  if (distribution?.success && distribution.selectedUserId) {
-    const assignee = await prisma.user.findUnique({
-      where: { id: distribution.selectedUserId },
-      select: { type: true },
-    });
-    if (assignee?.type === "HUMAN") {
-      await moveOpenDealToEmAtendimento({
-        dealId: args.dealId ?? null,
-        contactId,
-      }).catch(() => null);
-    }
+  if (selectedIsHuman) {
+    await moveOpenDealToEmAtendimento({
+      dealId: args.dealId ?? null,
+      contactId,
+    }).catch(() => null);
   }
 
   return {

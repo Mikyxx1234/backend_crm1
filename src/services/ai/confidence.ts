@@ -8,8 +8,9 @@
 
 export const AI_CONFIDENCE_HANDOFF_THRESHOLD = 0.4;
 
+/** @deprecated Prefer buildHumanUnavailableOfferMessage() — mantido só por imports. */
 export const LOW_CONFIDENCE_HANDOFF_MESSAGE =
-  "Vou te conectar com um de nossos consultores que vai te ajudar direitinho, tá? Só um instante 🙂";
+  "Combinado — já pedi para a equipe te atender. Assim que um(a) consultor(a) puder, continua com você por aqui. Enquanto isso, se quiser tirar alguma dúvida, *estou aqui* contigo 💛";
 
 const CONFIDENCE_RE =
   /\[CONFIANCA\s*:\s*([0-9]+(?:\.[0-9]+)?)\s*\]/gi;

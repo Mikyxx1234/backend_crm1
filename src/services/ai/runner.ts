@@ -406,7 +406,7 @@ function renderSystemPrompt(args: RenderArgs): string {
       lines.push(`- Funil: ${args.deal.stage.pipeline.name}`);
     if (args.deal.stage) lines.push(`- Estágio: ${args.deal.stage.name}`);
     lines.push(
-      "- Use Funil/Estágio para decidir Acolhimento vs Atendimento na distribuição.",
+      "- Funil/Estágio é só contexto. NÃO transfira só por causa do funil — atenda primeiro; use departamento certo só quando for distribuir de verdade.",
     );
   }
 
