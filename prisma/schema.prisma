@@ -4055,6 +4055,9 @@ model MobileLayoutConfig {
   /// Cor de marca opcional (override do navy padrao). Hex.
   /// Quando null, usa o brand-navy global.
   brandColor         String?
+  /// Quando true, ADMIN/MANAGER no mobile veem bottom nav em h-scroll
+  /// com todos os itens da sidebar (modo "Visual Chrome").
+  visualChrome       Boolean      @default(false)
   /// Versao incrementada a cada PUT — front faz refetch quando muda.
   version            Int          @default(1)
   updatedAt          DateTime     @updatedAt
