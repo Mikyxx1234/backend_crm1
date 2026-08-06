@@ -510,6 +510,37 @@ export async function executeDistribution(
 
   const input = await hydrateDistributionIds(rawInput);
 
+  // Snapshot ANTES do reassign limpar o assignee — usado para disparar
+  // `lead_distributed` só na 1ª vez que um HUMAN assume (sem hasHumanReply).
+  let preAssignSnap: {
+    assignedToId: string | null;
+    assigneeType: string | null;
+    hasHumanReply: boolean;
+    departmentId: string | null;
+    contactId: string | null;
+  } | null = null;
+  if (input.conversationId) {
+    const snap = await prisma.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: {
+        assignedToId: true,
+        hasHumanReply: true,
+        departmentId: true,
+        contactId: true,
+        assignedTo: { select: { type: true } },
+      },
+    });
+    if (snap) {
+      preAssignSnap = {
+        assignedToId: snap.assignedToId,
+        assigneeType: snap.assignedTo?.type ?? null,
+        hasHumanReply: snap.hasHumanReply,
+        departmentId: snap.departmentId,
+        contactId: snap.contactId,
+      };
+    }
+  }
+
   // Idempotente: se a conversa já tem responsável (ex.: inbound acabou de
   // distribuir e a automação dispara execute_distribution de novo), não
   // reatribui — salvo `reassign` (handoff manual para departamento).
@@ -836,26 +867,70 @@ export async function executeDistribution(
   // Handoff acadêmico / drenagem da fila → estágio "Em Atendimento".
   // Await: o card precisa estar no funil operacional assim que o consultor
   // humano for responsável (fire-and-forget perdia corridas com o inbox).
+  let selectedIsHuman = false;
+  try {
+    const assigneeType = await prisma.user.findUnique({
+      where: { id: selected.userId },
+      select: { type: true },
+    });
+    selectedIsHuman = assigneeType?.type === "HUMAN";
+  } catch {
+    selectedIsHuman = false;
+  }
+
   if (
-    input.triggerSource === "AI_AGENT" ||
-    (input.triggerSource === "SYSTEM" && Boolean(input.departmentId))
+    selectedIsHuman &&
+    (input.triggerSource === "AI_AGENT" ||
+      (input.triggerSource === "SYSTEM" && Boolean(input.departmentId)))
   ) {
     try {
-      const assigneeType = await prisma.user.findUnique({
-        where: { id: selected.userId },
-        select: { type: true },
+      const { moveOpenDealToEmAtendimento } = await import(
+        "@/services/ai/academic-department-routing"
+      );
+      await moveOpenDealToEmAtendimento({
+        dealId: assignedDealId,
+        contactId: input.contactId ?? null,
       });
-      if (assigneeType?.type === "HUMAN") {
-        const { moveOpenDealToEmAtendimento } = await import(
-          "@/services/ai/academic-department-routing"
-        );
-        await moveOpenDealToEmAtendimento({
-          dealId: assignedDealId,
-          contactId: input.contactId ?? null,
-        });
-      }
     } catch (e) {
       console.error("[distribution] moveOpenDealToEmAtendimento failed", e);
+    }
+  }
+
+  // Saudação pós-distribuição: 1ª vez que um HUMAN assume o lead ainda
+  // sem resposta humana (IA/null → consultor). Evita re-saudar em handoff
+  // entre consultores ou quando alguém já falou no chat.
+  const priorWasHuman = preAssignSnap?.assigneeType === "HUMAN";
+  const shouldFireLeadDistributed =
+    selectedIsHuman &&
+    !priorWasHuman &&
+    !(preAssignSnap?.hasHumanReply ?? false);
+
+  if (shouldFireLeadDistributed) {
+    const contactId =
+      input.contactId ?? preAssignSnap?.contactId ?? null;
+    const departmentId =
+      input.departmentId ??
+      explicitDeptIds[0] ??
+      preAssignSnap?.departmentId ??
+      null;
+    if (contactId) {
+      const { fireTrigger } = await import("@/services/automation-triggers");
+      fireTrigger("lead_distributed", {
+        contactId,
+        dealId: assignedDealId ?? input.dealId ?? undefined,
+        data: {
+          conversationId: input.conversationId ?? undefined,
+          departmentId: departmentId ?? undefined,
+          assignedToId: selected.userId,
+          assignedToName: selected.name,
+          triggerSource: input.triggerSource,
+        },
+      }).catch((err) =>
+        console.warn(
+          "[distribution] fireTrigger lead_distributed:",
+          err instanceof Error ? err.message : err,
+        ),
+      );
     }
   }
 

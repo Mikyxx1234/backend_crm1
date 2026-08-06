@@ -24,6 +24,7 @@ export const AUTOMATION_TRIGGER_TYPES = [
   "call_made",
   "conversation_tabulated",
   "whatsapp_session_expiring",
+  "lead_distributed",
 ] as const;
 
 export type AutomationTriggerType = (typeof AUTOMATION_TRIGGER_TYPES)[number];
@@ -272,6 +273,15 @@ export function evaluateTrigger(
     }
     case "whatsapp_session_expiring":
       return normalizeHoursBeforeExpiry(cfg.hoursBeforeExpiry) !== null;
+    case "lead_distributed": {
+      // Disparado pelo motor de distribuição quando um HUMAN assume o lead
+      // pela 1ª vez (ainda sem hasHumanReply). Filtro opcional por depto.
+      const cfgDept = readString(cfg, "departmentId");
+      const dataDept = readString(data, "departmentId");
+      if (cfgDept && dataDept && cfgDept !== dataDept) return false;
+      if (cfgDept && !dataDept) return false;
+      return true;
+    }
     case "manual": {
       // 27/mai/26 — Gatilho imperativo. O operador escolheu rodar a
       // automacao explicitamente pelo botao "Rodar automacao" na

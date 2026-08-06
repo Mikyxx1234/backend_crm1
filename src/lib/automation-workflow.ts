@@ -26,6 +26,8 @@ export type AutomationTriggerType =
   | "call_made"
   | "conversation_tabulated"
   | "whatsapp_session_expiring"
+  /** Distribuição Inteligente atribuiu um consultor HUMAN (1ª vez). */
+  | "lead_distributed"
   | "manual";
 
 export type AutomationStep = {
@@ -51,6 +53,7 @@ export const AUTOMATION_TRIGGER_TYPES: AutomationTriggerType[] = [
   "call_made",
   "conversation_tabulated",
   "whatsapp_session_expiring",
+  "lead_distributed",
   "manual",
 ];
 
@@ -109,6 +112,7 @@ export function triggerTypeLabel(t: string): string {
     call_made: "Ligação realizada",
     conversation_tabulated: "Conversa encerrada",
     whatsapp_session_expiring: "Sessão do WhatsApp prestes a encerrar",
+    lead_distributed: "Lead distribuído (consultor humano)",
     manual: "Manual (executar pela conversa)",
   };
   return map[t] ?? t;
@@ -219,6 +223,12 @@ export function summarizeTriggerConfig(
     }
     case "manual":
       return "Disparada manualmente da conversa";
+    case "lead_distributed": {
+      if (c.departmentId) {
+        return `Depto: ${String(c.departmentId).slice(0, 8)}…`;
+      }
+      return "Quando um consultor humano assume o lead";
+    }
     case "conversation_tabulated": {
       if (c.tabulationLabel) return `Tabulação: ${String(c.tabulationLabel)}`;
       if (c.tabulationId) return `Tabulação ID: ${String(c.tabulationId).slice(0, 8)}…`;
@@ -717,6 +727,9 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
       return { status: "" };
     case "manual":
       return {};
+    case "lead_distributed":
+      // Opcional: limitar a um departamento. Vazio = qualquer depto.
+      return { departmentId: "" };
     case "conversation_tabulated":
       // Escopo por departamento + tabulacao especifica (opcional).
       // Sem tabulationId => casa qualquer tabulacao do departamento.
