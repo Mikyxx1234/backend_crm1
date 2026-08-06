@@ -38,8 +38,13 @@ export async function GET(request: Request) {
     return NextResponse.json(data);
   } catch (e) {
     console.error("[analytics/tabulations]", e);
+    // Rota restrita a gestor/admin: devolve a causa junto. Sem isso, a única
+    // pista fica no log do container, e o painel some sem dizer por quê.
     return NextResponse.json(
-      { message: "Erro ao carregar analytics de tabulações." },
+      {
+        message: "Erro ao carregar analytics de tabulações.",
+        detail: e instanceof Error ? e.message : String(e),
+      },
       { status: 500 },
     );
   }
