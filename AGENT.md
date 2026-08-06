@@ -5,6 +5,20 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-06 — CourseConfig: canal, desconto, nível, semestre, grau e pricingOptions
+
+**Decisão.** Produto `kind=COURSE` passa a persistir em `CourseConfig`:
+`channel`, `discountPercent`, `level` (GRADUATION|POSTGRADUATE), `semester`,
+`grau` (texto) e `pricingOptions` (JSON com N linhas preço/canal/desconto).
+`Product.price` + `channel`/`discountPercent` espelham a 1ª opção.
+Valor com desconto é só UI.
+
+**Descartado.** ProductOffer para canal texto; só UI sem persistência.
+
+**Modelo:** Cursor Grok 4.5 / claude-sonnet-5-thinking-high.
+
+---
+
 ### 2026-08-06 — Campanha auto-fecha conversa criada só pro disparo
 
 **Decisão.** Em `src/workers/campaign-worker.ts:persistCampaignOutboundMessage`,

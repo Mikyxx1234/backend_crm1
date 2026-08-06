@@ -1614,6 +1614,12 @@ enum CourseMode {
   HYBRID
 }
 
+/// Nível acadêmico do curso (Graduação / Pós-Graduação).
+enum CourseLevel {
+  GRADUATION
+  POSTGRADUATE
+}
+
 enum StakeholderChannel {
   WHATSAPP
   EMAIL
@@ -1789,7 +1795,22 @@ model CourseConfig {
   productId          String       @unique
   product            Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
   mode               CourseMode   @default(EAD)
+  /// Graduação ou Pós-Graduação.
+  level              CourseLevel?
+  /// Grau do curso (texto livre, ex.: Bacharelado, Licenciatura).
+  grau               String?
+  /// Semestre do curso (número inteiro positivo).
+  semester           Int?
   postSalePipelineId String?
+  /// Canal comercial do curso (texto livre, ex.: WhatsApp, Indicação).
+  /// Mantido como espelho da 1ª opção de `pricingOptions` (compat).
+  channel            String?
+  /// Desconto percentual sobre o preço base do produto (0–100).
+  /// Mantido como espelho da 1ª opção de `pricingOptions` (compat).
+  discountPercent    Decimal?     @db.Decimal(5, 2)
+  /// Opções de preço/canal do curso.
+  /// Formato: [{ price: number, channel: string|null, discountPercent: number|null }]
+  pricingOptions     Json         @default("[]")
 
   classes CourseClass[]
 

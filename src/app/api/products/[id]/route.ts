@@ -18,6 +18,7 @@ type RouteContext = { params: Promise<{ id: string }> };
 const PRODUCT_KINDS = new Set(["PHYSICAL", "SERVICE", "COURSE", "JOB_OPENING"]);
 const PLAN_INTERVALS = new Set(["MONTHLY", "QUARTERLY", "YEARLY"]);
 const COURSE_MODES = new Set(["EAD", "IN_PERSON", "HYBRID"]);
+const COURSE_LEVELS = new Set(["GRADUATION", "POSTGRADUATE"]);
 
 function asRecord(v: unknown): Record<string, unknown> | null {
   return v && typeof v === "object" && !Array.isArray(v)
@@ -324,18 +325,110 @@ export async function PUT(request: Request, context: RouteContext) {
         typeof course.mode === "string" && COURSE_MODES.has(course.mode.toUpperCase())
           ? course.mode.toUpperCase()
           : "EAD";
+      const levelRaw =
+        typeof course.level === "string" ? course.level.trim().toUpperCase() : "";
+      const level = COURSE_LEVELS.has(levelRaw) ? levelRaw : null;
+      const grau =
+        typeof course.grau === "string" && course.grau.trim()
+          ? course.grau.trim()
+          : null;
+      const semesterNum =
+        typeof course.semester === "number" || typeof course.semester === "string"
+          ? Number(course.semester)
+          : null;
+      const semester =
+        semesterNum != null &&
+        Number.isFinite(semesterNum) &&
+        Number.isInteger(semesterNum) &&
+        semesterNum > 0
+          ? semesterNum
+          : null;
       const postSalePipelineId =
         typeof course.postSalePipelineId === "string" && course.postSalePipelineId.trim()
           ? course.postSalePipelineId.trim()
           : null;
+      const pricingOptions: Array<{
+        price: number;
+        channel: string | null;
+        discountPercent: number | null;
+      }> = [];
+      if (Array.isArray(course.pricingOptions)) {
+        for (const raw of course.pricingOptions) {
+          const opt = asRecord(raw);
+          if (!opt) continue;
+          const priceNum = Number(opt.price);
+          if (!Number.isFinite(priceNum) || priceNum < 0) continue;
+          const ch =
+            typeof opt.channel === "string" && opt.channel.trim()
+              ? opt.channel.trim()
+              : null;
+          const dNum =
+            typeof opt.discountPercent === "number" ||
+            typeof opt.discountPercent === "string"
+              ? Number(opt.discountPercent)
+              : null;
+          const dPct =
+            dNum != null && Number.isFinite(dNum) && dNum >= 0 && dNum <= 100
+              ? dNum
+              : null;
+          pricingOptions.push({
+            price: priceNum,
+            channel: ch,
+            discountPercent: dPct,
+          });
+        }
+      }
+      // Espelho da 1ª opção (ou payload legado channel/discountPercent).
+      const first = pricingOptions[0];
+      const channel =
+        first?.channel ??
+        (typeof course.channel === "string" && course.channel.trim()
+          ? course.channel.trim()
+          : null);
+      const discountPercentNum =
+        first?.discountPercent != null
+          ? Number(first.discountPercent)
+          : typeof course.discountPercent === "number" ||
+              typeof course.discountPercent === "string"
+            ? Number(course.discountPercent)
+            : null;
+      const discountPercent =
+        discountPercentNum != null &&
+        Number.isFinite(discountPercentNum) &&
+        discountPercentNum >= 0 &&
+        discountPercentNum <= 100
+          ? discountPercentNum
+          : null;
+      if (pricingOptions.length === 0 && (channel != null || discountPercent != null)) {
+        pricingOptions.push({
+          price: 0,
+          channel,
+          discountPercent,
+        });
+      }
       const cfg = await prisma.courseConfig.upsert({
         where: { productId: id },
         create: withOrgFromCtx({
           productId: id,
           mode: mode as never,
+          level: level as never,
+          grau,
+          semester,
           postSalePipelineId,
+          channel,
+          discountPercent,
+          pricingOptions,
         }),
-        update: { mode: mode as never, postSalePipelineId },
+        update: {
+          mode: mode as never,
+          level: level as never,
+          grau,
+          semester,
+          postSalePipelineId,
+          channel,
+          discountPercent,
+          pricingOptions,
+        },
         select: { id: true },
       });
       if (Array.isArray(course.classes)) {
