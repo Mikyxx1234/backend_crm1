@@ -192,7 +192,8 @@ export interface MobileLayoutConfigDto {
   enabled: MobileModuleId[];
   startRoute: string;
   brandColor: string | null;
-  visualChrome: boolean;
+  /** @deprecated Feature "Visual Chrome" removida — mantido só por compat com API antiga. */
+  visualChrome?: boolean;
   version: number;
 }
 
