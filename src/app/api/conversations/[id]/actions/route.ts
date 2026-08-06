@@ -612,15 +612,19 @@ export async function POST(request: Request, context: RouteContext) {
       let tabulationAncestors: string[] = [];
       /** Departamento no momento do encerramento (antes do clearDepartment). */
       let resolvedDepartmentId: string | null = null;
+      /** Tabulação gravada ANTES deste encerramento (detecta re-tabulação). */
+      let previousTabulationId: string | null = null;
       if (dbStatus === "RESOLVED") {
         const dept = await prisma.conversation.findUnique({
           where: { id },
           select: {
             departmentId: true,
+            tabulationId: true,
             department: { select: { id: true, requireTabulationOnClose: true } },
           },
         });
         resolvedDepartmentId = dept?.departmentId ?? null;
+        previousTabulationId = dept?.tabulationId ?? null;
         const rawTab = typeof b.tabulationId === "string" ? b.tabulationId.trim() : "";
         const requires = !!dept?.department?.requireTabulationOnClose;
         if (requires && !rawTab) {
@@ -732,13 +736,16 @@ export async function POST(request: Request, context: RouteContext) {
         }
       }
 
-      // Trigger conversation_tabulated: dispara em TODO encerramento (RESOLVED).
-      // Antes só rodava com tabulationId — conversas sem departamento / sem
-      // diálogo de tabulação (requireTabulationOnClose=false) nunca acionavam
-      // automações configuradas como "Qualquer tabulação". Automações que
-      // filtram tabulação específica continuam sem match quando tabulationId
-      // é null (ver matchesTriggerConfig). Só no primeiro encerramento.
-      if (dbStatus === "RESOLVED" && conv.status !== "RESOLVED") {
+      // Re-tabulação: `resolve` numa conversa JÁ encerrada passa pelo guard
+      // acima (só bloqueia sair de RESOLVED) e regrava `tabulationId`. Sem
+      // este segundo caso o dashboard continuaria contando o motivo antigo
+      // enquanto o banco já tem o novo.
+      const retabulated =
+        Boolean(tabulationId) &&
+        conv.status === "RESOLVED" &&
+        tabulationId !== previousTabulationId;
+
+      if ((dbStatus === "RESOLVED" && conv.status !== "RESOLVED") || retabulated) {
         if (tabulationId) {
           void logEvent({
             type: "CONVERSATION_TABULATED",
@@ -751,9 +758,19 @@ export async function POST(request: Request, context: RouteContext) {
               tabulationId,
               ancestorIds: tabulationAncestors,
               departmentId: resolvedDepartmentId,
+              ...(retabulated ? { retabulated: true } : {}),
             },
           });
         }
+      }
+
+      // Trigger conversation_tabulated: dispara em TODO encerramento (RESOLVED).
+      // Antes só rodava com tabulationId — conversas sem departamento / sem
+      // diálogo de tabulação (requireTabulationOnClose=false) nunca acionavam
+      // automações configuradas como "Qualquer tabulação". Automações que
+      // filtram tabulação específica continuam sem match quando tabulationId
+      // é null (ver matchesTriggerConfig). Só no primeiro encerramento.
+      if (dbStatus === "RESOLVED" && conv.status !== "RESOLVED") {
         // Resolve dealId (primeiro deal aberto do contato) para automacoes
         // que dependem de contexto de negocio (mover card, mudar funil).
         let dealId: string | undefined;

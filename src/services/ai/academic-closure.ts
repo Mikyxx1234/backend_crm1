@@ -10,6 +10,7 @@ import { sseBus } from "@/lib/sse-bus";
 import { logEvent } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
 import { updateConversationStatusInDb } from "@/services/conversations";
+import { resolveAutoCloseTabulation } from "@/services/tabulations";
 
 function normalize(s: string): string {
   return s
@@ -101,7 +102,15 @@ export async function closeAiOnlyConversation(args: {
     getOrgSettingBool("conversation.keepDepartmentOnEnd", false),
   ]);
 
+  // Tabulação padrão do departamento para encerramento automático. Sem ela
+  // a IA fecha sem tabular (comportamento anterior) — nunca bloqueia.
+  const autoTab = await resolveAutoCloseTabulation({
+    organizationId: conv.organizationId,
+    departmentId: conv.departmentId,
+  }).catch(() => null);
+
   const updated = await updateConversationStatusInDb(conv.id, "RESOLVED", {
+    ...(autoTab ? { tabulationId: autoTab.tabulationId } : {}),
     clearAssignedTo: !keepAgent,
     clearDepartment: !keepDepartment,
   });
@@ -122,6 +131,24 @@ export async function closeAiOnlyConversation(args: {
       reason: args.reason ?? null,
     },
   }).catch(() => null);
+
+  if (autoTab) {
+    await logEvent({
+      type: "CONVERSATION_TABULATED",
+      entityType: "CONVERSATION",
+      entityId: conv.id,
+      entityLabel: updated.externalId ?? null,
+      conversationId: conv.id,
+      contactId,
+      meta: {
+        tabulationId: autoTab.tabulationId,
+        ancestorIds: autoTab.ancestorIds,
+        departmentId: conv.departmentId,
+        source: "AI_AGENT",
+        auto: true,
+      },
+    }).catch(() => null);
+  }
 
   try {
     sseBus.publish("conversation_timeline_updated", {
@@ -147,8 +174,8 @@ export async function closeAiOnlyConversation(args: {
     contactId: contactId ?? undefined,
     dealId,
     data: {
-      tabulationId: null,
-      ancestorIds: [],
+      tabulationId: autoTab?.tabulationId ?? null,
+      ancestorIds: autoTab?.ancestorIds ?? [],
       departmentId: conv.departmentId,
       conversationId: conv.id,
       source: "AI_AGENT",

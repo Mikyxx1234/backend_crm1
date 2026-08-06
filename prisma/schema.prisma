@@ -3103,6 +3103,13 @@ model Department {
   /// backend e no modal do frontend). Default false = comportamento
   /// atual (encerrar sem tabular).
   requireTabulationOnClose Boolean      @default(false)
+  /// Folha da arvore de `Tabulation` aplicada quando a conversa e'
+  /// encerrada AUTOMATICAMENTE (IA de encerramento academico, step
+  /// `finish_conversation`). Sem isso o fechamento automatico dribla o
+  /// `requireTabulationOnClose` em silencio e some do dashboard. Null =
+  /// encerra sem tabular (comportamento anterior).
+  autoCloseTabulationId    String?
+  autoCloseTabulation      Tabulation?  @relation("DepartmentAutoCloseTabulation", fields: [autoCloseTabulationId], references: [id], onDelete: SetNull)
   /// Marca este departamento como o de SUPORTE INTERNO — recebe os
   /// tickets do chat interno de suporte (usuários ↔ time de suporte).
   /// Apenas um departamento por organização deveria ter isso como true
@@ -3261,6 +3268,9 @@ model Tabulation {
   updatedAt      DateTime     @updatedAt
 
   conversations Conversation[]
+  /// Departamentos que usam esta folha como tabulação de encerramento
+  /// automático (ver `Department.autoCloseTabulationId`).
+  autoCloseForDepartments Department[] @relation("DepartmentAutoCloseTabulation")
 
   @@index([organizationId])
   @@index([organizationId, departmentId])

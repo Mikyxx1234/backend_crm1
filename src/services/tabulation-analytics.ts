@@ -45,10 +45,18 @@ export type TabulationAnalyticsResult = {
   total: number;
   page: number;
   perPage: number;
+  /**
+   * Cardinalidade real no período. `byTabulation`/`byUser` são rankings
+   * truncados no top 20 — usar `.length` deles como KPI trava o número em 20.
+   */
+  distinctTabulations: number;
+  distinctUsers: number;
   byTabulation: TabulationTopItem[];
   byUser: TabulationByUserItem[];
   items: TabulationAnalyticsRow[];
 };
+
+const TOP_LIMIT = 20;
 
 function metaString(
   meta: Prisma.JsonValue | null | undefined,
@@ -140,60 +148,111 @@ export async function getTabulationAnalytics(
   const page = Math.max(1, filters.page ?? 1);
   const perPage = Math.min(100, Math.max(1, filters.perPage ?? 25));
 
-  const baseWhere: Prisma.ActivityEventWhereInput = {
-    organizationId: orgId,
-    type: "CONVERSATION_TABULATED",
-    occurredAt: { gte: filters.from, lte: filters.to },
-    ...(filters.actorUserId ? { actorUserId: filters.actorUserId } : {}),
-  };
-
-  // Filtros em meta JSON — aplica em memória após fetch limitado, ou via
-  // path do Prisma quando possível.
-  const events = await prisma.activityEvent.findMany({
-    where: baseWhere,
-    orderBy: { occurredAt: "desc" },
-    take: 5000,
-    select: {
-      id: true,
-      occurredAt: true,
-      conversationId: true,
-      contactId: true,
-      actorUserId: true,
-      meta: true,
-      actorUser: { select: { id: true, name: true } },
-      contact: { select: { id: true, name: true } },
-    },
-  });
-
-  let filtered = events;
+  // Agregação no Postgres. A versão anterior puxava até 5000 eventos e
+  // contava em memória: acima disso o "total" simplesmente parava de crescer,
+  // sem aviso, e os filtros de meta rodavam DEPOIS do corte.
+  const conds: Prisma.Sql[] = [
+    Prisma.sql`"organizationId" = ${orgId}`,
+    Prisma.sql`"type" = 'CONVERSATION_TABULATED'`,
+    Prisma.sql`"occurredAt" >= ${filters.from}`,
+    Prisma.sql`"occurredAt" <= ${filters.to}`,
+  ];
+  if (filters.actorUserId) {
+    conds.push(Prisma.sql`"actorUserId" = ${filters.actorUserId}`);
+  }
   if (filters.departmentId) {
-    filtered = filtered.filter(
-      (e) => metaString(e.meta, "departmentId") === filters.departmentId,
-    );
+    conds.push(Prisma.sql`meta->>'departmentId' = ${filters.departmentId}`);
   }
   if (filters.tabulationId) {
-    filtered = filtered.filter(
-      (e) => metaString(e.meta, "tabulationId") === filters.tabulationId,
-    );
+    conds.push(Prisma.sql`meta->>'tabulationId' = ${filters.tabulationId}`);
+  }
+  const whereSql = Prisma.join(conds, " AND ");
+
+  const metaAnd: Prisma.ActivityEventWhereInput[] = [];
+  if (filters.departmentId) {
+    metaAnd.push({
+      meta: { path: ["departmentId"], equals: filters.departmentId },
+    });
+  }
+  if (filters.tabulationId) {
+    metaAnd.push({
+      meta: { path: ["tabulationId"], equals: filters.tabulationId },
+    });
   }
 
-  const total = filtered.length;
-  const tabCounts = new Map<string, number>();
-  const userCounts = new Map<string, { name: string; count: number }>();
+  const [totals, tabRows, userRows, pageItems] = await Promise.all([
+    prisma.$queryRaw<
+      { total: bigint; distinct_tabulations: bigint; distinct_users: bigint }[]
+    >(Prisma.sql`
+      SELECT COUNT(*)::bigint AS total,
+             COUNT(DISTINCT meta->>'tabulationId')::bigint AS distinct_tabulations,
+             COUNT(DISTINCT "actorUserId")::bigint AS distinct_users
+      FROM "activity_events"
+      WHERE ${whereSql}
+    `),
+    prisma.$queryRaw<{ id: string; count: bigint }[]>(Prisma.sql`
+      SELECT meta->>'tabulationId' AS id, COUNT(*)::bigint AS count
+      FROM "activity_events"
+      WHERE ${whereSql} AND meta->>'tabulationId' IS NOT NULL
+      GROUP BY 1
+      ORDER BY count DESC
+      LIMIT ${TOP_LIMIT}
+    `),
+    prisma.$queryRaw<{ id: string; count: bigint }[]>(Prisma.sql`
+      SELECT "actorUserId" AS id, COUNT(*)::bigint AS count
+      FROM "activity_events"
+      WHERE ${whereSql} AND "actorUserId" IS NOT NULL
+      GROUP BY 1
+      ORDER BY count DESC
+      LIMIT ${TOP_LIMIT}
+    `),
+    prisma.activityEvent.findMany({
+      where: {
+        organizationId: orgId,
+        type: "CONVERSATION_TABULATED",
+        occurredAt: { gte: filters.from, lte: filters.to },
+        ...(filters.actorUserId ? { actorUserId: filters.actorUserId } : {}),
+        ...(metaAnd.length > 0 ? { AND: metaAnd } : {}),
+      },
+      orderBy: { occurredAt: "desc" },
+      skip: (page - 1) * perPage,
+      take: perPage,
+      select: {
+        id: true,
+        occurredAt: true,
+        conversationId: true,
+        contactId: true,
+        actorUserId: true,
+        meta: true,
+        actorUser: { select: { id: true, name: true } },
+        contact: { select: { id: true, name: true } },
+      },
+    }),
+  ]);
 
-  for (const e of filtered) {
-    const tabId = metaString(e.meta, "tabulationId");
-    if (tabId) tabCounts.set(tabId, (tabCounts.get(tabId) ?? 0) + 1);
-    if (e.actorUserId) {
-      const prev = userCounts.get(e.actorUserId);
-      userCounts.set(e.actorUserId, {
-        name: e.actorUser?.name ?? "Usuário",
-        count: (prev?.count ?? 0) + 1,
-      });
-    }
+  const total = Number(totals[0]?.total ?? 0);
+  const distinctTabulations = Number(totals[0]?.distinct_tabulations ?? 0);
+  const distinctUsers = Number(totals[0]?.distinct_users ?? 0);
+
+  const userNames = new Map<string, string>();
+  if (userRows.length > 0) {
+    const users = await prisma.user.findMany({
+      where: { id: { in: userRows.map((r) => r.id) } },
+      select: { id: true, name: true },
+    });
+    for (const u of users) userNames.set(u.id, u.name ?? "Usuário");
   }
 
-  const allTabIds = [...new Set([...tabCounts.keys()])];
+  // O ranking é top 20, mas a página do log pode citar tabulações fora dele —
+  // o pathMap precisa cobrir os dois conjuntos.
+  const allTabIds = [
+    ...new Set([
+      ...tabRows.map((r) => r.id),
+      ...pageItems
+        .map((e) => metaString(e.meta, "tabulationId"))
+        .filter((id): id is string => Boolean(id)),
+    ]),
+  ];
   const pathMap = await buildPathMap(allTabIds);
 
   const deptIds = [
@@ -212,33 +271,21 @@ export async function getTabulationAnalytics(
       : [];
   const deptNameById = new Map(depts.map((d) => [d.id, d.name]));
 
-  const byTabulation: TabulationTopItem[] = [...tabCounts.entries()]
-    .map(([tabulationId, count]) => {
-      const info = pathMap.get(tabulationId);
-      return {
-        tabulationId,
-        name: info?.name ?? tabulationId,
-        path: info?.path ?? tabulationId,
-        count,
-      };
-    })
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 20);
+  const byTabulation: TabulationTopItem[] = tabRows.map((r) => {
+    const info = pathMap.get(r.id);
+    return {
+      tabulationId: r.id,
+      name: info?.name ?? r.id,
+      path: info?.path ?? r.id,
+      count: Number(r.count),
+    };
+  });
 
-  const byUser: TabulationByUserItem[] = [...userCounts.entries()]
-    .map(([userId, v]) => ({ userId, name: v.name, count: v.count }))
-    .sort((a, b) => b.count - a.count)
-    .slice(0, 20);
-
-  const pageItems = filtered.slice((page - 1) * perPage, page * perPage);
-  const pageTabIds = [
-    ...new Set(
-      pageItems
-        .map((e) => metaString(e.meta, "tabulationId"))
-        .filter((id): id is string => Boolean(id)),
-    ),
-  ];
-  // pathMap já tem todos; ok.
+  const byUser: TabulationByUserItem[] = userRows.map((r) => ({
+    userId: r.id,
+    name: userNames.get(r.id) ?? "Usuário",
+    count: Number(r.count),
+  }));
 
   const items: TabulationAnalyticsRow[] = pageItems.map((e) => {
     const tabulationId = metaString(e.meta, "tabulationId");
@@ -268,6 +315,8 @@ export async function getTabulationAnalytics(
     total,
     page,
     perPage,
+    distinctTabulations,
+    distinctUsers,
     byTabulation,
     byUser,
     items,

@@ -3183,15 +3183,53 @@ async function executeStep(
 
       const convs = await prisma.conversation.findMany({
         where: { contactId: rt.contactId, status: { not: "RESOLVED" } },
-        select: { id: true, status: true, externalId: true, organizationId: true },
+        select: {
+          id: true,
+          status: true,
+          externalId: true,
+          organizationId: true,
+          departmentId: true,
+        },
       });
 
       const orgId = getOrgIdOrNull();
+      const { resolveAutoCloseTabulation } = await import(
+        "@/services/tabulations"
+      );
       for (const c of convs) {
+        // Tabulação padrão do departamento para encerramento automático.
+        // Ausente => encerra sem tabular (comportamento anterior).
+        const rowOrg = c.organizationId ?? orgId;
+        const autoTab = rowOrg
+          ? await resolveAutoCloseTabulation({
+              organizationId: rowOrg,
+              departmentId: c.departmentId,
+            }).catch(() => null)
+          : null;
+
         const updated = await updateConversationStatusInDb(c.id, "RESOLVED", {
+          ...(autoTab ? { tabulationId: autoTab.tabulationId } : {}),
           clearAssignedTo,
           clearDepartment,
         });
+
+        if (autoTab) {
+          void logEvent({
+            type: "CONVERSATION_TABULATED",
+            entityType: "CONVERSATION",
+            entityId: c.id,
+            entityLabel: c.externalId ?? null,
+            conversationId: c.id,
+            contactId: rt.contactId,
+            meta: {
+              tabulationId: autoTab.tabulationId,
+              ancestorIds: autoTab.ancestorIds,
+              departmentId: c.departmentId,
+              source: "automation",
+              auto: true,
+            },
+          });
+        }
 
         void logEvent({
           type: "CONVERSATION_CLOSED",
@@ -3207,7 +3245,7 @@ async function executeStep(
         });
 
         try {
-          const rowOrgId = c.organizationId ?? orgId;
+          const rowOrgId = rowOrg;
           if (rowOrgId) {
             sseBus.publish("conversation_updated", {
               organizationId: rowOrgId,

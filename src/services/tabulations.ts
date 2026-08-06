@@ -74,7 +74,10 @@ export async function getTree(departmentId: string): Promise<TabulationNode[]> {
 
 /** Retorna [rootId, ..., leafId] (inclui o proprio id ao fim). */
 export async function getAncestors(id: string): Promise<string[]> {
-  const orgId = orgIdOrThrow();
+  return ancestorsInOrg(id, orgIdOrThrow());
+}
+
+async function ancestorsInOrg(id: string, orgId: string): Promise<string[]> {
   const chain: string[] = [];
   let cursor: { id: string; parentId: string | null } | null =
     await prisma.tabulation.findFirst({
@@ -93,6 +96,41 @@ export async function getAncestors(id: string): Promise<string[]> {
     });
   }
   return chain.reverse();
+}
+
+/**
+ * Tabulacao de encerramento AUTOMATICO do departamento (IA de encerramento
+ * academico, step `finish_conversation`). Revalida a folha na hora do uso —
+ * a arvore pode ter sido reorganizada/desativada depois de configurada; nesse
+ * caso devolve null e o encerramento segue sem tabular (nunca bloqueia o bot).
+ *
+ * Recebe `organizationId` explicito: roda fora de request context (webhook,
+ * worker de automacao), onde `orgIdOrThrow()` nao vale.
+ */
+export async function resolveAutoCloseTabulation(args: {
+  organizationId: string;
+  departmentId: string | null | undefined;
+}): Promise<{ tabulationId: string; ancestorIds: string[] } | null> {
+  const { organizationId, departmentId } = args;
+  if (!departmentId) return null;
+
+  const dept = await prisma.department.findFirst({
+    where: { id: departmentId, organizationId },
+    select: { autoCloseTabulationId: true },
+  });
+  const tabulationId = dept?.autoCloseTabulationId;
+  if (!tabulationId) return null;
+
+  const node = await prisma.tabulation.findFirst({
+    where: { id: tabulationId, organizationId, departmentId, active: true },
+    select: { id: true, _count: { select: { children: true } } },
+  });
+  if (!node || node._count.children > 0) return null;
+
+  return {
+    tabulationId,
+    ancestorIds: await ancestorsInOrg(tabulationId, organizationId),
+  };
 }
 
 /**

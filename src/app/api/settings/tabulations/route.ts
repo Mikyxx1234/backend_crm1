@@ -28,7 +28,11 @@ export async function GET(request: Request) {
     // Confere que o departamento pertence a org (defesa; extension ja escoparia)
     const dept = await prisma.department.findFirst({
       where: { id: departmentId },
-      select: { id: true, requireTabulationOnClose: true },
+      select: {
+        id: true,
+        requireTabulationOnClose: true,
+        autoCloseTabulationId: true,
+      },
     });
     if (!dept) {
       return NextResponse.json(
@@ -40,6 +44,7 @@ export async function GET(request: Request) {
     return NextResponse.json({
       departmentId,
       requireTabulationOnClose: dept.requireTabulationOnClose,
+      autoCloseTabulationId: dept.autoCloseTabulationId,
       tree,
     });
   });

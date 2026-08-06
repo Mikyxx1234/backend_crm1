@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
+import { assertLeafInDepartment } from "@/services/tabulations";
 import { z } from "zod";
 
 const UpdateSchema = z.object({
@@ -12,6 +13,8 @@ const UpdateSchema = z.object({
     .optional(),
   icon: z.string().min(1).max(40).optional(),
   requireTabulationOnClose: z.boolean().optional(),
+  /** Folha usada no encerramento automático (IA / finish_conversation). */
+  autoCloseTabulationId: z.string().min(1).nullable().optional(),
   isSupport: z.boolean().optional(),
   distributionEnabled: z.boolean().optional(),
 });
@@ -39,6 +42,22 @@ export async function PUT(
     if (!parsed.success) {
       return NextResponse.json({ message: "Dados inválidos." }, { status: 400 });
     }
+    // A tabulação de encerramento automático precisa ser folha DESTE
+    // departamento — senão o bot gravaria um motivo de outra árvore.
+    if (parsed.data.autoCloseTabulationId) {
+      try {
+        await assertLeafInDepartment(parsed.data.autoCloseTabulationId, id);
+      } catch (e) {
+        return NextResponse.json(
+          {
+            message: (e as Error).message,
+            code: (e as { code?: string }).code ?? "TABULATION_INVALID",
+          },
+          { status: 400 },
+        );
+      }
+    }
+
     // Apenas um departamento de suporte por org: ao ligar a flag,
     // desliga nos demais.
     if (parsed.data.isSupport === true) {
