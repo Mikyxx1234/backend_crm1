@@ -1031,27 +1031,42 @@ export async function sendTemplateToConversation(
   // Capturar o id da config é o que permite ao resolver de Flow inbound
   // identificar o flow certo quando a resposta volta.
   let templateConfigId: string | null = null;
+  let configLanguage: string | null = null;
+  /** Config local sabe se há botão FLOW — evita lookup Meta no enrich. */
+  let knownHasFlowButton: boolean | null = null;
   try {
     const cfg = await prisma.whatsAppTemplateConfig.findFirst({
       where: { metaTemplateName: templateName },
-      select: { id: true, category: true, metaTemplateId: true },
+      select: {
+        id: true,
+        category: true,
+        metaTemplateId: true,
+        language: true,
+        hasButtons: true,
+        buttonTypes: true,
+      },
     });
     templateCategory = cfg?.category ?? null;
     templateConfigId = cfg?.id ?? null;
+    configLanguage = cfg?.language?.trim() || null;
     if (!templateGraphId && cfg?.metaTemplateId?.trim()) {
       templateGraphId = cfg.metaTemplateId.trim();
+    }
+    if (cfg) {
+      const types = Array.isArray(cfg.buttonTypes) ? cfg.buttonTypes : [];
+      knownHasFlowButton = types.some((t) => String(t).toUpperCase() === "FLOW");
+      if (!cfg.hasButtons) knownHasFlowButton = false;
     }
   } catch {
     // config local é opcional — o template pode existir só na WABA
   }
 
   let bodyPreview = args.bodyPreview?.trim() || null;
-  let languageCode = args.languageCode?.trim() || null;
+  let languageCode = args.languageCode?.trim() || configLanguage || null;
 
-  // Consulta a definição na Graph apenas quando ainda falta algo que só a
-  // Meta sabe. Integrações mandam só o nome do template e as variáveis; a UI
-  // já manda idioma e preview prontos e não paga essa chamada.
-  if (!templateCategory || !languageCode || !bodyPreview) {
+  // Consulta a Graph só quando falta preview (ou category+idioma juntos).
+  // Idioma sozinho NÃO justifica listar até 200 templates (timeout → 502 proxy).
+  if (!bodyPreview || (!templateCategory && !languageCode)) {
     const metaTemplates = (await metaClient
       .listMessageTemplates({ limit: 200 })
       .catch(() => null)) as {
@@ -1089,26 +1104,33 @@ export async function sendTemplateToConversation(
   let externalId: string | null = null;
   let resolvedFlowToken: string | null = null;
   try {
-    const enrichResult = await enrichTemplateComponentsForFlowSend(metaClient, {
-      templateName,
-      languageCode,
-      components: Array.isArray(args.components) ? args.components : undefined,
-      flowToken: args.flowToken?.trim() || null,
-      flowActionData: args.flowActionData ?? null,
-      templateGraphId,
-      strictFlowEnrich: false,
-    });
-    resolvedFlowToken = enrichResult.flowToken;
+    const baseComponents = Array.isArray(args.components) ? args.components : undefined;
+    // Template sem FLOW (config local): envia direto — GET/listagem Meta no
+    // enrich era a causa frequente de timeout do proxy após o deploy.
+    let sendComponents = baseComponents;
+    if (knownHasFlowButton !== false) {
+      const enrichResult = await enrichTemplateComponentsForFlowSend(metaClient, {
+        templateName,
+        languageCode,
+        components: baseComponents,
+        flowToken: args.flowToken?.trim() || null,
+        flowActionData: args.flowActionData ?? null,
+        templateGraphId,
+        strictFlowEnrich: false,
+      });
+      sendComponents = enrichResult.components;
+      resolvedFlowToken = enrichResult.flowToken;
+    }
     const result = await metaClient.sendTemplate(
       to,
       templateName,
       languageCode,
-      enrichResult.components,
+      sendComponents,
       recipient,
     );
     externalId = result.messages?.[0]?.id ?? null;
     console.log(
-      `[meta-send-template] template=${templateName} channel=${conv.channelRef?.id ?? "ENV"} to=${to ?? "—"}/${recipient ?? "—"} wamid=${externalId}`,
+      `[meta-send-template] template=${templateName} channel=${conv.channelRef?.id ?? "ENV"} to=${to ?? "—"}/${recipient ?? "—"} wamid=${externalId} flowEnrich=${knownHasFlowButton !== false}`,
     );
   } catch (e: unknown) {
     console.error("[meta-send-template]", e);
