@@ -47,7 +47,7 @@ export async function GET(_request: Request, context: RouteContext) {
     const items = await prisma.dealProduct.findMany({
       where: { dealId },
       include: {
-        product: { select: { id: true, name: true, sku: true, unit: true, type: true } },
+        product: { select: { id: true, name: true, sku: true, unit: true, type: true, kind: true } },
       },
       orderBy: { createdAt: "asc" },
     });
@@ -59,6 +59,12 @@ export async function GET(_request: Request, context: RouteContext) {
       productSku: item.product.sku,
       unit: item.product.unit,
       productType: item.product.type as "PRODUCT" | "SERVICE",
+      productKind: item.product.kind as
+        | "PHYSICAL"
+        | "SERVICE"
+        | "COURSE"
+        | "JOB_OPENING"
+        | null,
       quantity: Number(item.quantity),
       unitPrice: Number(item.unitPrice),
       discount: Number(item.discount),
@@ -153,9 +159,13 @@ export async function POST(request: Request, context: RouteContext) {
 
     const item = (await prisma.dealProduct.create({
       data: withOrgFromCtx({ dealId, productId, quantity, unitPrice, discount }),
-      include: { product: { select: { id: true, name: true, sku: true, unit: true, type: true } } },
+      include: {
+        product: { select: { id: true, name: true, sku: true, unit: true, type: true, kind: true } },
+      },
     })) as Prisma.DealProductGetPayload<{
-      include: { product: { select: { id: true; name: true; sku: true; unit: true; type: true } } };
+      include: {
+        product: { select: { id: true; name: true; sku: true; unit: true; type: true; kind: true } };
+      };
     }>;
 
     await recalcDealValue(dealId);
@@ -166,11 +176,18 @@ export async function POST(request: Request, context: RouteContext) {
         .mul(new Decimal(100).minus(new Decimal(item.discount)).div(100))
     );
 
+    const channel =
+      typeof body.channel === "string" && body.channel.trim()
+        ? body.channel.trim()
+        : null;
+
     const uid = session.user.id;
     createDealEvent(dealId, uid, "PRODUCT_ADDED", {
       productName: item.product.name,
       quantity: Number(item.quantity),
       unitPrice: Number(item.unitPrice),
+      discount: Number(item.discount),
+      ...(channel ? { channel } : {}),
     }).catch(() => {});
 
     return NextResponse.json({
@@ -181,6 +198,12 @@ export async function POST(request: Request, context: RouteContext) {
         productSku: item.product.sku,
         unit: item.product.unit,
         productType: item.product.type as "PRODUCT" | "SERVICE",
+        productKind: item.product.kind as
+          | "PHYSICAL"
+          | "SERVICE"
+          | "COURSE"
+          | "JOB_OPENING"
+          | null,
         quantity: Number(item.quantity),
         unitPrice: Number(item.unitPrice),
         discount: Number(item.discount),

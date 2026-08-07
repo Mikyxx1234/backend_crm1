@@ -2127,13 +2127,23 @@ async function executeStep(
       });
       if (!product) throw new Error(`send_product: produto ${productId} não encontrado`);
 
-      const priceNumber = Number(product.price ?? 0);
+      // Preço/canal escolhidos na config (curso multi-preço). Sem isso, usa product.price.
+      const basePrice = readNumber(cfg, "unitPrice") ?? Number(product.price ?? 0);
+      const discountPct = Math.min(
+        100,
+        Math.max(0, readNumber(cfg, "discountPercent") ?? 0),
+      );
+      const priceNumber = basePrice * (1 - discountPct / 100);
       const priceLabel = `R$ ${priceNumber.toFixed(2).replace(".", ",")}`;
+      const channel = readString(cfg, "channel")?.trim() || "";
       const produtoVars = {
         produto: {
           nome: product.name ?? "",
           preco: priceLabel,
           preco_numero: priceNumber,
+          preco_base: basePrice,
+          desconto: discountPct,
+          canal: channel,
           sku: product.sku ?? "",
           descricao: product.description ?? "",
           unidade: product.unit ?? "",
@@ -2149,6 +2159,7 @@ async function executeStep(
           : [
               `*${product.name ?? "Produto"}*`,
               product.description ? product.description : null,
+              channel ? `Canal: ${channel}` : null,
               `Valor: ${priceLabel}`,
             ]
               .filter(Boolean)
