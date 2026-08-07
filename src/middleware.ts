@@ -28,23 +28,39 @@ async function readAuthFromRequestCookie(
   req: NextRequest,
 ): Promise<{ user?: { id: string; isSuperAdmin?: boolean } } | null> {
   if (!AUTH_SECRET) return null;
+  // O cookie é emitido pelo frontend (HTTPS → `__Secure-authjs.session-token`).
+  // Este serviço só API recebe o header Cookie via rewrite. Se NEXTAUTH_URL
+  // da API estiver sem `https://`, `secureCookie: false` procura o nome
+  // errado e a sessão some → redirect /login HTML → toast genérico no FE.
+  // Tentamos o valor do env e o fallback HTTPS/HTTP.
+  const secureAttempts = [secureCookieFromEnv(), true, false];
+  const tried = new Set<boolean>();
   try {
-    const token = await getToken({
-      req,
-      secret: AUTH_SECRET,
-      secureCookie: secureCookieFromEnv(),
-    });
-    if (!token || typeof token !== "object") return null;
-    const rec = token as Record<string, unknown>;
-    const id =
-      typeof rec.id === "string" ? rec.id : typeof rec.sub === "string" ? rec.sub : null;
-    if (!id) return null;
-    return {
-      user: {
-        id,
-        isSuperAdmin: Boolean(rec.isSuperAdmin),
-      },
-    };
+    for (const secureCookie of secureAttempts) {
+      if (tried.has(secureCookie)) continue;
+      tried.add(secureCookie);
+      const token = await getToken({
+        req,
+        secret: AUTH_SECRET,
+        secureCookie,
+      });
+      if (!token || typeof token !== "object") continue;
+      const rec = token as Record<string, unknown>;
+      const id =
+        typeof rec.id === "string"
+          ? rec.id
+          : typeof rec.sub === "string"
+            ? rec.sub
+            : null;
+      if (!id) continue;
+      return {
+        user: {
+          id,
+          isSuperAdmin: Boolean(rec.isSuperAdmin),
+        },
+      };
+    }
+    return null;
   } catch {
     return null;
   }
@@ -202,6 +218,18 @@ export async function middleware(req: NextRequest) {
     }
 
     if (!reqAuth) {
+      // /api/* sem sessão → 401 JSON (nunca redirect pra /login).
+      // Este backend é só API: /login não existe (404 HTML). O frontend
+      // faz rewrite same-origin → se redirecionássemos, o fetch recebia
+      // HTML e a UI mascarava como "Servidor temporariamente indisponível".
+      if (pathname.startsWith("/api/")) {
+        return withSecurityHeaders(
+          NextResponse.json(
+            { message: "Unauthorized", code: "AUTH_REQUIRED" },
+            { status: 401 },
+          ),
+        );
+      }
       const loginUrl = new URL("/login", req.nextUrl.origin);
       loginUrl.searchParams.set("callbackUrl", pathname);
       return withSecurityHeaders(NextResponse.redirect(loginUrl));
@@ -228,6 +256,20 @@ export async function middleware(req: NextRequest) {
 
     return nextWithSecurityAndAudit(req);
   } catch {
+    // Mesma regra: erro no middleware em rota API não pode virar HTML.
+    try {
+      const pathname = req.nextUrl.pathname;
+      if (pathname.startsWith("/api/")) {
+        return withSecurityHeaders(
+          NextResponse.json(
+            { message: "Unauthorized", code: "AUTH_REQUIRED" },
+            { status: 401 },
+          ),
+        );
+      }
+    } catch {
+      /* fall through */
+    }
     const loginUrl = new URL("/login", req.nextUrl.origin);
     return withSecurityHeaders(NextResponse.redirect(loginUrl));
   }
