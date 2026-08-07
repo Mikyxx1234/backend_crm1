@@ -235,6 +235,11 @@ export class MetaWhatsAppClient {
     return this.configured && Boolean(this.businessAccountId?.trim());
   }
 
+  /** WABA ID usado nas rotas de message_templates (comparar origem/destino no clone). */
+  get wabaId(): string {
+    return this.businessAccountId?.trim() ?? "";
+  }
+
   static buildGraphUrl(path: string): string {
     const p = path.startsWith("/") ? path.slice(1) : path;
     return `https://graph.facebook.com/${GRAPH_VERSION}/${p}`;

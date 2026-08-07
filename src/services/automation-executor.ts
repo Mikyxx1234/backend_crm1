@@ -355,8 +355,29 @@ async function resolveAutomationMetaClient(opts: {
   conversationId?: string | null;
   contactId?: string | null;
   dealId?: string | null;
+  /** Quando o passo escolhe um canal Cloud API explícito (ex.: template por WABA). */
+  channelId?: string | null;
 }): Promise<MetaWhatsAppClient> {
   let resolvedOrgId: string | null = null;
+
+  const preferredChannelId =
+    typeof opts.channelId === "string" ? opts.channelId.trim() : "";
+  if (preferredChannelId) {
+    const preferred = await prisma.channel.findFirst({
+      where: {
+        id: preferredChannelId,
+        provider: "META_CLOUD_API",
+      },
+      select: { config: true, organizationId: true },
+    });
+    if (preferred?.config) {
+      resolvedOrgId = preferred.organizationId;
+      const client = metaClientFromConfig(
+        preferred.config as Record<string, unknown>,
+      );
+      if (client.configured) return client;
+    }
+  }
 
   if (opts.conversationId) {
     const conv = await prisma.conversation.findUnique({
@@ -2196,11 +2217,13 @@ async function executeStep(
         const conv = await resolveAutomationSendConv(rt.contactId);
         tplConversationId = conv?.id;
       }
+      const tplChannelId = readString(cfg, "channelId")?.trim() || null;
       const tplMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId: tplConversationId,
         contactId: rt.contactId ?? null,
         dealId: rt.dealId ?? null,
+        channelId: tplChannelId,
       });
       if (!tplMetaClient.configured) {
         throw new MetaSendFailureError(
