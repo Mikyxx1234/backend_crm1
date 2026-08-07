@@ -5,6 +5,27 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-07 — Baseline `_prisma_migrations` das course_config em prod
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão.** Em `db_crm` (prod), as 5 migrations `20260806*_course_config_*`
+foram **só registradas** em `_prisma_migrations` (checksum sha256 CRLF),
+sem reaplicar DDL — colunas/`CourseLevel` já existiam no schema.
+
+**Contexto.** Schema físico ok; tracking Prisma faltava (última migration
+registrada era `20260803180000`). Evita `migrate deploy` futuro tentar
+recriar o que já está aplicado.
+
+**Alternativas descartadas.** Reaplicar SQL (desnecessário; já idempotente
+mas sem ganho); ignorar o drift (risco em próximo deploy).
+
+**Impacto.** Prod passa a conhecer as 5 migrations de curso. Ainda há gap
+não tratado entre `20260803` e `20260806` (ex.: appearance/mobile layout /
+department auto-close) — fora deste ajuste.
+
+---
+
 ### 2026-08-07 — Node `send_whatsapp_list` (Lista / menu interativo)
 
 **Modelo usado.** Cursor Grok 4.5.
