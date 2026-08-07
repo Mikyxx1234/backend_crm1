@@ -28,12 +28,15 @@ export async function findContactIdsByPhoneDigits(
   const ctx = getRequestContext();
   const orgId = ctx?.organizationId;
   if (!orgId) return [];
-  // regexp_replace remove tudo que não é dígito; LIKE faz substring match.
-  // Limitamos a 500 IDs para não explodir o IN.
+  // Sufixo via reverse(...) LIKE 'rev%' — bate no índice
+  // `contacts_org_phone_digits_rev_idx` (prefixo em btree).
+  const suffix = digits.length > 11 ? digits.slice(-11) : digits;
+  const revPrefix = [...suffix].reverse().join("") + "%";
   const rows = await prisma.$queryRaw<{ id: string }[]>`
     SELECT id FROM contacts
     WHERE "organizationId" = ${orgId}
-      AND regexp_replace(COALESCE(phone, ''), '\D', '', 'g') LIKE ${"%" + digits + "%"}
+      AND reverse(regexp_replace(COALESCE(phone, ''), '\D', '', 'g'))
+          LIKE ${revPrefix}
     LIMIT 500
   `;
   return rows.map((r) => r.id);
@@ -365,44 +368,84 @@ export async function buildDealWhereFromFilters(
 
   const search = filters.search?.trim();
   if (search) {
-    const or: Prisma.DealWhereInput[] = [
-      { title: { contains: search, mode: "insensitive" } },
-      { contact: { name: { contains: search, mode: "insensitive" } } },
-      { contact: { email: { contains: search, mode: "insensitive" } } },
-      { contact: { phone: { contains: search } } },
-      // Busca em QUALQUER valor de campo personalizado (RGM, CPF, matrícula,
-      // etc.) — tanto do negócio quanto do contato vinculado. Espelha o que a
-      // lista de contatos já faz (services/contacts.ts).
-      { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
-      {
-        contact: {
-          customFields: { some: { value: { contains: search, mode: "insensitive" } } },
-        },
-      },
-    ];
-
     // Casa busca por telefone independente da formatação salva no banco.
     const digits = search.replace(/\D+/g, "");
-    if (digits.length >= 3) {
+    // Atalho (ago/26): buscas longas só-dígitos (telefone) geravam OR com
+    // contains em title/name/customFields + regexp em contacts — board
+    // ~6s por tecla. Com ≥8 dígitos e match em contacts, filtra só por
+    // contactId (e deal.number se couber em int4).
+    if (digits.length >= 8 && /^\+?[\d\s().-]+$/.test(search)) {
       const contactIds = await findContactIdsByPhoneDigits(digits);
+      const phoneOr: Prisma.DealWhereInput[] = [];
       if (contactIds.length > 0) {
-        or.push({ contactId: { in: contactIds } });
+        phoneOr.push({ contactId: { in: contactIds } });
       }
-      // Se a busca é PURAMENTE numérica, também tenta casar o número do
-      // próprio deal (`#123` na busca → match no `number`).
-      // IMPORTANTE: `Deal.number` é Int (int4, máx 2.147.483.647). Buscas
-      // numéricas longas (CPF, RGM, telefone) estouram esse limite e fazem
-      // o Postgres abortar a query inteira ("value out of range for type
-      // integer") — por isso só aplicamos o match quando cabe no int32.
       if (/^\d+$/.test(search)) {
         const asNumber = Number(search);
-        if (Number.isInteger(asNumber) && asNumber >= 0 && asNumber <= 2147483647) {
-          or.push({ number: asNumber });
+        if (
+          Number.isInteger(asNumber) &&
+          asNumber >= 0 &&
+          asNumber <= 2147483647
+        ) {
+          phoneOr.push({ number: asNumber });
         }
       }
-    }
+      if (phoneOr.length > 0) {
+        conditions.push(
+          phoneOr.length === 1 ? phoneOr[0] : { OR: phoneOr },
+        );
+      } else {
+        // Nenhum contato: força zero matches (evita scan full-text inútil).
+        conditions.push({ id: "__no_phone_match__" });
+      }
+    } else {
+      const or: Prisma.DealWhereInput[] = [
+        { title: { contains: search, mode: "insensitive" } },
+        { contact: { name: { contains: search, mode: "insensitive" } } },
+        { contact: { email: { contains: search, mode: "insensitive" } } },
+        { contact: { phone: { contains: search } } },
+        // Busca em QUALQUER valor de campo personalizado (RGM, CPF, matrícula,
+        // etc.) — tanto do negócio quanto do contato vinculado. Espelha o que a
+        // lista de contatos já faz (services/contacts.ts).
+        {
+          customFields: {
+            some: { value: { contains: search, mode: "insensitive" } },
+          },
+        },
+        {
+          contact: {
+            customFields: {
+              some: { value: { contains: search, mode: "insensitive" } },
+            },
+          },
+        },
+      ];
 
-    conditions.push({ OR: or });
+      if (digits.length >= 3) {
+        const contactIds = await findContactIdsByPhoneDigits(digits);
+        if (contactIds.length > 0) {
+          or.push({ contactId: { in: contactIds } });
+        }
+        // Se a busca é PURAMENTE numérica, também tenta casar o número do
+        // próprio deal (`#123` na busca → match no `number`).
+        // IMPORTANTE: `Deal.number` é Int (int4, máx 2.147.483.647). Buscas
+        // numéricas longas (CPF, RGM, telefone) estouram esse limite e fazem
+        // o Postgres abortar a query inteira ("value out of range for type
+        // integer") — por isso só aplicamos o match quando cabe no int32.
+        if (/^\d+$/.test(search)) {
+          const asNumber = Number(search);
+          if (
+            Number.isInteger(asNumber) &&
+            asNumber >= 0 &&
+            asNumber <= 2147483647
+          ) {
+            or.push({ number: asNumber });
+          }
+        }
+      }
+
+      conditions.push({ OR: or });
+    }
   }
 
   if (filters.pipelineId) {

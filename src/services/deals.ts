@@ -1082,7 +1082,7 @@ const MAX_BOARD_COLUMN_LIMIT = 500;
  * a ação manual do operador continua refletindo na hora — o TTL só cobre o
  * fluxo de leitura/webhook, onde 30s de staleness é aceitável.
  */
-const BOARD_CACHE_TTL_SEC = 30;
+const BOARD_CACHE_TTL_SEC = 45;
 
 /**
  * Critério de ordenação dos cards dentro de cada coluna do board.
@@ -1476,10 +1476,14 @@ async function computeBoardData(
   // IDs/contatos derivados das colunas já carregadas — insumo das
   // consultas de enriquecimento abaixo.
   const allDealIds = stages.flatMap((s) => s.deals.map((d) => d.id));
-  const allContactIds = stages
-    .flatMap((s) => s.deals)
-    .map((d) => d.contactId)
-    .filter((id): id is string => !!id);
+  const allContactIds = [
+    ...new Set(
+      stages
+        .flatMap((s) => s.deals)
+        .map((d) => d.contactId)
+        .filter((id): id is string => !!id),
+    ),
+  ];
   const allContacts = stages
     .flatMap((s) => s.deals)
     .map((d) => d.contact)
@@ -1525,26 +1529,60 @@ async function computeBoardData(
   // `Deal.owner` via regra de herança (ver `propagateOwnerToContactAndChat`),
   // então não precisamos carregá-los separadamente aqui.
   //
-  // O `channel` é exposto no card pra alimentar o badge do `ChatAvatar`
-  // (ex.: bolinha verde do WhatsApp). Quando o contato tem múltiplas
-  // conversas, vence o canal da MAIS RECENTE — segue a mesma escolha
-  // de `lastMessage` pra manter consistência visual.
-  const convsPromise =
+  // Antes: findMany conversations + nested messages take 1 por conv — N+1
+  // em SQL gerado. Agora: 1 query com DISTINCT ON (mesmo padrão do inbox).
+  // Semântica: unread = soma; channel = conv mais recente por updatedAt;
+  // lastMessage = msg mais recente do contato (qualquer conv).
+  type BoardConvRow = {
+    contactId: string;
+    channel: string | null;
+    unreadCount: number;
+    msgContent: string | null;
+    msgCreatedAt: Date | null;
+    msgDirection: string | null;
+  };
+  const convsPromise: Promise<BoardConvRow[]> =
     allContactIds.length > 0
-      ? prisma.conversation.findMany({
-          where: { contactId: { in: allContactIds } },
-          select: {
-            contactId: true,
-            unreadCount: true,
-            channel: true,
-            updatedAt: true,
-            messages: {
-              orderBy: { createdAt: "desc" },
-              take: 1,
-              select: { content: true, createdAt: true, direction: true },
-            },
-          },
-        })
+      ? prisma.$queryRaw<BoardConvRow[]>`
+          WITH contact_unread AS (
+            SELECT "contactId", SUM("unreadCount")::int AS unread
+            FROM conversations
+            WHERE "contactId" = ANY(${allContactIds})
+              AND "organizationId" = ${orgIdForBoard}
+            GROUP BY "contactId"
+          ),
+          latest_channel AS (
+            SELECT DISTINCT ON ("contactId")
+              "contactId", channel
+            FROM conversations
+            WHERE "contactId" = ANY(${allContactIds})
+              AND "organizationId" = ${orgIdForBoard}
+            ORDER BY "contactId", "updatedAt" DESC
+          ),
+          last_msg AS (
+            SELECT DISTINCT ON (c."contactId")
+              c."contactId",
+              m.content AS "msgContent",
+              m."createdAt" AS "msgCreatedAt",
+              m.direction AS "msgDirection"
+            FROM conversations c
+            INNER JOIN messages m ON m."conversationId" = c.id
+            WHERE c."contactId" = ANY(${allContactIds})
+              AND c."organizationId" = ${orgIdForBoard}
+              AND m."organizationId" = ${orgIdForBoard}
+            ORDER BY c."contactId", m."createdAt" DESC
+          )
+          SELECT
+            cu."contactId",
+            lc.channel,
+            COALESCE(cu.unread, 0) AS "unreadCount",
+            lm."msgContent",
+            lm."msgCreatedAt",
+            lm."msgDirection"
+          FROM contact_unread cu
+          LEFT JOIN latest_channel lc ON lc."contactId" = cu."contactId"
+          LEFT JOIN last_msg lm ON lm."contactId" = cu."contactId"
+        `
       : Promise.resolve([]);
 
   const [totalsGroups, dealProducts, convs, metrics] = await Promise.all([
@@ -1570,31 +1608,26 @@ async function computeBoardData(
     }
   }
 
-  const lastMsgMap = new Map<string, { content: string; createdAt: Date; direction: string }>();
+  const lastMsgMap = new Map<
+    string,
+    { content: string; createdAt: Date; direction: string }
+  >();
   const unreadMap = new Map<string, number>();
   const channelMap = new Map<string, { channel: string; updatedAt: Date }>();
-  for (const conv of convs) {
-    if (!conv.contactId) continue;
-
-    if (conv.messages.length > 0) {
-      const msg = conv.messages[0];
-      const existing = lastMsgMap.get(conv.contactId);
-      if (!existing || msg.createdAt > existing.createdAt) {
-        lastMsgMap.set(conv.contactId, msg);
-      }
+  for (const row of convs) {
+    if (!row.contactId) continue;
+    unreadMap.set(row.contactId, row.unreadCount ?? 0);
+    if (row.channel) {
+      channelMap.set(row.contactId, {
+        channel: row.channel,
+        updatedAt: new Date(0),
+      });
     }
-
-    const prev = unreadMap.get(conv.contactId) ?? 0;
-    unreadMap.set(conv.contactId, prev + conv.unreadCount);
-
-    // Se ainda não temos canal pra este contato, ou esta conv é mais
-    // recente que a já registrada, atualiza. Garante que o badge no
-    // card reflita o canal da conversa "ativa" do contato.
-    const prevCh = channelMap.get(conv.contactId);
-    if (!prevCh || conv.updatedAt > prevCh.updatedAt) {
-      channelMap.set(conv.contactId, {
-        channel: conv.channel,
-        updatedAt: conv.updatedAt,
+    if (row.msgContent != null && row.msgCreatedAt != null) {
+      lastMsgMap.set(row.contactId, {
+        content: row.msgContent,
+        createdAt: row.msgCreatedAt,
+        direction: row.msgDirection ?? "in",
       });
     }
   }
