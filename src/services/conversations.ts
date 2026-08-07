@@ -587,29 +587,56 @@ export async function getConversations(
   // reabre como ticket novo). Historico dos tickets antigos segue acessivel
   // na timeline continua do chat. Paginamos a lista colapsada e hidratamos
   // so a pagina com o `listSelect` completo. Ver frontend use-conversations.
-  const keyRows = await prisma.conversation.findMany({
-    where,
-    orderBy,
-    select: { id: true, contactId: true, channel: true },
-  });
-
-  // Quando a listagem e' de UM contato especifico (ex.: abas de ticket do
-  // painel de negocio), NAO colapsa — o caller quer todos os tickets.
+  //
+  // Performance (ago/26): carregar TODOS os IDs da org em memoria fazia
+  // GET /api/conversations levar 5–8s. Varremos em lotes ate cobrir a
+  // pagina pedida (+1 pra saber se ha mais) e, se ainda houver linhas,
+  // estimamos `total` pelo teto conservador (repIds + restantes brutos)
+  // so pra infinite scroll nao parar cedo demais.
   const collapse = !params.contactId;
+  const needReps = skip + perPage + 1;
+  const BATCH = 500;
+  const HARD_CAP = 8_000;
   const seenGroups = new Set<string>();
   const repIds: string[] = [];
-  for (const r of keyRows) {
-    const groupKey =
-      collapse && r.contactId
-        ? `c:${r.contactId}::${r.channel ?? ""}`
-        : `id:${r.id}`;
-    if (seenGroups.has(groupKey)) continue;
-    seenGroups.add(groupKey);
-    repIds.push(r.id);
+  let scanned = 0;
+  let exhausted = false;
+
+  while (repIds.length < needReps && scanned < HARD_CAP) {
+    const batch = await prisma.conversation.findMany({
+      where,
+      orderBy,
+      select: { id: true, contactId: true, channel: true },
+      skip: scanned,
+      take: Math.min(BATCH, HARD_CAP - scanned),
+    });
+    if (batch.length === 0) {
+      exhausted = true;
+      break;
+    }
+    scanned += batch.length;
+    if (batch.length < BATCH) exhausted = true;
+
+    for (const r of batch) {
+      const groupKey =
+        collapse && r.contactId
+          ? `c:${r.contactId}::${r.channel ?? ""}`
+          : `id:${r.id}`;
+      if (seenGroups.has(groupKey)) continue;
+      seenGroups.add(groupKey);
+      repIds.push(r.id);
+      if (repIds.length >= needReps) break;
+    }
+    if (exhausted) break;
   }
 
-  const total = repIds.length;
   const pageIds = repIds.slice(skip, skip + perPage);
+  // Se esgotamos o scan, total exato = reps unicos. Caso contrario ha mais
+  // grupos alem da pagina — reporta pelo menos skip+perPage+1 (e soma o
+  // que ja vimos) pra o infinite scroll continuar pedindo.
+  const total = exhausted
+    ? repIds.length
+    : Math.max(repIds.length, skip + perPage + 1);
 
   const hydrated = await prisma.conversation.findMany({
     where: { id: { in: pageIds } },

@@ -801,77 +801,112 @@ export async function moveDeal(
   let becameLost = false;
   // Preserva o pipeline de ORIGEM para invalidação de cache pós-move.
   let fromPipelineId: string | null = dealPeek.stage.pipelineId;
-  const result = await prisma.$transaction(async (tx) => {
-    const deal = await tx.deal.findUnique({ where: { id: dealId } });
-    if (!deal) throw new Error("NOT_FOUND");
-
-    const targetStage = await tx.stage.findUnique({ where: { id: targetStageId } });
-    if (!targetStage) throw new Error("STAGE_NOT_FOUND");
-
-    const dealStage = await tx.stage.findUnique({ where: { id: deal.stageId } });
-    if (!dealStage) throw new Error("STAGE_NOT_FOUND");
-    fromPipelineId = dealStage.pipelineId;
-    // Cross-pipeline permitido: quando o funil muda, a reordenação de
-    // posições continua funcionando (origem decrementa, destino incrementa
-    // — ambos escopados por stageId, então não há colisão entre funis).
-
-    if (targetStage.isLost) {
-      const pipe = await tx.pipeline.findUnique({
-        where: { id: targetStage.pipelineId },
-        select: { lossReasonRequired: true },
-      });
-      if (pipe?.lossReasonRequired && !options?.lostReason?.trim()) {
-        throw new Error("LOST_REASON_REQUIRED");
-      }
-    }
-
-    const oldStageId = deal.stageId;
-    const oldPos = deal.position;
-    const statusPatch = buildStatusSyncPatch(deal.status, targetStage, options?.lostReason);
-    becameWon = deal.status !== "WON" && targetStage.isWon;
-    becameLost = deal.status !== "LOST" && targetStage.isLost;
-
-    if (oldStageId === targetStageId) {
-      const deals = await tx.deal.findMany({
-        where: { stageId: targetStageId },
-        orderBy: { position: "asc" },
-      });
-      const ordered = deals.filter((d) => d.id !== dealId);
-      const clamped = Math.min(position, ordered.length);
-      ordered.splice(clamped, 0, deal);
-
-      for (let i = 0; i < ordered.length; i++) {
-        await tx.deal.update({
-          where: { id: ordered[i].id },
-          data: ordered[i].id === dealId ? { position: i, ...statusPatch } : { position: i },
-        });
-      }
-
-      return tx.deal.findUnique({
+  // Timeout 20s: sob carga (webhooks + AI) o default 5s estourava em
+  // `updateMany` de posição → P2028 → HTTP 500 em /deals/:id/move (~6s).
+  // Hidratação (`listInclude`) fica FORA da TX pra liberar locks cedo.
+  await prisma.$transaction(
+    async (tx) => {
+      const deal = await tx.deal.findUnique({
         where: { id: dealId },
-        include: listInclude,
+        select: { id: true, stageId: true, position: true, status: true },
       });
-    }
+      if (!deal) throw new Error("NOT_FOUND");
 
-    await tx.deal.updateMany({
-      where: { stageId: targetStageId, position: { gte: position } },
-      data: { position: { increment: 1 } },
-    });
+      const targetStage = await tx.stage.findUnique({
+        where: { id: targetStageId },
+        select: {
+          id: true,
+          pipelineId: true,
+          isWon: true,
+          isLost: true,
+        },
+      });
+      if (!targetStage) throw new Error("STAGE_NOT_FOUND");
 
-    await tx.deal.update({
-      where: { id: dealId },
-      data: { stageId: targetStageId, position, ...statusPatch },
-    });
+      const dealStage = await tx.stage.findUnique({
+        where: { id: deal.stageId },
+        select: { pipelineId: true },
+      });
+      if (!dealStage) throw new Error("STAGE_NOT_FOUND");
+      fromPipelineId = dealStage.pipelineId;
+      // Cross-pipeline permitido: quando o funil muda, a reordenação de
+      // posições continua funcionando (origem decrementa, destino incrementa
+      // — ambos escopados por stageId, então não há colisão entre funis).
 
-    await tx.deal.updateMany({
-      where: { stageId: oldStageId, position: { gt: oldPos } },
-      data: { position: { decrement: 1 } },
-    });
+      if (targetStage.isLost) {
+        const pipe = await tx.pipeline.findUnique({
+          where: { id: targetStage.pipelineId },
+          select: { lossReasonRequired: true },
+        });
+        if (pipe?.lossReasonRequired && !options?.lostReason?.trim()) {
+          throw new Error("LOST_REASON_REQUIRED");
+        }
+      }
 
-    return tx.deal.findUnique({
-      where: { id: dealId },
-      include: listInclude,
-    });
+      const oldStageId = deal.stageId;
+      const oldPos = deal.position;
+      const statusPatch = buildStatusSyncPatch(
+        deal.status,
+        targetStage,
+        options?.lostReason,
+      );
+      becameWon = deal.status !== "WON" && targetStage.isWon;
+      becameLost = deal.status !== "LOST" && targetStage.isLost;
+
+      if (oldStageId === targetStageId) {
+        const deals = await tx.deal.findMany({
+          where: { stageId: targetStageId },
+          orderBy: { position: "asc" },
+          select: { id: true, position: true },
+        });
+        const ordered = deals.filter((d) => d.id !== dealId);
+        const clamped = Math.min(position, ordered.length);
+        ordered.splice(clamped, 0, deal);
+
+        // Um UPDATE com VALUES em vez de N round-trips (estágio com
+        // centenas de cards estourava o timeout de 5s).
+        if (ordered.length > 0) {
+          const values = ordered.map(
+            (d, i) => Prisma.sql`(${d.id}, ${i})`,
+          );
+          await tx.$executeRaw`
+            UPDATE deals AS d
+            SET position = v.pos::int
+            FROM (VALUES ${Prisma.join(values)}) AS v(id, pos)
+            WHERE d.id = v.id AND d.position IS DISTINCT FROM v.pos::int
+          `;
+        }
+
+        if (Object.keys(statusPatch).length > 0) {
+          await tx.deal.update({
+            where: { id: dealId },
+            data: statusPatch,
+          });
+        }
+        return;
+      }
+
+      await tx.deal.updateMany({
+        where: { stageId: targetStageId, position: { gte: position } },
+        data: { position: { increment: 1 } },
+      });
+
+      await tx.deal.update({
+        where: { id: dealId },
+        data: { stageId: targetStageId, position, ...statusPatch },
+      });
+
+      await tx.deal.updateMany({
+        where: { stageId: oldStageId, position: { gt: oldPos } },
+        data: { position: { decrement: 1 } },
+      });
+    },
+    { timeout: 20_000, maxWait: 10_000 },
+  );
+
+  const result = await prisma.deal.findUnique({
+    where: { id: dealId },
+    include: listInclude,
   });
 
   // Pós-commit (fire-and-forget; import dinâmico evita ciclo de módulos):
