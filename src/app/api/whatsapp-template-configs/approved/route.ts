@@ -35,12 +35,19 @@ function extractAfter(raw: unknown): string | undefined {
 export async function GET(request: Request) {
   return withApiAuthContext(request, async (user) => {
     try {
+      const url = new URL(request.url);
+      const channelId = url.searchParams.get("channelId");
       const resolved = await resolveMetaTemplatesClient({
         organizationId: user.organizationId,
         isSuperAdmin: user.isSuperAdmin,
+        channelId,
       });
       // Sem canal/credenciais Meta na org: nada aprovado para listar.
+      // channelId inválido (404) propaga erro; demais falhas de resolve → [].
       if (!resolved.ok) {
+        if (channelId?.trim() && resolved.response.status === 404) {
+          return resolved.response;
+        }
         return NextResponse.json([]);
       }
 

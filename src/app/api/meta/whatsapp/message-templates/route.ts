@@ -99,13 +99,15 @@ async function resolveHeaderMediaBuffer(
 export async function GET(request: Request) {
   return withOrgContext(async (session) => {
     try {
+      const url = new URL(request.url);
+      const channelId = url.searchParams.get("channelId");
       const resolved = await resolveMetaTemplatesClient({
         organizationId: session.user.organizationId,
         isSuperAdmin: session.user.isSuperAdmin,
+        channelId,
       });
       if (!resolved.ok) return resolved.response;
 
-      const url = new URL(request.url);
       const after = url.searchParams.get("after") ?? undefined;
       const lim = url.searchParams.get("limit");
       const limit = lim ? Number.parseInt(lim, 10) : undefined;
@@ -129,14 +131,6 @@ export async function POST(request: Request) {
       const roleDenied = requireAdminOrManager(session);
       if (roleDenied) return roleDenied;
 
-      const resolved = await resolveMetaTemplatesClient({
-        organizationId: session.user.organizationId,
-        isSuperAdmin: session.user.isSuperAdmin,
-      });
-      if (!resolved.ok) return resolved.response;
-
-      const metaClient = resolved.client;
-
       let body: unknown;
       try {
         body = await request.json();
@@ -144,6 +138,19 @@ export async function POST(request: Request) {
         return NextResponse.json({ message: "JSON inválido." }, { status: 400 });
       }
       const b = body as Record<string, unknown>;
+      const url = new URL(request.url);
+      const channelIdFromQuery = url.searchParams.get("channelId");
+      const channelIdFromBody =
+        typeof b.channelId === "string" && b.channelId.trim() ? b.channelId.trim() : null;
+
+      const resolved = await resolveMetaTemplatesClient({
+        organizationId: session.user.organizationId,
+        isSuperAdmin: session.user.isSuperAdmin,
+        channelId: channelIdFromBody ?? channelIdFromQuery,
+      });
+      if (!resolved.ok) return resolved.response;
+
+      const metaClient = resolved.client;
 
       if (b.raw === true && b.payload && typeof b.payload === "object" && !Array.isArray(b.payload)) {
         const data = await metaClient.createMessageTemplate(b.payload as Record<string, unknown>);

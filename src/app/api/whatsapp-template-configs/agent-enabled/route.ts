@@ -9,28 +9,29 @@ import { prisma } from "@/lib/prisma";
 type GraphMap = Awaited<ReturnType<typeof listMessageTemplatesByGraphId>>;
 
 /**
- * Cache TTL em memória do catálogo Graph (map por graph-template-id), POR ORG.
- *
- * `listMessageTemplatesByGraphId` pagina TODO o catálogo da WABA (limit=500,
- * com todos os componentes) — payload de centenas de KB. Este endpoint é
- * chamado sempre que o agente abre o composer / picker / modal "/", por
- * múltiplos agentes. Sem cache, cada abertura re-busca e re-parseia o
- * catálogo inteiro da Meta na thread web (CPU + latência).
- *
- * TTL curto (60s) mantém os metadados praticamente frescos (mudança de
- * template é rara) e elimina o refetch em rajada. Chave = organizationId.
+ * Cache TTL em memória do catálogo Graph (map por graph-template-id).
+ * Chave = organizationId + channelId (WABA distinta por canal Cloud API).
  */
 const GRAPH_MAP_TTL_MS = 60_000;
 const graphMapCache = new Map<string, { at: number; map: GraphMap }>();
+
+function cacheKey(orgId: string, channelId: string): string {
+  return `${orgId}::${channelId || "default"}`;
+}
 
 /**
  * Lista templates habilitados para o agente. Quando o canal Meta Cloud da org
  * está disponível, mescla metadados (botões, variáveis, Flow) a partir da
  * Graph — evita envio como texto por BD desatualizado sem backfill.
+ *
+ * `?channelId=` restringe à WABA daquele canal (só templates presentes nela).
  */
-export async function GET() {
+export async function GET(request: Request) {
   return withOrgContext(async (session) => {
     try {
+      const url = new URL(request.url);
+      const channelId = url.searchParams.get("channelId")?.trim() || "";
+
       const configs = await prisma.whatsAppTemplateConfig.findMany({
         where: { agentEnabled: true },
         orderBy: { label: "asc" },
@@ -39,43 +40,52 @@ export async function GET() {
       const orgId = session.user.organizationId;
       let graphMap: GraphMap | null = null;
 
-      const cached = orgId ? graphMapCache.get(orgId) : undefined;
+      const key = orgId ? cacheKey(orgId, channelId) : "";
+      const cached = key ? graphMapCache.get(key) : undefined;
       if (cached && Date.now() - cached.at < GRAPH_MAP_TTL_MS) {
         graphMap = cached.map;
       } else {
         const resolved = await resolveMetaTemplatesClient({
           organizationId: orgId,
           isSuperAdmin: session.user.isSuperAdmin,
+          channelId: channelId || null,
         });
+        if (!resolved.ok && channelId) {
+          return resolved.response;
+        }
         if (resolved.ok) {
           try {
             graphMap = await listMessageTemplatesByGraphId(resolved.client);
-            if (orgId) graphMapCache.set(orgId, { at: Date.now(), map: graphMap });
+            if (key) graphMapCache.set(key, { at: Date.now(), map: graphMap });
           } catch {
             graphMap = null;
           }
         }
       }
 
-      const enriched = configs.map((row) => {
-        const id = typeof row.metaTemplateId === "string" ? row.metaTemplateId.trim() : "";
-        const hit = id && graphMap ? graphMap.get(id) : undefined;
-        if (!hit) return row;
+      const enriched = configs
+        .map((row) => {
+          const id = typeof row.metaTemplateId === "string" ? row.metaTemplateId.trim() : "";
+          const hit = id && graphMap ? graphMap.get(id) : undefined;
+          // Com channelId: só templates que existem na WABA desse canal.
+          if (channelId && graphMap && !hit) return null;
+          if (!hit) return row;
 
-        const analysis = analyzeTemplateComponents(hit.components, {
-          parameterFormat: hit.parameterFormat,
-        });
+          const analysis = analyzeTemplateComponents(hit.components, {
+            parameterFormat: hit.parameterFormat,
+          });
 
-        return {
-          ...row,
-          hasButtons: analysis.hasButtons,
-          buttonTypes: analysis.buttonTypes,
-          hasVariables: analysis.hasVariables,
-          flowAction: analysis.flowAction,
-          flowId: analysis.flowId,
-          headerFormat: analysis.headerFormat,
-        };
-      });
+          return {
+            ...row,
+            hasButtons: analysis.hasButtons,
+            buttonTypes: analysis.buttonTypes,
+            hasVariables: analysis.hasVariables,
+            flowAction: analysis.flowAction,
+            flowId: analysis.flowId,
+            headerFormat: analysis.headerFormat,
+          };
+        })
+        .filter((row): row is NonNullable<typeof row> => row != null);
 
       return NextResponse.json(enriched);
     } catch (e) {

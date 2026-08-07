@@ -7,10 +7,12 @@ import { metaClientFromConfig, type MetaWhatsAppClient } from "./client";
 type SessionForMetaTemplates = {
   organizationId: string | null;
   isSuperAdmin: boolean;
+  /** Quando informado, usa esse canal META_CLOUD_API (não o último updatedAt). */
+  channelId?: string | null;
 };
 
 export type ResolveMetaTemplatesClientResult =
-  | { ok: true; client: MetaWhatsAppClient }
+  | { ok: true; client: MetaWhatsAppClient; channelId: string }
   | { ok: false; response: NextResponse };
 
 /**
@@ -18,6 +20,9 @@ export type ResolveMetaTemplatesClientResult =
  * Sempre usa credenciais do canal `META_CLOUD_API` da organização da sessão
  * (via Prisma extension + RequestContext), nunca o singleton de env global —
  * evita leak multi-tenant (ex.: DNA Work vendo templates da WABA da EduIT).
+ *
+ * Com `channelId`: resolve esse canal (org-scoped). Sem: último CONNECTED
+ * (fallback: qualquer META_CLOUD_API) — compatível com n8n/callers antigos.
  */
 export async function resolveMetaTemplatesClient(
   session: SessionForMetaTemplates,
@@ -47,18 +52,40 @@ export async function resolveMetaTemplatesClient(
     provider: "META_CLOUD_API" as const,
   };
 
-  let channel = await prisma.channel.findFirst({
-    where: { ...baseWhere, status: "CONNECTED" },
-    select: { config: true },
-    orderBy: { updatedAt: "desc" },
-  });
+  const requestedId = typeof session.channelId === "string" ? session.channelId.trim() : "";
 
-  if (!channel) {
+  let channel: { id: string; config: unknown } | null = null;
+
+  if (requestedId) {
     channel = await prisma.channel.findFirst({
-      where: baseWhere,
-      select: { config: true },
+      where: { ...baseWhere, id: requestedId },
+      select: { id: true, config: true },
+    });
+    if (!channel) {
+      return {
+        ok: false,
+        response: NextResponse.json(
+          {
+            message:
+              "Canal WhatsApp Cloud API não encontrado nesta organização. Verifique o channelId.",
+          },
+          { status: 404 },
+        ),
+      };
+    }
+  } else {
+    const connected = await prisma.channel.findFirst({
+      where: { ...baseWhere, status: "CONNECTED" },
+      select: { id: true, config: true },
       orderBy: { updatedAt: "desc" },
     });
+    channel =
+      connected ??
+      (await prisma.channel.findFirst({
+        where: baseWhere,
+        select: { id: true, config: true },
+        orderBy: { updatedAt: "desc" },
+      }));
   }
 
   if (!channel) {
@@ -91,5 +118,5 @@ export async function resolveMetaTemplatesClient(
     };
   }
 
-  return { ok: true, client };
+  return { ok: true, client, channelId: channel.id };
 }

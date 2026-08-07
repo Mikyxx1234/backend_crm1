@@ -14,15 +14,18 @@ function requireAdminOrManager(session: { user?: { role?: string } }): NextRespo
 }
 
 /** DELETE: remove template pelo ID Graph (campo `id` na listagem). */
-export async function DELETE(_request: Request, context: RouteContext) {
+export async function DELETE(request: Request, context: RouteContext) {
   return withOrgContext(async (session) => {
     try {
       const roleDenied = requireAdminOrManager(session);
       if (roleDenied) return roleDenied;
 
+      const url = new URL(request.url);
+      const channelId = url.searchParams.get("channelId");
       const resolved = await resolveMetaTemplatesClient({
         organizationId: session.user.organizationId,
         isSuperAdmin: session.user.isSuperAdmin,
+        channelId,
       });
       if (!resolved.ok) return resolved.response;
 
