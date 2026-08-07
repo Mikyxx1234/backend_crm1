@@ -765,6 +765,34 @@ export type MoveDealOptions = {
   lostReason?: string | null;
 };
 
+const MOVE_DEAL_MAX_RETRIES = 3;
+
+function isPrismaDeadlock(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const code = "code" in err ? String((err as { code: unknown }).code) : "";
+  if (code === "P2034") return true;
+  const msg =
+    "message" in err ? String((err as { message: unknown }).message) : "";
+  return /deadlock detected/i.test(msg);
+}
+
+/**
+ * Advisory locks por estágio em ordem lexicográfica estável.
+ * Evita deadlock A↔B em `deals.position` sem travar milhares de rows
+ * (FOR UPDATE em coluna grande estourava o timeout de 20s).
+ */
+async function lockStagesForMove(
+  tx: ScopedTx,
+  stageIds: string[],
+): Promise<void> {
+  const unique = [...new Set(stageIds.filter(Boolean))].sort();
+  for (const stageId of unique) {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(hashtextextended(${stageId}, 0))
+    `;
+  }
+}
+
 export async function moveDeal(
   dealId: string,
   targetStageId: string,
@@ -804,105 +832,131 @@ export async function moveDeal(
   // Timeout 20s: sob carga (webhooks + AI) o default 5s estourava em
   // `updateMany` de posição → P2028 → HTTP 500 em /deals/:id/move (~6s).
   // Hidratação (`listInclude`) fica FORA da TX pra liberar locks cedo.
-  await prisma.$transaction(
-    async (tx) => {
-      const deal = await tx.deal.findUnique({
-        where: { id: dealId },
-        select: { id: true, stageId: true, position: true, status: true },
-      });
-      if (!deal) throw new Error("NOT_FOUND");
-
-      const targetStage = await tx.stage.findUnique({
-        where: { id: targetStageId },
-        select: {
-          id: true,
-          pipelineId: true,
-          isWon: true,
-          isLost: true,
-        },
-      });
-      if (!targetStage) throw new Error("STAGE_NOT_FOUND");
-
-      const dealStage = await tx.stage.findUnique({
-        where: { id: deal.stageId },
-        select: { pipelineId: true },
-      });
-      if (!dealStage) throw new Error("STAGE_NOT_FOUND");
-      fromPipelineId = dealStage.pipelineId;
-      // Cross-pipeline permitido: quando o funil muda, a reordenação de
-      // posições continua funcionando (origem decrementa, destino incrementa
-      // — ambos escopados por stageId, então não há colisão entre funis).
-
-      if (targetStage.isLost) {
-        const pipe = await tx.pipeline.findUnique({
-          where: { id: targetStage.pipelineId },
-          select: { lossReasonRequired: true },
-        });
-        if (pipe?.lossReasonRequired && !options?.lostReason?.trim()) {
-          throw new Error("LOST_REASON_REQUIRED");
-        }
-      }
-
-      const oldStageId = deal.stageId;
-      const oldPos = deal.position;
-      const statusPatch = buildStatusSyncPatch(
-        deal.status,
-        targetStage,
-        options?.lostReason,
-      );
-      becameWon = deal.status !== "WON" && targetStage.isWon;
-      becameLost = deal.status !== "LOST" && targetStage.isLost;
-
-      if (oldStageId === targetStageId) {
-        const deals = await tx.deal.findMany({
-          where: { stageId: targetStageId },
-          orderBy: { position: "asc" },
-          select: { id: true, position: true },
-        });
-        const ordered = deals.filter((d) => d.id !== dealId);
-        const clamped = Math.min(position, ordered.length);
-        ordered.splice(clamped, 0, deal);
-
-        // Um UPDATE com VALUES em vez de N round-trips (estágio com
-        // centenas de cards estourava o timeout de 5s).
-        if (ordered.length > 0) {
-          const values = ordered.map(
-            (d, i) => Prisma.sql`(${d.id}, ${i})`,
-          );
-          await tx.$executeRaw`
-            UPDATE deals AS d
-            SET position = v.pos::int
-            FROM (VALUES ${Prisma.join(values)}) AS v(id, pos)
-            WHERE d.id = v.id AND d.position IS DISTINCT FROM v.pos::int
+  // Retry em P2034/deadlock: moves concorrentes ainda podem colidir; a
+  // ordem de lock reduz, o retry absorve o residual.
+  let lastMoveErr: unknown;
+  for (let attempt = 0; attempt < MOVE_DEAL_MAX_RETRIES; attempt++) {
+    try {
+      await prisma.$transaction(
+        async (tx) => {
+          // Trava o deal movido antes de ler estágios — evita TOCTOU com
+          // outro move do mesmo card.
+          await tx.$queryRaw`
+            SELECT d.id FROM deals d WHERE d.id = ${dealId} FOR UPDATE
           `;
-        }
 
-        if (Object.keys(statusPatch).length > 0) {
+          const deal = await tx.deal.findUnique({
+            where: { id: dealId },
+            select: { id: true, stageId: true, position: true, status: true },
+          });
+          if (!deal) throw new Error("NOT_FOUND");
+
+          const targetStage = await tx.stage.findUnique({
+            where: { id: targetStageId },
+            select: {
+              id: true,
+              pipelineId: true,
+              isWon: true,
+              isLost: true,
+            },
+          });
+          if (!targetStage) throw new Error("STAGE_NOT_FOUND");
+
+          const dealStage = await tx.stage.findUnique({
+            where: { id: deal.stageId },
+            select: { pipelineId: true },
+          });
+          if (!dealStage) throw new Error("STAGE_NOT_FOUND");
+          fromPipelineId = dealStage.pipelineId;
+          // Cross-pipeline permitido: quando o funil muda, a reordenação de
+          // posições continua funcionando (origem decrementa, destino incrementa
+          // — ambos escopados por stageId, então não há colisão entre funis).
+
+          if (targetStage.isLost) {
+            const pipe = await tx.pipeline.findUnique({
+              where: { id: targetStage.pipelineId },
+              select: { lossReasonRequired: true },
+            });
+            if (pipe?.lossReasonRequired && !options?.lostReason?.trim()) {
+              throw new Error("LOST_REASON_REQUIRED");
+            }
+          }
+
+          const oldStageId = deal.stageId;
+          const oldPos = deal.position;
+          const statusPatch = buildStatusSyncPatch(
+            deal.status,
+            targetStage,
+            options?.lostReason,
+          );
+          becameWon = deal.status !== "WON" && targetStage.isWon;
+          becameLost = deal.status !== "LOST" && targetStage.isLost;
+
+          // Lock order estável (advisory) nas colunas tocadas.
+          await lockStagesForMove(tx, [oldStageId, targetStageId]);
+
+          if (oldStageId === targetStageId) {
+            const deals = await tx.deal.findMany({
+              where: { stageId: targetStageId },
+              orderBy: { position: "asc" },
+              select: { id: true, position: true },
+            });
+            const ordered = deals.filter((d) => d.id !== dealId);
+            const clamped = Math.min(position, ordered.length);
+            ordered.splice(clamped, 0, deal);
+
+            // Um UPDATE com VALUES em vez de N round-trips (estágio com
+            // centenas de cards estourava o timeout de 5s).
+            if (ordered.length > 0) {
+              const values = ordered.map(
+                (d, i) => Prisma.sql`(${d.id}, ${i})`,
+              );
+              await tx.$executeRaw`
+                UPDATE deals AS d
+                SET position = v.pos::int
+                FROM (VALUES ${Prisma.join(values)}) AS v(id, pos)
+                WHERE d.id = v.id AND d.position IS DISTINCT FROM v.pos::int
+              `;
+            }
+
+            if (Object.keys(statusPatch).length > 0) {
+              await tx.deal.update({
+                where: { id: dealId },
+                data: statusPatch,
+              });
+            }
+            return;
+          }
+
+          await tx.deal.updateMany({
+            where: { stageId: targetStageId, position: { gte: position } },
+            data: { position: { increment: 1 } },
+          });
+
           await tx.deal.update({
             where: { id: dealId },
-            data: statusPatch,
+            data: { stageId: targetStageId, position, ...statusPatch },
           });
-        }
-        return;
+
+          await tx.deal.updateMany({
+            where: { stageId: oldStageId, position: { gt: oldPos } },
+            data: { position: { decrement: 1 } },
+          });
+        },
+        { timeout: 20_000, maxWait: 10_000 },
+      );
+      lastMoveErr = undefined;
+      break;
+    } catch (err) {
+      lastMoveErr = err;
+      if (!isPrismaDeadlock(err) || attempt >= MOVE_DEAL_MAX_RETRIES - 1) {
+        throw err;
       }
-
-      await tx.deal.updateMany({
-        where: { stageId: targetStageId, position: { gte: position } },
-        data: { position: { increment: 1 } },
-      });
-
-      await tx.deal.update({
-        where: { id: dealId },
-        data: { stageId: targetStageId, position, ...statusPatch },
-      });
-
-      await tx.deal.updateMany({
-        where: { stageId: oldStageId, position: { gt: oldPos } },
-        data: { position: { decrement: 1 } },
-      });
-    },
-    { timeout: 20_000, maxWait: 10_000 },
-  );
+      // backoff curto antes de retry (deadlock é transitório)
+      await new Promise((r) => setTimeout(r, 25 + attempt * 40));
+    }
+  }
+  if (lastMoveErr) throw lastMoveErr;
 
   const result = await prisma.deal.findUnique({
     where: { id: dealId },
@@ -1424,6 +1478,16 @@ async function computeBoardData(
   // Promise.all lá embaixo. Não usar `await` aqui — a promise fica em voo.
   const metricsPromise = getStageMetrics(pipelineId);
 
+  // ⚡ COUNT por etapa em paralelo com o SELECT de cards. Antes o groupBy
+  // esperava `stages` só pra montar `stageId IN (...)` — agora escopa por
+  // `stage.pipelineId` (mesmo resultado) e sobe junto com a query pesada.
+  const totalsPromise: Promise<{ stageId: string; _count: { _all: number } }[]> =
+    prisma.deal.groupBy({
+      by: ["stageId"],
+      where: { ...dealWhere, stage: { pipelineId } },
+      _count: { _all: true },
+    });
+
   let stages: BoardStageWithDeals[];
 
   if (sortField === "lastInteraction") {
@@ -1438,39 +1502,29 @@ async function computeBoardData(
       sortDirection,
     );
   } else {
-    // 1) Etapas + cards. Para evitar problemas de UX em "Carregar mais",
-    //    quando uma etapa tem `extraLoaded > 0`, retornamos `perStage + extraLoaded`
-    //    (acumulado). O frontend continua vendo todos os cards já carregados.
-    stages = await prisma.stage.findMany({
+    // 1) Etapas leves + 2) cards por coluna em paralelo (LIMIT por stage).
+    // Nested `include.deals.take` gerava um plano único pesado em funis
+    // grandes (ex.: ~40k OPEN); N queries indexadas `stageId+status+position`
+    // com LIMIT rodam juntas e costumam ser bem mais baratas.
+    const stagesRaw = await prisma.stage.findMany({
       where: { pipelineId },
       orderBy: { position: "asc" },
-      include: {
-        deals: {
-          where: dealWhere,
-          orderBy: dealOrderBy,
-          take: perStage,
-          include: BOARD_DEAL_INCLUDE,
-        },
-      },
     });
-
-    // 2) Para etapas com extra carregado > 0, substitui pelo conjunto acumulado.
-    const stageIdsWithOffset = Object.keys(offsetByStage).filter(
-      (id) => (offsetByStage[id] ?? 0) > 0,
-    );
-    if (stageIdsWithOffset.length > 0) {
-      for (const stageId of stageIdsWithOffset) {
-        const extra = offsetByStage[stageId] ?? 0;
-        const expanded = await prisma.deal.findMany({
-          where: { ...dealWhere, stageId },
+    const dealsByStage = await Promise.all(
+      stagesRaw.map((stage) => {
+        const extra = offsetByStage[stage.id] ?? 0;
+        return prisma.deal.findMany({
+          where: { ...dealWhere, stageId: stage.id },
           orderBy: dealOrderBy,
           take: perStage + extra,
           include: BOARD_DEAL_INCLUDE,
         });
-        const idx = stages.findIndex((s) => s.id === stageId);
-        if (idx >= 0) stages[idx] = { ...stages[idx], deals: expanded };
-      }
-    }
+      }),
+    );
+    stages = stagesRaw.map((stage, i) => ({
+      ...stage,
+      deals: dealsByStage[i] ?? [],
+    }));
   }
 
   // IDs/contatos derivados das colunas já carregadas — insumo das
@@ -1495,20 +1549,9 @@ async function computeBoardData(
   // entre si (só dependem de stages/IDs já resolvidos, ou apenas do
   // pipelineId), então rodam em paralelo com Promise.all — a latência passa
   // a ser ~o MAIOR round-trip, não a soma. Semanticamente idêntico: são
-  // leituras sem efeito colateral entre si. `metricsPromise` já foi
-  // disparada antes do findMany de stages (cache-aside 60s).
+  // leituras sem efeito colateral entre si. `metricsPromise`/`totalsPromise`
+  // já voam desde antes do findMany de stages.
   const orgIdForBoard = getOrgIdOrThrow();
-
-  // 3) Contagem TOTAL por etapa (independente do limit) — usada pra exibir
-  //    "+N mais" e os totais reais por coluna.
-  const totalsPromise: Promise<{ stageId: string; _count: { _all: number } }[]> =
-    stages.length > 0
-      ? prisma.deal.groupBy({
-          by: ["stageId"],
-          where: { ...dealWhere, stageId: { in: stages.map((s) => s.id) } },
-          _count: { _all: true },
-        })
-      : Promise.resolve([]);
 
   // Nome/tipo do produto por deal.
   const productsPromise: Promise<{ dealId: string; name: string; type: string }[]> =
