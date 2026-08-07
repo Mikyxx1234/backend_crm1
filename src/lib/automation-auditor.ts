@@ -80,6 +80,7 @@ const PAUSING_TYPES = new Set([
   "wait_for_reply",
   "question",
   "send_whatsapp_interactive",
+  "send_whatsapp_list",
 ]);
 
 /**
@@ -124,6 +125,7 @@ const META_SEND_FAILURE_TYPES = new Set([
   "send_whatsapp_template",
   "send_whatsapp_media",
   "send_whatsapp_interactive",
+  "send_whatsapp_list",
   "question",
 ]);
 
@@ -164,6 +166,17 @@ export function getStepOutgoing(step: StepLike): StepOutgoing {
         push(label, b.gotoStepId);
       });
       push("else (nenhum botão bateu)", c.elseGotoStepId);
+      push("timeout", c.timeoutGotoStepId);
+      push("linear (após enviar)", c.nextStepId);
+      break;
+    }
+    case "send_whatsapp_list": {
+      const rows = Array.isArray(c.rows) ? (c.rows as Record<string, unknown>[]) : [];
+      rows.forEach((r, i) => {
+        const label = strOrEmpty(r.title) || `item #${i + 1}`;
+        push(label, r.gotoStepId);
+      });
+      push("else (nenhum item bateu)", c.elseGotoStepId);
       push("timeout", c.timeoutGotoStepId);
       push("linear (após enviar)", c.nextStepId);
       break;
@@ -337,7 +350,7 @@ export function auditAutomation(automation: AutomationLike): AuditReport {
     const isTerminal = TERMINAL_TYPES.has(step.type);
     const hasExplicitEdges = cfg.__hasExplicitEdges === true;
     const hasAnyOut = local.length > 0 || crossAutomation.length > 0;
-    const isLinearStep = !["condition", "wait_for_reply", "question", "send_whatsapp_interactive", "business_hours", "goto"].includes(step.type);
+    const isLinearStep = !["condition", "wait_for_reply", "question", "send_whatsapp_interactive", "send_whatsapp_list", "business_hours", "goto"].includes(step.type);
     const nextId = strOrEmpty(cfg.nextStepId);
     const isDeadEndLinear = isLinearStep && hasExplicitEdges && !hasAnyOut && nextId !== NONE_ID && !isTerminal;
     if (isDeadEndLinear) {
@@ -456,6 +469,60 @@ export function auditAutomation(automation: AutomationLike): AuditReport {
       });
     }
 
+    if (step.type === "send_whatsapp_list") {
+      if (!strOrEmpty(cfg.body)) {
+        issues.push({
+          code: "list_no_body",
+          severity: "error",
+          message: "Lista WhatsApp sem texto da mensagem.",
+          stepId: step.id,
+        });
+      }
+      if (!strOrEmpty(cfg.button)) {
+        issues.push({
+          code: "list_no_button",
+          severity: "error",
+          message: "Lista WhatsApp sem rótulo do botão que abre a lista.",
+          stepId: step.id,
+        });
+      }
+      const rows = Array.isArray(cfg.rows) ? (cfg.rows as Record<string, unknown>[]) : [];
+      if (rows.length === 0) {
+        issues.push({
+          code: "list_no_rows",
+          severity: "error",
+          message: "Lista WhatsApp sem nenhum item configurado.",
+          stepId: step.id,
+        });
+      } else if (rows.length > 10) {
+        issues.push({
+          code: "list_too_many_rows",
+          severity: "warning",
+          message: `Lista WhatsApp com ${rows.length} itens — WhatsApp só aceita até 10.`,
+          stepId: step.id,
+        });
+      }
+      rows.forEach((r, i) => {
+        if (!strOrEmpty(r.title)) {
+          issues.push({
+            code: "list_row_no_title",
+            severity: "error",
+            message: `Item #${i + 1} da lista sem título.`,
+            stepId: step.id,
+          });
+        }
+        if (!strOrEmpty(r.gotoStepId)) {
+          issues.push({
+            code: "list_row_no_target",
+            severity: "warning",
+            message: `Item "${strOrEmpty(r.title) || `#${i + 1}`}" sem passo de destino.`,
+            stepId: step.id,
+            hint: "Conecte esse item a um passo, ou o clique vai cair no 'else' (se existir) ou finalizar.",
+          });
+        }
+      });
+    }
+
     if (step.type === "business_hours") {
       if (!strOrEmpty(cfg.elseStepId)) {
         issues.push({
@@ -545,6 +612,7 @@ function categorizeStepType(type: string): ActionCategory {
     case "send_whatsapp_template":
     case "send_whatsapp_media":
     case "send_whatsapp_interactive":
+    case "send_whatsapp_list":
     case "question":
     case "send_email":
       return "messaging";

@@ -60,6 +60,7 @@ const META_SEND_FAILURE_STEP_TYPES = new Set([
   "send_whatsapp_template",
   "send_whatsapp_media",
   "send_whatsapp_interactive",
+  "send_whatsapp_list",
   "question",
 ]);
 
@@ -2649,6 +2650,159 @@ async function executeStep(
       return { skipRemaining: true };
     }
 
+    case "send_whatsapp_list": {
+      const phoneRaw = readString(cfg, "phone")?.trim() || rt.contact?.phone || "";
+      const digits = phoneRaw.replace(/\D/g, "");
+      const to = digits.length >= 8 ? digits : undefined;
+      const recipient =
+        readString(cfg, "recipient")?.trim() || rt.contact?.whatsappBsuid?.trim() || undefined;
+      if (!to && !recipient) {
+        throw new MetaSendFailureError("send_whatsapp_list: sem destino");
+      }
+
+      const listVars = (cfg as Record<string, unknown>)["__variables"] as
+        | Record<string, unknown>
+        | undefined;
+      const bodyRaw = readString(cfg, "body");
+      if (!bodyRaw) throw new Error("send_whatsapp_list: body obrigatório");
+      const body = await interpolateMessageVariables(bodyRaw, rt, listVars);
+
+      const buttonLabel = (readString(cfg, "button")?.trim() || "Ver opções").slice(0, 20);
+      const sectionTitle = readString(cfg, "sectionTitle")?.trim() || null;
+
+      const rawRows = Array.isArray(cfg.rows)
+        ? (cfg.rows as {
+            id?: string;
+            title?: string;
+            description?: string;
+            gotoStepId?: string;
+          }[])
+        : [];
+      const rows = rawRows.slice(0, 10).map((r, i) => ({
+        id: (r.id || `row_${i}`).slice(0, 200),
+        title: (r.title || `Opção ${i + 1}`).slice(0, 24),
+        description: r.description?.trim()
+          ? r.description.trim().slice(0, 72)
+          : null,
+      }));
+      if (rows.length === 0) {
+        throw new Error("send_whatsapp_list: pelo menos 1 item obrigatório");
+      }
+
+      const headerRaw = readString(cfg, "header");
+      const footerRaw = readString(cfg, "footer");
+      const header = headerRaw
+        ? await interpolateMessageVariables(headerRaw, rt, listVars)
+        : headerRaw;
+      const footer = footerRaw
+        ? await interpolateMessageVariables(footerRaw, rt, listVars)
+        : footerRaw;
+
+      const rowLabels = rows.map((r) => r.title).join(", ");
+      const displayContent = `${body}\n[Lista: ${rowLabels}]`;
+
+      let conversationId: string | undefined;
+      if (rt.contactId) {
+        const conv = await resolveAutomationSendConv(rt.contactId);
+        conversationId = conv?.id;
+      }
+
+      const listMetaClient = await resolveAutomationMetaClient({
+        automationId: rt.automationId,
+        conversationId,
+        contactId: rt.contactId ?? null,
+        dealId: rt.dealId ?? null,
+      });
+      if (!listMetaClient.configured) {
+        throw new MetaSendFailureError(
+          "send_whatsapp_list: nenhum canal META_CLOUD_API configurado para esta organização.",
+        );
+      }
+
+      const sections = [
+        {
+          title: sectionTitle,
+          rows,
+        },
+      ];
+
+      let externalId: string | null = null;
+      try {
+        const sendResult = await listMetaClient.sendInteractiveList(
+          to,
+          body,
+          buttonLabel,
+          sections,
+          header,
+          footer,
+          recipient,
+        );
+        externalId = sendResult.messages?.[0]?.id ?? null;
+      } catch (sendErr) {
+        const classified = classifyMetaSendFailure(sendErr) ?? toMetaSendFailure(sendErr);
+        log.error(
+          `Envio WhatsApp lista falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`,
+        );
+        await persistFailedAutomationOutbound({
+          conversationId,
+          content: displayContent,
+          messageType: "interactive",
+          senderName: rt.automationName ?? "Automação",
+          triggeredByName: rt.triggeredByName,
+          error: classified,
+        });
+        throw classified;
+      }
+
+      if (conversationId) {
+        const saved = await prisma.message.create({
+          data: withOrgFromCtx({
+            conversationId,
+            content: displayContent,
+            direction: "out",
+            messageType: "interactive",
+            senderName: rt.automationName ?? "Automação",
+            authorType: "bot",
+            ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
+            externalId,
+            sendStatus: "sent",
+          }),
+        });
+        sseBus.publish("new_message", {
+          organizationId: getOrgIdOrNull(),
+          conversationId,
+          contactId: rt.contactId ?? undefined,
+          direction: "out",
+          content: displayContent,
+        });
+
+        if (resolveFailureGotoStepId(cfg)) {
+          await awaitMetaDeliveryVerdict(saved.id, "send_whatsapp_list");
+        }
+      }
+
+      const stepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
+      const LIST_DEFAULT_TIMEOUT_MS = 86_400_000;
+      const rawTimeout = readNumber(cfg, "timeoutMs");
+      const listTimeoutMs =
+        rawTimeout && rawTimeout > 0 ? rawTimeout : LIST_DEFAULT_TIMEOUT_MS;
+      if (stepId && rt.contactId) {
+        const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
+        if (existingCtx) {
+          await advanceContext(
+            existingCtx.id,
+            stepId,
+            (existingCtx.variables as Record<string, unknown>) ?? {},
+            listTimeoutMs,
+          );
+        } else {
+          await createContext(rt.automationId, rt.contactId, stepId, listTimeoutMs);
+        }
+      }
+
+      return { skipRemaining: true };
+    }
+
     case "webhook": {
       const rawUrl = readString(cfg, "url");
       if (!rawUrl) throw new Error("webhook: url obrigatória");
@@ -3498,6 +3652,7 @@ const WA_SEND_STEP_TYPES = new Set([
   "send_whatsapp_template",
   "send_whatsapp_media",
   "send_whatsapp_interactive",
+  "send_whatsapp_list",
   "send_product",
   "question",
 ]);
@@ -3871,6 +4026,7 @@ const STEP_TYPE_LABELS: Record<string, string> = {
   send_whatsapp_template: "Template WhatsApp",
   send_whatsapp_media: "Mídia WhatsApp",
   send_whatsapp_interactive: "Botões WhatsApp",
+  send_whatsapp_list: "Lista WhatsApp",
   send_product: "Enviar produto",
   webhook: "Webhook",
   delay: "Atraso",

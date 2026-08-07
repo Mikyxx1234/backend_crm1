@@ -5,6 +5,28 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-07 — Node `send_whatsapp_list` (Lista / menu interativo)
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão.** Novo passo `send_whatsapp_list` no executor: envia lista via
+`MetaWhatsAppClient.sendInteractiveList` (até 10 rows), persiste outbound
+`interactive`, aguarda delivery se houver `failureGotoStepId`, e pausa
+como interactive. Matching de reply em `automation-context` aceita
+`config.rows` (title/id/`gotoStepId`) além de `buttons`.
+
+**Contexto.** Client Meta já tinha lista; faltava o step no fluxo.
+Botões Meta limitam a 3 opções.
+
+**Alternativas descartadas.** Estender `send_whatsapp_interactive`; webhook
+genérico sem handles no canvas.
+
+**Impacto.** `automation-workflow`, `automation-executor`,
+`automation-context`, `automation-auditor`, `automations` (validate/summarize),
+`automation-layout`.
+
+---
+
 ### 2026-08-06 — CourseConfig: canal, desconto, nível, semestre, grau e pricingOptions
 
 **Decisão.** Produto `kind=COURSE` passa a persistir em `CourseConfig`:

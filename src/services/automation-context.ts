@@ -57,6 +57,7 @@ function readNumber(cfg: unknown, key: string): number | undefined {
 export const PAUSING_STEP_TYPES = new Set([
   "question",
   "send_whatsapp_interactive",
+  "send_whatsapp_list",
   "send_whatsapp_template",
   "send_whatsapp_message",
   "wait_for_reply",
@@ -360,9 +361,25 @@ export async function processIncomingMessage(contactId: string, messageContent: 
       const varName = String(config.saveToVariable ?? "lastResponse");
       variables = { ...variables, [varName]: messageContent };
 
-      const buttons = Array.isArray(config.buttons)
-        ? (config.buttons as { text?: string; title?: string; id?: string; gotoStepId?: string }[])
+      const buttonsFromButtons = Array.isArray(config.buttons)
+        ? (config.buttons as {
+            text?: string;
+            title?: string;
+            id?: string;
+            gotoStepId?: string;
+          }[])
         : [];
+      const buttonsFromRows = Array.isArray(config.rows)
+        ? (config.rows as {
+            text?: string;
+            title?: string;
+            id?: string;
+            gotoStepId?: string;
+          }[])
+        : [];
+      // Lista WhatsApp usa `rows`; botões/question usam `buttons`.
+      const buttons =
+        buttonsFromButtons.length > 0 ? buttonsFromButtons : buttonsFromRows;
 
       if (buttons.length > 0) {
         const normalized = messageContent.trim().toLowerCase();

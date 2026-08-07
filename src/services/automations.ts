@@ -548,6 +548,7 @@ function pickAgentCategory(stepType: string): string | null {
     case "send_whatsapp_template":
       return "template";
     case "send_whatsapp_interactive":
+    case "send_whatsapp_list":
       return "interactive";
     case "send_product":
       return "product";
@@ -569,6 +570,7 @@ function previewForStep(
     case "send_whatsapp_media":
       return str(config.caption) || AGENT_CATEGORY_LABELS.media;
     case "send_whatsapp_interactive":
+    case "send_whatsapp_list":
       return str(config.body) || null;
     case "send_whatsapp_template":
       return str(config.templateLabel) || str(config.templateName) || null;

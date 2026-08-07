@@ -25,6 +25,7 @@ function estStepWidth(type: string): number {
       return 300;
     case "question":
     case "send_whatsapp_interactive":
+    case "send_whatsapp_list":
       return 320;
     case "wait_for_reply":
       return 310;
