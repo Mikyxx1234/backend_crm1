@@ -121,6 +121,10 @@ export type ConversationLastMessagePreview = {
   messageType: string;
   mediaUrl: string | null;
   direction: string;
+  /** Ack de entrega (só relevante para direction=out). */
+  sendStatus: string | null;
+  /** Motivo da falha quando sendStatus=failed. */
+  sendError: string | null;
 };
 
 export type ConversationTag = {
@@ -179,10 +183,13 @@ async function lastMessagePreviewsBatch(
     messageType: string;
     mediaUrl: string | null;
     direction: string;
+    sendStatus: string | null;
+    sendError: string | null;
     createdAt: Date;
   }[]>`
     SELECT DISTINCT ON ("conversationId")
-      "conversationId", "content", "messageType", "mediaUrl", "direction", "createdAt"
+      "conversationId", "content", "messageType", "mediaUrl", "direction",
+      "sendStatus", "sendError", "createdAt"
     FROM "messages"
     WHERE "conversationId" = ANY(${conversationIds})
       AND "organizationId" = ${orgId}
@@ -198,6 +205,8 @@ async function lastMessagePreviewsBatch(
         messageType: r.messageType || "text",
         mediaUrl: r.mediaUrl ?? null,
         direction: r.direction || "in",
+        sendStatus: r.sendStatus ?? null,
+        sendError: r.sendError ?? null,
       },
       createdAt: r.createdAt,
     });
