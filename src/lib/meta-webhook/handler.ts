@@ -56,7 +56,7 @@ void META_WEBHOOK_BUILD_MARKER;
 const log = getLogger("meta-webhook");
 import { processMetaWhatsappCallsWebhook } from "@/services/meta-whatsapp-calls-webhook";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
-import { logEvent, logMessageFailed } from "@/services/activity-log";
+import { logEvent, logMessageFailed, logMessageRead } from "@/services/activity-log";
 import { metaErrorReason } from "@/lib/meta-whatsapp/error-catalog";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -1359,6 +1359,7 @@ async function processStatusUpdate(status: Record<string, unknown>) {
         conversationId: true,
         organizationId: true,
         externalId: true,
+        content: true,
       },
     });
     if (!msg) {
@@ -1515,6 +1516,51 @@ async function processStatusUpdate(status: Record<string, unknown>) {
           log.info(
             `Mensagem lida wamid=${wamid} conversationId=${msg.conversationId} bubbleId=${bubbleId}`,
           );
+          // Activity Log + timeline do deal — base para estatística de leitura.
+          void (async () => {
+            const conv = await prisma.conversation
+              .findUnique({
+                where: { id: msg.conversationId },
+                select: {
+                  contactId: true,
+                  contact: { select: { name: true, phone: true } },
+                },
+              })
+              .catch(() => null);
+            let dealId: string | null = null;
+            if (conv?.contactId) {
+              const open = await prisma.deal
+                .findFirst({
+                  where: { contactId: conv.contactId, status: "OPEN" },
+                  select: { id: true },
+                  orderBy: { updatedAt: "desc" },
+                })
+                .catch(() => null);
+              if (open) {
+                dealId = open.id;
+              } else {
+                const any = await prisma.deal
+                  .findFirst({
+                    where: { contactId: conv.contactId },
+                    select: { id: true },
+                    orderBy: { updatedAt: "desc" },
+                  })
+                  .catch(() => null);
+                dealId = any?.id ?? null;
+              }
+            }
+            await logMessageRead({
+              messageId: msg.id,
+              conversationId: msg.conversationId,
+              contactId: conv?.contactId ?? null,
+              dealId,
+              contactLabel: conv?.contact?.name ?? null,
+              contactSublabel: conv?.contact?.phone ?? null,
+              preview: msg.content?.slice(0, 200) ?? null,
+              source: "meta",
+              channel: "WhatsApp",
+            });
+          })();
         }
     }
 

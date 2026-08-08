@@ -219,6 +219,50 @@ export async function logMessageFailed(input: {
   });
 }
 
+/**
+ * Atalho para registrar leitura (ack `read` da Meta/WhatsApp) no Activity Log.
+ *
+ * Alimenta `/logs`, timeline do negócio e estatísticas futuras (taxa de
+ * leitura). Só deve ser chamado na transição para `read` (não em reentrega).
+ * Fire-and-forget.
+ */
+export async function logMessageRead(input: {
+  messageId: string;
+  conversationId?: string | null;
+  contactId?: string | null;
+  dealId?: string | null;
+  contactLabel?: string | null;
+  contactSublabel?: string | null;
+  preview?: string | null;
+  channel?: string | null;
+  source?: "meta" | "baileys" | string;
+}): Promise<void> {
+  const preview = input.preview?.trim() || null;
+  await logEvent({
+    type: "MESSAGE_READ",
+    entityType: "MESSAGE",
+    entityId: input.messageId,
+    entityLabel: input.contactLabel ?? "Mensagem lida",
+    conversationId: input.conversationId ?? null,
+    contactId: input.contactId ?? null,
+    dealId: input.dealId ?? null,
+    newValue: preview,
+    actor: {
+      type: "SYSTEM",
+      label: "WhatsApp",
+      sublabel: "confirmação de leitura",
+      ref: null,
+    },
+    meta: {
+      preview,
+      source: input.source ?? "meta",
+      channel: input.channel ?? "WhatsApp",
+      contactName: input.contactLabel ?? null,
+      contactPhone: input.contactSublabel ?? null,
+    },
+  });
+}
+
 /// Atalho usado pelo backfill / wrapper de `createDealEvent`. Recebe
 /// o objeto serializado direto e nao deriva ator do contexto.
 export async function logEventRaw(
