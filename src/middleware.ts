@@ -141,7 +141,10 @@ const PUBLIC_PATHS = new Set([
   "/cockpit-agente.html",
 ]);
 
-const PUBLIC_API_PATHS = new Set(["/api/signup"]);
+const PUBLIC_API_PATHS = new Set([
+  "/api/signup",
+  "/api/organization/by-slug",
+]);
 
 const PWA_PUBLIC_PATHS = new Set([
   "/manifest.webmanifest",

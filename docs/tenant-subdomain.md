@@ -15,7 +15,8 @@ Apex/marketing: `https://crm.eduit.com.br`
 | FE | `NEXTAUTH_URL` | apex (`https://crm.eduit.com.br`) |
 
 Helpers: `buildTenantUrl(slug)` / `tenantUrl(slug)` (BE + FE).  
-Signup (`POST /api/signup`) devolve `slug` + `tenantUrl`.
+Signup (`POST /api/signup`) devolve `slug` + `tenantUrl`.  
+Lookup público: `GET /api/organization/by-slug?slug=` → `{ ok, slug, name }` ou 404 (rate-limit IP). O middleware FE usa isso para 404 de slug inexistente/inativo.
 
 ## DNS / EasyPanel / TLS (checklist)
 
@@ -67,7 +68,8 @@ a sessão segue no redirect.
 
 ## Comportamento
 
-- Host com slug válido → cookie/header `tenant-slug` / `x-tenant-slug`; app liberado.
-- Slug inválido → 404 amigável.
+- Host com slug válido **e org ACTIVE** → cookie/header `tenant-slug` / `x-tenant-slug`; app liberado.
+- Slug inválido ou org inexistente/inativa → 404 amigável.
 - Sessão JWT com `organizationSlug` ≠ Host (e não super-admin) → 403 / login com `tenant_mismatch`.
+- Cookie Auth.js em prod: `Domain=.{TENANT_BASE_DOMAIN}` (ver `AUTH_COOKIE_DOMAIN`).
 - Escopo Prisma/JWT por `organizationId` permanece; o slug só amarra o Host à sessão.
