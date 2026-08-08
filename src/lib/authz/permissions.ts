@@ -109,6 +109,7 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
     description:
       "Controla quais abas/filas da Inbox o papel enxerga. Entrada (pool livre) também exige conversation:claim. Substitui o legado sharedInbox para operadores (MEMBER).",
     actions: [
+      { action: "tab:todos", label: "Todas" },
       { action: "tab:entrada", label: "Entrada (fila livre)" },
       { action: "tab:esperando", label: "Aguardando" },
       { action: "tab:respondidas", label: "Respondidas" },
