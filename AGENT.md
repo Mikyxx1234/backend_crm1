@@ -3811,3 +3811,13 @@ para recuperar futuros bancos que caiam em P3009.
 
 **Impacto.** Frontend builder + utomation-executor + validação em update/toggle. Template já tinha channelId — unificado com o restante. ConnectionDivider existente passa a receber channelId das mensagens de automação.
 
+
+### 2026-08-08 - Nodes de automacao "Ganho" e "Perda"
+
+**Decisao.** Dois novos steps de acao: `mark_deal_won` (config `{ pipelineId, pipelineName? }`) e `mark_deal_lost` (config `{ pipelineId, pipelineName?, lostReason }`). Em runtime, resolvem o dealId como `move_stage` (rt.dealId -> cfg.dealId -> deal OPEN do contato, com `continueIfNoDeal` opcional) e chamam `markDealWon`/`markDealLost` com `opts.pipelineId` explicito - sem depender do pipeline ATUAL do deal, permitindo fechar num funil diferente do que o deal esta hoje. `markDealLost` em modo automacao valida o motivo so contra o catalogo do pipeline informado (`assertLostReasonAllowedForPipeline(pipelineId, reason, false)`), sem opcao "Outro". Sem migracao - reusa `Deal.lostReason` e `Stage.isWon/isLost`.
+
+**Contexto.** Faltava fechar negocio (ganho/perdido) direto de um fluxo de automacao - so existia `move_stage` generico, que nao teria de onde tirar o motivo da perda nem qual pipeline usar quando o deal ja mudou de funil.
+
+**Alternativas descartadas.** Reaproveitar `move_stage` puro com stageId fixo (perderia a validacao de motivo por pipeline e o disparo correto de `deal_won`/`deal_lost`); motivo de perda livre (foge do padrao "catalogo por pipeline" ja usado no kanban).
+
+**Impacto.** `services/deals.ts` (`buildTerminalStageMovePatch` e `markDealWon`/`markDealLost` ganham `opts.pipelineId` opcional - callers existentes sem opts continuam iguais), `services/automation-executor.ts` (2 novos cases + `STEP_TYPE_LABELS`), `lib/automation-workflow.ts` (ACTION_STEP_TYPES/labels/default/summary/isStepIncomplete). Nao confundir com os triggers `deal_won`/`deal_lost` (permanecem gatilhos, inalterados).

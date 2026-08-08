@@ -1001,25 +1001,38 @@ export async function moveDeal(
 }
 
 /**
- * Resolve o estágio terminal (Ganho ou Perdido) do pipeline do deal e o
+ * Resolve o estágio terminal (Ganho ou Perdido) do pipeline informado
+ * (ou do pipeline ATUAL do deal, quando `pipelineId` não é passado) e o
  * patch de movimentação pra ele (append no fim da coluna). Retorna {}
- * quando o deal já está no terminal certo ou o pipeline (legado) não
- * tem o estágio fixo.
+ * quando o deal já está no terminal certo do MESMO pipeline atual, ou o
+ * pipeline destino (legado) não tem o estágio fixo.
+ *
+ * `pipelineId` explícito (automação "Ganho"/"Perda") permite mover o
+ * deal para o terminal de um pipeline DIFERENTE do atual — nesse caso o
+ * no-op não se aplica (o estágio atual pertence a outro funil).
  */
 async function buildTerminalStageMovePatch(
   tx: ScopedTx,
   deal: { stageId: string },
   kind: "won" | "lost",
+  pipelineId?: string | null,
 ): Promise<Prisma.DealUncheckedUpdateInput> {
   const current = await tx.stage.findUnique({
     where: { id: deal.stageId },
     select: { pipelineId: true, isWon: true, isLost: true },
   });
   if (!current) return {};
-  if (kind === "won" ? current.isWon : current.isLost) return {};
+
+  const targetPipelineId = pipelineId ?? current.pipelineId;
+  if (
+    targetPipelineId === current.pipelineId &&
+    (kind === "won" ? current.isWon : current.isLost)
+  ) {
+    return {};
+  }
 
   const target = await tx.stage.findFirst({
-    where: { pipelineId: current.pipelineId, ...(kind === "won" ? { isWon: true } : { isLost: true }) },
+    where: { pipelineId: targetPipelineId, ...(kind === "won" ? { isWon: true } : { isLost: true }) },
     select: { id: true },
   });
   if (!target) return {};
@@ -1031,11 +1044,17 @@ async function buildTerminalStageMovePatch(
   return { stageId: target.id, position: (max._max.position ?? -1) + 1 };
 }
 
-export async function markDealWon(id: string) {
+export type MarkDealTerminalOptions = {
+  /** Move o deal para o estágio terminal DESTE pipeline (automação). Sem
+   *  isso, usa o pipeline atual do deal (comportamento manual/kanban). */
+  pipelineId?: string | null;
+};
+
+export async function markDealWon(id: string, opts?: MarkDealTerminalOptions) {
   const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
     if (!deal) throw new Error("NOT_FOUND");
-    const movePatch = await buildTerminalStageMovePatch(tx, deal, "won");
+    const movePatch = await buildTerminalStageMovePatch(tx, deal, "won", opts?.pipelineId);
     return tx.deal.update({
       where: { id },
       data: {
@@ -1054,7 +1073,11 @@ export async function markDealWon(id: string) {
   return result;
 }
 
-export async function markDealLost(id: string, lostReason?: string | null) {
+export async function markDealLost(
+  id: string,
+  lostReason?: string | null,
+  opts?: MarkDealTerminalOptions,
+) {
   const reason = lostReason?.trim() || null;
 
   const dealPeek = await prisma.deal.findUnique({
@@ -1062,7 +1085,7 @@ export async function markDealLost(id: string, lostReason?: string | null) {
     select: { stageId: true, stage: { select: { pipelineId: true } } },
   });
   if (!dealPeek) throw new Error("NOT_FOUND");
-  const pipelineId = dealPeek.stage.pipelineId;
+  const pipelineId = opts?.pipelineId ?? dealPeek.stage.pipelineId;
 
   const pipe = await prisma.pipeline.findUnique({
     where: { id: pipelineId },
@@ -1072,12 +1095,19 @@ export async function markDealLost(id: string, lostReason?: string | null) {
     throw new Error("LOST_REASON_REQUIRED");
   }
 
-  await assertLostReasonAllowed(reason, pipelineId);
+  if (opts?.pipelineId) {
+    // Automação (node "Perda"): sempre catálogo do pipeline informado —
+    // ignora `lossReasonAllowOther` (sem opção "Outro" nesse fluxo).
+    const { assertLostReasonAllowedForPipeline } = await import("@/services/loss-reasons");
+    await assertLostReasonAllowedForPipeline(pipelineId, reason, false);
+  } else {
+    await assertLostReasonAllowed(reason, pipelineId);
+  }
 
   const result = await prisma.$transaction(async (tx) => {
     const deal = await tx.deal.findUnique({ where: { id }, select: { stageId: true } });
     if (!deal) throw new Error("NOT_FOUND");
-    const movePatch = await buildTerminalStageMovePatch(tx, deal, "lost");
+    const movePatch = await buildTerminalStageMovePatch(tx, deal, "lost", opts?.pipelineId);
     return tx.deal.update({
       where: { id },
       data: {

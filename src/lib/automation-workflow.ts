@@ -60,6 +60,8 @@ export const AUTOMATION_TRIGGER_TYPES: AutomationTriggerType[] = [
 export const ACTION_STEP_TYPES = [
   "send_email",
   "move_stage",
+  "mark_deal_won",
+  "mark_deal_lost",
   "assign_owner",
   "transfer_department",
   "add_tag",
@@ -168,6 +170,8 @@ export function stepTypeLabel(t: string): string {
   const map: Record<string, string> = {
     send_email: "Enviar e-mail",
     move_stage: "Mover estágio",
+    mark_deal_won: "Ganho",
+    mark_deal_lost: "Perda",
     assign_owner: "Atribuir responsável",
     transfer_department: "Transferir para departamento",
     add_tag: "Adicionar tag",
@@ -299,6 +303,25 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
       const sid = c.stageId ? String(c.stageId) : "";
       if (sid && lookup?.[sid]) return lookup[sid];
       return sid ? `Estágio: ${sid.slice(0, 12)}…` : "Definir estágio";
+    }
+    case "mark_deal_won": {
+      if (c.pipelineName) return `Funil: ${String(c.pipelineName)}`;
+      const pid = c.pipelineId ? String(c.pipelineId) : "";
+      if (pid && lookup?.[pid]) return `Funil: ${lookup[pid]}`;
+      return pid ? `Funil: ${pid.slice(0, 12)}…` : "Selecionar funil";
+    }
+    case "mark_deal_lost": {
+      const pipelineLabel = c.pipelineName
+        ? String(c.pipelineName)
+        : c.pipelineId && lookup?.[String(c.pipelineId)]
+          ? lookup[String(c.pipelineId)]
+          : c.pipelineId
+            ? `${String(c.pipelineId).slice(0, 12)}…`
+            : "";
+      const reason = c.lostReason ? String(c.lostReason) : "";
+      if (pipelineLabel && reason) return `${pipelineLabel} · ${reason}`;
+      if (pipelineLabel) return `Funil: ${pipelineLabel} (sem motivo)`;
+      return "Selecionar funil e motivo";
     }
     case "assign_owner": {
       const target = c.target ? String(c.target) : "deal";
@@ -458,6 +481,10 @@ export function isStepIncomplete(
     return true;
   }
   switch (stepType) {
+    case "mark_deal_won":
+      return !str(c.pipelineId);
+    case "mark_deal_lost":
+      return !str(c.pipelineId) || !str(c.lostReason);
     case "send_whatsapp_message":
       return !str(c.content);
     case "send_product":
@@ -501,6 +528,10 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       return { to: "", subject: "", body: "" };
     case "move_stage":
       return { stageId: "" };
+    case "mark_deal_won":
+      return { pipelineId: "", pipelineName: "" };
+    case "mark_deal_lost":
+      return { pipelineId: "", pipelineName: "", lostReason: "" };
     case "assign_owner":
       return { userId: "", target: "deal" };
     case "transfer_department":

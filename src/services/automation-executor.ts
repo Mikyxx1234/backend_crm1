@@ -35,11 +35,13 @@ import { sseBus } from "@/lib/sse-bus";
 import {
   assignDealOwner,
   createDealEvent,
+  markDealLost,
+  markDealWon,
   nextDealNumber,
   propagateOwnerToContactAndChat,
 } from "@/services/deals";
 import { triggerAgentOpeningForContact } from "@/services/ai/piloting-actions";
-import { notifyDealStageChanged } from "@/services/automation-triggers";
+import { fireTrigger, notifyDealStageChanged } from "@/services/automation-triggers";
 import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
 import { logEvent } from "@/services/activity-log";
@@ -1566,6 +1568,98 @@ async function executeStep(
           depth: (rt.depth ?? 0) + 1,
         });
       }
+      return {};
+    }
+
+    case "mark_deal_won":
+    case "mark_deal_lost": {
+      const isLost = stepType === "mark_deal_lost";
+      const pipelineId = readString(cfg, "pipelineId");
+      if (!pipelineId) {
+        throw new Error(`${stepType}: pipelineId obrigatório`);
+      }
+      const lostReason = isLost ? readString(cfg, "lostReason") : undefined;
+      if (isLost && !lostReason?.trim()) {
+        throw new Error("mark_deal_lost: lostReason obrigatório");
+      }
+
+      let targetDealId = rt.dealId ?? readString(cfg, "dealId");
+      if (!targetDealId && rt.contactId) {
+        const openDeal = await prisma.deal.findFirst({
+          where: { contactId: rt.contactId, status: "OPEN" },
+          select: { id: true },
+        });
+        targetDealId = openDeal?.id;
+      }
+      if (!targetDealId) {
+        if (cfg.continueIfNoDeal === true) {
+          return { note: "ignorado (contato sem negócio aberto)" };
+        }
+        throw new Error(`${stepType}: dealId ausente no contexto`);
+      }
+
+      const before = await prisma.deal.findUnique({
+        where: { id: targetDealId },
+        select: { status: true, stageId: true, contactId: true },
+      });
+      if (!before) throw new Error(`${stepType}: negócio não encontrado`);
+
+      const updated = isLost
+        ? await markDealLost(targetDealId, lostReason, { pipelineId })
+        : await markDealWon(targetDealId, { pipelineId });
+
+      const contactIdForEvents = rt.contactId ?? before.contactId ?? undefined;
+
+      createDealEvent(
+        targetDealId,
+        null,
+        "STATUS_CHANGED",
+        {
+          from: before.status,
+          to: isLost ? "LOST" : "WON",
+          ...(isLost ? { lostReason } : {}),
+          automationId: rt.automationId,
+          ...(rt.automationName ? { automationName: rt.automationName } : {}),
+        },
+        {
+          type: "AUTOMATION",
+          label: rt.automationName ? `Automação: ${rt.automationName}` : "Automação",
+          ref: rt.automationId,
+        },
+      ).catch(() => {});
+
+      if (before.stageId !== updated.stageId) {
+        createDealEvent(
+          targetDealId,
+          null,
+          "STAGE_CHANGED",
+          {
+            from: { id: before.stageId },
+            to: { id: updated.stageId },
+            automationId: rt.automationId,
+            ...(rt.automationName ? { automationName: rt.automationName } : {}),
+          },
+          {
+            type: "AUTOMATION",
+            label: rt.automationName ? `Automação: ${rt.automationName}` : "Automação",
+            ref: rt.automationId,
+          },
+        ).catch(() => {});
+      }
+
+      fireTrigger(isLost ? "deal_lost" : "deal_won", {
+        dealId: targetDealId,
+        contactId: contactIdForEvents,
+        data: { fromStatus: before.status, ...(isLost ? { lostReason } : {}) },
+      }).catch(() => {});
+
+      if (before.stageId !== updated.stageId) {
+        void notifyDealStageChanged(targetDealId, before.stageId, updated.stageId, {
+          contactId: contactIdForEvents,
+          depth: (rt.depth ?? 0) + 1,
+        });
+      }
+
       return {};
     }
 
@@ -4118,6 +4212,8 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
 const STEP_TYPE_LABELS: Record<string, string> = {
   send_email: "Enviar e-mail",
   move_stage: "Mover estágio",
+  mark_deal_won: "Ganho",
+  mark_deal_lost: "Perda",
   assign_owner: "Atribuir responsável",
   add_tag: "Adicionar tag",
   remove_tag: "Remover tag",
