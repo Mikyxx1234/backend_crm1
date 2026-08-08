@@ -213,6 +213,9 @@ function permissionsAllowKey(
  * Substitui o legado `sharedInbox` para MEMBER nas filas Entrada/Automação.
  * Seguro combinar com o filtro de aba (`tabToWhere`) — extras só aparecem
  * nas abas cujo predicado as inclui.
+ *
+ * `base` vazio = irrestrito (ADMIN/MANAGER “all”). Nesse caso NÃO aplicar
+ * extras: senão a inbox inteira colapsa só para Entrada/Automação.
  */
 export function withInboxQueueVisibility(
   base: Prisma.ConversationWhereInput,
@@ -221,6 +224,11 @@ export function withInboxQueueVisibility(
     tabs?: Array<"entrada" | "automacao">;
   },
 ): Prisma.ConversationWhereInput {
+  // Irrestrito: não restringir às filas compartilhadas.
+  if (!base || Object.keys(base).length === 0) {
+    return base ?? {};
+  }
+
   const perms =
     args.permissions instanceof Set
       ? args.permissions
@@ -252,9 +260,6 @@ export function withInboxQueueVisibility(
   }
 
   if (extras.length === 0) return base;
-  if (!base || Object.keys(base).length === 0) {
-    return extras.length === 1 ? extras[0]! : { OR: extras };
-  }
   return { OR: [base, ...extras] };
 }
 
