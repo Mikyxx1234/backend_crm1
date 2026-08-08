@@ -1617,6 +1617,17 @@ async function computeBoardData(
             WHERE c."contactId" = ANY(${allContactIds})
               AND c."organizationId" = ${orgIdForBoard}
               AND m."organizationId" = ${orgIdForBoard}
+              -- Preview do card = última msg real de chat (cliente/agente).
+              -- Exclui nota interna, rascunho IA e eventos de call — senão o
+              -- kanban/Flow mostra "Lead/Conversa distribuída…" no lugar do Oi.
+              AND m."isPrivate" = false
+              AND m."messageType" NOT IN (
+                'note',
+                'ai_draft',
+                'whatsapp_call',
+                'whatsapp_call_recording'
+              )
+              AND m.direction IN ('in', 'out')
             ORDER BY c."contactId", m."createdAt" DESC
           )
           SELECT

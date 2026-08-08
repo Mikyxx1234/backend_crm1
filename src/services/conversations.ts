@@ -193,6 +193,15 @@ async function lastMessagePreviewsBatch(
     FROM "messages"
     WHERE "conversationId" = ANY(${conversationIds})
       AND "organizationId" = ${orgId}
+      -- Mesma regra do board: preview = chat real, não nota/sistema.
+      AND "isPrivate" = false
+      AND "messageType" NOT IN (
+        'note',
+        'ai_draft',
+        'whatsapp_call',
+        'whatsapp_call_recording'
+      )
+      AND direction IN ('in', 'out')
     ORDER BY "conversationId", "createdAt" DESC
   `;
 
