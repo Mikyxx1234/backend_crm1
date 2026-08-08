@@ -1583,6 +1583,8 @@ async function computeBoardData(
     msgContent: string | null;
     msgCreatedAt: Date | null;
     msgDirection: string | null;
+    msgSendStatus: string | null;
+    msgSendError: string | null;
   };
   const convsPromise: Promise<BoardConvRow[]> =
     allContactIds.length > 0
@@ -1607,7 +1609,9 @@ async function computeBoardData(
               c."contactId",
               m.content AS "msgContent",
               m."createdAt" AS "msgCreatedAt",
-              m.direction AS "msgDirection"
+              m.direction AS "msgDirection",
+              m."sendStatus" AS "msgSendStatus",
+              m."sendError" AS "msgSendError"
             FROM conversations c
             INNER JOIN messages m ON m."conversationId" = c.id
             WHERE c."contactId" = ANY(${allContactIds})
@@ -1621,7 +1625,9 @@ async function computeBoardData(
             COALESCE(cu.unread, 0) AS "unreadCount",
             lm."msgContent",
             lm."msgCreatedAt",
-            lm."msgDirection"
+            lm."msgDirection",
+            lm."msgSendStatus",
+            lm."msgSendError"
           FROM contact_unread cu
           LEFT JOIN latest_channel lc ON lc."contactId" = cu."contactId"
           LEFT JOIN last_msg lm ON lm."contactId" = cu."contactId"
@@ -1653,7 +1659,13 @@ async function computeBoardData(
 
   const lastMsgMap = new Map<
     string,
-    { content: string; createdAt: Date; direction: string }
+    {
+      content: string;
+      createdAt: Date;
+      direction: string;
+      sendStatus: string | null;
+      sendError: string | null;
+    }
   >();
   const unreadMap = new Map<string, number>();
   const channelMap = new Map<string, { channel: string; updatedAt: Date }>();
@@ -1671,6 +1683,8 @@ async function computeBoardData(
         content: row.msgContent,
         createdAt: row.msgCreatedAt,
         direction: row.msgDirection ?? "in",
+        sendStatus: row.msgSendStatus ?? null,
+        sendError: row.msgSendError ?? null,
       });
     }
   }
@@ -1718,7 +1732,13 @@ async function computeBoardData(
             hasOverdueActivity,
             unreadCount: deal.contactId ? (unreadMap.get(deal.contactId) ?? 0) : 0,
             lastMessage: lastMsg
-              ? { content: lastMsg.content, createdAt: lastMsg.createdAt, direction: lastMsg.direction }
+              ? {
+                  content: lastMsg.content,
+                  createdAt: lastMsg.createdAt,
+                  direction: lastMsg.direction,
+                  sendStatus: lastMsg.sendStatus,
+                  sendError: lastMsg.sendError,
+                }
               : null,
             channel: deal.contactId
               ? channelMap.get(deal.contactId)?.channel ?? null
