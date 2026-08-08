@@ -29,11 +29,22 @@ export function getAuthCookieDomain(): string | undefined {
   if (explicit) {
     return explicit.startsWith(".") ? explicit : `.${explicit}`;
   }
-  // Produção (HTTPS): compartilha cookie entre apex e `{slug}.base`.
-  // Em HTTP/local não setamos Domain — cookie fica host-only.
+  // Só compartilha Domain quando NEXTAUTH_URL já está no domínio de tenant.
+  // Em EasyPanel / preview (ex.: *.easypanel.host), Domain=.crm… faz o
+  // browser rejeitar o Set-Cookie → login “ok” e middleware manda de volta
+  // pro /login. Nesses hosts o cookie fica host-only.
   const nextAuthUrl = process.env.NEXTAUTH_URL ?? "";
   if (!nextAuthUrl.startsWith("https://")) return undefined;
-  return `.${getTenantBaseDomain()}`;
+  try {
+    const host = new URL(nextAuthUrl).hostname.toLowerCase();
+    const base = getTenantBaseDomain();
+    if (host === base || host.endsWith(`.${base}`)) {
+      return `.${base}`;
+    }
+  } catch {
+    /* NEXTAUTH_URL inválida — host-only */
+  }
+  return undefined;
 }
 
 export function buildTenantUrl(slug: string): string {

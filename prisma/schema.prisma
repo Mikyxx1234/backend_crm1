@@ -1338,6 +1338,8 @@ model Pipeline {
   organizationId       String
   organization         Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name                 String
+  /// Identificador público estável pra URL (?pipeline=vendas). Único por org.
+  slug                 String
   isDefault            Boolean              @default(false)
   /// Se true, marcar negócio como perdido neste funil exige motivo.
   lossReasonRequired   Boolean              @default(false)
@@ -1355,6 +1357,7 @@ model Pipeline {
   /// stages/deals permanecem no banco, mas o pipeline some das listagens.
   archivedAt           DateTime?
 
+  @@unique([organizationId, slug])
   @@index([organizationId])
   @@index([organizationId, isDefault])
   @@index([organizationId, archivedAt])
@@ -1366,6 +1369,8 @@ model Stage {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name           String
+  /// Identificador público estável pra URL (?stage=negociacao). Único no funil.
+  slug           String
   position       Int
   color          String       @default("#6366f1")
   winProbability Int          @default(0)
@@ -1382,6 +1387,7 @@ model Stage {
   deals      Deal[]
 
   @@unique([pipelineId, position])
+  @@unique([pipelineId, slug])
   @@index([organizationId])
   @@map("stages")
 }

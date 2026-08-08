@@ -14,6 +14,7 @@ import {
   type PipelineTemplateId,
 } from "@/lib/onboarding-templates";
 import { buildTenantUrl } from "@/lib/tenant-url";
+import { slugify } from "@/lib/utils";
 
 /**
  * Logica do wizard de onboarding. Opera com `prismaBase` porque:
@@ -216,12 +217,14 @@ export async function applyPipelineTemplate(
       data: {
         organizationId,
         name: template.pipelineName,
+        slug: slugify(template.pipelineName) || "pipeline",
         isDefault: true,
         stages: {
           create: [
             ...template.stages.map((s) => ({
               organizationId,
               name: s.name,
+              slug: slugify(s.name) || `stage-${s.position}`,
               position: s.position,
               color: s.color,
               winProbability: s.winProbability,

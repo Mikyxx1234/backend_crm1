@@ -71,5 +71,7 @@ a sessão segue no redirect.
 - Host com slug válido **e org ACTIVE** → cookie/header `tenant-slug` / `x-tenant-slug`; app liberado.
 - Slug inválido ou org inexistente/inativa → 404 amigável.
 - Sessão JWT com `organizationSlug` ≠ Host (e não super-admin) → 403 / login com `tenant_mismatch`.
-- Cookie Auth.js em prod: `Domain=.{TENANT_BASE_DOMAIN}` (ver `AUTH_COOKIE_DOMAIN`).
+- Cookie Auth.js: `Domain=.{TENANT_BASE_DOMAIN}` só quando `NEXTAUTH_URL` já
+  está nesse domínio (prod/tenant). Em EasyPanel/preview o cookie é host-only
+  (senão o browser rejeita e o login volta pro `/login`). Override: `AUTH_COOKIE_DOMAIN`.
 - Escopo Prisma/JWT por `organizationId` permanece; o slug só amarra o Host à sessão.

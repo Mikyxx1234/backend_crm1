@@ -2,13 +2,14 @@ import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { slugify } from "@/lib/utils";
 
 const DEFAULT_STAGES: Omit<Prisma.StageCreateWithoutPipelineInput, "pipeline" | "organization">[] = [
-  { name: "Novo", position: 0, color: "#6366f1", winProbability: 10, rottingDays: 30 },
-  { name: "Qualificado", position: 1, color: "#8b5cf6", winProbability: 25, rottingDays: 30 },
-  { name: "Proposta", position: 2, color: "#ec4899", winProbability: 50, rottingDays: 14 },
-  { name: "Negociação", position: 3, color: "#f97316", winProbability: 75, rottingDays: 7 },
-  { name: "Fechamento", position: 4, color: "#22c55e", winProbability: 90, rottingDays: 7 },
+  { name: "Novo", position: 0, color: "#6366f1", winProbability: 10, rottingDays: 30, slug: "novo" },
+  { name: "Qualificado", position: 1, color: "#8b5cf6", winProbability: 25, rottingDays: 30, slug: "qualificado" },
+  { name: "Proposta", position: 2, color: "#ec4899", winProbability: 50, rottingDays: 14, slug: "proposta" },
+  { name: "Negociação", position: 3, color: "#f97316", winProbability: 75, rottingDays: 7, slug: "negociacao" },
+  { name: "Fechamento", position: 4, color: "#22c55e", winProbability: 90, rottingDays: 7, slug: "fechamento" },
 ];
 
 /**
@@ -19,8 +20,8 @@ const DEFAULT_STAGES: Omit<Prisma.StageCreateWithoutPipelineInput, "pipeline" | 
  * `rottingDays` alto evita marcar deals fechados como "apodrecendo".
  */
 export const TERMINAL_STAGES: Omit<Prisma.StageCreateWithoutPipelineInput, "pipeline" | "organization" | "position">[] = [
-  { name: "Ganho", color: "#16a34a", winProbability: 100, rottingDays: 3650, isWon: true },
-  { name: "Perdido", color: "#ef4444", winProbability: 0, rottingDays: 3650, isLost: true },
+  { name: "Ganho", color: "#16a34a", winProbability: 100, rottingDays: 3650, isWon: true, slug: "ganho" },
+  { name: "Perdido", color: "#ef4444", winProbability: 0, rottingDays: 3650, isLost: true, slug: "perdido" },
 ];
 
 /** Stages default + terminais com positions sequenciais, prontos pro create. */
@@ -34,9 +35,69 @@ function buildDefaultStageCreates(organizationId: string) {
   return [...base, ...terminals];
 }
 
+/** Gera slug único no escopo (org ou pipeline). */
+async function allocateUniqueSlug(args: {
+  base: string;
+  exists: (candidate: string) => Promise<boolean>;
+}): Promise<string> {
+  const root = slugify(args.base) || "item";
+  let candidate = root;
+  let n = 1;
+  while (await args.exists(candidate)) {
+    n += 1;
+    candidate = `${root}-${n}`;
+  }
+  return candidate;
+}
+
+async function allocatePipelineSlug(
+  organizationId: string,
+  name: string,
+  excludeId?: string,
+): Promise<string> {
+  return allocateUniqueSlug({
+    base: name,
+    exists: async (candidate) => {
+      const hit = await prisma.pipeline.findFirst({
+        where: {
+          organizationId,
+          slug: candidate,
+          ...(excludeId ? { id: { not: excludeId } } : {}),
+        },
+        select: { id: true },
+      });
+      return !!hit;
+    },
+  });
+}
+
+export async function allocateStageSlug(
+  pipelineId: string,
+  name: string,
+  excludeId?: string,
+  tx?: Prisma.TransactionClient,
+): Promise<string> {
+  const db = tx ?? prisma;
+  return allocateUniqueSlug({
+    base: name,
+    exists: async (candidate) => {
+      const hit = await db.stage.findFirst({
+        where: {
+          pipelineId,
+          slug: candidate,
+          ...(excludeId ? { id: { not: excludeId } } : {}),
+        },
+        select: { id: true },
+      });
+      return !!hit;
+    },
+  });
+}
+
 const stageWithCountSelect = {
   id: true,
   name: true,
+  slug: true,
   position: true,
   color: true,
   winProbability: true,
@@ -52,9 +113,11 @@ export async function ensureDefaultPipeline() {
   const count = await prisma.pipeline.count({ where: { archivedAt: null } });
   if (count > 0) return;
   const organizationId = getOrgIdOrThrow();
+  const slug = await allocatePipelineSlug(organizationId, "Pipeline Principal");
   await prisma.pipeline.create({
     data: {
       name: "Pipeline Principal",
+      slug,
       isDefault: true,
       organizationId,
       stages: {
@@ -83,6 +146,7 @@ export async function getPipelines(options?: { allowedPipelineIds?: string[] | n
     select: {
       id: true,
       name: true,
+      slug: true,
       isDefault: true,
       createdAt: true,
       updatedAt: true,
@@ -111,7 +175,7 @@ const dealListInclude = {
 export async function getPipelineMeta(id: string) {
   return prisma.pipeline.findFirst({
     where: { id, archivedAt: null },
-    select: { id: true, name: true, isDefault: true },
+    select: { id: true, name: true, slug: true, isDefault: true },
   });
 }
 
@@ -140,9 +204,11 @@ export async function createPipeline(data: { name: string }) {
   }
 
   const organizationId = getOrgIdOrThrow();
+  const slug = await allocatePipelineSlug(organizationId, name);
   return prisma.pipeline.create({
     data: {
       name,
+      slug,
       organizationId,
       stages: {
         create: buildDefaultStageCreates(organizationId),
@@ -151,6 +217,7 @@ export async function createPipeline(data: { name: string }) {
     select: {
       id: true,
       name: true,
+      slug: true,
       isDefault: true,
       createdAt: true,
       updatedAt: true,
@@ -174,7 +241,9 @@ export async function updatePipeline(id: string, data: UpdatePipelineInput) {
   if (data.name !== undefined) {
     const name = data.name.trim();
     if (!name) throw new Error("INVALID_NAME");
+    const organizationId = getOrgIdOrThrow();
     payload.name = name;
+    payload.slug = await allocatePipelineSlug(organizationId, name, id);
   }
   if (data.isDefault !== undefined) {
     payload.isDefault = data.isDefault;
@@ -299,9 +368,12 @@ export async function createStage(pipelineId: string, data: CreateStageInput) {
       });
     }
 
+    const slug = await allocateStageSlug(pipelineId, name, undefined, tx);
+
     return tx.stage.create({
       data: {
         name,
+        slug,
         position,
         pipelineId,
         organizationId: getOrgIdOrThrow(),
@@ -359,6 +431,7 @@ export async function updateStage(id: string, data: UpdateStageInput) {
     const name = data.name.trim();
     if (!name) throw new Error("INVALID_NAME");
     payload.name = name;
+    payload.slug = await allocateStageSlug(stage.pipelineId, name, id);
   }
   if (data.color !== undefined) payload.color = data.color;
   if (data.winProbability !== undefined) payload.winProbability = data.winProbability;

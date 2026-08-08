@@ -9,7 +9,7 @@ export async function GET(request: Request) {
 
   return await runWithApiUserContext(authResult.user, async () => {
   const stages = await prisma.stage.findMany({
-    select: { id: true, name: true, color: true, position: true, pipelineId: true },
+    select: { id: true, name: true, slug: true, color: true, position: true, pipelineId: true },
     orderBy: { position: "asc" },
   });
   return NextResponse.json(stages);

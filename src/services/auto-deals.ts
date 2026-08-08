@@ -37,6 +37,7 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
 import { fireTrigger } from "@/services/automation-triggers";
 import { nextDealNumber } from "@/services/deals";
 import { getNextOwner } from "@/services/lead-distribution";
+import { allocateStageSlug } from "@/services/pipelines";
 
 type EnsureOpenDealSource = "auto_whatsapp" | "auto_whatsapp_qr" | string;
 
@@ -182,10 +183,12 @@ export async function ensureOpenDealForContact(
     });
     const newPosition = (minPos._min.position ?? 0) - 1;
 
+    const stageName = "Lead de Entrada";
     incomingStage = await prisma.stage.create({
       data: {
         organizationId: getOrgIdOrThrow(),
-        name: "Lead de Entrada",
+        name: stageName,
+        slug: await allocateStageSlug(pipeline.id, stageName),
         pipelineId: pipeline.id,
         position: newPosition,
         color: "#f59e0b",

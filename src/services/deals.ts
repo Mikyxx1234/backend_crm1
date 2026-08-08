@@ -337,13 +337,13 @@ const detailInclude = {
   },
   stage: {
     select: {
-      id: true, name: true, position: true, color: true,
+      id: true, name: true, slug: true, position: true, color: true,
       pipeline: {
         select: {
-          id: true, name: true,
+          id: true, name: true, slug: true,
           stages: {
             orderBy: { position: "asc" as const },
-            select: { id: true, name: true, color: true, position: true },
+            select: { id: true, name: true, slug: true, color: true, position: true },
           },
         },
       },
