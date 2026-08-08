@@ -130,16 +130,17 @@ export async function getVisibilityFilter(
   }
 
   /**
-   * Modo "own" do papel. A "caixa de entrada compartilhada" (extra do PAPEL,
-   * atrás da flag `rbac_granular_scope_v1`) decide se o agente enxerga
-   * conversas não atribuídas via contato:
-   *   - sharedInbox=true (default) → vê conversas próprias + não atribuídas
-   *     ligadas a contatos que ele acompanha.
-   *   - sharedInbox=false → estritamente as conversas atribuídas a ele.
-   * ADMIN e flag desligada mantêm o comportamento compartilhado.
+   * Modo "own" do papel.
    *
-   * MEMBER: sempre estrito (só atribuídas a ele) — não entra no pool
-   * "Sem responsável".
+   * MEMBER: default estrito (só atribuídas a ele). Filas compartilhadas
+   * (Entrada / Automação) NÃO usam mais `sharedInbox` — liberar via
+   * `inbox:tab:entrada` + `conversation:claim` e `inbox:tab:automacao`,
+   * aplicadas em `withInboxQueueVisibility` na listagem da inbox.
+   *
+   * Demais papéis (com flag `rbac_granular_scope_v1`):
+   *   - sharedInbox=true (default) → próprias + não atribuídas ligadas a
+   *     contatos que o agente acompanha.
+   *   - sharedInbox=false → estritamente as atribuídas a ele.
    */
   let strictOwnInbox = role === "MEMBER";
   if (!strictOwnInbox) {
@@ -191,6 +192,70 @@ export async function getVisibilityFilter(
       OR: [assignedToMe, composeDepartmentScope(sharedUnassigned, deptScope)],
     },
   };
+}
+
+function permissionsAllowKey(
+  perms: ReadonlySet<string>,
+  key: string,
+): boolean {
+  if (perms.has("*") || perms.has(key)) return true;
+  const colon = key.indexOf(":");
+  if (colon > 0 && perms.has(`${key.slice(0, colon)}:*`)) return true;
+  return false;
+}
+
+/**
+ * Amplia o `conversationWhere` para filas compartilhadas da Inbox quando o
+ * operador tem as chaves correspondentes:
+ *   - `inbox:tab:entrada` + `conversation:claim` → pool OPEN não atribuído
+ *   - `inbox:tab:automacao` → fila de automação (RUNNING / assignee IA)
+ *
+ * Substitui o legado `sharedInbox` para MEMBER nas filas Entrada/Automação.
+ * Seguro combinar com o filtro de aba (`tabToWhere`) — extras só aparecem
+ * nas abas cujo predicado as inclui.
+ */
+export function withInboxQueueVisibility(
+  base: Prisma.ConversationWhereInput,
+  args: {
+    permissions: ReadonlySet<string> | readonly string[];
+    tabs?: Array<"entrada" | "automacao">;
+  },
+): Prisma.ConversationWhereInput {
+  const perms =
+    args.permissions instanceof Set
+      ? args.permissions
+      : new Set(args.permissions);
+  const tabs = args.tabs ?? (["entrada", "automacao"] as const);
+  const extras: Prisma.ConversationWhereInput[] = [];
+
+  if (
+    tabs.includes("entrada") &&
+    permissionsAllowKey(perms, "inbox:tab:entrada") &&
+    permissionsAllowKey(perms, "conversation:claim")
+  ) {
+    extras.push({ assignedToId: null, status: "OPEN" });
+  }
+
+  if (tabs.includes("automacao") && permissionsAllowKey(perms, "inbox:tab:automacao")) {
+    extras.push({
+      status: "OPEN",
+      OR: [
+        {
+          assignedToId: null,
+          contact: {
+            automationContexts: { some: { status: "RUNNING" } },
+          },
+        },
+        { assignedTo: { is: { type: "AI" } } },
+      ],
+    });
+  }
+
+  if (extras.length === 0) return base;
+  if (!base || Object.keys(base).length === 0) {
+    return extras.length === 1 ? extras[0]! : { OR: extras };
+  }
+  return { OR: [base, ...extras] };
 }
 
 export async function getVisibilitySettings(): Promise<

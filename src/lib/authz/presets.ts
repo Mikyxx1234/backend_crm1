@@ -36,6 +36,9 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   // Conversation
   "conversation:view", "conversation:claim", "conversation:reassign_others",
   "conversation:resolve", "conversation:send_template", "conversation:transfer_channel",
+  // Filas da Inbox — Gestor vê todas as abas
+  "inbox:tab:entrada", "inbox:tab:esperando", "inbox:tab:respondidas",
+  "inbox:tab:automacao", "inbox:tab:finalizados", "inbox:tab:erro",
   // Automation / AI
   "automation:view", "automation:create", "automation:edit", "automation:publish", "automation:delete",
   "ai_agent:view", "ai_agent:create", "ai_agent:edit", "ai_agent:delete",
@@ -81,6 +84,9 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   "company:view",
   "deal:view", "deal:create", "deal:edit", "deal:change_stage",
   "conversation:view", "conversation:claim", "conversation:resolve",
+  // Filas da Inbox — Operador: só Aguardando + Respondidas por padrão
+  // (Entrada/Automação exigem grant explícito em Settings → Permissões).
+  "inbox:tab:esperando", "inbox:tab:respondidas",
   "tag:view",
   "task:view", "task:create", "task:edit",
   "report:view",

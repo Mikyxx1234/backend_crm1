@@ -4,7 +4,7 @@ import { withApiAuthContext } from "@/lib/api-auth";
 import { loadAuthzContext } from "@/lib/authz";
 import { canSeeInboxTab, getScopeGrants } from "@/lib/authz/scope-grants";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
-import { getVisibilityFilter } from "@/lib/visibility";
+import { getVisibilityFilter, withInboxQueueVisibility } from "@/lib/visibility";
 import {
   buildInboxFilterConditions,
   findSessionExpiringConversationIds,
@@ -124,6 +124,10 @@ export async function GET(request: Request) {
 
       if (searchParams.get("counts") === "1") {
         const visibility = await getVisibilityFilter(user);
+        const conversationWhere = withInboxQueueVisibility(
+          visibility.conversationWhere,
+          { permissions: inboxPerms },
+        );
         const memberCategoryTabs: InboxCategoryTab[] | null =
           user.role === "MEMBER"
             ? (() => {
@@ -140,7 +144,7 @@ export async function GET(request: Request) {
             ? countsSearchRaw.trim()
             : undefined;
         const counts = await getTabCounts(
-          visibility.conversationWhere,
+          conversationWhere,
           memberCategoryTabs,
           allowedChannelIds,
           filterConditions,
@@ -182,6 +186,10 @@ export async function GET(request: Request) {
         typeof searchRaw === "string" && searchRaw.trim().length > 0 ? searchRaw.trim() : undefined;
 
       const visibility = await getVisibilityFilter(user);
+      const conversationWhere = withInboxQueueVisibility(
+        visibility.conversationWhere,
+        { permissions: inboxPerms },
+      );
 
       const memberTodosCategories: InboxCategoryTab[] | undefined =
         tab === "todos" && user.role === "MEMBER"
@@ -202,7 +210,7 @@ export async function GET(request: Request) {
         search,
         page,
         perPage,
-        visibilityWhere: visibility.conversationWhere,
+        visibilityWhere: conversationWhere,
         ownerId,
         ownerIds,
         withoutOwner,

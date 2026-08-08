@@ -2,12 +2,13 @@ import { NextResponse } from "next/server";
 import type { Prisma } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
+import { loadAuthzContext } from "@/lib/authz";
 import { listAllowedChannelIds } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
-import { getVisibilityFilter } from "@/lib/visibility";
+import { getVisibilityFilter, withInboxQueueVisibility } from "@/lib/visibility";
 
-type SessionUser = { id: string; role: AppUserRole };
+type SessionUser = { id: string; role: AppUserRole; organizationId?: string };
 
 /** Verifica se o usuário pode listar/ver esta conversa (mesma regra da API GET /conversations). */
 export async function userHasConversationAccess(
@@ -15,9 +16,23 @@ export async function userHasConversationAccess(
   conversationId: string
 ): Promise<boolean> {
   const { conversationWhere } = await getVisibilityFilter(user);
+  let where = conversationWhere;
+  try {
+    const orgId = user.organizationId ?? getOrgIdOrThrow();
+    const authz = await loadAuthzContext({
+      userId: user.id,
+      organizationId: orgId,
+      isSuperAdmin: false,
+    });
+    const perms: ReadonlySet<string> =
+      authz.isSuperAdmin || authz.isAdmin ? new Set(["*"]) : authz.permissions;
+    where = withInboxQueueVisibility(conversationWhere, { permissions: perms });
+  } catch {
+    // Sem authz (jobs / contexto incompleto) — mantém where base.
+  }
   const conditions: Prisma.ConversationWhereInput[] = [{ id: conversationId }];
-  if (conversationWhere && Object.keys(conversationWhere).length > 0) {
-    conditions.push(conversationWhere);
+  if (where && Object.keys(where).length > 0) {
+    conditions.push(where);
   }
   // Escopo de canais por usuário (mesma regra do GET /conversations).
   const allowedChannelIds = await listAllowedChannelIds({

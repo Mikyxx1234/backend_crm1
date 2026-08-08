@@ -104,6 +104,20 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
     ],
   },
   {
+    resource: "inbox",
+    label: "Filas da Inbox",
+    description:
+      "Controla quais abas/filas da Inbox o papel enxerga. Entrada (pool livre) também exige conversation:claim. Substitui o legado sharedInbox para operadores (MEMBER).",
+    actions: [
+      { action: "tab:entrada", label: "Entrada (fila livre)" },
+      { action: "tab:esperando", label: "Aguardando" },
+      { action: "tab:respondidas", label: "Respondidas" },
+      { action: "tab:automacao", label: "Automação" },
+      { action: "tab:finalizados", label: "Encerradas" },
+      { action: "tab:erro", label: "Erro" },
+    ],
+  },
+  {
     resource: "automation",
     label: "Automações (Salesbot, fluxos)",
     actions: [
@@ -357,7 +371,10 @@ export function describePermission(key: string): string {
     const r = PERMISSION_CATALOG.find((x) => x.resource === resource);
     return r ? `Tudo em ${r.label}` : key;
   }
-  const [resource, action] = key.split(":");
+  const colon = key.indexOf(":");
+  if (colon <= 0) return key;
+  const resource = key.slice(0, colon);
+  const action = key.slice(colon + 1);
   const r = PERMISSION_CATALOG.find((x) => x.resource === resource);
   if (!r) return key;
   const a = r.actions.find((x) => x.action === action);

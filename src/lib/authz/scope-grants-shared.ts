@@ -183,11 +183,16 @@ function normalizeIds(input: unknown): string[] {
 
 function normalizeRoleScope(input: unknown): RoleScope {
   const src = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
-  return {
-    ADMIN: normalizeIds(src.ADMIN),
-    MANAGER: normalizeIds(src.MANAGER),
-    MEMBER: normalizeIds(src.MEMBER),
-  };
+  const out: RoleScope = {};
+  // Só inclui papéis presentes no input — ausente ≠ `[]`.
+  // `[]` explícito = nenhum acesso; chave ausente = sem regra (default permissivo
+  // nos demais scopes / fallback de permissions nas abas da inbox).
+  for (const role of ["ADMIN", "MANAGER", "MEMBER"] as const) {
+    if (Array.isArray(src[role])) {
+      out[role] = normalizeIds(src[role]);
+    }
+  }
+  return out;
 }
 
 function normalizeUserScope(input: unknown): UserScopeGrants {
@@ -655,15 +660,26 @@ export function canSeeSettingsItem(args: {
 const DEFAULT_MEMBER_INBOX_TABS = new Set<InboxTab>(["esperando", "respondidas"]);
 
 /**
- * Permissão RBAC mínima por aba de categoria (Authz v2 ↔ inbox).
- *
- * Modelo: "entrada" é a fila LIVRE (conversas sem resposta do agente) — só
- * faz sentido para quem pode ASSUMIR conversa da fila (`conversation:claim`).
- * As demais abas refletem o trabalho do agente e exigem apenas
- * `conversation:view`. Mantido alinhado ao catálogo em
- * `src/lib/authz/permissions.ts` (resource `conversation`).
+ * Permission keys canônicas por aba (`inbox:tab:<id>`).
+ * Fonte alinhada a `PERMISSION_CATALOG` resource `inbox`.
  */
-const INBOX_TAB_REQUIRED_PERMISSION: Record<Exclude<InboxTab, InboxSuperTab>, string> = {
+const INBOX_TAB_PERMISSION_KEYS: Record<Exclude<InboxTab, InboxSuperTab>, string> = {
+  entrada: "inbox:tab:entrada",
+  esperando: "inbox:tab:esperando",
+  respondidas: "inbox:tab:respondidas",
+  automacao: "inbox:tab:automacao",
+  finalizados: "inbox:tab:finalizados",
+  erro: "inbox:tab:erro",
+};
+
+/**
+ * Fallback legado (rollout): se a org/usuário ainda NÃO tem nenhuma
+ * `inbox:tab:*`, deriva das actions de `conversation` (comportamento pré-filas).
+ */
+const LEGACY_INBOX_TAB_REQUIRED_PERMISSION: Record<
+  Exclude<InboxTab, InboxSuperTab>,
+  string
+> = {
   entrada: "conversation:claim",
   esperando: "conversation:view",
   respondidas: "conversation:view",
@@ -687,11 +703,22 @@ function permissionsAllow(perms: ReadonlySet<string>, key: string): boolean {
   return false;
 }
 
+function hasAnyInboxTabPermission(perms: ReadonlySet<string>): boolean {
+  if (perms.has("*") || perms.has("inbox:*")) return true;
+  for (const key of Object.values(INBOX_TAB_PERMISSION_KEYS)) {
+    if (perms.has(key)) return true;
+  }
+  return false;
+}
+
 function memberTabAllowedByPermissions(
   perms: ReadonlySet<string>,
   tab: Exclude<InboxTab, InboxSuperTab>,
 ): boolean {
-  const required = INBOX_TAB_REQUIRED_PERMISSION[tab];
+  if (hasAnyInboxTabPermission(perms)) {
+    return permissionsAllow(perms, INBOX_TAB_PERMISSION_KEYS[tab]);
+  }
+  const required = LEGACY_INBOX_TAB_REQUIRED_PERMISSION[tab];
   if (!required) return false;
   return permissionsAllow(perms, required);
 }
@@ -700,14 +727,15 @@ function memberTabAllowedByPermissions(
  * Decide se um papel pode ver uma aba da inbox.
  *
  * Ordem de precedência para MEMBER:
- *   1. Regra explícita por papel configurada pela org (`inbox.tabs.MEMBER`,
- *      via /settings/permissions) — sempre vence (admin restringiu de propósito).
- *   2. Caso contrário, deriva do RBAC (`permissions`): o papel custom que
- *      concede `conversation:view`/`conversation:claim` libera as abas
- *      correspondentes. É a CONEXÃO entre o sistema de roles (Authz v2) e o
- *      gating do inbox, que antes era hardcoded no enum legado `User.role`.
- *   3. Sem info de permissões (callers legados/client) → default histórico
- *      (`esperando`/`respondidas`), preservando o fail-safe anterior.
+ *   1. ADMIN/MANAGER (`User.role`) ou permission `*` → todas as abas.
+ *   2. Regra explícita `inbox.tabs.MEMBER` (scope-grants) — `[]` = nenhuma;
+ *      lista / `"*"` = essas abas. Vence permissions quando presente.
+ *   3. Permission keys `inbox:tab:<id>` (quando ao menos uma existe no papel).
+ *   4. Fallback legado: `conversation:view` / `conversation:claim`.
+ *   5. Default histórico: `esperando` / `respondidas`.
+ *
+ * Nota: `sharedInbox` do Role NÃO libera abas — use `inbox:tab:entrada` +
+ * `conversation:claim` (e `inbox:tab:automacao` para a fila de automação).
  */
 export function canSeeInboxTab(args: {
   grants: ScopeGrants;
@@ -716,15 +744,22 @@ export function canSeeInboxTab(args: {
   permissions?: ReadonlySet<string> | readonly string[] | null;
 }): boolean {
   // "todos" e "abertas" são super-tabs sempre visíveis; a visibilidade real
-  // é aplicada pelo `visibilityWhere` na query (MEMBER só vê o que é dele).
+  // é aplicada pelo `visibilityWhere` na query (MEMBER só vê o que é dele
+  // + filas liberadas via `withInboxQueueVisibility`).
   if (args.tab === "todos" || args.tab === "abertas") return true;
   const role = asRoleKey(args.role);
+  const perms = toPermissionSet(args.permissions);
+  if (perms && permissionsAllow(perms, "*")) return true;
   if (!role || role === "ADMIN" || role === "MANAGER") return true;
+
   const scope = args.grants.inbox?.tabs;
   if (hasRoleRule(scope, "MEMBER")) {
-    return roleRuleAllows(scope, "MEMBER", args.tab);
+    const ids = scope?.MEMBER ?? [];
+    // Regra presente com lista vazia = nenhuma aba (não "liberar tudo").
+    if (ids.length === 0) return false;
+    if (ids.includes("*")) return true;
+    return ids.includes(args.tab);
   }
-  const perms = toPermissionSet(args.permissions);
   if (perms) {
     return memberTabAllowedByPermissions(perms, args.tab);
   }
@@ -737,12 +772,17 @@ export function listAllowedInboxTabsForUser(args: {
   permissions?: ReadonlySet<string> | readonly string[] | null;
 }): InboxTab[] {
   const role = asRoleKey(args.role);
-  if (!role || role === "ADMIN" || role === "MANAGER") {
+  const perms = toPermissionSet(args.permissions);
+  if ((perms && permissionsAllow(perms, "*")) || !role || role === "ADMIN" || role === "MANAGER") {
     return ["todos", ...INBOX_CATEGORY_TAB_ORDER];
   }
+  const scope = args.grants.inbox?.tabs;
+  const explicitEmpty =
+    hasRoleRule(scope, "MEMBER") && (scope?.MEMBER?.length ?? 0) === 0;
   const allowed = INBOX_CATEGORY_TAB_ORDER.filter((t) =>
     canSeeInboxTab({ grants: args.grants, role, tab: t, permissions: args.permissions }),
   );
+  if (explicitEmpty) return ["todos"];
   const base: Exclude<InboxTab, "todos">[] =
     allowed.length > 0 ? [...allowed] : ["esperando", "respondidas"];
   return ["todos", ...base];
