@@ -95,6 +95,51 @@ export const ACTION_STEP_TYPES = [
 
 export type ActionStepType = (typeof ACTION_STEP_TYPES)[number];
 
+/**
+ * Steps de "mensagem" que suportam seleção de canal (`config.channelId`).
+ * `question` está incluído porque envia via WhatsApp/Meta (pergunta ao
+ * lead) — mesmo picker/regra de herança dos demais envios WA.
+ */
+export const MESSAGE_CHANNEL_STEP_TYPES = [
+  "send_whatsapp_message",
+  "send_whatsapp_template",
+  "send_whatsapp_media",
+  "send_whatsapp_interactive",
+  "send_whatsapp_list",
+  "send_product",
+  "send_email",
+  "question",
+] as const;
+
+export function isMessageChannelStep(type: string): boolean {
+  return (MESSAGE_CHANNEL_STEP_TYPES as readonly string[]).includes(type);
+}
+
+/** Índice do primeiro step de mensagem na ordem do array (= `position`). */
+export function findFirstMessageStepIndex(steps: { type: string }[]): number {
+  return steps.findIndex((s) => isMessageChannelStep(s.type));
+}
+
+/**
+ * Regra de herança de canal: só o PRIMEIRO passo de mensagem do fluxo
+ * precisa de `config.channelId` explícito — e só quando a org tem 2+
+ * canais conectados do tipo relevante (`connectedChannelCount` já vem
+ * filtrado pelo chamador: WhatsApp para os demais tipos, e-mail para
+ * `send_email`). Passos posteriores herdam em runtime
+ * (`resolveOutboundChannelId`); vazio não é erro para eles.
+ */
+export function validateFirstMessageChannel(
+  steps: { type: string; config?: unknown }[],
+  connectedChannelCount: number,
+): string | null {
+  if (connectedChannelCount < 2) return null;
+  const idx = findFirstMessageStepIndex(steps);
+  if (idx < 0) return null;
+  const cfg = asRecord(steps[idx].config);
+  const channelId = typeof cfg.channelId === "string" ? cfg.channelId.trim() : "";
+  return channelId ? null : "MISSING_CHANNEL_ON_FIRST_MESSAGE_STEP";
+}
+
 export function triggerTypeLabel(t: string): string {
   const map: Record<string, string> = {
     stage_changed: "Estágio alterado",
@@ -402,9 +447,16 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
  * incompletos — o operador não precisa esperar a automação rodar e falhar
  * pra descobrir que esqueceu de preencher um texto obrigatório.
  */
-export function isStepIncomplete(stepType: string, config: unknown): boolean {
+export function isStepIncomplete(
+  stepType: string,
+  config: unknown,
+  opts?: { requireChannel?: boolean },
+): boolean {
   const c = typeof config === "object" && config !== null ? (config as Record<string, unknown>) : {};
   const str = (v: unknown) => (typeof v === "string" ? v.trim() : "");
+  if (opts?.requireChannel && isMessageChannelStep(stepType) && !str(c.channelId)) {
+    return true;
+  }
   switch (stepType) {
     case "send_whatsapp_message":
       return !str(c.content);

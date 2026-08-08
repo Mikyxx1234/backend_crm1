@@ -170,6 +170,8 @@ async function persistFailedAutomationOutbound(opts: {
   triggeredByName?: string | null;
   error: unknown;
   mediaUrl?: string | null;
+  /** Canal (WhatsApp/e-mail) resolvido para este envio — ver `resolveOutboundChannelId`. */
+  channelId?: string | null;
 }): Promise<void> {
   if (!opts.conversationId) return;
   const sendError = formatMetaSendError(opts.error).slice(0, 500);
@@ -186,6 +188,7 @@ async function persistFailedAutomationOutbound(opts: {
         sendStatus: "failed",
         sendError,
         ...(opts.mediaUrl ? { mediaUrl: opts.mediaUrl } : {}),
+        ...(opts.channelId ? { channelId: opts.channelId } : {}),
       }),
     })
     .catch((e) => log.warn("Falha ao persistir mensagem de erro:", e));
@@ -290,6 +293,28 @@ async function resolveAutomationSendConv(
     select: { id: true },
   });
   return conv ? { id: conv.id } : null;
+}
+
+/**
+ * Melhor esforço para herdar o canal ativo através de uma pausa
+ * (question/wait_for_reply): `continueFromStep` monta um `RuntimeContext`
+ * novo, sem o `activeChannelId` acumulado na execução original. Como o
+ * canal de cada envio fica gravado em `Message.channelId`, recuperamos o
+ * último aqui — mesma fonte que já alimenta o "via {canal}" do inbox.
+ */
+async function loadLastAutomationChannelId(contactId: string): Promise<string | null> {
+  const conv = await prisma.conversation.findFirst({
+    where: { contactId, channel: "whatsapp" },
+    orderBy: { updatedAt: "desc" },
+    select: { id: true },
+  });
+  if (!conv) return null;
+  const lastMsg = await prisma.message.findFirst({
+    where: { conversationId: conv.id, direction: "out", channelId: { not: null } },
+    orderBy: { createdAt: "desc" },
+    select: { channelId: true },
+  });
+  return lastMsg?.channelId ?? null;
 }
 
 /**
@@ -452,6 +477,23 @@ async function resolveAutomationMetaClient(opts: {
     `Nenhum canal META_CLOUD_API encontrado (automation=${opts.automationId ?? "—"}, conv=${opts.conversationId ?? "—"}, org=${resolvedOrgId ?? "—"}) — caindo para singleton (env vars). MULTI-TENANCY EM RISCO!`,
   );
   return metaWhatsApp;
+}
+
+/**
+ * Resolve o canal (WhatsApp/e-mail) usado num passo de envio: explícito
+ * no step (`config.channelId`) OU herdado do último canal usado no
+ * caminho de execução (`rt.activeChannelId`). Passos posteriores sem
+ * `channelId` próprio herdam o canal do passo anterior — só o PRIMEIRO
+ * passo de mensagem do fluxo é obrigado a escolher (validado em
+ * `services/automations.ts`). Chamar `rt.activeChannelId = resolved`
+ * logo após, para que o PRÓXIMO passo herde.
+ */
+function resolveOutboundChannelId(
+  cfg: Record<string, unknown>,
+  rt: RuntimeContext,
+): string | null {
+  const cfgChannelId = readString(cfg, "channelId")?.trim();
+  return cfgChannelId || rt.activeChannelId || null;
 }
 
 const ACTIVITY_TYPES: ActivityType[] = ["CALL", "EMAIL", "MEETING", "TASK", "NOTE", "WHATSAPP", "OTHER"];
@@ -952,6 +994,14 @@ type RuntimeContext = {
    * `notifyDealStageChanged`. Ver `AutomationJobContext.depth`.
    */
   depth: number;
+  /**
+   * Canal (WhatsApp/e-mail) usado pelo ÚLTIMO passo de mensagem no
+   * caminho de execução atual. Setado por `resolveOutboundChannelId`
+   * após cada envio — passos de mensagem seguintes SEM `channelId`
+   * próprio herdam este valor. `null`/undefined = nenhum envio ainda
+   * (ou canal não identificado).
+   */
+  activeChannelId?: string | null;
 };
 
 /**
@@ -1254,6 +1304,7 @@ async function resolveRuntimeContext(
     contactCustomFields: customFieldsSnapshot.contactCustomFields,
     dealCustomFields: customFieldsSnapshot.dealCustomFields,
     depth: typeof ctx.depth === "number" ? ctx.depth : 0,
+    activeChannelId: null,
   };
 }
 
@@ -1980,12 +2031,15 @@ async function executeStep(
         if (!conv) log.warn(`Nenhuma conversa WhatsApp encontrada para o contato ${rt.contactId}`);
       }
 
+      const resolvedChannelId = resolveOutboundChannelId(cfg, rt);
       const metaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId,
         contactId: rt.contactId ?? null,
         dealId: rt.dealId ?? null,
+        channelId: resolvedChannelId,
       });
+      rt.activeChannelId = resolvedChannelId;
       if (!metaClient.configured) {
         throw new MetaSendFailureError(
           "send_whatsapp_message: nenhum canal META_CLOUD_API configurado para esta organização."
@@ -2055,6 +2109,7 @@ async function executeStep(
           senderName: rt.automationName ?? "Automação",
           triggeredByName: rt.triggeredByName,
           error: classified,
+          channelId: resolvedChannelId,
         });
         throw classified;
       }
@@ -2084,6 +2139,7 @@ async function executeStep(
             ...(typeof outFlowToken === "string" && outFlowToken.trim()
               ? { flowToken: outFlowToken.trim() }
               : {}),
+            ...(resolvedChannelId ? { channelId: resolvedChannelId } : {}),
           }),
         });
 
@@ -2229,7 +2285,7 @@ async function executeStep(
         const conv = await resolveAutomationSendConv(rt.contactId);
         tplConversationId = conv?.id;
       }
-      const tplChannelId = readString(cfg, "channelId")?.trim() || null;
+      const tplChannelId = resolveOutboundChannelId(cfg, rt);
       const tplMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId: tplConversationId,
@@ -2237,6 +2293,7 @@ async function executeStep(
         dealId: rt.dealId ?? null,
         channelId: tplChannelId,
       });
+      rt.activeChannelId = tplChannelId;
       if (!tplMetaClient.configured) {
         throw new MetaSendFailureError(
           "send_whatsapp_template: nenhum canal META_CLOUD_API configurado para esta organização."
@@ -2314,6 +2371,7 @@ async function executeStep(
           senderName: rt.automationName ?? "Automação",
           triggeredByName: rt.triggeredByName,
           error: classified,
+          channelId: tplChannelId,
         });
         throw classified;
       }
@@ -2346,6 +2404,7 @@ async function executeStep(
             externalId: tplExternalId,
             ...(enrichFlowToken ? { flowToken: enrichFlowToken } : {}),
             ...(tplConfigId ? { templateConfigId: tplConfigId } : {}),
+            ...(tplChannelId ? { channelId: tplChannelId } : {}),
           }),
         });
 
@@ -2414,12 +2473,15 @@ async function executeStep(
         const conv = await resolveAutomationSendConv(rt.contactId);
         mediaConversationId = conv?.id;
       }
+      const mediaChannelId = resolveOutboundChannelId(cfg, rt);
       const mediaMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId: mediaConversationId,
         contactId: rt.contactId ?? null,
         dealId: rt.dealId ?? null,
+        channelId: mediaChannelId,
       });
+      rt.activeChannelId = mediaChannelId;
       if (!mediaMetaClient.configured) {
         throw new MetaSendFailureError(
           "send_whatsapp_media: nenhum canal META_CLOUD_API configurado para esta organização."
@@ -2530,6 +2592,7 @@ async function executeStep(
           triggeredByName: rt.triggeredByName,
           error: classified,
           mediaUrl,
+          channelId: mediaChannelId,
         });
         throw classified;
       }
@@ -2546,6 +2609,7 @@ async function executeStep(
             senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId: mediaExternalId,
             mediaUrl,
+            ...(mediaChannelId ? { channelId: mediaChannelId } : {}),
           }),
         });
         sseBus.publish("new_message", {
@@ -2599,12 +2663,15 @@ async function executeStep(
         conversationId = conv?.id;
       }
 
+      const interactiveChannelId = resolveOutboundChannelId(cfg, rt);
       const interactiveMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId,
         contactId: rt.contactId ?? null,
         dealId: rt.dealId ?? null,
+        channelId: interactiveChannelId,
       });
+      rt.activeChannelId = interactiveChannelId;
       if (!interactiveMetaClient.configured) {
         throw new MetaSendFailureError(
           "send_whatsapp_interactive: nenhum canal META_CLOUD_API configurado para esta organização."
@@ -2625,6 +2692,7 @@ async function executeStep(
           senderName: rt.automationName ?? "Automação",
           triggeredByName: rt.triggeredByName,
           error: classified,
+          channelId: interactiveChannelId,
         });
         throw classified;
       }
@@ -2639,6 +2707,7 @@ async function executeStep(
             senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId,
             sendStatus: "sent",
+            ...(interactiveChannelId ? { channelId: interactiveChannelId } : {}),
           }),
         });
         sseBus.publish("new_message", {
@@ -2730,12 +2799,15 @@ async function executeStep(
         conversationId = conv?.id;
       }
 
+      const listChannelId = resolveOutboundChannelId(cfg, rt);
       const listMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId,
         contactId: rt.contactId ?? null,
         dealId: rt.dealId ?? null,
+        channelId: listChannelId,
       });
+      rt.activeChannelId = listChannelId;
       if (!listMetaClient.configured) {
         throw new MetaSendFailureError(
           "send_whatsapp_list: nenhum canal META_CLOUD_API configurado para esta organização.",
@@ -2773,6 +2845,7 @@ async function executeStep(
           senderName: rt.automationName ?? "Automação",
           triggeredByName: rt.triggeredByName,
           error: classified,
+          channelId: listChannelId,
         });
         throw classified;
       }
@@ -2789,6 +2862,7 @@ async function executeStep(
             ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}),
             externalId,
             sendStatus: "sent",
+            ...(listChannelId ? { channelId: listChannelId } : {}),
           }),
         });
         sseBus.publish("new_message", {
@@ -3148,12 +3222,15 @@ async function executeStep(
         const interpolated = await interpolateMessageVariables(content, rt, vars);
 
         const conv = await resolveAutomationSendConv(rt.contactId);
+        const questionChannelId = resolveOutboundChannelId(cfg, rt);
         const questionMetaClient = await resolveAutomationMetaClient({
           automationId: rt.automationId,
           conversationId: conv?.id,
           contactId: rt.contactId ?? null,
           dealId: rt.dealId ?? null,
+          channelId: questionChannelId,
         });
+        rt.activeChannelId = questionChannelId;
         if (!questionMetaClient.configured) {
           throw new MetaSendFailureError(
             "question: nenhum canal META_CLOUD_API configurado para esta organização."
@@ -3174,12 +3251,13 @@ async function executeStep(
             senderName: rt.automationName ?? "Automação",
             triggeredByName: rt.triggeredByName,
             error: classified,
+            channelId: questionChannelId,
           });
           throw classified;
         }
         if (conv) {
           const saved = await prisma.message.create({
-            data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId }),
+            data: withOrgFromCtx({ conversationId: conv.id, content: interpolated, direction: "out", messageType: "text", senderName: rt.automationName ?? "Automação", authorType: "bot", ...(rt.triggeredByName ? { triggeredByName: rt.triggeredByName } : {}), externalId, ...(questionChannelId ? { channelId: questionChannelId } : {}) }),
           });
           sseBus.publish("new_message", { organizationId: getOrgIdOrNull(), conversationId: conv.id, contactId: rt.contactId, direction: "out", content: interpolated });
 
@@ -4140,6 +4218,10 @@ export async function continueFromStep(
     // Continuação após wait/question: mantém profundidade base (0). O
     // encadeamento relevante ocorre no fluxo principal (executeStep).
     depth: 0,
+    // Herda o canal do último envio desta conversa (best-effort) — o
+    // `RuntimeContext` original (com o `activeChannelId` acumulado) não
+    // sobrevive à pausa. Ver `loadLastAutomationChannelId`.
+    activeChannelId: await loadLastAutomationChannelId(contactId),
   };
 
   let contConvIdForMeta: string | undefined;

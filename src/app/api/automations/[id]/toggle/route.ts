@@ -28,6 +28,16 @@ export async function POST(_request: Request, context: RouteContext) {
         if (err instanceof Error && err.message === "NOT_FOUND") {
           return NextResponse.json({ message: "Automação não encontrada." }, { status: 404 });
         }
+        if (err instanceof Error && err.message === "MISSING_CHANNEL_ON_FIRST_MESSAGE_STEP") {
+          return NextResponse.json(
+            {
+              message:
+                "Selecione o canal do primeiro passo de mensagem — a organização tem mais de um canal conectado.",
+              code: "MISSING_CHANNEL_ON_FIRST_MESSAGE_STEP",
+            },
+            { status: 400 },
+          );
+        }
         throw err;
       }
     } catch (e: unknown) {

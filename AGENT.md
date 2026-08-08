@@ -3798,3 +3798,16 @@ para destravar `P3009` em bancos novos vazios. A versão single-tenant tinha
 + 70 tabelas. Scripts utilitários (`scripts/clean-failed-migrations.mjs`,
 `scripts/resolve-post-baseline.mjs`, etc.) continuam válidos e ficam mantidos
 para recuperar futuros bancos que caiam em P3009.
+
+### 2026-08-08 — Seleção de canal em nodes de mensagem da automação
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão.** Nodes de mensagem (WA texto/mídia/lista/botões/template/produto + e-mail) passam a ter config.channelId opcional com herança: o primeiro node de mensagem do fluxo exige canal quando a org tem 2+ canais CONNECTED; os seguintes herdam (vazio = último canal do caminho) e podem override. UI: kebab no canvas + seletor no painel, ocultos se ≤1 canal conectado. Runtime grava Message.channelId e mantém o mesmo negócio; troca de canal aparece no divisor timeline "via {canal}". Save/ativar bloqueia sem canal no 1º node (quando multi-canal). Lista só canais CONNECTED. Escopo: todas as orgs; desenvolver na DEV_BRANCH.
+
+**Contexto.** Orgs com múltiplos números WhatsApp (ex. Cruzeiro EAD: Acadêmico + CSV Atendimento) precisam escolher por qual canal a automação envia, sem abrir outro negócio.
+
+**Alternativas descartadas.** Gravar channelId em todo node (ruidoso); substituir senderName/automação pelo nome do canal na bolha (quebra marca "Temas Transversais"); abrir novo negócio ao trocar canal.
+
+**Impacto.** Frontend builder + utomation-executor + validação em update/toggle. Template já tinha channelId — unificado com o restante. ConnectionDivider existente passa a receber channelId das mensagens de automação.
+

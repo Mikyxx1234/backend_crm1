@@ -129,6 +129,16 @@ export async function PUT(request: Request, context: RouteContext) {
               { status: 400 },
             );
           }
+          if (err.message === "MISSING_CHANNEL_ON_FIRST_MESSAGE_STEP") {
+            return NextResponse.json(
+              {
+                message:
+                  "Selecione o canal do primeiro passo de mensagem — a organização tem mais de um canal conectado.",
+                code: "MISSING_CHANNEL_ON_FIRST_MESSAGE_STEP",
+              },
+              { status: 400 },
+            );
+          }
         }
         throw err;
       }

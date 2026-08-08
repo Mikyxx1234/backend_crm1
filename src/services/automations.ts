@@ -6,6 +6,10 @@ export type { AutomationJobContext } from "@/lib/queue";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { normalizeHoursBeforeExpiry } from "@/services/whatsapp-session-expiry";
+import {
+  findFirstMessageStepIndex,
+  validateFirstMessageChannel,
+} from "@/lib/automation-workflow";
 
 export const AUTOMATION_TRIGGER_TYPES = [
   "stage_changed",
@@ -702,6 +706,40 @@ export async function createAutomation(
   }) as unknown as Prisma.AutomationGetPayload<{ include: { steps: true } }>;
 }
 
+/**
+ * Conta canais CONECTADOS da org relevantes para seleção de canal em
+ * passos de mensagem: WhatsApp (Meta Cloud API) ou e-mail.
+ */
+async function countConnectedChannels(type: "WHATSAPP" | "EMAIL"): Promise<number> {
+  const organizationId = getOrgIdOrThrow();
+  return prisma.channel.count({
+    where: {
+      organizationId,
+      type,
+      status: "CONNECTED",
+      ...(type === "WHATSAPP" ? { provider: "META_CLOUD_API" } : {}),
+    },
+  });
+}
+
+/**
+ * Valida que o PRIMEIRO passo de mensagem do fluxo tem `channelId` quando
+ * a org tem 2+ canais conectados do tipo relevante (WhatsApp para a
+ * maioria dos steps de mensagem; e-mail para `send_email`). Retorna a
+ * mensagem de erro (`MISSING_CHANNEL_ON_FIRST_MESSAGE_STEP`) ou `null`.
+ */
+async function validateFirstMessageChannelForOrg(
+  steps: { type: string; config?: unknown }[],
+): Promise<string | null> {
+  const idx = findFirstMessageStepIndex(steps);
+  if (idx < 0) return null;
+  const firstType = steps[idx].type;
+  const connectedCount = await countConnectedChannels(
+    firstType === "send_email" ? "EMAIL" : "WHATSAPP",
+  );
+  return validateFirstMessageChannel(steps, connectedCount);
+}
+
 export type UpdateAutomationInput = {
   name?: string;
   description?: string | null;
@@ -713,7 +751,10 @@ export type UpdateAutomationInput = {
 };
 
 export async function updateAutomation(id: string, data: UpdateAutomationInput) {
-  const existing = await prisma.automation.findUnique({ where: { id } });
+  const existing = await prisma.automation.findUnique({
+    where: { id },
+    include: { steps: { orderBy: { position: "asc" } } },
+  });
   if (!existing) {
     throw new Error("NOT_FOUND");
   }
@@ -721,6 +762,16 @@ export async function updateAutomation(id: string, data: UpdateAutomationInput) 
   const effectiveTriggerConfig = data.triggerConfig ?? existing.triggerConfig;
   if (!validateAutomationTriggerConfig(effectiveTriggerType, effectiveTriggerConfig)) {
     throw new Error("INVALID_TRIGGER_CONFIG");
+  }
+
+  // Seleção de canal: só bloqueia quando a automação FICA ativa (já ativa
+  // e steps sendo salvos, ou sendo ativada agora) — desativar ou editar
+  // sem tocar steps/active nunca é bloqueado por isso.
+  const effectiveActive = data.active !== undefined ? data.active : existing.active;
+  if (effectiveActive) {
+    const effectiveSteps = data.steps ?? existing.steps.map((s) => ({ type: s.type, config: s.config }));
+    const channelErr = await validateFirstMessageChannelForOrg(effectiveSteps);
+    if (channelErr) throw new Error(channelErr);
   }
 
   return prisma.$transaction(async (tx) => {
@@ -797,13 +848,25 @@ export async function deleteAutomation(id: string) {
 }
 
 export async function toggleAutomation(id: string) {
-  const existing = await prisma.automation.findUnique({ where: { id }, select: { id: true, active: true } });
+  const existing = await prisma.automation.findUnique({
+    where: { id },
+    select: {
+      id: true,
+      active: true,
+      steps: { select: { type: true, config: true }, orderBy: { position: "asc" } },
+    },
+  });
   if (!existing) {
     throw new Error("NOT_FOUND");
   }
+  const activating = !existing.active;
+  if (activating) {
+    const channelErr = await validateFirstMessageChannelForOrg(existing.steps);
+    if (channelErr) throw new Error(channelErr);
+  }
   return prisma.automation.update({
     where: { id },
-    data: { active: !existing.active },
+    data: { active: activating },
     include: { steps: { orderBy: { position: "asc" } } },
   });
 }
