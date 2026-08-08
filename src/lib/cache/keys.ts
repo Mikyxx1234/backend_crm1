@@ -136,3 +136,66 @@ export async function invalidateBoardData(
 ): Promise<void> {
   await cache.delPattern(`board:${orgId}:${pipelineId}:*`);
 }
+
+/**
+ * Invalida o board de TODOS os pipelines da org.
+ *
+ * Uma mensagem nova muda `lastMessage`/`unreadCount` dos cards, mas quem a
+ * cria (webhook, envio manual, automação, IA) conhece a conversa — não o
+ * pipeline do negócio. Varrer por org evita um lookup extra no hot path.
+ */
+async function purgeOrgBoards(orgId: string): Promise<void> {
+  try {
+    await cache.delPattern(`board:${orgId}:*`);
+  } catch {
+    /* cache é best-effort — o TTL cobre a falha */
+  }
+}
+
+/**
+ * Janela de coalescência das invalidações por mensagem.
+ *
+ * O board é a query mais cara do app (~2,4s) e o cache-aside existe pra
+ * segurar rajada de webhook. Purgar a cada mensagem devolveria o pico de
+ * CPU de jul/26, então a primeira mensagem purga na hora (o operador vê o
+ * card atualizar no refetch que o SSE dispara ~800ms depois) e as demais
+ * da janela viram uma única purga no fim dela.
+ */
+const BOARD_INVALIDATION_WINDOW_MS = 3_000;
+
+type BoardInvalidationWindow = {
+  timer: ReturnType<typeof setTimeout>;
+  /** Houve mensagem durante a janela → purga de novo ao fechá-la. */
+  again: boolean;
+};
+
+const boardInvalidationWindows = new Map<string, BoardInvalidationWindow>();
+
+/**
+ * Agenda a invalidação do board da org com coalescência (leading + trailing).
+ * Fire-and-forget: nunca bloqueia o path de criação da mensagem.
+ */
+export function scheduleBoardInvalidation(orgId: string | null | undefined): void {
+  if (!orgId) return;
+
+  const open = boardInvalidationWindows.get(orgId);
+  if (open) {
+    open.again = true;
+    return;
+  }
+
+  void purgeOrgBoards(orgId);
+
+  const slot: BoardInvalidationWindow = {
+    again: false,
+    timer: setTimeout(() => {
+      boardInvalidationWindows.delete(orgId);
+      if (slot.again) scheduleBoardInvalidation(orgId);
+    }, BOARD_INVALIDATION_WINDOW_MS),
+  };
+  // Não segura o event loop no shutdown.
+  if (typeof slot.timer === "object" && slot.timer && "unref" in slot.timer) {
+    slot.timer.unref();
+  }
+  boardInvalidationWindows.set(orgId, slot);
+}

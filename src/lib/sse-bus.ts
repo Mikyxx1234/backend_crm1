@@ -1,5 +1,6 @@
 import IORedis from "ioredis";
 
+import { scheduleBoardInvalidation } from "@/lib/cache/keys";
 import { metrics, safeLabel } from "@/lib/metrics";
 
 /**
@@ -166,6 +167,20 @@ class SseBus {
         );
       }
       return;
+    }
+
+    // Mensagem nova deixa o cache-aside do board (TTL 45s) desatualizado:
+    // os cards do Kanban/Flow continuariam com a prévia e o "aguardando
+    // resposta" anteriores. Purgar aqui cobre TODOS os produtores (envio
+    // manual, webhook Meta/Baileys, automação, IA) num ponto só. Feito
+    // antes do fan-out pra que o refetch disparado pelo SSE no cliente já
+    // encontre o cache limpo.
+    //
+    // `message_status` (ticks entregue→lida) fica de fora de propósito: são
+    // vários eventos por mensagem e o ganho no card não paga o recompute do
+    // board. Esses ticks acompanham o TTL / o poll de 30s.
+    if (event === "new_message") {
+      scheduleBoardInvalidation(orgId);
     }
 
     const envelope: SseEventEnvelope = { organizationId: orgId, data };
