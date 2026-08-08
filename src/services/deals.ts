@@ -1610,6 +1610,8 @@ async function computeBoardData(
     contactId: string;
     channel: string | null;
     unreadCount: number;
+    msgId: string | null;
+    msgExternalId: string | null;
     msgContent: string | null;
     msgCreatedAt: Date | null;
     msgDirection: string | null;
@@ -1645,6 +1647,8 @@ async function computeBoardData(
           last_msg AS (
             SELECT DISTINCT ON (c."contactId")
               c."contactId",
+              m.id AS "msgId",
+              m."externalId" AS "msgExternalId",
               m.content AS "msgContent",
               m."createdAt" AS "msgCreatedAt",
               m.direction AS "msgDirection",
@@ -1672,6 +1676,8 @@ async function computeBoardData(
             cu."contactId",
             lc.channel,
             COALESCE(cu.unread, 0) AS "unreadCount",
+            lm."msgId",
+            lm."msgExternalId",
             lm."msgContent",
             lm."msgCreatedAt",
             lm."msgDirection",
@@ -1746,6 +1752,8 @@ async function computeBoardData(
   const lastMsgMap = new Map<
     string,
     {
+      id: string;
+      externalId: string | null;
       content: string;
       createdAt: Date;
       direction: string;
@@ -1764,8 +1772,10 @@ async function computeBoardData(
         updatedAt: new Date(0),
       });
     }
-    if (row.msgContent != null && row.msgCreatedAt != null) {
+    if (row.msgId != null && row.msgContent != null && row.msgCreatedAt != null) {
       lastMsgMap.set(row.contactId, {
+        id: row.msgId,
+        externalId: row.msgExternalId ?? null,
         content: row.msgContent,
         createdAt: row.msgCreatedAt,
         direction: row.msgDirection ?? "in",
@@ -1858,6 +1868,8 @@ async function computeBoardData(
             unreadCount: unread,
             lastMessage: lastMsg
               ? {
+                  id: lastMsg.id,
+                  externalId: lastMsg.externalId,
                   content: lastMsg.content,
                   createdAt: lastMsg.createdAt,
                   direction: lastMsg.direction,
