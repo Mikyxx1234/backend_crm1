@@ -81,6 +81,8 @@ export async function POST(request: Request) {
           sources?: string[];
           withoutSource?: boolean;
           sessionExpiresWithinHours?: number;
+          /** Toggle "Minhas × Todas" do header — mesmo recorte da lista. */
+          mine?: boolean;
         };
       };
       const { ids, action, allInFilter } = body;
@@ -138,6 +140,7 @@ export async function POST(request: Request) {
               sources: f.sources,
               withoutSource: f.withoutSource,
               sessionExpiresWithinHours: f.sessionExpiresWithinHours,
+              onlyAssignedToId: f.mine ? user.id : undefined,
             });
             targetIds = resolved.ids;
             skippedIds = resolved.skippedIds;

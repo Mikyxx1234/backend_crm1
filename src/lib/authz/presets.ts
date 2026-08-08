@@ -84,9 +84,14 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   "company:view",
   "deal:view", "deal:create", "deal:edit", "deal:change_stage",
   "conversation:view", "conversation:claim", "conversation:resolve",
-  // Filas da Inbox — Operador: Todas + Aguardando + Respondidas por padrão
-  // (Entrada/Automação exigem grant explícito em Settings → Permissões).
-  "inbox:tab:todos", "inbox:tab:esperando", "inbox:tab:respondidas",
+  // Filas da Inbox — Operador: Todas + Entrada + Aguardando + Respondidas.
+  // Entrada entra por padrão porque é onde ficam as conversas ainda sem
+  // atendimento humano, atribuídas ou não: sem ela o operador não enxerga
+  // as próprias conversas recém-distribuídas. O recorte entre "só as
+  // minhas" e a fila inteira é o toggle do header da Inbox (`?mine=1`).
+  // Automação segue exigindo grant explícito em Settings → Permissões.
+  "inbox:tab:todos", "inbox:tab:entrada", "inbox:tab:esperando",
+  "inbox:tab:respondidas",
   "tag:view",
   "task:view", "task:create", "task:edit",
   "report:view",
