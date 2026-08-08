@@ -214,10 +214,11 @@ const nextAuth = NextAuth({
 
         // Bloqueio 2: organizacao suspensa/arquivada. Super-admins da
         // EduIT (organizationId=null) nao sao afetados.
+        let organizationSlug: string | null = null;
         if (user.organizationId) {
           const org = await prisma.organization.findUnique({
             where: { id: user.organizationId },
-            select: { status: true },
+            select: { status: true, slug: true },
           });
           if (org && org.status !== "ACTIVE") {
             await recordLoginAttempt({
@@ -227,6 +228,7 @@ const nextAuth = NextAuth({
             });
             return null;
           }
+          organizationSlug = org?.slug ?? null;
         }
 
         await recordLoginAttempt({
@@ -242,6 +244,7 @@ const nextAuth = NextAuth({
           email: user.email,
           role: user.role,
           organizationId: user.organizationId,
+          organizationSlug,
           isSuperAdmin: user.isSuperAdmin,
           // NextAuth lê `image` como o avatar do usuário (mapeia pra
           // `session.user.image`). Espelhamos `User.avatarUrl` aqui pra
@@ -260,11 +263,13 @@ const nextAuth = NextAuth({
         token.id = user.id;
         token.role = (user as { role?: AppUserRole | null }).role ?? undefined;
         token.organizationId = (user as { organizationId?: string | null }).organizationId ?? null;
+        token.organizationSlug =
+          (user as { organizationSlug?: string | null }).organizationSlug ?? null;
         token.isSuperAdmin = Boolean((user as { isSuperAdmin?: boolean }).isSuperAdmin);
         token.picture = (user as { image?: string | null }).image ?? null;
       } else if (token.id) {
         try {
-          // Refresh role + avatarUrl + organizationId do banco a cada
+          // Refresh role + avatarUrl + organizationId/slug do banco a cada
           // renovação do JWT — garante que se:
           //   a) o agente atualizar a foto em /settings/profile, OU
           //   b) o super-admin mover o user para outra org, OU
@@ -279,7 +284,7 @@ const nextAuth = NextAuth({
               organizationId: true,
               isSuperAdmin: true,
               isErased: true,
-              organization: { select: { status: true } },
+              organization: { select: { status: true, slug: true } },
             },
           });
           if (dbUser) {
@@ -295,6 +300,7 @@ const nextAuth = NextAuth({
             }
             token.role = dbUser.role;
             token.organizationId = dbUser.organizationId;
+            token.organizationSlug = dbUser.organization?.slug ?? null;
             token.isSuperAdmin = dbUser.isSuperAdmin;
             token.picture = dbUser.avatarUrl ?? null;
           }
@@ -310,6 +316,8 @@ const nextAuth = NextAuth({
         (session.user as { role?: unknown }).role = token.role;
         (session.user as { organizationId?: string | null }).organizationId =
           (token.organizationId as string | null | undefined) ?? null;
+        (session.user as { organizationSlug?: string | null }).organizationSlug =
+          (token.organizationSlug as string | null | undefined) ?? null;
         (session.user as { isSuperAdmin?: boolean }).isSuperAdmin =
           Boolean(token.isSuperAdmin);
         // NextAuth NÃO copia automaticamente `token.picture` pra

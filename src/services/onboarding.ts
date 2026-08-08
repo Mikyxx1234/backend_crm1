@@ -13,6 +13,7 @@ import {
   PIPELINE_TEMPLATES,
   type PipelineTemplateId,
 } from "@/lib/onboarding-templates";
+import { buildTenantUrl } from "@/lib/tenant-url";
 
 /**
  * Logica do wizard de onboarding. Opera com `prismaBase` porque:
@@ -342,6 +343,9 @@ export async function signupOrganizationWithAdmin(input: {
 }): Promise<{
   organizationId: string;
   organizationSlug: string;
+  /** Alias de organizationSlug (contrato do redirect pós-signup). */
+  slug: string;
+  tenantUrl: string;
   userId: string;
   email: string;
 }> {
@@ -443,6 +447,8 @@ export async function signupOrganizationWithAdmin(input: {
     return {
       organizationId: result.org.id,
       organizationSlug: result.org.slug,
+      slug: result.org.slug,
+      tenantUrl: buildTenantUrl(result.org.slug),
       userId: result.user.id,
       email: adminEmail,
     };

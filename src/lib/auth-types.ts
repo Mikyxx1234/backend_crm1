@@ -9,6 +9,8 @@ declare module "next-auth" {
     role?: AppUserRole;
     /// Id da organizacao a que o user pertence. Null somente para super-admin EduIT.
     organizationId?: string | null;
+    /// Slug da org (subdomain). Null somente para super-admin sem org.
+    organizationSlug?: string | null;
     /// Flag que libera acesso ao painel /admin e bypassa a RLS por organizacao.
     isSuperAdmin?: boolean;
   }
@@ -22,6 +24,8 @@ declare module "next-auth" {
       /// Helper requireAuth() valida essa precondicao e responde 401 se
       /// encontrar user comum sem organizationId.
       organizationId: string | null;
+      /// Slug da org — usado pelo middleware FE para casar Host vs sessão.
+      organizationSlug: string | null;
       /// Verdadeiro para operadores da EduIT. Usado no middleware e
       /// em requireSuperAdmin() para gatear /admin/organizations.
       isSuperAdmin: boolean;
@@ -38,6 +42,7 @@ declare module "next-auth/jwt" {
     id?: string;
     role?: AppUserRole;
     organizationId?: string | null;
+    organizationSlug?: string | null;
     isSuperAdmin?: boolean;
   }
 }

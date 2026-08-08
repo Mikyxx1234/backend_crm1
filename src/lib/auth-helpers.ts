@@ -45,6 +45,8 @@ type Session = {
     role?: UserRole;
     /// Id da organizacao resolvida no JWT. Null APENAS para super-admin EduIT.
     organizationId: string | null;
+    /// Slug da org (subdomain). Null APENAS para super-admin sem org.
+    organizationSlug?: string | null;
     /// Habilita bypass da RLS e acesso a /admin/organizations.
     isSuperAdmin: boolean;
     image?: string | null;
