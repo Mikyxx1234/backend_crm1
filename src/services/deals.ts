@@ -458,7 +458,7 @@ export async function createDeal(data: CreateDealInput) {
     const number = await nextDealNumber();
     const title = rawTitle || `Negócio - #${number}`;
     try {
-      return await prisma.deal.create({
+      const created = await prisma.deal.create({
         data: withOrgFromCtx({
           ...(data.id ? { id: data.id } : {}),
           number,
@@ -476,6 +476,8 @@ export async function createDeal(data: CreateDealInput) {
         }),
         include: listInclude,
       });
+      await invalidateBoardsForPipelines([created.stage?.pipelineId]);
+      return created;
     } catch (err) {
       lastErr = err;
       if (isPrismaUniqueViolation(err)) {
@@ -506,6 +508,41 @@ export async function findOpenDealForContactInPipeline(
     orderBy: { createdAt: "asc" },
     include: listInclude,
   });
+}
+
+/**
+ * Invalida o cache-aside do board dos pipelines afetados por uma escrita
+ * manual (responsável, título, valor, criação/exclusão…).
+ *
+ * Sem isso o operador edita, o react-query refaz o GET do board e recebe
+ * a variante ainda em cache — o card só reflete a mudança depois do
+ * `BOARD_CACHE_TTL_SEC`.
+ *
+ * Awaited de propósito: o refetch do cliente sai logo após a resposta e
+ * corria com o purge, reintroduzindo o card antigo por cima do update
+ * otimista.
+ */
+async function invalidateBoardsForPipelines(
+  pipelineIds: (string | null | undefined)[],
+): Promise<void> {
+  try {
+    const orgId = getOrgIdOrThrow();
+    await Promise.all(
+      Array.from(new Set(pipelineIds.filter(Boolean))).map((pipelineId) =>
+        invalidateBoardData(orgId, pipelineId as string),
+      ),
+    );
+  } catch {
+    /* fora de contexto de org (jobs) — TTL curto cobre a atualização */
+  }
+}
+
+async function pipelineIdOfDeal(dealId: string): Promise<string | null> {
+  const row = await prisma.deal.findUnique({
+    where: { id: dealId },
+    select: { stage: { select: { pipelineId: true } } },
+  });
+  return row?.stage?.pipelineId ?? null;
 }
 
 export type UpdateDealInput = {
@@ -552,9 +589,14 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
     throw new Error("EMPTY_UPDATE");
   }
 
+  // Troca de estágio pode ser cross-pipeline: guarda o funil de origem
+  // pra invalidar os dois boards depois do commit.
+  const previousPipelineId =
+    data.stageId === undefined ? null : await pipelineIdOfDeal(id);
+
   // REGRA DE HERANÇA DE RESPONSÁVEL (ver `assignDealOwner` abaixo).
-  return prisma.$transaction(async (tx) => {
-    const updated = await tx.deal.update({
+  const updated = await prisma.$transaction(async (tx) => {
+    const row = await tx.deal.update({
       where: { id },
       data: payload,
       include: listInclude,
@@ -562,12 +604,19 @@ export async function updateDeal(id: string, data: UpdateDealInput) {
 
     if (data.ownerId !== undefined) {
       const contactId =
-        data.contactId !== undefined ? data.contactId : updated.contactId;
+        data.contactId !== undefined ? data.contactId : row.contactId;
       await propagateOwnerToContactAndChat(tx, contactId, data.ownerId);
     }
 
-    return updated;
+    return row;
   });
+
+  await invalidateBoardsForPipelines([
+    updated.stage?.pipelineId,
+    previousPipelineId,
+  ]);
+
+  return updated;
 }
 
 /**
@@ -641,15 +690,24 @@ export async function assignDealOwner(
   dealId: string,
   ownerId: string | null,
 ) {
-  return prisma.$transaction(async (tx) => {
-    const deal = await tx.deal.update({
+  const deal = await prisma.$transaction(async (tx) => {
+    const row = await tx.deal.update({
       where: { id: dealId },
       data: { ownerId },
-      select: { id: true, contactId: true, ownerId: true },
+      select: {
+        id: true,
+        contactId: true,
+        ownerId: true,
+        stage: { select: { pipelineId: true } },
+      },
     });
-    await propagateOwnerToContactAndChat(tx, deal.contactId, ownerId);
-    return deal;
+    await propagateOwnerToContactAndChat(tx, row.contactId, ownerId);
+    return row;
   });
+
+  await invalidateBoardsForPipelines([deal.stage?.pipelineId]);
+
+  return deal;
 }
 
 /**
@@ -720,7 +778,9 @@ export async function syncOwnershipForContact(
 }
 
 export async function deleteDeal(id: string) {
+  const pipelineId = await pipelineIdOfDeal(id);
   await prisma.deal.delete({ where: { id } });
+  await invalidateBoardsForPipelines([pipelineId]);
 }
 
 function addDays(d: Date, days: number): Date {
@@ -1070,6 +1130,7 @@ export async function markDealWon(id: string, opts?: MarkDealTerminalOptions) {
   void import("@/services/product-fulfillment").then((m) => m.onDealWon(id));
   // Catálogo por capacidades (PRD): operação pós-venda agnóstica.
   void import("@/services/fulfillment").then((m) => m.onCommercialDealWon(id));
+  await invalidateBoardsForPipelines([result.stage?.pipelineId]);
   return result;
 }
 
@@ -1121,6 +1182,10 @@ export async function markDealLost(
   });
   // Perda: estorna alocações (no-op se não houver; cobre "desistência" no funil B2C).
   void import("@/services/product-fulfillment").then((m) => m.onDealReverted(id));
+  await invalidateBoardsForPipelines([
+    result.stage?.pipelineId,
+    dealPeek.stage.pipelineId,
+  ]);
   return result;
 }
 
@@ -1149,6 +1214,7 @@ export async function reopenDeal(id: string) {
   });
   // Reabertura: estorna alocações consumidas no ganho (lança inversos).
   void import("@/services/product-fulfillment").then((m) => m.onDealReverted(id));
+  await invalidateBoardsForPipelines([result.stage?.pipelineId]);
   return result;
 }
 
