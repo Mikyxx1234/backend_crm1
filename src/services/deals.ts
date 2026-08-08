@@ -1586,6 +1586,14 @@ async function computeBoardData(
     msgSendStatus: string | null;
     msgSendError: string | null;
   };
+  /** Últimas inbound por contato (até 5) — preview “N aguardando” no card. */
+  type BoardAwaitingMsgRow = {
+    contactId: string;
+    content: string;
+    createdAt: Date;
+    rn: number;
+  };
+  const AWAITING_PREVIEW_CAP = 5;
   const convsPromise: Promise<BoardConvRow[]> =
     allContactIds.length > 0
       ? prisma.$queryRaw<BoardConvRow[]>`
@@ -1645,16 +1653,53 @@ async function computeBoardData(
         `
       : Promise.resolve([]);
 
-  const [totalsGroups, dealProducts, convs, metrics] = await Promise.all([
-    totalsPromise,
-    productsPromise,
-    convsPromise,
-    metricsPromise,
-    // Enriquecimento de avatar (fallback PURAMENTE VISUAL — foto do User
-    // homônimo quando o Contact não tem avatarUrl). Independe das demais;
-    // roda no mesmo lote. Muta `allContacts` em memória e resolve void.
-    enrichContactsWithUserAvatarFallback(allContacts),
-  ]);
+  const awaitingMsgsPromise: Promise<BoardAwaitingMsgRow[]> =
+    allContactIds.length > 0
+      ? prisma.$queryRaw<BoardAwaitingMsgRow[]>`
+          SELECT
+            ranked."contactId",
+            ranked.content,
+            ranked."createdAt",
+            ranked.rn
+          FROM (
+            SELECT
+              c."contactId",
+              m.content,
+              m."createdAt",
+              ROW_NUMBER() OVER (
+                PARTITION BY c."contactId"
+                ORDER BY m."createdAt" DESC
+              )::int AS rn
+            FROM conversations c
+            INNER JOIN messages m ON m."conversationId" = c.id
+            WHERE c."contactId" = ANY(${allContactIds})
+              AND c."organizationId" = ${orgIdForBoard}
+              AND m."organizationId" = ${orgIdForBoard}
+              AND m."isPrivate" = false
+              AND m.direction = 'in'
+              AND m."messageType" NOT IN (
+                'note',
+                'ai_draft',
+                'whatsapp_call',
+                'whatsapp_call_recording'
+              )
+          ) ranked
+          WHERE ranked.rn <= ${AWAITING_PREVIEW_CAP}
+        `
+      : Promise.resolve([]);
+
+  const [totalsGroups, dealProducts, convs, awaitingMsgRows, metrics] =
+    await Promise.all([
+      totalsPromise,
+      productsPromise,
+      convsPromise,
+      awaitingMsgsPromise,
+      metricsPromise,
+      // Enriquecimento de avatar (fallback PURAMENTE VISUAL — foto do User
+      // homônimo quando o Contact não tem avatarUrl). Independe das demais;
+      // roda no mesmo lote. Muta `allContacts` em memória e resolve void.
+      enrichContactsWithUserAvatarFallback(allContacts),
+    ]);
 
   const totalsByStage = new Map<string, number>();
   for (const g of totalsGroups) totalsByStage.set(g.stageId, g._count._all);
@@ -1700,6 +1745,19 @@ async function computeBoardData(
     }
   }
 
+  // contactId → inbound mais recentes (rn=1 = mais nova). Cortamos por
+  // unreadCount no map do deal (footer "N aguardando").
+  const awaitingByContact = new Map<
+    string,
+    Array<{ content: string; createdAt: Date }>
+  >();
+  for (const row of awaitingMsgRows) {
+    if (!row.contactId || !row.content?.trim()) continue;
+    const list = awaitingByContact.get(row.contactId) ?? [];
+    list.push({ content: row.content, createdAt: row.createdAt });
+    awaitingByContact.set(row.contactId, list);
+  }
+
   const metricsMap = new Map(metrics.map((m) => [m.stageId, m]));
 
   // Stage `isIncoming` (Leads de entrada) é a fase de captura e DEVE
@@ -1727,6 +1785,32 @@ async function computeBoardData(
           const threshold = addDays(deal.updatedAt, stage.rottingDays);
           const isRotting = now.getTime() > threshold.getTime();
           const lastMsg = deal.contactId ? lastMsgMap.get(deal.contactId) : undefined;
+          const unread = deal.contactId
+            ? (unreadMap.get(deal.contactId) ?? 0)
+            : 0;
+          const awaitingRaw = deal.contactId
+            ? (awaitingByContact.get(deal.contactId) ?? [])
+            : [];
+          // Mais antigas → mais novas no tooltip (leitura cronológica).
+          // Quantidade = min(unread, cap); se unread=0 mas última é inbound,
+          // mantém só a última no preview (comportamento antigo).
+          const awaitingTake =
+            unread > 0
+              ? Math.min(unread, AWAITING_PREVIEW_CAP)
+              : lastMsg?.direction === "in"
+                ? 1
+                : 0;
+          const awaitingMessages =
+            awaitingTake > 0
+              ? awaitingRaw
+                  .slice(0, awaitingTake)
+                  .slice()
+                  .reverse()
+                  .map((m) => ({
+                    content: m.content,
+                    createdAt: m.createdAt,
+                  }))
+              : [];
           const tags = deal.tags?.map((t: { tag: { id: string; name: string; color: string } }) => t.tag) ?? [];
           const pendingActivities = deal.activities?.length ?? 0;
           const hasOverdueActivity = deal.activities?.some(
@@ -1741,7 +1825,7 @@ async function computeBoardData(
             tags,
             pendingActivities,
             hasOverdueActivity,
-            unreadCount: deal.contactId ? (unreadMap.get(deal.contactId) ?? 0) : 0,
+            unreadCount: unread,
             lastMessage: lastMsg
               ? {
                   content: lastMsg.content,
@@ -1751,6 +1835,7 @@ async function computeBoardData(
                   sendError: lastMsg.sendError,
                 }
               : null,
+            awaitingMessages,
             channel: deal.contactId
               ? channelMap.get(deal.contactId)?.channel ?? null
               : null,
