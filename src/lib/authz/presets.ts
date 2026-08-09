@@ -34,7 +34,8 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   "deal:view", "deal:create", "deal:edit", "deal:delete",
   "deal:transfer_owner", "deal:change_stage", "deal:set_won", "deal:set_lost",
   // Conversation
-  "conversation:view", "conversation:claim", "conversation:reassign_others",
+  "conversation:view", "conversation:claim", "conversation:transfer",
+  "conversation:reassign_others",
   "conversation:resolve", "conversation:send_template", "conversation:transfer_channel",
   // Filas da Inbox — Gestor vê todas as abas
   "inbox:tab:todos", "inbox:tab:entrada", "inbox:tab:esperando", "inbox:tab:respondidas",
@@ -83,7 +84,8 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   "contact:view", "contact:create", "contact:edit",
   "company:view",
   "deal:view", "deal:create", "deal:edit", "deal:change_stage",
-  "conversation:view", "conversation:claim", "conversation:resolve",
+  "conversation:view", "conversation:claim", "conversation:transfer",
+  "conversation:resolve",
   // Filas da Inbox — Operador: Todas + Entrada + Aguardando + Respondidas.
   // Entrada entra por padrão porque é onde ficam as conversas ainda sem
   // atendimento humano, atribuídas ou não: sem ela o operador não enxerga

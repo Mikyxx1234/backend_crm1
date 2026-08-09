@@ -21,6 +21,38 @@ import { executeDistribution } from "@/services/distribution";
 import { assertLeafInDepartment, getAncestors } from "@/services/tabulations";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 
+async function resolveConversationAssignFlags(user: {
+  id: string;
+  organizationId: string | null;
+  isSuperAdmin: boolean;
+}): Promise<{ canReassignOthers: boolean; canTransfer: boolean }> {
+  const authzInput = {
+    userId: user.id,
+    organizationId: user.organizationId,
+    isSuperAdmin: user.isSuperAdmin,
+  };
+  const [canReassignOthers, canTransferRbac] = await Promise.all([
+    checkPermission(authzInput, "conversation:reassign_others"),
+    checkPermission(authzInput, "conversation:transfer"),
+  ]);
+  // Override legado por usuário (Settings → Agentes). Só conta como
+  // liberação quando a row existe e o flag está true — sem row, vale o RBAC.
+  let canTransferAgent = false;
+  try {
+    const perm = await prisma.agentPermission.findUnique({
+      where: { userId: user.id },
+      select: { canTransferConversation: true },
+    });
+    if (perm?.canTransferConversation) canTransferAgent = true;
+  } catch {
+    canTransferAgent = false;
+  }
+  return {
+    canReassignOthers,
+    canTransfer: canTransferRbac || canReassignOthers || canTransferAgent,
+  };
+}
+
 async function logDealEventsForConversationContact(
   conversationId: string,
   userId: string,
@@ -108,18 +140,12 @@ export async function POST(request: Request, context: RouteContext) {
           organizationId: string | null;
           isSuperAdmin: boolean;
         };
-        const canReassignOthers = await checkPermission(
-          {
-            userId: sessionUser.id,
-            organizationId: sessionUser.organizationId,
-            isSuperAdmin: sessionUser.isSuperAdmin,
-          },
-          "conversation:reassign_others",
-        );
+        const flags = await resolveConversationAssignFlags(sessionUser);
         const user = {
           id: sessionUser.id,
           role: sessionUser.role,
-          canReassignOthers,
+          canReassignOthers: flags.canReassignOthers,
+          canTransfer: flags.canTransfer,
         };
         const prev = await prisma.conversation.findUnique({
           where: { id },
@@ -185,6 +211,20 @@ export async function POST(request: Request, context: RouteContext) {
         const gate = await requireConversationAccess(session, id);
         if (gate) return gate;
 
+        const sessionUser = session.user as {
+          id: string;
+          role: "ADMIN" | "MANAGER" | "MEMBER";
+          organizationId: string | null;
+          isSuperAdmin: boolean;
+        };
+        const flags = await resolveConversationAssignFlags(sessionUser);
+        if (!flags.canTransfer && !flags.canReassignOthers) {
+          return NextResponse.json(
+            { message: "Sem permissão para transferir conversa." },
+            { status: 403 },
+          );
+        }
+
         const hasAgent = "assignedToId" in b;
         const hasDept = "departmentId" in b;
         if (!hasAgent && !hasDept) {
@@ -194,9 +234,11 @@ export async function POST(request: Request, context: RouteContext) {
           );
         }
 
-        const user = session.user as {
-          id: string;
-          role: "ADMIN" | "MANAGER" | "MEMBER";
+        const user = {
+          id: sessionUser.id,
+          role: sessionUser.role,
+          canReassignOthers: flags.canReassignOthers,
+          canTransfer: flags.canTransfer,
         };
 
         // --- Transferência para AGENTE (reusa o fluxo de assign) ---
@@ -305,6 +347,7 @@ export async function POST(request: Request, context: RouteContext) {
             select: {
               contactId: true,
               externalId: true,
+              assignedToId: true,
               departmentId: true,
               department: { select: { id: true, name: true } },
             },
@@ -313,6 +356,19 @@ export async function POST(request: Request, context: RouteContext) {
             return NextResponse.json(
               { message: "Conversa não encontrada." },
               { status: 404 },
+            );
+          }
+
+          // Só `conversation:transfer` (sem reassign_others): não mexe em
+          // conversa que já tem outro responsável.
+          if (
+            !flags.canReassignOthers &&
+            prevConv.assignedToId &&
+            prevConv.assignedToId !== user.id
+          ) {
+            return NextResponse.json(
+              { message: "Sem permissão para transferir conversa de outro agente." },
+              { status: 403 },
             );
           }
 

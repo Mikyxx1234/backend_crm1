@@ -864,6 +864,8 @@ export async function assignConversationAssignedTo(
     id: string;
     role: AppUserRole;
     canReassignOthers?: boolean;
+    /** Pode transferir conversa própria/livre para outro agente (RBAC `conversation:transfer`). */
+    canTransfer?: boolean;
   }
 ): Promise<AssignConversationResult> {
   const conv = await prisma.conversation.findUnique({
@@ -878,19 +880,40 @@ export async function assignConversationAssignedTo(
   // por role preserva os demais callsites legados (ex.: transfer).
   const canReassignOthers =
     actor.canReassignOthers ?? (isAdmin || isManager);
+  const canTransfer = actor.canTransfer ?? false;
 
   if (!canReassignOthers) {
-    if (newAssigneeId === null) return { ok: false, code: "FORBIDDEN" };
-    if (newAssigneeId !== actor.id) return { ok: false, code: "FORBIDDEN" };
-    if (conv.assignedToId && conv.assignedToId !== actor.id) {
-      return { ok: false, code: "FORBIDDEN" };
-    }
-    // Auto-atribuição requer permissão configurada pelo administrador.
-    if (!conv.assignedToId) {
-      const allowed = await canRoleSelfAssign(actor.role);
-      if (!allowed) return { ok: false, code: "FORBIDDEN" };
+    // Transferência: conversa própria OU livre → outro agente. Sem isso o
+    // operador só conseguia se autoatribuir (`claim`), e o botão Transferir
+    // da Inbox devolvia 403 em silêncio.
+    const ownsOrUnassigned =
+      !conv.assignedToId || conv.assignedToId === actor.id;
+    if (
+      canTransfer &&
+      ownsOrUnassigned &&
+      newAssigneeId !== null &&
+      newAssigneeId !== actor.id
+    ) {
+      const u = await prisma.user.findUnique({
+        where: { id: newAssigneeId },
+        select: { id: true },
+      });
+      if (!u) return { ok: false, code: "USER_NOT_FOUND" };
       const ok = await userHasConversationAccess(actor, conversationId);
       if (!ok) return { ok: false, code: "FORBIDDEN" };
+    } else {
+      if (newAssigneeId === null) return { ok: false, code: "FORBIDDEN" };
+      if (newAssigneeId !== actor.id) return { ok: false, code: "FORBIDDEN" };
+      if (conv.assignedToId && conv.assignedToId !== actor.id) {
+        return { ok: false, code: "FORBIDDEN" };
+      }
+      // Auto-atribuição requer permissão configurada pelo administrador.
+      if (!conv.assignedToId) {
+        const allowed = await canRoleSelfAssign(actor.role);
+        if (!allowed) return { ok: false, code: "FORBIDDEN" };
+        const ok = await userHasConversationAccess(actor, conversationId);
+        if (!ok) return { ok: false, code: "FORBIDDEN" };
+      }
     }
   } else {
     // Managers também respeitam o flag quando estão se auto-atribuindo.

@@ -96,6 +96,7 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
     actions: [
       { action: "view", label: "Visualizar conversas" },
       { action: "claim", label: "Assumir conversa livre da fila" },
+      { action: "transfer", label: "Transferir conversa (própria ou livre) para agente/departamento" },
       { action: "reassign_others", label: "Reatribuir conversa de outro agente" },
       { action: "resolve", label: "Resolver / reabrir conversa" },
       { action: "delete_messages", label: "Excluir mensagens", destructive: true },
