@@ -733,8 +733,9 @@ function memberTabAllowedByPermissions(
  *
  * Ordem de precedência para MEMBER:
  *   1. ADMIN/MANAGER (`User.role`) ou permission `*` → todas as abas.
- *   2. Regra explícita `inbox.tabs.MEMBER` (scope-grants) — `[]` = nenhuma;
- *      lista / `"*"` = essas abas. Vence permissions quando presente.
+ *   2. Regra explícita `inbox.tabs.MEMBER` (scope-grants) — lista / `"*"` =
+ *      essas abas. Vence permissions quando presente. `[]` = legado sem UI
+ *      que o grave: tratado como ausência de regra (ver comentário abaixo).
  *   3. Permission keys `inbox:tab:<id>` (quando ao menos uma existe no papel),
  *      inclusive `inbox:tab:todos`.
  *   4. Fallback legado: `conversation:view` / `conversation:claim`
@@ -757,13 +758,16 @@ export function canSeeInboxTab(args: {
   if (perms && permissionsAllow(perms, "*")) return true;
   if (!role || role === "ADMIN" || role === "MANAGER") return true;
 
-  const scope = args.grants.inbox?.tabs;
-  if (hasRoleRule(scope, "MEMBER")) {
-    const ids = scope?.MEMBER ?? [];
-    // Regra presente com lista vazia = nenhuma aba (não "liberar tudo").
-    if (ids.length === 0) return false;
-    if (ids.includes("*")) return true;
-    return ids.includes(args.tab);
+  // Lista vazia NÃO é "nenhuma aba". Nenhuma tela grava `inbox.tabs` hoje — o
+  // controle das filas vive nas permissions `inbox:tab:*` da role —, então uma
+  // lista vazia só sobra de configuração legada. Honrá-la bloqueava a Inbox
+  // inteira do operador (todas as abas, contadores zerados, 403 na listagem)
+  // mesmo com as filas liberadas na role, e sem UI para desfazer. Vazio = sem
+  // regra: cai para as permissions, que seguem fail-closed.
+  const tabIds = args.grants.inbox?.tabs?.MEMBER;
+  if (Array.isArray(tabIds) && tabIds.length > 0) {
+    if (tabIds.includes("*")) return true;
+    return tabIds.includes(args.tab);
   }
   if (perms) {
     return memberTabAllowedByPermissions(perms, args.tab);
@@ -782,9 +786,6 @@ export function listAllowedInboxTabsForUser(args: {
   if ((perms && permissionsAllow(perms, "*")) || !role || role === "ADMIN" || role === "MANAGER") {
     return ["todos", ...INBOX_CATEGORY_TAB_ORDER];
   }
-  const scope = args.grants.inbox?.tabs;
-  const explicitEmpty =
-    hasRoleRule(scope, "MEMBER") && (scope?.MEMBER?.length ?? 0) === 0;
   const showTodos = canSeeInboxTab({
     grants: args.grants,
     role,
@@ -794,7 +795,6 @@ export function listAllowedInboxTabsForUser(args: {
   const allowed = INBOX_CATEGORY_TAB_ORDER.filter((t) =>
     canSeeInboxTab({ grants: args.grants, role, tab: t, permissions: args.permissions }),
   );
-  if (explicitEmpty) return showTodos ? ["todos"] : [];
   const base: Exclude<InboxTab, InboxSuperTab>[] =
     allowed.length > 0 ? [...allowed] : ["esperando", "respondidas"];
   return showTodos ? ["todos", ...base] : [...base];
