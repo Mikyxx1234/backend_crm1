@@ -85,7 +85,11 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!authResult.ok) return authResult.response;
 
     return await runWithApiUserContext(authResult.user, async () => {
-    const denied = await requirePermissionForUser(authResult.user, "deal:edit");
+    // Gate base = leitura. Cada grupo de campo cobra a sua própria permission
+    // mais abaixo (`deal:edit` p/ campos comuns, `deal:change_stage` p/ etapa,
+    // `deal:transfer_owner` p/ responsável) — exigir `deal:edit` aqui barrava
+    // quem só tinha a chave de transferência.
+    const denied = await requirePermissionForUser(authResult.user, "deal:view");
     if (denied) return denied;
     const { id } = await context.params;
     if (!id) {
@@ -215,6 +219,32 @@ export async function PUT(request: Request, context: RouteContext) {
     if (stageChanging) {
       const moveDenied = await requirePermissionForUser(authResult.user, "deal:change_stage");
       if (moveDenied) return moveDenied;
+    }
+
+    const currentOwnerId = existing.owner?.id ?? null;
+    const ownerChanging =
+      "ownerId" in payload && (payload.ownerId ?? null) !== currentOwnerId;
+    if (ownerChanging) {
+      const transferDenied = await requirePermissionForUser(
+        authResult.user,
+        "deal:transfer_owner",
+      );
+      if (transferDenied) {
+        // `deal:transfer_owner` cobre "mexer no responsável de qualquer
+        // negócio". Sem ela, quem tem `deal:edit` ainda entrega um negócio
+        // próprio (ou sem dono) — é o que o preset Operador sempre permitiu.
+        const ownOrUnassigned = !currentOwnerId || currentOwnerId === authResult.user.id;
+        const editDenied = await requirePermissionForUser(authResult.user, "deal:edit");
+        if (!ownOrUnassigned || editDenied) return transferDenied;
+      }
+    }
+
+    // Campos comuns (título, valor, contato…) seguem sob `deal:edit`.
+    const scopedFields = new Set(["stageId", "ownerId"]);
+    const touchesCommonFields = Object.keys(payload).some((k) => !scopedFields.has(k));
+    if (touchesCommonFields) {
+      const editDenied = await requirePermissionForUser(authResult.user, "deal:edit");
+      if (editDenied) return editDenied;
     }
 
     const blockedFields: string[] = [];
