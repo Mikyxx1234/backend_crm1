@@ -24,6 +24,21 @@ const DEFAULTS: Record<AppUserRole, VisibilityMode> = {
 };
 
 /**
+ * Eixo ORTOGONAL a own/all: o papel enxerga itens SEM responsável (o pool
+ * livre — deal com `ownerId` null, conversa com `assignedToId` null)?
+ *
+ * Defaults preservam o comportamento anterior à introdução do toggle:
+ *   - MEMBER: `false` — operador nunca via "Sem responsável" nem em all.
+ *   - MANAGER/ADMIN: `true` — em all já enxergavam o pool.
+ * Combina com own/all: own + pool = próprios + sem dono; all + pool = tudo.
+ */
+const UNASSIGNED_DEFAULTS: Record<AppUserRole, boolean> = {
+  ADMIN: true,
+  MANAGER: true,
+  MEMBER: false,
+};
+
+/**
  * Lê settings da org corrente.
  *
  * Multi-tenancy v0 cutover: antes lia de `SystemSetting` (global, vazava
@@ -33,6 +48,21 @@ const DEFAULTS: Record<AppUserRole, VisibilityMode> = {
  */
 async function loadVisibilityMap(): Promise<Map<string, string>> {
   return getOrgSettingsByPrefix("visibility.");
+}
+
+async function loadUnassignedMap(): Promise<Map<string, string>> {
+  return getOrgSettingsByPrefix("unassigned.");
+}
+
+function getUnassignedForRole(
+  settings: Map<string, string>,
+  role: AppUserRole,
+): boolean {
+  if (role === "ADMIN") return true;
+  const val = settings.get(`unassigned.${role}`);
+  if (val === "true") return true;
+  if (val === "false") return false;
+  return UNASSIGNED_DEFAULTS[role];
 }
 
 function getModeForRole(
@@ -105,35 +135,41 @@ export async function getVisibilityFilter(
     };
   }
 
-  const settings = await loadVisibilityMap();
+  const [settings, unassignedSettings] = await Promise.all([
+    loadVisibilityMap(),
+    loadUnassignedMap(),
+  ]);
   const mode = getModeForRole(settings, role);
+  // Ver ou não os itens SEM responsável (pool livre). Eixo ortogonal a own/all.
+  const includeUnassigned = getUnassignedForRole(unassignedSettings, role);
 
-  // MEMBER nunca vê "Sem responsável" (deal/conversa sem dono) — mesmo com
-  // visibility.MEMBER=all. Só ADMIN/MANAGER enxergam a fila não atribuída
-  // no pipeline/inbox compartilhado.
+  // Deal sem dono só aparece quando o papel pode ver o pool livre; caso
+  // contrário exige `ownerId` presente. `{}` = todos (dono ou não).
+  const dealWhereAll: Prisma.DealWhereInput = includeUnassigned
+    ? {}
+    : { ownerId: { not: null } };
+
+  // Conversas atribuídas dentro do escopo (base para o modo "all" sem pool).
+  const assignedInScope = composeDepartmentScope(
+    { assignedToId: { not: null } },
+    deptScope,
+  );
+  // Tudo dentro do escopo (com pool). No modo "all" com pool o recorte é o
+  // departamento — não o dono.
+  const anythingInScope = composeDepartmentScope({}, deptScope);
+
   if (mode === "all") {
-    if (role === "MEMBER") {
-      // Conversa ATRIBUÍDA ao agente é sempre visível a ele — inclusive fora
-      // do seu departamento. Sem o `OR assignedToMe`, um escopo de
-      // departamento (AND) escondia até as próprias conversas do agente
-      // quando elas chegavam sem `departmentId` (ex.: recém-distribuídas),
-      // e a fila dele aparecia vazia mesmo em modo "all".
-      const seeAllAssigned = composeDepartmentScope(
-        { assignedToId: { not: null } },
-        deptScope,
-      );
-      return {
-        canSeeAll: true,
-        dealWhere: { ownerId: { not: null } },
-        conversationWhere: deptScope
-          ? { OR: [{ assignedToId: user.id }, seeAllAssigned] }
-          : seeAllAssigned,
-      };
-    }
+    // Conversa ATRIBUÍDA ao agente é sempre visível a ele — inclusive fora do
+    // seu departamento. Sem o `OR assignedToMe`, um escopo de departamento
+    // (AND) escondia até as próprias conversas do agente quando chegavam sem
+    // `departmentId` (ex.: recém-distribuídas), e a fila aparecia vazia.
+    const scopedConversations = includeUnassigned ? anythingInScope : assignedInScope;
     return {
       canSeeAll: true,
-      dealWhere: {},
-      conversationWhere: composeDepartmentScope({}, deptScope),
+      dealWhere: dealWhereAll,
+      conversationWhere: deptScope
+        ? { OR: [{ assignedToId: user.id }, scopedConversations] }
+        : scopedConversations,
     };
   }
 
@@ -173,31 +209,50 @@ export async function getVisibilityFilter(
   // departamento (AND), e o agente "não via a conversa distribuída".
   const assignedToMe: Prisma.ConversationWhereInput = { assignedToId: user.id };
 
+  // Com o eixo "sem responsável" ligado, o own passa a incluir o pool livre:
+  // próprios + itens sem dono (o modelo de distribuição em que o operador
+  // puxa da fila). Sem ele, own segue estrito (só os próprios).
+  const ownDealWhere: Prisma.DealWhereInput = includeUnassigned
+    ? { OR: [{ ownerId: user.id }, { ownerId: null }] }
+    : { ownerId: user.id };
+  // Pool livre de conversas respeita o isolamento por departamento; as
+  // próprias (`assignedToMe`) permanecem sempre visíveis, dentro ou fora dele.
+  const unassignedPool = composeDepartmentScope({ assignedToId: null }, deptScope);
+
   if (strictOwnInbox) {
     return {
       canSeeAll: false,
-      dealWhere: { ownerId: user.id },
-      conversationWhere: assignedToMe,
+      dealWhere: ownDealWhere,
+      conversationWhere: includeUnassigned
+        ? { OR: [assignedToMe, unassignedPool] }
+        : assignedToMe,
     };
   }
 
   // Pool compartilhado (não atribuídas ligadas a contatos que o agente
-  // acompanha): AQUI sim vale o isolamento por departamento.
-  const sharedUnassigned: Prisma.ConversationWhereInput = {
-    assignedToId: null,
-    contact: {
-      OR: [
-        { deals: { some: { ownerId: user.id } } },
-        { assignedToId: user.id },
-      ],
-    },
-  };
+  // acompanha): AQUI sim vale o isolamento por departamento. Com o eixo
+  // "sem responsável" ligado, o pool deixa de exigir vínculo com o contato —
+  // o agente vê TODA a fila não atribuída (dentro do escopo).
+  const sharedUnassigned: Prisma.ConversationWhereInput = includeUnassigned
+    ? unassignedPool
+    : composeDepartmentScope(
+        {
+          assignedToId: null,
+          contact: {
+            OR: [
+              { deals: { some: { ownerId: user.id } } },
+              { assignedToId: user.id },
+            ],
+          },
+        },
+        deptScope,
+      );
 
   return {
     canSeeAll: false,
-    dealWhere: { ownerId: user.id },
+    dealWhere: ownDealWhere,
     conversationWhere: {
-      OR: [assignedToMe, composeDepartmentScope(sharedUnassigned, deptScope)],
+      OR: [assignedToMe, sharedUnassigned],
     },
   };
 }
@@ -289,6 +344,23 @@ export async function setVisibilityForRole(
   // setOrgSetting já invalida o cache (chave + prefixo) automaticamente.
   const { setOrgSetting } = await import("@/lib/org-settings");
   await setOrgSetting(`visibility.${role}`, mode);
+}
+
+export async function getUnassignedSettings(): Promise<Record<string, boolean>> {
+  const settings = await loadUnassignedMap();
+  return {
+    ADMIN: true,
+    MANAGER: getUnassignedForRole(settings, "MANAGER"),
+    MEMBER: getUnassignedForRole(settings, "MEMBER"),
+  };
+}
+
+export async function setUnassignedForRole(
+  role: "MANAGER" | "MEMBER",
+  include: boolean,
+) {
+  const { setOrgSetting } = await import("@/lib/org-settings");
+  await setOrgSetting(`unassigned.${role}`, include ? "true" : "false");
 }
 
 /**

@@ -5,7 +5,13 @@ import { withOrgContext, requireAuthWithCtx } from "@/lib/auth-helpers";
 import { can } from "@/lib/authz";
 import { getScopeGrants, setScopeGrants, type ScopeGrants } from "@/lib/authz/scope-grants";
 import { getSelfAssignSettings, setSelfAssignForRole } from "@/lib/self-assign";
-import { getVisibilitySettings, setVisibilityForRole, type VisibilityMode } from "@/lib/visibility";
+import {
+  getUnassignedSettings,
+  getVisibilitySettings,
+  setUnassignedForRole,
+  setVisibilityForRole,
+  type VisibilityMode,
+} from "@/lib/visibility";
 import { isFeatureEnabled } from "@/lib/feature-flags";
 
 function isVisibilityMode(v: unknown): v is VisibilityMode {
@@ -20,6 +26,7 @@ export async function GET() {
     const role = (session.user as { role?: string }).role ?? null;
     const scopeGrants = await getScopeGrants();
     const visibility = await getVisibilitySettings();
+    const unassigned = await getUnassignedSettings();
     const selfAssign = await getSelfAssignSettings();
     const canManage = can(authz.ctx, "settings:permissions");
     const featureEnabled = session.user.organizationId
@@ -34,6 +41,7 @@ export async function GET() {
         : Array.from(authz.ctx.permissions),
       featureEnabled,
       visibility,
+      unassigned,
       selfAssign,
       scopeGrants,
     });
@@ -67,6 +75,23 @@ export async function PUT(request: Request) {
           return NextResponse.json({ message: "visibility.MEMBER inválido." }, { status: 400 });
         }
         await setVisibilityForRole("MEMBER", v.MEMBER);
+      }
+    }
+
+    const unassigned = body.unassigned;
+    if (unassigned && typeof unassigned === "object") {
+      const u = unassigned as Record<string, unknown>;
+      if (u.MANAGER !== undefined) {
+        if (typeof u.MANAGER !== "boolean") {
+          return NextResponse.json({ message: "unassigned.MANAGER inválido." }, { status: 400 });
+        }
+        await setUnassignedForRole("MANAGER", u.MANAGER);
+      }
+      if (u.MEMBER !== undefined) {
+        if (typeof u.MEMBER !== "boolean") {
+          return NextResponse.json({ message: "unassigned.MEMBER inválido." }, { status: 400 });
+        }
+        await setUnassignedForRole("MEMBER", u.MEMBER);
       }
     }
 
@@ -107,6 +132,7 @@ export async function PUT(request: Request) {
     return NextResponse.json({
       ok: true,
       visibility: await getVisibilitySettings(),
+      unassigned: await getUnassignedSettings(),
       selfAssign: await getSelfAssignSettings(),
       scopeGrants: await getScopeGrants(),
     });
