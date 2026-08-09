@@ -39,7 +39,12 @@ export async function GET(request: Request, context: RouteContext) {
 
     const user = authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
     const visibility = await getVisibilityFilter(user);
-    if (!visibility.canSeeAll && deal.ownerId !== user.id) {
+    // Deal sem dono acompanha o eixo "sem responsável": quem enxerga o pool no
+    // board precisa conseguir abrir o card, senão o clique devolve 403.
+    const ownsOrCanClaim =
+      deal.ownerId === user.id ||
+      (deal.ownerId === null && visibility.includeUnassigned);
+    if (!visibility.canSeeAll && !ownsOrCanClaim) {
       return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
 

@@ -15,7 +15,7 @@ export async function userHasConversationAccess(
   user: SessionUser,
   conversationId: string
 ): Promise<boolean> {
-  const { conversationWhere } = await getVisibilityFilter(user);
+  const { conversationWhere, includeUnassigned } = await getVisibilityFilter(user);
   let where = conversationWhere;
   try {
     const orgId = user.organizationId ?? getOrgIdOrThrow();
@@ -26,7 +26,10 @@ export async function userHasConversationAccess(
     });
     const perms: ReadonlySet<string> =
       authz.isSuperAdmin || authz.isAdmin ? new Set(["*"]) : authz.permissions;
-    where = withInboxQueueVisibility(conversationWhere, { permissions: perms });
+    where = withInboxQueueVisibility(conversationWhere, {
+      permissions: perms,
+      includeUnassigned,
+    });
   } catch {
     // Sem authz (jobs / contexto incompleto) — mantém where base.
   }

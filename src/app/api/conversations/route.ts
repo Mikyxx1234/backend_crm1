@@ -126,7 +126,10 @@ export async function GET(request: Request) {
         const visibility = await getVisibilityFilter(user);
         const conversationWhere = withInboxQueueVisibility(
           visibility.conversationWhere,
-          { permissions: inboxPerms },
+          {
+            permissions: inboxPerms,
+            includeUnassigned: visibility.includeUnassigned,
+          },
         );
         const memberCategoryTabs: InboxCategoryTab[] | null =
           user.role === "MEMBER"
@@ -188,7 +191,10 @@ export async function GET(request: Request) {
       const visibility = await getVisibilityFilter(user);
       const conversationWhere = withInboxQueueVisibility(
         visibility.conversationWhere,
-        { permissions: inboxPerms },
+        {
+          permissions: inboxPerms,
+          includeUnassigned: visibility.includeUnassigned,
+        },
       );
 
       const memberTodosCategories: InboxCategoryTab[] | undefined =

@@ -13,6 +13,12 @@ export type VisibilityResult = {
   canSeeAll: boolean;
   dealWhere: Prisma.DealWhereInput;
   conversationWhere: Prisma.ConversationWhereInput;
+  /**
+   * O papel enxerga o pool livre (sem responsável)? Precisa viajar junto com
+   * o `where` porque as filas da Inbox injetam conversas não atribuídas por
+   * fora dele (`withInboxQueueVisibility`) e também precisam respeitar o eixo.
+   */
+  includeUnassigned: boolean;
 };
 
 type SessionUser = { id: string; role: AppUserRole };
@@ -132,6 +138,7 @@ export async function getVisibilityFilter(
       canSeeAll: true,
       dealWhere: {},
       conversationWhere: composeDepartmentScope({}, deptScope),
+      includeUnassigned: true,
     };
   }
 
@@ -170,6 +177,7 @@ export async function getVisibilityFilter(
       conversationWhere: deptScope
         ? { OR: [{ assignedToId: user.id }, scopedConversations] }
         : scopedConversations,
+      includeUnassigned,
     };
   }
 
@@ -226,6 +234,7 @@ export async function getVisibilityFilter(
       conversationWhere: includeUnassigned
         ? { OR: [assignedToMe, unassignedPool] }
         : assignedToMe,
+      includeUnassigned,
     };
   }
 
@@ -254,6 +263,7 @@ export async function getVisibilityFilter(
     conversationWhere: {
       OR: [assignedToMe, sharedUnassigned],
     },
+    includeUnassigned,
   };
 }
 
@@ -279,12 +289,19 @@ function permissionsAllowKey(
  *
  * `base` vazio = irrestrito (ADMIN/MANAGER “all”). Nesse caso NÃO aplicar
  * extras: senão a inbox inteira colapsa só para Entrada/Automação.
+ *
+ * `includeUnassigned` vem de `getVisibilityFilter` e recorta o que estas
+ * filas injetam: as duas trazem conversa SEM responsável, então sem esse
+ * gate o pool livre reaparecia na Inbox mesmo com o eixo desligado nas
+ * permissões — a aba Entrada furava a regra. Conversa com assignee IA
+ * continua aparecendo: ela TEM responsável, ainda que não humano.
  */
 export function withInboxQueueVisibility(
   base: Prisma.ConversationWhereInput,
   args: {
     permissions: ReadonlySet<string> | readonly string[];
     tabs?: Array<"entrada" | "automacao">;
+    includeUnassigned?: boolean;
   },
 ): Prisma.ConversationWhereInput {
   // Irrestrito: não restringir às filas compartilhadas.
@@ -297,9 +314,11 @@ export function withInboxQueueVisibility(
       ? args.permissions
       : new Set(args.permissions);
   const tabs = args.tabs ?? (["entrada", "automacao"] as const);
+  const includeUnassigned = args.includeUnassigned ?? true;
   const extras: Prisma.ConversationWhereInput[] = [];
 
   if (
+    includeUnassigned &&
     tabs.includes("entrada") &&
     permissionsAllowKey(perms, "inbox:tab:entrada") &&
     permissionsAllowKey(perms, "conversation:claim")
@@ -308,18 +327,18 @@ export function withInboxQueueVisibility(
   }
 
   if (tabs.includes("automacao") && permissionsAllowKey(perms, "inbox:tab:automacao")) {
-    extras.push({
-      status: "OPEN",
-      OR: [
-        {
-          assignedToId: null,
-          contact: {
-            automationContexts: { some: { status: "RUNNING" } },
-          },
+    const automationQueue: Prisma.ConversationWhereInput[] = [
+      { assignedTo: { is: { type: "AI" } } },
+    ];
+    if (includeUnassigned) {
+      automationQueue.unshift({
+        assignedToId: null,
+        contact: {
+          automationContexts: { some: { status: "RUNNING" } },
         },
-        { assignedTo: { is: { type: "AI" } } },
-      ],
-    });
+      });
+    }
+    extras.push({ status: "OPEN", OR: automationQueue });
   }
 
   if (extras.length === 0) return base;

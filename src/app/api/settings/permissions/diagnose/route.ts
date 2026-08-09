@@ -114,7 +114,10 @@ export async function GET(request: Request) {
     });
 
     const visibility = await getVisibilityFilter({ id: target.id, role });
-    const queueWhere = withInboxQueueVisibility(visibility.conversationWhere, { permissions });
+    const queueWhere = withInboxQueueVisibility(visibility.conversationWhere, {
+      permissions,
+      includeUnassigned: visibility.includeUnassigned,
+    });
 
     const visibleTabs = (["todos", ...INBOX_CATEGORY_TABS] as InboxTab[]).filter((tab) =>
       canSeeInboxTab({ grants, role, tab, permissions }),
@@ -236,6 +239,7 @@ export async function GET(request: Request) {
         configuracaoDaOrg: visibilitySettings,
         modoAplicado: visibilitySettings[role],
         canSeeAll: visibility.canSeeAll,
+        veSemResponsavel: visibility.includeUnassigned,
         conversationWhere: visibility.conversationWhere,
         dealWhere: visibility.dealWhere,
       },
