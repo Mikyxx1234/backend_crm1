@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withApiAuthContext } from "@/lib/api-auth";
 import type { AppUserRole } from "@/lib/auth-types";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -18,6 +19,9 @@ type Ctx = { params: Promise<{ id: string }> };
 export async function POST(request: Request, ctx: Ctx) {
   return withApiAuthContext(request, async (user) => {
     try {
+      const denied = await requirePermissionForUser(user, "contact:edit");
+      if (denied) return denied;
+
       const { id: contactId } = await ctx.params;
       const body = (await request.json()) as Record<string, unknown>;
       const tagId = typeof body.tagId === "string" ? body.tagId.trim() : "";
@@ -89,8 +93,11 @@ export async function POST(request: Request, ctx: Ctx) {
 }
 
 export async function DELETE(request: Request, ctx: Ctx) {
-  return withApiAuthContext(request, async () => {
+  return withApiAuthContext(request, async (user) => {
     try {
+      const denied = await requirePermissionForUser(user, "contact:edit");
+      if (denied) return denied;
+
       const { id: contactId } = await ctx.params;
       const body = (await request.json()) as Record<string, unknown>;
       const tagId = typeof body.tagId === "string" ? body.tagId : "";

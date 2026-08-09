@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { getLogger } from "@/lib/logger";
 import { parseContactPhoneInput } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
@@ -27,6 +28,9 @@ export async function GET(request: Request, context: RouteContext) {
     if (!authResult.ok) return authResult.response;
 
     return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "contact:view");
+    if (denied) return denied;
+
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }
@@ -64,6 +68,9 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!authResult.ok) return authResult.response;
 
     return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "contact:edit");
+    if (denied) return denied;
+
     const { id } = await context.params;
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
@@ -191,6 +198,9 @@ export async function DELETE(request: Request, context: RouteContext) {
     if (!authResult.ok) return authResult.response;
 
     return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "contact:delete");
+    if (denied) return denied;
+
     if (!id) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import {
   getContactCustomFieldValues,
   upsertContactCustomFieldValues,
@@ -21,6 +22,9 @@ export async function GET(request: Request, ctx: Ctx) {
     if (!authResult.ok) return authResult.response;
 
     return await runWithApiUserContext(authResult.user, async () => {
+      const denied = await requirePermissionForUser(authResult.user, "contact:view");
+      if (denied) return denied;
+
       const { id } = await ctx.params;
       const values = await getContactCustomFieldValues(id);
       return NextResponse.json(values);
@@ -39,6 +43,9 @@ export async function PUT(request: Request, ctx: Ctx) {
     if (!authResult.ok) return authResult.response;
 
     return await runWithApiUserContext(authResult.user, async () => {
+      const denied = await requirePermissionForUser(authResult.user, "contact:edit");
+      if (denied) return denied;
+
       const { id } = await ctx.params;
       const body = (await request.json()) as Record<string, unknown>;
       const values = Array.isArray(body.values) ? body.values : [];

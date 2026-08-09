@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
+import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { parseContactPhoneInput } from "@/lib/phone";
 import {
   createContact,
@@ -21,6 +22,8 @@ export async function GET(request: Request) {
     if (!authResult.ok) return authResult.response;
 
     return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "contact:view");
+    if (denied) return denied;
 
     const { searchParams } = new URL(request.url);
     const search = searchParams.get("search") ?? undefined;
@@ -132,6 +135,8 @@ export async function POST(request: Request) {
     if (!authResult.ok) return authResult.response;
 
     return await runWithApiUserContext(authResult.user, async () => {
+    const denied = await requirePermissionForUser(authResult.user, "contact:create");
+    if (denied) return denied;
 
     let body: unknown;
     try {
