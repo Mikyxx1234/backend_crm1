@@ -113,13 +113,21 @@ export async function getVisibilityFilter(
   // no pipeline/inbox compartilhado.
   if (mode === "all") {
     if (role === "MEMBER") {
+      // Conversa ATRIBUÍDA ao agente é sempre visível a ele — inclusive fora
+      // do seu departamento. Sem o `OR assignedToMe`, um escopo de
+      // departamento (AND) escondia até as próprias conversas do agente
+      // quando elas chegavam sem `departmentId` (ex.: recém-distribuídas),
+      // e a fila dele aparecia vazia mesmo em modo "all".
+      const seeAllAssigned = composeDepartmentScope(
+        { assignedToId: { not: null } },
+        deptScope,
+      );
       return {
         canSeeAll: true,
         dealWhere: { ownerId: { not: null } },
-        conversationWhere: composeDepartmentScope(
-          { assignedToId: { not: null } },
-          deptScope,
-        ),
+        conversationWhere: deptScope
+          ? { OR: [{ assignedToId: user.id }, seeAllAssigned] }
+          : seeAllAssigned,
       };
     }
     return {
