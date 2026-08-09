@@ -206,6 +206,17 @@ export async function PUT(request: Request, context: RouteContext) {
     const payload = Object.fromEntries(
       Object.entries(data).filter(([, v]) => v !== undefined)
     ) as Parameters<typeof updateDeal>[1];
+
+    // Mover de etapa exige `deal:change_stage` — não basta `deal:edit`, senão
+    // o PUT furava o gate do POST /move e um operador sem a permission
+    // ainda mudava fase pelo painel.
+    const stageChanging =
+      typeof payload.stageId === "string" && payload.stageId !== existing.stage.id;
+    if (stageChanging) {
+      const moveDenied = await requirePermissionForUser(authResult.user, "deal:change_stage");
+      if (moveDenied) return moveDenied;
+    }
+
     const blockedFields: string[] = [];
     for (const key of Object.keys(payload)) {
       if (!(await canEditFieldForUser(authResult.user, "deal", key))) blockedFields.push(key);
