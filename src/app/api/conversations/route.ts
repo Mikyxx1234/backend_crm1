@@ -72,11 +72,6 @@ export async function GET(request: Request) {
       const withoutOwner =
         searchParams.get("withoutOwner") === "1" ||
         searchParams.get("withoutOwner") === "true";
-      // Recorte "só as minhas" (toggle do header da Inbox). Vale para
-      // qualquer aba e não conflita com o filtro de responsável do painel.
-      const onlyMine =
-        searchParams.get("mine") === "1" || searchParams.get("mine") === "true";
-      const onlyAssignedToId = onlyMine ? apiUser.id : undefined;
       const stageId = searchParams.get("stageId") ?? undefined;
       const stageIdsRaw = searchParams.get("stageIds") ?? "";
       const stageIds = stageIdsRaw
@@ -118,7 +113,6 @@ export async function GET(request: Request) {
         ownerId,
         ownerIds,
         withoutOwner,
-        onlyAssignedToId,
         stageId,
         stageIds,
         tagIds,
@@ -220,7 +214,6 @@ export async function GET(request: Request) {
         ownerId,
         ownerIds,
         withoutOwner,
-        onlyAssignedToId,
         stageId,
         stageIds,
         tagIds,

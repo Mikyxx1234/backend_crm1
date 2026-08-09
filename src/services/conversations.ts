@@ -54,14 +54,6 @@ export type GetConversationsParams = {
   ownerId?: string;
   /** Multi-seleção de responsáveis (OR). Preferir sobre `ownerId`. */
   ownerIds?: string[];
-  /**
-   * Recorte "só as minhas" da Inbox: AND `assignedToId = <id>`. Vale para
-   * qualquer aba e é independente do filtro de responsável do painel — a
-   * fila Entrada, por exemplo, mistura conversas sem dono (a distribuir)
-   * com as já atribuídas e ainda sem atendimento humano; este recorte é o
-   * que permite ao operador ver só as dele sem perder a fila inteira.
-   */
-  onlyAssignedToId?: string;
   /** true = só conversas sem responsável (`assignedToId` null). */
   withoutOwner?: boolean;
   stageId?: string;
@@ -434,9 +426,6 @@ export function buildInboxFilterConditions(
   params: GetConversationsParams,
 ): Prisma.ConversationWhereInput[] {
   const conditions: Prisma.ConversationWhereInput[] = [];
-  if (params.onlyAssignedToId) {
-    conditions.push({ assignedToId: params.onlyAssignedToId });
-  }
   if (params.contactId) conditions.push({ contactId: params.contactId });
   if (params.channel) conditions.push({ channel: params.channel });
   if (params.sessionExpiresWithinHours !== undefined) {
