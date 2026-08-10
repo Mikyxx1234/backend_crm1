@@ -275,6 +275,10 @@ async function awaitMetaDeliveryVerdict(
  * isso: reusa a conversa não-RESOLVED ou cria um ticket novo (com tratamento
  * de corrida e disparo de `conversation_created`).
  *
+ * Em `campaign_trigger`, o ticket novo NÃO herda `contact.assignedToId` —
+ * senão a aba Entrada enche com disparos em massa (assignee HUMAN +
+ * hasHumanReply=false ignora o filtro de contexto RUNNING).
+ *
  * Retorna `{ id } | null` de propósito, para manter compatível o uso
  * downstream (`conv?.id`, `conv.id`, `if (conv)`) dos sites de envio.
  * Fallback best-effort (sem canal/telefone): usa a conversa mais recente,
@@ -282,10 +286,11 @@ async function awaitMetaDeliveryVerdict(
  */
 async function resolveAutomationSendConv(
   contactId: string | null | undefined,
+  opts?: { inheritAssignee?: boolean },
 ): Promise<{ id: string } | null> {
   if (!contactId) return null;
   try {
-    const ensured = await ensureWhatsAppConversationForContact(contactId);
+    const ensured = await ensureWhatsAppConversationForContact(contactId, opts);
     if ("conversationId" in ensured) return { id: ensured.conversationId };
   } catch (err) {
     log.warn(`resolveAutomationSendConv: ensure falhou p/ contato ${contactId}:`, err);
@@ -296,6 +301,13 @@ async function resolveAutomationSendConv(
     select: { id: true },
   });
   return conv ? { id: conv.id } : null;
+}
+
+/** Campanha AUTOMATION: não herdar dono do contato no ticket novo (ver ensure opts). */
+function sendConvOptsForRuntime(rt: { event?: string | null }): {
+  inheritAssignee?: boolean;
+} {
+  return rt.event === "campaign_trigger" ? { inheritAssignee: false } : {};
 }
 
 /**
@@ -2271,7 +2283,7 @@ async function executeStep(
 
       let conversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId);
+        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
         conversationId = conv?.id;
         if (!conv) log.warn(`Nenhuma conversa WhatsApp encontrada para o contato ${rt.contactId}`);
       }
@@ -2531,7 +2543,7 @@ async function executeStep(
 
       let tplConversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId);
+        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
         tplConversationId = conv?.id;
       }
       const tplChannelId = resolveOutboundChannelId(cfg, rt);
@@ -2722,7 +2734,7 @@ async function executeStep(
 
       let mediaConversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId);
+        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
         mediaConversationId = conv?.id;
       }
       const mediaChannelId = resolveOutboundChannelId(cfg, rt);
@@ -2911,7 +2923,7 @@ async function executeStep(
 
       let conversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId);
+        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
         conversationId = conv?.id;
       }
 
@@ -3061,7 +3073,7 @@ async function executeStep(
 
       let conversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId);
+        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
         conversationId = conv?.id;
       }
 
@@ -3487,7 +3499,7 @@ async function executeStep(
         const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
         const interpolated = await interpolateMessageVariables(content, rt, vars);
 
-        const conv = await resolveAutomationSendConv(rt.contactId);
+        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
         const questionChannelId = resolveOutboundChannelId(cfg, rt);
         const questionMetaClient = await resolveAutomationMetaClient({
           automationId: rt.automationId,

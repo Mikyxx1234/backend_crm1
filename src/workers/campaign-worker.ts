@@ -468,7 +468,11 @@ async function persistCampaignOutboundMessage(input: {
     if (existing) return existing.id;
   }
 
-  const ensured = await ensureWhatsAppConversationForContact(input.contactId);
+  const ensured = await ensureWhatsAppConversationForContact(input.contactId, {
+    // Campanha TEMPLATE/TEXT: ticket novo só pra histórico do disparo — sem
+    // herdar dono (Entrada). Auto-resolve abaixo fecha o ticket em seguida.
+    inheritAssignee: false,
+  });
   if (
     ensured.status === "skipped_contact_missing" ||
     ensured.status === "skipped_no_channel" ||
