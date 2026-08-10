@@ -1179,25 +1179,38 @@ export function isActiveConversationUniqueViolation(err: unknown): boolean {
   return false;
 }
 
-const CONVERSATION_NUMBER_MAX_RETRIES = 5;
+// Campanha Meta usa concurrency=10 no send worker: varios creates
+// resolvem o mesmo max+1 e colidem no unique (organizationId, number).
+// 5 retries bastam em inbox/webhook; em blast o stampede precisa de
+// mais tentativas + jitter pra desincronizar os perdedores.
+const CONVERSATION_NUMBER_MAX_RETRIES = 12;
 
 /**
  * Detecta P2002 no unique (organizationId, number). Outros P2002
- * (externalId, etc) NAO devem ser retentados aqui — deixamos borbulhar
- * para o caller tratar.
+ * (externalId, active_contact_channel, etc) NAO devem ser retentados
+ * aqui — deixamos borbulhar para o caller tratar.
  */
 function isConversationNumberUniqueViolation(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
-  const e = err as { code?: string; meta?: { target?: string[] | string } };
+  const e = err as {
+    code?: string;
+    message?: string;
+    meta?: { target?: string[] | string };
+  };
   if (e.code !== "P2002") return false;
   const target = e.meta?.target;
-  if (Array.isArray(target)) return target.includes("number");
-  if (typeof target === "string") return target.includes("number");
-  return false;
+  const targetHasNumber = (s: string) =>
+    s === "number" || s.includes("number");
+  if (Array.isArray(target)) return target.some((t) => targetHasNumber(String(t)));
+  if (typeof target === "string") return targetHasNumber(target);
+  // Prisma as vezes omite meta.target; mensagem tipica do engine:
+  // Unique constraint failed on the fields: (`"organizationId"`,`number`)
+  const msg = typeof e.message === "string" ? e.message : "";
+  return /organizationId/i.test(msg) && /[`"']number[`"']/i.test(msg);
 }
 
 /**
- * Executa `run(number)` com retry ate 5 vezes se der P2002 no unique
+ * Executa `run(number)` com retry se der P2002 no unique
  * (organizationId, number). Uso pra centralizar a logica de numero
  * sequencial de Conversation em todos os pontos de criacao — mesma
  * ideia do loop em `createContact` (services/contacts.ts). O caller
@@ -1214,6 +1227,10 @@ export async function withConversationNumberRetry<T>(
     } catch (err) {
       if (isConversationNumberUniqueViolation(err)) {
         lastErr = err;
+        // Jitter crescente: sem isso N workers que perderam o create
+        // re-leem max e colidem de novo no mesmo instante.
+        const delayMs = 5 + Math.floor(Math.random() * 15 * (attempt + 1));
+        await new Promise((r) => setTimeout(r, delayMs));
         continue;
       }
       throw err;
