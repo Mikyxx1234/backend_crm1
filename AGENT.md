@@ -5,6 +5,23 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-10 — Retomada de Lista/botão com conversa já na IA
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Problema.** Gatilho manual envia Lista WhatsApp; contato clica; IA
+responde saudação e o fluxo não avança. A conversa já tinha `assignedToId`
+da IA; `processIncomingMessage` usava `suppressAutomation` e cancelava o
+contexto pausado antes do match.
+
+**Decisão.** Retomada só bloqueia com `humanAttending` (humano dono ou
+`hasHumanReply`). Assignee só IA não mata contexto pausado.
+`suppressAutomation` permanece nos triggers (não iniciar automação nova).
+Match de opção também aceita fallback `row_N`/`btn_N` como no executor.
+
+**Arquivos.** `services/automation-context.ts`; teste
+`automation-branch-routing.test.ts`.
+
 ### 2026-08-10 — Fila noturna: não cancelar `distribution_pending` quando a IA reassumiu
 
 **Modelo usado.** Cursor Grok 4.5.
