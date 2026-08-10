@@ -5,21 +5,22 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
-### 2026-08-10 — Agente IA não atende alunos no funil Acolhimento
+### 2026-08-10 — Agente IA não atende alunos no Acolhimento (funil OU etapa)
 
 **Modelo usado.** Cursor Grok 4.5.
 
-**Decisão.** Se o contato tem deal OPEN cujo pipeline tem nome com
-`acolh` (ex.: Acolhimento), a IA **não assume** e **não responde**:
-- `first-attendance`: skip + limpa assignee IA se já estava na IA;
-- `maybeReplyAsAIAgent`: block `acolhimento_funnel` + limpa assignee IA.
+**Decisão.** Se o contato tem deal OPEN cujo **pipeline ou stage** tem
+`acolh` no nome (ex.: etapa `ACOLHIMENTO ACADÊMICO` em funil `ACADÊMICO`),
+a IA **não assume** e **não responde**:
+- `first-attendance`: skip + limpa assignee IA; exclui do pipe acadêmico
+  (antes `/academ/` casava em “ACOLHIMENTO ACADÊMICO”);
+- `scheduleAiReply` / `maybeReplyAsAIAgent`: block cedo;
+- `POST …/conversations/:id/actions` assign → 409 se destino for User AI.
 
-**Contexto.** Operação vai disparar campanha com botão nesse funil;
-resposta da IA competiria com o fluxo do botão / humano.
+**Contexto.** Campanha com botão no Acolhimento; v1 só olhava o nome do
+funil e a IA continuava atendendo quando só a **etapa** tinha “acolh”.
 
-**Alternativas descartadas.** Só prompt (LLM ainda poderia falar);
-filtrar só por departamento Acolhimento (aluno pode estar no funil
-sem dept setado).
+**Alternativas descartadas.** Só prompt; filtrar só por departamento.
 
 ### 2026-08-11 — Envio outbound bloqueia canal DISCONNECTED e template aceita `channelId`
 
