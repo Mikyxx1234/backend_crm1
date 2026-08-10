@@ -717,7 +717,10 @@ export async function getConversations(
     }
     return {
       ...row,
-      lastInboundAt: lastInboundMap.get(row.id) ?? row.lastInboundAt,
+      // Batch = inbound do contato+canal (mesma regra do GET messages).
+      // Sem entrada no map → sem inbound real; NÃO cair no denormalizado
+      // (pode estar stale e esconder "Expirada" no card).
+      lastInboundAt: lastInboundMap.get(row.id) ?? null,
       lastMessagePreview: previewMap.get(row.id)?.preview ?? null,
       lastMessageAt: previewMap.get(row.id)?.createdAt ?? null,
       tags: Array.from(tagMap.values()),
@@ -858,7 +861,7 @@ export async function getConversationById(id: string) {
   }
   return {
     ...row,
-    lastInboundAt: lastInboundMap.get(id) ?? row.lastInboundAt,
+    lastInboundAt: lastInboundMap.get(id) ?? null,
     lastMessagePreview: previewMap.get(id)?.preview ?? null,
     lastMessageAt: previewMap.get(id)?.createdAt ?? null,
     tags: Array.from(tagMap.values()),
