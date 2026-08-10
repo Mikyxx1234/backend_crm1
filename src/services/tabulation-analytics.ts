@@ -32,6 +32,13 @@ export type TabulationTopItem = {
   tabulationId: string;
   name: string;
   path: string;
+  /**
+   * O ranking agrupa por `tabulationId`, então a mesma folha criada em varios
+   * departamentos (ex.: "Sem Resposta" em Acolhimento, SAC e Retencao) rende
+   * uma linha por departamento — com `path` identico quando a folha esta na
+   * raiz. Sem o departamento as linhas ficam indistinguiveis na tela.
+   */
+  departmentName: string | null;
   count: number;
 };
 
@@ -273,10 +280,14 @@ export async function getTabulationAnalytics(
 
   const byTabulation: TabulationTopItem[] = tabRows.map((r) => {
     const info = pathMap.get(r.id);
+    // Departamento da propria tabulacao (e nao o do evento): o ranking agrupa
+    // por folha, e a folha pertence a uma arvore so.
+    const deptId = info?.departmentId ?? null;
     return {
       tabulationId: r.id,
       name: info?.name ?? r.id,
       path: info?.path ?? r.id,
+      departmentName: deptId ? (deptNameById.get(deptId) ?? null) : null,
       count: Number(r.count),
     };
   });
