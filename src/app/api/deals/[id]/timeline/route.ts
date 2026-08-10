@@ -42,12 +42,13 @@ export async function GET(_req: Request, ctx: Ctx) {
       user: { id: string; name: string; avatarUrl: string | null } | null;
     };
 
-    // Eventos escopados ao contato do negócio (tags/campos do contato) são
-    // logados com `contactId` e SEM `dealId` — por isso não apareciam na
+    // Eventos escopados ao contato do negócio (tags/campos/criação do contato)
+    // são logados com `contactId` e SEM `dealId` — por isso não apareciam na
     // timeline do negócio. Incluímos explicitamente esses tipos pro contato
     // deste deal, sem puxar tudo (mensagens já vêm via dealId).
     const contactId = existing.contactId ?? null;
     const CONTACT_SCOPED_TYPES = [
+      "CONTACT_CREATED",
       "CONTACT_TAG_ADDED",
       "CONTACT_TAG_REMOVED",
       "CONTACT_FIELD_CHANGED",
@@ -109,6 +110,56 @@ export async function GET(_req: Request, ctx: Ctx) {
           : null,
       }));
     }
+
+    // Âncoras: data de criação do negócio e do contato (quando não há evento).
+    const hasDealCreated = events.some((e) => e.type === "CREATED");
+    if (!hasDealCreated && existing.createdAt) {
+      events.push({
+        id: `synthetic:deal-created:${existing.id}`,
+        type: "CREATED",
+        meta: {
+          synthetic: true,
+          createdAt: existing.createdAt.toISOString?.() ?? String(existing.createdAt),
+        },
+        createdAt: existing.createdAt instanceof Date ? existing.createdAt : new Date(existing.createdAt),
+        user: null,
+      });
+    }
+
+    if (contactId) {
+      const hasContactCreated = events.some((e) => e.type === "CONTACT_CREATED");
+      if (!hasContactCreated) {
+        const contact = await prisma.contact.findUnique({
+          where: { id: contactId },
+          select: { id: true, name: true, phone: true, createdAt: true },
+        });
+        if (contact) {
+          const exists = await prisma.activityEvent.findFirst({
+            where: { contactId: contact.id, type: "CONTACT_CREATED" },
+            select: { id: true },
+          });
+          if (!exists) {
+            events.push({
+              id: `synthetic:contact-created:${contact.id}`,
+              type: "CONTACT_CREATED",
+              meta: {
+                synthetic: true,
+                createdAt: contact.createdAt.toISOString(),
+                name: contact.name ?? contact.phone,
+              },
+              createdAt: contact.createdAt,
+              user: null,
+            });
+          }
+        }
+      }
+    }
+
+    events.sort((a, b) => {
+      const dt = b.createdAt.getTime() - a.createdAt.getTime();
+      if (dt !== 0) return dt;
+      return b.id.localeCompare(a.id);
+    });
 
     const stageIds = new Set<string>();
     const fieldIds = new Set<string>();

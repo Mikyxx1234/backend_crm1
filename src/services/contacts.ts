@@ -1003,6 +1003,8 @@ export async function createContact(data: CreateContactInput) {
           email: created.email,
           phone: created.phone,
           source: data.source ?? null,
+          createdAt: created.createdAt.toISOString(),
+          name: created.name ?? created.phone ?? created.email,
         },
       });
 
