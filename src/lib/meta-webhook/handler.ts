@@ -2543,7 +2543,9 @@ async function executePostBody(
 
             let salesbotHandled = false;
             try {
-              const salesbotResult = await processSalesbotMessage(contact.id, parsed.text);
+              const salesbotResult = await processSalesbotMessage(contact.id, parsed.text, {
+                interactiveId: parsed.interactiveButtonId,
+              });
               salesbotHandled = Boolean(salesbotResult?.handled);
             } catch (err) {
               log.error("Falha no salesbot:", err);

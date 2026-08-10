@@ -279,7 +279,11 @@ export async function getContactAutomationHistory(contactId: string, limit = 20)
   });
 }
 
-export async function processIncomingMessage(contactId: string, messageContent: string) {
+export async function processIncomingMessage(
+  contactId: string,
+  messageContent: string,
+  opts?: { interactiveId?: string | null },
+) {
   // Se humano já está atendendo, encerra salesbot ativo e não avança passos.
   try {
     const { getHumanAttendanceForContact } = await import(
@@ -382,11 +386,19 @@ export async function processIncomingMessage(contactId: string, messageContent: 
         buttonsFromButtons.length > 0 ? buttonsFromButtons : buttonsFromRows;
 
       if (buttons.length > 0) {
+        // Match por título interpolado (texto da Meta) OU por id estável
+        // (list_reply.id / button_reply.id). Títulos com {{contact.name}} etc.
+        // são interpolados no envio e não batem com o config cru — o id resolve.
         const normalized = messageContent.trim().toLowerCase();
+        const interactiveId = (opts?.interactiveId ?? "").trim().toLowerCase();
         const matchedBtn = buttons.find((b) => {
           const label = (b.title || b.text || "").trim().toLowerCase();
           const btnId = (b.id || "").trim().toLowerCase();
-          return label === normalized || btnId === normalized;
+          return (
+            (label && label === normalized) ||
+            (btnId && btnId === normalized) ||
+            (interactiveId && btnId && btnId === interactiveId)
+          );
         });
 
         const elseGoto = readStepRef(config, "elseGotoStepId");
