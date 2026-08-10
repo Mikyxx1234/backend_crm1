@@ -67,6 +67,18 @@ export type EnsureConversationResult =
   | { status: "skipped_contact_missing" }
   | { status: "skipped_no_phone" };
 
+export type EnsureWhatsAppConversationOptions = {
+  /**
+   * Quando true (default), conversa nova herda `contact.assignedToId`.
+   * Campanhas AUTOMATION devem passar false: o ticket fica sem dono enquanto
+   * o robô aguarda clique/resposta, e a aba Entrada esconde via predicate
+   * `assignedToId=null` + contexto RUNNING. Herdar o dono do contato jogava
+   * centenas de disparos na Entrada dos consultores (Cruzeiro EaD,
+   * campanha cmsni2x8l01zqp201n4g43loc / incidente irmão de 8fdd2a5).
+   */
+  inheritAssignee?: boolean;
+};
+
 /**
  * Garante que exista uma Conversation WhatsApp pro contato, com `channelId`
  * preenchido. Ver docstring do módulo pros cenários idempotentes.
@@ -76,7 +88,9 @@ export type EnsureConversationResult =
  */
 export async function ensureWhatsAppConversationForContact(
   contactId: string,
+  opts?: EnsureWhatsAppConversationOptions,
 ): Promise<EnsureConversationResult> {
+  const inheritAssignee = opts?.inheritAssignee !== false;
   const contact = await prisma.contact.findUnique({
     where: { id: contactId },
     select: {
@@ -156,7 +170,9 @@ export async function ensureWhatsAppConversationForContact(
           inboxName: defaultChannel.name,
           channelId: defaultChannel.id,
           contactId: contact.id,
-          ...(contact.assignedToId ? { assignedToId: contact.assignedToId } : {}),
+          ...(inheritAssignee && contact.assignedToId
+            ? { assignedToId: contact.assignedToId }
+            : {}),
         }),
         select: { id: true, channelId: true },
       }),
