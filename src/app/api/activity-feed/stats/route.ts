@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import { Prisma } from "@prisma/client";
 
-import { requireManager } from "@/lib/auth-helpers";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 
@@ -24,11 +24,24 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
  *   }
  */
 export async function GET(req: Request) {
+  // Stats de logs: restrito a gestão (ADMIN/MANAGER). O contexto vem de
+  // withOrgContext (runWithContext) — com requireManager, que usa enterWith,
+  // o getOrgIdOrThrow() do handler explodia em produção.
+  return withOrgContext((session) => handle(req, session));
+}
+
+/** A session achatada de auth-helpers não é exportada; deriva do helper. */
+type OrgSession = Parameters<Parameters<typeof withOrgContext>[0]>[0];
+
+async function handle(req: Request, session: OrgSession) {
   try {
-    // Stats de logs: restrito a gestão (ADMIN/MANAGER). requireManager
-    // também ativa o RequestContext usado por getOrgIdOrThrow() abaixo.
-    const r = await requireManager();
-    if (!r.ok) return r.response;
+    const role = session.user.role;
+    if (role !== "ADMIN" && role !== "MANAGER") {
+      return NextResponse.json(
+        { message: "Acesso restrito a administradores/gestores." },
+        { status: 403 },
+      );
+    }
 
     const orgId = getOrgIdOrThrow();
     const url = new URL(req.url);
