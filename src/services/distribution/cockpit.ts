@@ -143,7 +143,9 @@ export async function getCockpitData(): Promise<CockpitData> {
           // Só conta quem já respondeu (exclui calouros só com template BV).
           lastInboundAt: { not: null },
           contact: {
-            automationContexts: { none: { status: "RUNNING" } },
+            automationContexts: {
+              none: { status: { in: ["RUNNING", "PAUSED"] } },
+            },
           },
         },
       }),

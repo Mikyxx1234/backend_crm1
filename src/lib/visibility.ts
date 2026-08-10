@@ -334,7 +334,10 @@ export function withInboxQueueVisibility(
       automationQueue.unshift({
         assignedToId: null,
         contact: {
-          automationContexts: { some: { status: "RUNNING" } },
+          // PAUSED = aguardando reply/botão (campanha) — mesma fila Automação.
+          automationContexts: {
+            some: { status: { in: ["RUNNING", "PAUSED"] } },
+          },
         },
       });
     }

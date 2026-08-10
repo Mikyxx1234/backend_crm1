@@ -71,10 +71,9 @@ export type EnsureWhatsAppConversationOptions = {
   /**
    * Quando true (default), conversa nova herda `contact.assignedToId`.
    * Campanhas AUTOMATION devem passar false: o ticket fica sem dono enquanto
-   * o robô aguarda clique/resposta, e a aba Entrada esconde via predicate
-   * `assignedToId=null` + contexto RUNNING. Herdar o dono do contato jogava
-   * centenas de disparos na Entrada dos consultores (Cruzeiro EaD,
-   * campanha cmsni2x8l01zqp201n4g43loc / incidente irmão de 8fdd2a5).
+   * o robô aguarda clique/resposta. Em ticket já OPEN reutilizado, também
+   * remove o assignee atual — senão a aba Entrada (HUMAN + sem hasHumanReply)
+   * engolia o disparo. A aba Automação cobre RUNNING e PAUSED.
    */
   inheritAssignee?: boolean;
 };
@@ -123,10 +122,25 @@ export async function ensureWhatsAppConversationForContact(
       channel: "whatsapp",
       status: { not: "RESOLVED" },
     },
-    select: { id: true, channelId: true, inboxName: true },
+    select: { id: true, channelId: true, inboxName: true, assignedToId: true },
   });
 
   if (existing) {
+    // Campanha/automation: não deixar ticket reutilizado com dono humano
+    // (Entrada via assignedTo=HUMAN + hasHumanReply=false).
+    if (!inheritAssignee && existing.assignedToId) {
+      await prisma.conversation
+        .update({
+          where: { id: existing.id },
+          data: { assignedToId: null },
+        })
+        .catch((err) => {
+          log.warn("Falha ao limpar assignee em ensure (não-fatal)", {
+            conversationId: existing.id,
+            err,
+          });
+        });
+    }
     if (existing.channelId === defaultChannel.id) {
       return {
         status: "already_ok",

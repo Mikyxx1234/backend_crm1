@@ -262,6 +262,16 @@ function noCountableReplyWhere(
     : { hasHumanReply: false };
 }
 
+/**
+ * Contexto de automação ainda "vivo" no contato: RUNNING (executando) ou
+ * PAUSED (aguardando reply/botão — típico pós-template de campanha).
+ * Entrada só excluía RUNNING; PAUSED sem dono caía em Entrada e poluía a
+ * fila dos consultores após disparos AUTOMATION.
+ */
+const ACTIVE_AUTOMATION_CTX: Prisma.EnumAutomationCtxStatusFilter = {
+  in: ["RUNNING", "PAUSED"],
+};
+
 function tabToWhere(
   tab: InboxCategoryTab,
   countAgentReply = false,
@@ -284,7 +294,9 @@ function tabToWhere(
               {
                 assignedToId: null,
                 contact: {
-                  automationContexts: { none: { status: "RUNNING" } },
+                  automationContexts: {
+                    none: { status: ACTIVE_AUTOMATION_CTX },
+                  },
                 },
               },
               { assignedTo: { is: { type: "HUMAN" } } },
@@ -318,15 +330,18 @@ function tabToWhere(
         hasError: false,
       };
     case "automacao":
-      // Robô ativo sem dono humano, OU assignee IA. Quem já tem consultor
-      // humano vai para Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
+      // Robô ativo (RUNNING ou PAUSED aguardando cliente) sem dono humano,
+      // OU assignee IA. Quem já tem consultor humano vai para
+      // Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
       return {
         status: "OPEN",
         OR: [
           {
             assignedToId: null,
             contact: {
-              automationContexts: { some: { status: "RUNNING" } },
+              automationContexts: {
+                some: { status: ACTIVE_AUTOMATION_CTX },
+              },
             },
           },
           { assignedTo: { is: { type: "AI" } } },
