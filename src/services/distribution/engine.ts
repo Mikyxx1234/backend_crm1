@@ -511,11 +511,11 @@ export async function executeDistribution(
   const input = await hydrateDistributionIds(rawInput);
 
   // Snapshot ANTES do reassign limpar o assignee — usado para disparar
-  // `lead_distributed` só na 1ª vez que um HUMAN assume (sem hasHumanReply).
+  // `lead_distributed` quando um HUMAN assume vindo de IA/sem dono
+  // (mesmo se a conversa já teve resposta humana antes).
   let preAssignSnap: {
     assignedToId: string | null;
     assigneeType: string | null;
-    hasHumanReply: boolean;
     departmentId: string | null;
     contactId: string | null;
   } | null = null;
@@ -524,7 +524,6 @@ export async function executeDistribution(
       where: { id: input.conversationId },
       select: {
         assignedToId: true,
-        hasHumanReply: true,
         departmentId: true,
         contactId: true,
         assignedTo: { select: { type: true } },
@@ -534,7 +533,6 @@ export async function executeDistribution(
       preAssignSnap = {
         assignedToId: snap.assignedToId,
         assigneeType: snap.assignedTo?.type ?? null,
-        hasHumanReply: snap.hasHumanReply,
         departmentId: snap.departmentId,
         contactId: snap.contactId,
       };
@@ -896,14 +894,11 @@ export async function executeDistribution(
     }
   }
 
-  // Saudação pós-distribuição: 1ª vez que um HUMAN assume o lead ainda
-  // sem resposta humana (IA/null → consultor). Evita re-saudar em handoff
-  // entre consultores ou quando alguém já falou no chat.
+  // Saudação pós-distribuição: sempre que um HUMAN assume vindo de IA/null
+  // (mesmo se já houve atendimento humano nesta conversa). Não re-dispara
+  // em handoff humano → humano (priorWasHuman).
   const priorWasHuman = preAssignSnap?.assigneeType === "HUMAN";
-  const shouldFireLeadDistributed =
-    selectedIsHuman &&
-    !priorWasHuman &&
-    !(preAssignSnap?.hasHumanReply ?? false);
+  const shouldFireLeadDistributed = selectedIsHuman && !priorWasHuman;
 
   if (shouldFireLeadDistributed) {
     const contactId =

@@ -278,8 +278,8 @@ export function evaluateTrigger(
     case "whatsapp_session_expiring":
       return normalizeHoursBeforeExpiry(cfg.hoursBeforeExpiry) !== null;
     case "lead_distributed": {
-      // Disparado pelo motor de distribuição quando um HUMAN assume o lead
-      // pela 1ª vez (ainda sem hasHumanReply). Filtro opcional por depto.
+      // Disparado pelo motor quando um HUMAN assume vindo de IA/sem dono
+      // (inclui conversas que já tiveram resposta humana). Filtro opcional por depto.
       const cfgDept = readString(cfg, "departmentId");
       const dataDept = readString(data, "departmentId");
       if (cfgDept && dataDept && cfgDept !== dataDept) return false;
