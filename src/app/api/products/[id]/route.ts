@@ -351,6 +351,8 @@ export async function PUT(request: Request, context: RouteContext) {
         price: number;
         channel: string | null;
         discountPercent: number | null;
+        installments: number | null;
+        months: number | null;
       }> = [];
       if (Array.isArray(course.pricingOptions)) {
         for (const raw of course.pricingOptions) {
@@ -371,10 +373,35 @@ export async function PUT(request: Request, context: RouteContext) {
             dNum != null && Number.isFinite(dNum) && dNum >= 0 && dNum <= 100
               ? dNum
               : null;
+          const instNum =
+            typeof opt.installments === "number" ||
+            typeof opt.installments === "string"
+              ? Number(opt.installments)
+              : null;
+          const installments =
+            instNum != null &&
+            Number.isFinite(instNum) &&
+            Number.isInteger(instNum) &&
+            instNum > 0
+              ? instNum
+              : null;
+          const monthsNum =
+            typeof opt.months === "number" || typeof opt.months === "string"
+              ? Number(opt.months)
+              : null;
+          const months =
+            monthsNum != null &&
+            Number.isFinite(monthsNum) &&
+            Number.isInteger(monthsNum) &&
+            monthsNum > 0
+              ? monthsNum
+              : null;
           pricingOptions.push({
             price: priceNum,
             channel: ch,
             discountPercent: dPct,
+            installments,
+            months,
           });
         }
       }
@@ -404,8 +431,14 @@ export async function PUT(request: Request, context: RouteContext) {
           price: 0,
           channel,
           discountPercent,
+          installments: null,
+          months: null,
         });
       }
+      // Pós: se semester não veio no payload, espelha months da 1ª cota.
+      const semesterResolved =
+        semester ??
+        (pricingOptions[0]?.months != null ? pricingOptions[0].months : null);
       const cfg = await prisma.courseConfig.upsert({
         where: { productId: id },
         create: withOrgFromCtx({
@@ -413,7 +446,7 @@ export async function PUT(request: Request, context: RouteContext) {
           mode: mode as never,
           level: level as never,
           grau,
-          semester,
+          semester: semesterResolved,
           postSalePipelineId,
           channel,
           discountPercent,
@@ -423,7 +456,7 @@ export async function PUT(request: Request, context: RouteContext) {
           mode: mode as never,
           level: level as never,
           grau,
-          semester,
+          semester: semesterResolved,
           postSalePipelineId,
           channel,
           discountPercent,
