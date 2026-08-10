@@ -30,6 +30,7 @@ import { toAbsolutePublicMediaUrl } from "@/lib/meta-whatsapp/to-absolute-public
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, runWithActor } from "@/lib/request-context";
+import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import type { AutomationJobPayload } from "@/lib/queue";
 import { sseBus } from "@/lib/sse-bus";
 import {
@@ -2390,10 +2391,14 @@ async function executeStep(
         await prisma.conversation.update({
           where: { id: conversationId },
           data: {
-            lastMessageDirection: "out",
-            hasAgentReply: true,
-            ...(author.asHuman ? { hasHumanReply: true } : {}),
             updatedAt: new Date(),
+            ...(author.asHuman
+              ? {
+                  lastMessageDirection: "out" as const,
+                  hasAgentReply: true,
+                  hasHumanReply: true,
+                }
+              : await botOutboundReplyMark()),
           },
         }).catch(() => {});
 
@@ -2654,7 +2659,10 @@ async function executeStep(
 
         await prisma.conversation.update({
           where: { id: tplConversationId },
-          data: { lastMessageDirection: "out", hasAgentReply: true, updatedAt: new Date() },
+          data: {
+            updatedAt: new Date(),
+            ...(await botOutboundReplyMark()),
+          },
         }).catch(() => {});
 
         sseBus.publish("new_message", {

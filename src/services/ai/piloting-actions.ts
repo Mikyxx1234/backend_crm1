@@ -27,6 +27,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
+import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { createActivity } from "@/services/activities";
 import { createDealEvent } from "@/services/deals";
 
@@ -267,9 +268,8 @@ export async function sendAgentMessage(args: {
       .update({
         where: { id: args.conversationId },
         data: {
-          lastMessageDirection: "out",
-          hasAgentReply: true,
           updatedAt: new Date(),
+          ...(await botOutboundReplyMark()),
         },
       })
       .catch(() => null);
@@ -339,9 +339,8 @@ export async function sendAgentMessage(args: {
         .update({
           where: { id: args.conversationId },
           data: {
-            lastMessageDirection: "out",
-            hasAgentReply: true,
             updatedAt: new Date(),
+            ...(await botOutboundReplyMark()),
           },
         })
         .catch(() => null);

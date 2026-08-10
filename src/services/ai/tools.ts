@@ -22,6 +22,7 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
+import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { lookupStudent } from "@/services/academic-records";
 import { createActivity } from "@/services/activities";
 import { notifyDealStageChanged } from "@/services/automation-triggers";
@@ -426,9 +427,8 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
           .update({
             where: { id: ctx.conversationId },
             data: {
-              lastMessageDirection: "out",
-              hasAgentReply: true,
               updatedAt: new Date(),
+              ...(await botOutboundReplyMark(conv.organizationId)),
             },
           })
           .catch(() => null);

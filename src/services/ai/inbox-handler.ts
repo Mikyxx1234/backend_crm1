@@ -40,6 +40,7 @@ import { cache } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { sseBus } from "@/lib/sse-bus";
 import {
   hasAgentGreetedInCurrentAssignment,
@@ -1493,9 +1494,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         .update({
           where: { id: args.conversationId },
           data: {
-            lastMessageDirection: "out",
-            hasAgentReply: true,
             updatedAt: new Date(),
+            ...(await botOutboundReplyMark()),
           },
         })
         .catch(() => null);

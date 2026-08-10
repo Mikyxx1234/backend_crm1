@@ -2489,6 +2489,7 @@ async function executePostBody(
                   unreadCount: { increment: 1 },
                   lastInboundAt: parsed.timestamp ?? new Date(),
                   lastMessageDirection: "in",
+                  hasAgentReply: false,
                   hasError: false,
                 },
               });

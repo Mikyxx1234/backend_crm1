@@ -6,6 +6,7 @@ import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { countAgentReplyAsAnswered } from "@/lib/conversation-reply-marking";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import {
@@ -244,7 +245,27 @@ function buildConversationSourceCondition(
   return or.length === 1 ? or[0] : { OR: or };
 }
 
-function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
+/** Reply que conta para Aguardando/Respondidas (humano; + agente se setting ON). */
+function countableReplyWhere(
+  countAgent: boolean,
+): Prisma.ConversationWhereInput {
+  return countAgent
+    ? { OR: [{ hasHumanReply: true }, { hasAgentReply: true }] }
+    : { hasHumanReply: true };
+}
+
+function noCountableReplyWhere(
+  countAgent: boolean,
+): Prisma.ConversationWhereInput {
+  return countAgent
+    ? { hasHumanReply: false, hasAgentReply: false }
+    : { hasHumanReply: false };
+}
+
+function tabToWhere(
+  tab: InboxCategoryTab,
+  countAgentReply = false,
+): Prisma.ConversationWhereInput {
   switch (tab) {
     case "entrada":
       // Entrada = (1) sem dono e fora do robô, OU (2) já com consultor
@@ -252,12 +273,13 @@ function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
       // manual com fila cheia (hasHumanReply=true — antes sumia das abas).
       // Em (2) NÃO exigimos “sem RUNNING”: no handoff “Falar com equipe” o
       // contexto PIPE pode ainda estar RUNNING por um instante.
+      // Com countAgentReplyAsAnswered, “já houve reply” também inclui hasAgentReply.
       return {
         status: "OPEN",
         hasError: false,
         OR: [
           {
-            hasHumanReply: false,
+            ...noCountableReplyWhere(countAgentReply),
             OR: [
               {
                 assignedToId: null,
@@ -269,32 +291,29 @@ function tabToWhere(tab: InboxCategoryTab): Prisma.ConversationWhereInput {
             ],
           },
           {
-            hasHumanReply: true,
+            ...countableReplyWhere(countAgentReply),
             assignedToId: null,
           },
         ],
       };
     case "esperando":
-      // "Aguardando" = já teve atendimento humano e o cliente falou por último
-      // (`lastMessageDirection = "in"`) — é a vez do consultor responder. O
-      // guard `hasHumanReply` só evita que conversas sem nenhum atendimento
-      // humano (que agora ficam em "Entrada") apareçam aqui.
+      // "Aguardando" = já teve atendimento (humano; + agente se setting) e o
+      // cliente falou por último (`lastMessageDirection = "in"`).
       return {
         status: "OPEN",
         assignedToId: { not: null },
-        hasHumanReply: true,
+        AND: [countableReplyWhere(countAgentReply)],
         lastMessageDirection: "in",
         hasError: false,
       };
     case "respondidas":
-      // "Respondidas" = já teve atendimento humano e nós falamos por último
-      // (`lastMessageDirection = "out"`), aguardando o cliente. `hasHumanReply`
-      // garante que o aviso automático da distribuição (sem resposta humana)
-      // não caia aqui — esses vão para "Entrada".
+      // "Respondidas" = já teve atendimento e nós falamos por último
+      // (`lastMessageDirection = "out"`). Com setting OFF, só hasHumanReply
+      // (aviso automático da distribuição sem reply humano fica em Entrada).
       return {
         status: "OPEN",
         assignedToId: { not: null },
-        hasHumanReply: true,
+        AND: [countableReplyWhere(countAgentReply)],
         lastMessageDirection: "out",
         hasError: false,
       };
@@ -369,15 +388,18 @@ export async function buildConversationSearchWhere(
 function tabFilterWhere(
   tab: InboxTab,
   todosCategoryTabs?: InboxCategoryTab[],
+  countAgentReply = false,
 ): Prisma.ConversationWhereInput | null {
   if (tab === "todos") {
     if (todosCategoryTabs && todosCategoryTabs.length > 0) {
-      return { OR: todosCategoryTabs.map((t) => tabToWhere(t)) };
+      return {
+        OR: todosCategoryTabs.map((t) => tabToWhere(t, countAgentReply)),
+      };
     }
     return null;
   }
   if (tab === "abertas") return { status: "OPEN" };
-  return tabToWhere(tab);
+  return tabToWhere(tab, countAgentReply);
 }
 
 /**
@@ -402,8 +424,13 @@ export async function buildConversationListWhere(
   const searchWhere = await buildConversationSearchWhere(params.search);
   if (searchWhere) conditions.push(searchWhere);
 
+  const countAgentReply = await countAgentReplyAsAnswered();
   if (params.tab) {
-    const tabWhere = tabFilterWhere(params.tab, params.todosCategoryTabs);
+    const tabWhere = tabFilterWhere(
+      params.tab,
+      params.todosCategoryTabs,
+      countAgentReply,
+    );
     if (tabWhere) conditions.push(tabWhere);
   }
   if (params.status && !params.tab) conditions.push({ status: params.status });
@@ -712,13 +739,16 @@ async function countTodosTab(
   allowedChannelIds?: string[] | null,
   filterConditions?: Prisma.ConversationWhereInput[],
   searchWhere?: Prisma.ConversationWhereInput | null,
+  countAgentReply = false,
 ): Promise<number> {
   const conditions: Prisma.ConversationWhereInput[] = [];
   if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
     conditions.push(visibilityWhere);
   }
   if (memberOrTabs && memberOrTabs.length > 0) {
-    conditions.push({ OR: memberOrTabs.map((t) => tabToWhere(t)) });
+    conditions.push({
+      OR: memberOrTabs.map((t) => tabToWhere(t, countAgentReply)),
+    });
   }
   if (allowedChannelIds) {
     conditions.push({ channelId: { in: allowedChannelIds } });
@@ -746,13 +776,14 @@ export async function getTabCounts(
 ): Promise<Record<InboxTab, number>> {
   const extra = filterConditions ?? [];
   const searchWhere = await buildConversationSearchWhere(search);
+  const countAgentReply = await countAgentReplyAsAnswered();
   const results = await Promise.all(
     TAB_LIST.map(async (tab) => {
       const conditions: Prisma.ConversationWhereInput[] = [];
       if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
         conditions.push(visibilityWhere);
       }
-      conditions.push(tabToWhere(tab));
+      conditions.push(tabToWhere(tab, countAgentReply));
       if (allowedChannelIds) {
         conditions.push({ channelId: { in: allowedChannelIds } });
       }
@@ -771,6 +802,7 @@ export async function getTabCounts(
     allowedChannelIds,
     extra,
     searchWhere,
+    countAgentReply,
   );
   // "abertas" = todas as conversas em aberto (status OPEN), independentemente
   // da subcategoria. Contagem própria (não é uma categoria em TAB_LIST).

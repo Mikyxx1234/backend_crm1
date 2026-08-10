@@ -6,6 +6,7 @@ import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
+import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { sseBus } from "@/lib/sse-bus";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
@@ -517,9 +518,8 @@ async function persistCampaignOutboundMessage(input: {
     .update({
       where: { id: conversationId },
       data: {
-        lastMessageDirection: "out",
-        hasAgentReply: true,
         updatedAt: new Date(),
+        ...(await botOutboundReplyMark()),
         ...(shouldAutoResolve
           ? {
               status: "RESOLVED" as const,
