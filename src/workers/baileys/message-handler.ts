@@ -227,7 +227,13 @@ async function syncContactAvatar(
 // a cargo das automações configuradas pelo operador (trigger
 // `message_received` + filtro `dealStatus`).
 
-const CONV_SELECT = { id: true, status: true, channelId: true, waJid: true } as const;
+const CONV_SELECT = {
+  id: true,
+  status: true,
+  channelId: true,
+  waJid: true,
+  assignedToId: true,
+} as const;
 
 async function findActiveConversation(contactId: string) {
   return prisma.conversation.findFirst({
@@ -583,6 +589,7 @@ export async function handleBaileysMessage(
       conversationId: conversation.id,
       contactId: contact.id,
       direction: "in",
+      assignedToId: conversation.assignedToId ?? null,
       content: parsed.text,
       timestamp: new Date().toISOString(),
     });

@@ -715,6 +715,7 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
     status: true,
     channelId: true,
     organizationId: true,
+    assignedToId: true,
   } as const;
   const findActive = () =>
     prisma.conversation.findFirst({
@@ -2508,6 +2509,7 @@ async function executePostBody(
                 conversationId: conversation.id,
                 contactId: contact.id,
                 direction: "in",
+                assignedToId: conversation.assignedToId ?? null,
                 content: parsed.text,
                 timestamp: parsed.timestamp,
               });

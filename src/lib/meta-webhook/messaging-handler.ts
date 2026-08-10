@@ -318,6 +318,7 @@ async function processEvent(
       conversationId: conversation.id,
       contactId: contact.id,
       direction: "in",
+      assignedToId: conversation.assignedToId ?? null,
       content,
       timestamp,
     });
@@ -441,13 +442,13 @@ async function findOrCreateConversation(
   contactId: string,
   platform: Platform,
   channelId: string,
-): Promise<{ id: string }> {
+): Promise<{ id: string; assignedToId: string | null }> {
   const channelSlug = platform;
 
   const findActive = () =>
     prisma.conversation.findFirst({
       where: { contactId, channel: channelSlug, status: { not: "RESOLVED" } },
-      select: { id: true, channelId: true },
+      select: { id: true, channelId: true, assignedToId: true },
     });
 
   const existing = await findActive();
@@ -458,7 +459,7 @@ async function findOrCreateConversation(
         data: { channelId },
       });
     }
-    return { id: existing.id };
+    return { id: existing.id, assignedToId: existing.assignedToId ?? null };
   }
 
   const contact = await prisma.contact.findUnique({
@@ -477,7 +478,7 @@ async function findOrCreateConversation(
           status: "OPEN" as const,
           ...(contact?.assignedToId ? { assignedToId: contact.assignedToId } : {}),
         }),
-        select: { id: true },
+        select: { id: true, assignedToId: true },
       }),
     );
     await maybeDistributeNewInboundTicket({
@@ -485,11 +486,14 @@ async function findOrCreateConversation(
       contactId,
       assignedToId: contact?.assignedToId ?? null,
     });
-    return created;
+    return {
+      id: created.id,
+      assignedToId: created.assignedToId ?? contact?.assignedToId ?? null,
+    };
   } catch (err) {
     if (isActiveConversationUniqueViolation(err)) {
       const won = await findActive();
-      if (won) return { id: won.id };
+      if (won) return { id: won.id, assignedToId: won.assignedToId ?? null };
     }
     throw err;
   }
