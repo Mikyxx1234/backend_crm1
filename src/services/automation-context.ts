@@ -110,6 +110,44 @@ export function readStepRef(config: unknown, key: string): string | null {
   return trimmed;
 }
 
+export type InteractiveOption = {
+  text?: string;
+  title?: string;
+  id?: string;
+  gotoStepId?: string;
+};
+
+/**
+ * Casa resposta de botão/lista com a opção do config.
+ * O executor envia `b.id || btn_${i}` / `r.id || row_${i}` (0-based) — quando
+ * o JSON salvo não tem `id`, o `list_reply.id`/`button_reply.id` ainda casa
+ * pelo fallback de índice.
+ */
+export function matchInteractiveOption(
+  options: InteractiveOption[],
+  messageContent: string,
+  interactiveId?: string | null,
+): InteractiveOption | undefined {
+  const normalized = messageContent.trim().toLowerCase();
+  const idNorm = (interactiveId ?? "").trim().toLowerCase();
+  return options.find((b, idx) => {
+    const label = (b.title || b.text || "").trim().toLowerCase();
+    const btnId = (b.id || "").trim().toLowerCase();
+    // Ids efetivos iguais aos gerados em automation-executor.ts
+    const effectiveRowId = (btnId || `row_${idx}`).toLowerCase();
+    const effectiveBtnId = (btnId || `btn_${idx}`).toLowerCase();
+    return (
+      (label && label === normalized) ||
+      (btnId && btnId === normalized) ||
+      (idNorm && btnId && btnId === idNorm) ||
+      (idNorm && (idNorm === effectiveRowId || idNorm === effectiveBtnId)) ||
+      (!btnId &&
+        idNorm &&
+        (idNorm === `row_${idx}` || idNorm === `btn_${idx}`))
+    );
+  });
+}
+
 export async function getActiveContext(automationId: string, contactId: string) {
   return prisma.automationContext.findFirst({
     where: {
@@ -284,18 +322,27 @@ export async function processIncomingMessage(
   messageContent: string,
   opts?: { interactiveId?: string | null },
 ) {
-  // Se humano já está atendendo, encerra salesbot ativo e não avança passos.
+  // Só cancela/bloqueia retomada quando HUMANO está no atendimento
+  // (`humanAttending`). `suppressAutomation` também é true com assignee IA
+  // e serve para NÃO disparar automações novas nos triggers — aqui não
+  // usamos, senão o clique na lista/botão morre se a IA já era assignee
+  // antes do gatilho manual.
   try {
     const { getHumanAttendanceForContact } = await import(
       "@/services/attendance-guards"
     );
     const snap = await getHumanAttendanceForContact(contactId);
-    if (snap?.suppressAutomation) {
+    if (snap?.humanAttending) {
       const cancelled = await cancelActiveContextsForContact(contactId);
       log.info(
-        `processIncomingMessage skip — atendimento ativo contact=${contactId} cancelled=${cancelled} assignee=${snap.assignedToId ?? "-"}`,
+        `processIncomingMessage skip — humano atendendo contact=${contactId} cancelled=${cancelled} assignee=${snap.assignedToId ?? "-"} hasHumanReply=${snap.hasHumanReply}`,
       );
       return { handled: false as const };
+    }
+    if (snap?.assignedToId) {
+      log.debug(
+        `processIncomingMessage — assignee IA/não-humano contact=${contactId} assignee=${snap.assignedToId} type=${snap.assigneeType ?? "-"} — mantém contextos pausados`,
+      );
     }
   } catch (err) {
     log.warn(
@@ -386,20 +433,14 @@ export async function processIncomingMessage(
         buttonsFromButtons.length > 0 ? buttonsFromButtons : buttonsFromRows;
 
       if (buttons.length > 0) {
-        // Match por título interpolado (texto da Meta) OU por id estável
-        // (list_reply.id / button_reply.id). Títulos com {{contact.name}} etc.
-        // são interpolados no envio e não batem com o config cru — o id resolve.
-        const normalized = messageContent.trim().toLowerCase();
-        const interactiveId = (opts?.interactiveId ?? "").trim().toLowerCase();
-        const matchedBtn = buttons.find((b) => {
-          const label = (b.title || b.text || "").trim().toLowerCase();
-          const btnId = (b.id || "").trim().toLowerCase();
-          return (
-            (label && label === normalized) ||
-            (btnId && btnId === normalized) ||
-            (interactiveId && btnId && btnId === interactiveId)
-          );
-        });
+        // Match por título, id do config, interactiveId e fallback row_N/btn_N
+        // (quando o executor gerou id e o JSON salvo não tem). Ver
+        // matchInteractiveOption.
+        const matchedBtn = matchInteractiveOption(
+          buttons,
+          messageContent,
+          opts?.interactiveId,
+        );
 
         const elseGoto = readStepRef(config, "elseGotoStepId");
         // Saída padrão do passo. Em menus do canvas é comum vários botões

@@ -14,6 +14,7 @@ import { describe, expect, it } from "vitest";
 import {
   hasExplicitEdges,
   linearFallbackStepId,
+  matchInteractiveOption,
   readStepRef,
 } from "@/services/automation-context";
 
@@ -213,17 +214,7 @@ describe("roteamento de botão — botão válido sem aresta conectada", () => {
       id?: string;
       gotoStepId?: string;
     }[];
-    const normalized = resposta.trim().toLowerCase();
-    const idNorm = (interactiveId ?? "").trim().toLowerCase();
-    const matched = buttons.find((b) => {
-      const label = (b.title || b.text || "").trim().toLowerCase();
-      const btnId = (b.id || "").trim().toLowerCase();
-      return (
-        (label && label === normalized) ||
-        (btnId && btnId === normalized) ||
-        (idNorm && btnId && btnId === idNorm)
-      );
-    });
+    const matched = matchInteractiveOption(buttons, resposta, interactiveId);
     const elseGoto = readStepRef(config, "elseGotoStepId");
     const defaultOut = readStepRef(config, "nextStepId");
     if (matched) {
@@ -302,5 +293,36 @@ describe("roteamento de botão — botão válido sem aresta conectada", () => {
     };
     expect(resolveButtonTarget(lista, "João")).toBeNull();
     expect(resolveButtonTarget(lista, "João", "row-nome")).toBe("proximo-passo");
+  });
+
+  it("lista com título template e id ausente casa pelo fallback row_N do executor", () => {
+    // Executor envia r.id || `row_${i}` — JSON salvo sem id ainda retoma o ramo.
+    const lista = {
+      __hasExplicitEdges: true,
+      nextStepId: "__none__",
+      elseGotoStepId: "",
+      rows: [
+        {
+          title: "{{contact.name}}",
+          gotoStepId: "tag-pos-lista",
+        },
+      ],
+    };
+    expect(resolveButtonTarget(lista, "Maria")).toBeNull();
+    expect(resolveButtonTarget(lista, "Maria", "row_0")).toBe("tag-pos-lista");
+  });
+});
+
+describe("matchInteractiveOption", () => {
+  it("casa título, id do config e fallback btn_N / row_N", () => {
+    const opts = [
+      { title: "Alpha", id: "a1", gotoStepId: "s1" },
+      { title: "{{contact.name}}", gotoStepId: "s2" },
+    ];
+    expect(matchInteractiveOption(opts, "Alpha")?.gotoStepId).toBe("s1");
+    expect(matchInteractiveOption(opts, "x", "a1")?.gotoStepId).toBe("s1");
+    expect(matchInteractiveOption(opts, "João", "row_1")?.gotoStepId).toBe("s2");
+    expect(matchInteractiveOption(opts, "João", "btn_1")?.gotoStepId).toBe("s2");
+    expect(matchInteractiveOption(opts, "João", "ROW_1")?.gotoStepId).toBe("s2");
   });
 });
