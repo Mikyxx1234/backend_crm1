@@ -37,7 +37,11 @@ export type TabulationTopItem = {
    * departamentos (ex.: "Sem Resposta" em Acolhimento, SAC e Retencao) rende
    * uma linha por departamento — com `path` identico quando a folha esta na
    * raiz. Sem o departamento as linhas ficam indistinguiveis na tela.
+   *
+   * O `departmentId` acompanha o nome porque o painel usa a linha do ranking
+   * como atalho pro filtro de departamento.
    */
+  departmentId: string | null;
   departmentName: string | null;
   count: number;
 };
@@ -287,6 +291,7 @@ export async function getTabulationAnalytics(
       tabulationId: r.id,
       name: info?.name ?? r.id,
       path: info?.path ?? r.id,
+      departmentId: deptId,
       departmentName: deptId ? (deptNameById.get(deptId) ?? null) : null,
       count: Number(r.count),
     };
