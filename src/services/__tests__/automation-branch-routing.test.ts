@@ -205,18 +205,24 @@ describe("roteamento de botão — botão válido sem aresta conectada", () => {
   function resolveButtonTarget(
     config: Record<string, unknown>,
     resposta: string,
+    interactiveId?: string | null,
   ): string | null {
-    const buttons = (config.buttons ?? []) as {
+    const buttons = ((config.buttons ?? config.rows) ?? []) as {
       title?: string;
       text?: string;
       id?: string;
       gotoStepId?: string;
     }[];
     const normalized = resposta.trim().toLowerCase();
+    const idNorm = (interactiveId ?? "").trim().toLowerCase();
     const matched = buttons.find((b) => {
       const label = (b.title || b.text || "").trim().toLowerCase();
       const btnId = (b.id || "").trim().toLowerCase();
-      return label === normalized || btnId === normalized;
+      return (
+        (label && label === normalized) ||
+        (btnId && btnId === normalized) ||
+        (idNorm && btnId && btnId === idNorm)
+      );
     });
     const elseGoto = readStepRef(config, "elseGotoStepId");
     const defaultOut = readStepRef(config, "nextStepId");
@@ -278,5 +284,23 @@ describe("roteamento de botão — botão válido sem aresta conectada", () => {
       buttons: [{ title: "Órfão", gotoStepId: "" }],
     };
     expect(resolveButtonTarget(semDefault, "Órfão")).toBe("repetir-menu");
+  });
+
+  it("lista com título template casa pelo interactiveId (list_reply.id)", () => {
+    // Envio interpola {{contact.name}} → "João"; config cru não bate no título.
+    const lista = {
+      __hasExplicitEdges: true,
+      nextStepId: "__none__",
+      elseGotoStepId: "",
+      rows: [
+        {
+          id: "row-nome",
+          title: "{{contact.name}}",
+          gotoStepId: "proximo-passo",
+        },
+      ],
+    };
+    expect(resolveButtonTarget(lista, "João")).toBeNull();
+    expect(resolveButtonTarget(lista, "João", "row-nome")).toBe("proximo-passo");
   });
 });
