@@ -2541,8 +2541,10 @@ async function executePostBody(
               log.error("Falha no ensureInboundAiAttendance:", err);
             }
 
+            let salesbotHandled = false;
             try {
-              await processSalesbotMessage(contact.id, parsed.text);
+              const salesbotResult = await processSalesbotMessage(contact.id, parsed.text);
+              salesbotHandled = Boolean(salesbotResult?.handled);
             } catch (err) {
               log.error("Falha no salesbot:", err);
             }
@@ -2571,7 +2573,10 @@ async function executePostBody(
             }
 
             // Agente de IA: agenda resposta com debounce (agrupa msgs consecutivas).
-            if (!isSystemMessage && parsed.text) {
+            // Quando o salesbot consumiu a mensagem (clique de botão casado
+            // com automação pausada), a IA NÃO fala — a resposta era insumo
+            // do fluxo, não uma pergunta pro agente.
+            if (!isSystemMessage && parsed.text && !salesbotHandled) {
               void scheduleAiReply({
                 conversationId: conversation.id,
                 contactId: contact.id,

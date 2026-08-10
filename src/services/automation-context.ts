@@ -291,7 +291,7 @@ export async function processIncomingMessage(contactId: string, messageContent: 
       log.info(
         `processIncomingMessage skip — atendimento ativo contact=${contactId} cancelled=${cancelled} assignee=${snap.assignedToId ?? "-"}`,
       );
-      return;
+      return { handled: false as const };
     }
   } catch (err) {
     log.warn(

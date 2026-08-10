@@ -262,6 +262,30 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
+  // Automação pausada aguardando resposta do contato (ex.: template de
+  // campanha com botões): a mensagem inbound é a RESPOSTA ESPERADA pelo
+  // fluxo. Se a IA assumir a conversa aqui, o guarda `suppressAutomation`
+  // do salesbot cancela o contexto e o clique nunca casa com o botão —
+  // a automação morre e a IA responde fora de contexto. (Incidente
+  // 10/ago/26 — campanha "calouros_parte1": contatos interceptados.)
+  try {
+    const { getContactActiveContexts } = await import(
+      "@/services/automation-context"
+    );
+    const activeCtxs = await getContactActiveContexts(args.contactId);
+    if (activeCtxs.length > 0) {
+      logAi("first_attendance_skip_automation_waiting", {
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        contexts: activeCtxs.length,
+      });
+      return null;
+    }
+  } catch (e) {
+    console.error("[ai] first_attendance automation-context check failed — skipping", e);
+    return null;
+  }
+
   // Roster de depts (Wesley/Danúbia/Marília/…) — best-effort.
   try {
     const { ensureAcademicDepartmentRoster } = await import(
