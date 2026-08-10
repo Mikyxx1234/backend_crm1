@@ -20,6 +20,10 @@ import { prisma } from "@/lib/prisma";
  *
  * Resposta:
  *   { items: ActivityEvent[], nextCursor: string | null }
+ *
+ * Também inclui (quando existirem / como âncora sintética):
+ *   - CONTACT_CREATED (data de criação do contato)
+ *   - CREATED (data de criação do(s) negócio(s) do contato)
  */
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -44,6 +48,38 @@ function parseCsv(raw: string | null): string[] | null {
   return arr.length > 0 ? arr : null;
 }
 
+type TimelineItem = {
+  id: string;
+  type: string;
+  occurredAt: Date;
+  meta: Record<string, unknown>;
+  entityType?: string;
+  entityId?: string;
+  entityLabel?: string | null;
+  dealId?: string | null;
+  contactId?: string | null;
+  conversationId?: string | null;
+  actorType?: string;
+  actorUserId?: string | null;
+  actorLabel?: string | null;
+  actorUser?: { id: string; name: string | null; avatarUrl: string | null } | null;
+  synthetic?: boolean;
+};
+
+function cmpDesc(a: TimelineItem, b: TimelineItem): number {
+  const dt = b.occurredAt.getTime() - a.occurredAt.getTime();
+  if (dt !== 0) return dt;
+  return b.id.localeCompare(a.id);
+}
+
+function passesCursor(item: TimelineItem, cursor: { occurredAt: Date; id: string }): boolean {
+  const t = item.occurredAt.getTime();
+  const ct = cursor.occurredAt.getTime();
+  if (t < ct) return true;
+  if (t > ct) return false;
+  return item.id < cursor.id;
+}
+
 export async function GET(req: Request, context: RouteContext) {
   return withOrgContext(async (session) => {
     try {
@@ -62,38 +98,48 @@ export async function GET(req: Request, context: RouteContext) {
       const cursor = parseCursor(sp.get("cursor"));
       const types = parseCsv(sp.get("type"));
 
-      // A timeline da conversa mostra eventos ligados diretamente a ela
-      // (conversationId) E as mudancas de etapa/status do(s) negocio(s) do
-      // contato. Estas ultimas sao logadas como eventos de DEAL (com dealId
-      // e SEM conversationId) por createDealEvent — por isso a "troca de
-      // fase do funil" nao aparecia aqui. Resolvemos os deals do contato e
-      // incluimos esses tipos explicitamente (paridade com a timeline do
-      // negocio, que ja puxa eventos contact-scoped).
       const conv = await prisma.conversation.findUnique({
         where: { id: conversationId },
-        select: { contactId: true },
+        select: {
+          contactId: true,
+          contact: {
+            select: { id: true, name: true, phone: true, createdAt: true },
+          },
+        },
       });
-      let dealIds: string[] = [];
-      if (conv?.contactId) {
-        const deals = await prisma.deal.findMany({
-          where: { contactId: conv.contactId },
-          select: { id: true },
-        });
-        dealIds = deals.map((d) => d.id);
-      }
 
-      const DEAL_SCOPED_TYPES = ["STAGE_CHANGED", "STATUS_CHANGED"];
+      const contact = conv?.contact ?? null;
+      const contactId = contact?.id ?? conv?.contactId ?? null;
+
+      const deals = contactId
+        ? await prisma.deal.findMany({
+            where: { contactId },
+            select: {
+              id: true,
+              title: true,
+              number: true,
+              createdAt: true,
+            },
+            orderBy: { createdAt: "asc" },
+            take: 50,
+          })
+        : [];
+      const dealIds = deals.map((d) => d.id);
+
+      const DEAL_SCOPED_TYPES = ["STAGE_CHANGED", "STATUS_CHANGED", "CREATED"];
+      const CONTACT_SCOPED_TYPES = ["CONTACT_CREATED"];
 
       const scopeOr: Prisma.ActivityEventWhereInput[] = [{ conversationId }];
       if (dealIds.length > 0) {
         scopeOr.push({ dealId: { in: dealIds }, type: { in: DEAL_SCOPED_TYPES } });
       }
+      if (contactId) {
+        scopeOr.push({ contactId, type: { in: CONTACT_SCOPED_TYPES } });
+      }
 
       const where: Prisma.ActivityEventWhereInput = { OR: scopeOr };
       if (types) where.type = { in: types };
 
-      // Cursor composto identico ao /api/activity-feed — desempate estavel
-      // em eventos do mesmo instante (occurredAt desc, id desc).
       if (cursor) {
         const cursorAnd: Prisma.ActivityEventWhereInput = {
           OR: [
@@ -117,13 +163,109 @@ export async function GET(req: Request, context: RouteContext) {
         },
       });
 
-      const hasMore = rows.length > limit;
-      const items = hasMore ? rows.slice(0, limit) : rows;
-      const last = items[items.length - 1];
+      const items: TimelineItem[] = rows.map((a) => ({
+        id: a.id,
+        type: a.type,
+        occurredAt: a.occurredAt,
+        meta: (a.meta ?? {}) as Record<string, unknown>,
+        entityType: a.entityType,
+        entityId: a.entityId,
+        entityLabel: a.entityLabel,
+        dealId: a.dealId,
+        contactId: a.contactId,
+        conversationId: a.conversationId,
+        actorType: a.actorType,
+        actorUserId: a.actorUserId,
+        actorLabel: a.actorLabel,
+        actorUser: a.actorUser,
+      }));
+
+      // Âncoras de criação: se não há evento real, sintetiza a partir de
+      // Contact.createdAt / Deal.createdAt para a timeline e os logs
+      // sempre mostrarem a data de criação.
+      const synthetics: TimelineItem[] = [];
+
+      const [contactCreatedRow, dealCreatedRows] = await Promise.all([
+        contactId
+          ? prisma.activityEvent.findFirst({
+              where: { contactId, type: "CONTACT_CREATED" },
+              select: { id: true },
+            })
+          : Promise.resolve(null),
+        dealIds.length > 0
+          ? prisma.activityEvent.findMany({
+              where: { dealId: { in: dealIds }, type: "CREATED" },
+              select: { dealId: true },
+              distinct: ["dealId"],
+            })
+          : Promise.resolve([] as { dealId: string | null }[]),
+      ]);
+      const dealsWithCreated = new Set(
+        dealCreatedRows.map((r) => r.dealId).filter((id): id is string => !!id),
+      );
+
+      if (contact && !contactCreatedRow) {
+        synthetics.push({
+          id: `synthetic:contact-created:${contact.id}`,
+          type: "CONTACT_CREATED",
+          occurredAt: contact.createdAt,
+          meta: {
+            synthetic: true,
+            createdAt: contact.createdAt.toISOString(),
+          },
+          entityType: "CONTACT",
+          entityId: contact.id,
+          entityLabel: contact.name ?? contact.phone ?? null,
+          contactId: contact.id,
+          actorType: "SYSTEM",
+          actorLabel: "Sistema",
+          synthetic: true,
+        });
+      }
+
+      for (const deal of deals) {
+        if (dealsWithCreated.has(deal.id)) continue;
+        synthetics.push({
+          id: `synthetic:deal-created:${deal.id}`,
+          type: "CREATED",
+          occurredAt: deal.createdAt,
+          meta: {
+            synthetic: true,
+            createdAt: deal.createdAt.toISOString(),
+            dealNumber: deal.number,
+          },
+          entityType: "DEAL",
+          entityId: deal.id,
+          entityLabel: deal.title ?? (deal.number != null ? `Negócio #${deal.number}` : null),
+          dealId: deal.id,
+          contactId: contactId,
+          actorType: "SYSTEM",
+          actorLabel: "Sistema",
+          synthetic: true,
+        });
+      }
+
+      const typeFilter = types ? new Set(types) : null;
+      const extra = synthetics.filter((s) => {
+        if (typeFilter && !typeFilter.has(s.type)) return false;
+        if (cursor && !passesCursor(s, cursor)) return false;
+        return true;
+      });
+
+      const merged = [...items, ...extra].sort(cmpDesc);
+      const page = merged.slice(0, limit);
+      const hasMore = merged.length > limit;
+      const last = page[page.length - 1];
       const nextCursor =
         hasMore && last ? `${last.occurredAt.getTime()}_${last.id}` : null;
 
-      return NextResponse.json({ items, nextCursor });
+      return NextResponse.json({
+        items: page.map((i) => ({
+          ...i,
+          occurredAt: i.occurredAt.toISOString(),
+        })),
+        nextCursor,
+      });
     } catch (e) {
       return NextResponse.json(
         { message: e instanceof Error ? e.message : "Erro." },

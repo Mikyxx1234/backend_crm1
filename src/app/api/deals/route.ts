@@ -194,7 +194,10 @@ export async function POST(request: Request) {
       });
 
       const uid = authResult.user.id;
-      createDealEvent(deal.id, uid, "CREATED", { stageId: b.stageId }).catch(() => {});
+      createDealEvent(deal.id, uid, "CREATED", {
+        stageId: b.stageId,
+        createdAt: deal.createdAt instanceof Date ? deal.createdAt.toISOString() : deal.createdAt,
+      }).catch(() => {});
       fireTrigger("deal_created", {
         dealId: deal.id,
         contactId: deal.contactId ?? undefined,
