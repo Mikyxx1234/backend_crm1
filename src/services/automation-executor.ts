@@ -2996,8 +2996,14 @@ async function executeStep(
       if (!bodyRaw) throw new Error("send_whatsapp_list: body obrigatório");
       const body = await interpolateMessageVariables(bodyRaw, rt, listVars);
 
-      const buttonLabel = (readString(cfg, "button")?.trim() || "Ver opções").slice(0, 20);
-      const sectionTitle = readString(cfg, "sectionTitle")?.trim() || null;
+      const buttonRaw = readString(cfg, "button") || "";
+      const buttonInterpolated = await interpolateMessageVariables(buttonRaw, rt, listVars);
+      const buttonLabel = (buttonInterpolated.trim() || "Ver opções").slice(0, 20);
+
+      const sectionTitleRaw = readString(cfg, "sectionTitle");
+      const sectionTitle = sectionTitleRaw?.trim()
+        ? (await interpolateMessageVariables(sectionTitleRaw, rt, listVars)).trim() || null
+        : null;
 
       const rawRows = Array.isArray(cfg.rows)
         ? (cfg.rows as {
@@ -3007,13 +3013,21 @@ async function executeStep(
             gotoStepId?: string;
           }[])
         : [];
-      const rows = rawRows.slice(0, 10).map((r, i) => ({
-        id: (r.id || `row_${i}`).slice(0, 200),
-        title: (r.title || `Opção ${i + 1}`).slice(0, 24),
-        description: r.description?.trim()
-          ? r.description.trim().slice(0, 72)
-          : null,
-      }));
+      const rows = await Promise.all(
+        rawRows.slice(0, 10).map(async (r, i) => {
+          const titleRaw = r.title || `Opção ${i + 1}`;
+          const title = (await interpolateMessageVariables(titleRaw, rt, listVars)).slice(0, 24);
+          const descRaw = r.description?.trim();
+          const description = descRaw
+            ? (await interpolateMessageVariables(descRaw, rt, listVars)).trim().slice(0, 72) || null
+            : null;
+          return {
+            id: (r.id || `row_${i}`).slice(0, 200),
+            title,
+            description,
+          };
+        }),
+      );
       if (rows.length === 0) {
         throw new Error("send_whatsapp_list: pelo menos 1 item obrigatório");
       }
