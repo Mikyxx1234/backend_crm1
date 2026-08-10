@@ -128,6 +128,17 @@ function buildGenericQueueHandoffMessage(now = new Date()): string {
   return buildHumanUnavailableOfferMessage(now);
 }
 
+/** Após distribuição bem-sucedida a saudação fica com a automação (como responsável). */
+async function conversationAssignedToHuman(
+  conversationId: string,
+): Promise<boolean> {
+  const c = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: { assignedTo: { select: { type: true } } },
+  });
+  return c?.assignedTo?.type === "HUMAN";
+}
+
 function stripConfidenceTag(text: string): string {
   return parseAgentConfidence(text).text.trim();
 }
@@ -656,7 +667,11 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               userMessage: args.userMessage,
               reason: "Aluno pediu/confirmou fila humana (ack pós-transferência)",
             }).catch(() => null);
+            const gotHumanAck = await conversationAssignedToHuman(
+              args.conversationId,
+            );
             if (
+              !gotHumanAck &&
               !lastBotOut?.content?.includes("expediente inicia") &&
               !lastBotOut?.content?.includes("já está na *fila*")
             ) {
@@ -787,22 +802,25 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
               : "Atendimento",
         reason: `Palavra-chave disparou handoff: "${keyword}"`,
       });
-      const keywordText =
-        deptKey === "retencao"
-          ? buildRetentionHandoffMessage()
-          : buildGenericQueueHandoffMessage();
-      await sendAgentMessage({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: assignee.id,
-        autonomyMode: cfg.autonomyMode,
-        text: keywordText,
-        channel: args.channel,
-        kind: "text",
-        humanBehavior,
-        generationId: args.generationId,
-        bypassAssigneeCheck: true,
-      }).catch(() => null);
+      // Humano atribuído → saudação da automação; agente só fala se ficou em fila.
+      if (!(await conversationAssignedToHuman(args.conversationId))) {
+        const keywordText =
+          deptKey === "retencao"
+            ? buildRetentionHandoffMessage()
+            : buildGenericQueueHandoffMessage();
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: keywordText,
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+      }
       logAi("handoff", {
         conversationId: args.conversationId,
         reason: "keyword",
@@ -824,18 +842,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         reason:
           "Dúvida sobre valor/grade/info de curso — handoff obrigatório (sem site)",
       });
-      await sendAgentMessage({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: assignee.id,
-        autonomyMode: cfg.autonomyMode,
-        text: buildGenericQueueHandoffMessage(),
-        channel: args.channel,
-        kind: "text",
-        humanBehavior,
-        generationId: args.generationId,
-        bypassAssigneeCheck: true,
-      }).catch(() => null);
+      if (!(await conversationAssignedToHuman(args.conversationId))) {
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: buildGenericQueueHandoffMessage(),
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+      }
       logAi("handoff", {
         conversationId: args.conversationId,
         reason: "course_shopping",
@@ -858,18 +878,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         departmentName: "Retenção",
         reason: "Intenção de trancamento/cancelamento (regra determinística)",
       });
-      await sendAgentMessage({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: assignee.id,
-        autonomyMode: cfg.autonomyMode,
-        text: buildRetentionHandoffMessage(),
-        channel: args.channel,
-        kind: "text",
-        humanBehavior,
-        generationId: args.generationId,
-        bypassAssigneeCheck: true,
-      }).catch(() => null);
+      if (!(await conversationAssignedToHuman(args.conversationId))) {
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: buildRetentionHandoffMessage(),
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+      }
       logAi("handoff", {
         conversationId: args.conversationId,
         reason: "retention_intent",
@@ -977,19 +999,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         error: result.error ?? "unknown",
         durationMs: Date.now() - startedAt.getTime(),
       });
-      // Nunca deixa o aluno sem resposta: avisa + joga na distribuição.
-      await sendAgentMessage({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: assignee.id,
-        autonomyMode: cfg.autonomyMode,
-        text: buildGenericQueueHandoffMessage(),
-        channel: args.channel,
-        kind: "text",
-        humanBehavior,
-        generationId: args.generationId,
-        bypassAssigneeCheck: true,
-      }).catch(() => null);
+      // Distribui primeiro; só avisa fila se não caiu em consultor humano
+      // (saudação fica com a automação "como responsável").
       await executeAcademicDepartmentHandoff({
         conversationId: args.conversationId,
         contactId: args.contactId,
@@ -997,6 +1008,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         userMessage: args.userMessage,
         reason: `Falha no run da IA: ${result.error ?? "unknown"}`,
       }).catch(() => null);
+      if (!(await conversationAssignedToHuman(args.conversationId))) {
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: buildGenericQueueHandoffMessage(),
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+      }
       return;
     }
 
@@ -1103,7 +1128,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
       let outbound: string | null = null;
       if (gotHuman) {
-        outbound = handoffText;
+        // Consultor + automação de saudação falam com o aluno; agente não envia
+        // "já pedi a equipe..." (chegaria depois e confundiria).
+        outbound = null;
       } else if (alreadyNoticed) {
         // Já avisou fila — não repete; só envia se o LLM trouxe info nova
         // e não for near-duplicate / promessa falsa de "em breve".
@@ -1221,18 +1248,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         userMessage: args.userMessage,
         reason: `Baixa confiança da IA (${parsed.confidence?.toFixed(2)})`,
       });
-      await sendAgentMessage({
-        conversationId: args.conversationId,
-        contactId: args.contactId,
-        agentUserId: assignee.id,
-        autonomyMode: cfg.autonomyMode,
-        text: buildHumanUnavailableOfferMessage(),
-        channel: args.channel,
-        kind: "text",
-        humanBehavior,
-        generationId: args.generationId,
-        bypassAssigneeCheck: true,
-      }).catch(() => null);
+      if (!(await conversationAssignedToHuman(args.conversationId))) {
+        await sendAgentMessage({
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          agentUserId: assignee.id,
+          autonomyMode: cfg.autonomyMode,
+          text: buildHumanUnavailableOfferMessage(),
+          channel: args.channel,
+          kind: "text",
+          humanBehavior,
+          generationId: args.generationId,
+          bypassAssigneeCheck: true,
+        }).catch(() => null);
+      }
       await prisma.aIAgentRun
         .update({
           where: { id: result.runId },
