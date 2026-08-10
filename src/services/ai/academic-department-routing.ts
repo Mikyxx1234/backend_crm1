@@ -7,6 +7,7 @@ import { executeDistribution } from "@/services/distribution";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { ACADEMIC_DEPARTMENT_ALIASES } from "@/lib/ai-agents/academic-atendimento-prompt";
+import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
 
 export type AcademicDeptKey = keyof typeof ACADEMIC_DEPARTMENT_ALIASES;
 
@@ -363,6 +364,24 @@ export function isCourseShoppingInquiry(userMessage: string): boolean {
   return false;
 }
 
+/**
+ * Handoff imediato justificado pelo TEXTO do aluno (sem esperar confiança).
+ * Pedido explícito de humano, retenção, ou dúvida comercial de curso/valor.
+ * Dúvidas operacionais (ex.: início das aulas) NÃO justificam — a IA atende.
+ */
+export function isImmediateAcademicHandoffJustified(
+  userMessage?: string | null,
+): boolean {
+  const msg = (userMessage ?? "").trim();
+  if (!msg) return false;
+  if (userWantsHumanDistribution(msg)) return true;
+  if (isCourseShoppingInquiry(msg)) return true;
+  if (inferDepartmentFromContext({ userMessage: msg }) === "retencao") {
+    return true;
+  }
+  return false;
+}
+
 /** Texto do agente implica handoff (mesmo sem tool). */
 export function textImpliesAcademicHandoff(text: string): boolean {
   const t = normalize(text);
@@ -606,6 +625,28 @@ export async function executeAcademicDepartmentHandoff(args: {
       dealId: args.dealId ?? null,
       contactId,
     }).catch(() => null);
+  }
+
+  // Alinha Deal.owner (incl. LOST/WON) com o assignee da conversa — o header
+  // do negócio e a automação de saudação (lead_distributed) ficam na mesma pessoa.
+  if (selectedIsHuman && selectedUserId && contactId) {
+    try {
+      const { assignDealOwner } = await import("@/services/deals");
+      let dealId = args.dealId ?? null;
+      if (!dealId) {
+        const latest = await prisma.deal.findFirst({
+          where: { contactId },
+          orderBy: { updatedAt: "desc" },
+          select: { id: true },
+        });
+        dealId = latest?.id ?? null;
+      }
+      if (dealId) {
+        await assignDealOwner(dealId, selectedUserId);
+      }
+    } catch (e) {
+      console.warn("[academic-handoff] align deal owner failed", e);
+    }
   }
 
   return {

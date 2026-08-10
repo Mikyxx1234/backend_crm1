@@ -51,6 +51,7 @@ import {
   executeAcademicDepartmentHandoff,
   inferDepartmentFromContext,
   isCourseShoppingInquiry,
+  isImmediateAcademicHandoffJustified,
   moveOpenDealToEmAtendimento,
 } from "@/services/ai/academic-department-routing";
 import {
@@ -1025,7 +1026,8 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       return;
     }
 
-    const replyText = stripConfidenceTag(result.text || "");
+    const parsedEarly = parseAgentConfidence(result.text || "");
+    const replyText = parsedEarly.text.trim();
     const transferred =
       result.status === "HANDOFF" ||
       runHadTransferTools(result.toolCalls);
@@ -1033,6 +1035,58 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     // sem tool / sem fila real). Só reforça se já houve tool ou status HANDOFF.
 
     if (transferred) {
+      // Atender primeiro: só conclui distribuição se pedido de humano,
+      // retenção/curso-valor, ou baixa confiança. Evita handoff em dúvida
+      // simples (ex.: início das aulas) + saudação humana por cima da IA.
+      const handoffJustified =
+        isImmediateAcademicHandoffJustified(args.userMessage) ||
+        shouldHandoffOnLowConfidence(parsedEarly.confidence);
+
+      if (!handoffJustified) {
+        // Tools podem ter sido adiadas (deferred) ou só setaram dept —
+        // garante que a conversa continua com a IA e envia a resposta.
+        const convNow = await prisma.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: {
+            assignedToId: true,
+            assignedTo: { select: { type: true } },
+          },
+        });
+        if (convNow?.assignedTo?.type === "HUMAN") {
+          await prisma.$transaction(async (tx) => {
+            await tx.conversation.update({
+              where: { id: args.conversationId },
+              data: { assignedToId: assignee.id, updatedAt: new Date() },
+            });
+            await tx.contact.update({
+              where: { id: args.contactId },
+              data: { assignedToId: assignee.id },
+            });
+          }).catch(() => null);
+        }
+        if (replyText) {
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text: replyText,
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          }).catch(() => null);
+        }
+        logAi("handoff_deferred_answer_first", {
+          conversationId: args.conversationId,
+          confidence: parsedEarly.confidence,
+          hadReply: Boolean(replyText),
+          durationMs: Date.now() - startedAt.getTime(),
+        });
+        return;
+      }
+
       const handoffText =
         replyText ||
         (inferDepartmentFromContext({ userMessage: args.userMessage }) ===
@@ -1040,6 +1094,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           ? buildRetentionHandoffMessage()
           : buildGenericQueueHandoffMessage());
       // Distribui primeiro; só depois envia UMA mensagem ao aluno.
+      // Humano atribuído → saudação da automação (lead_distributed).
       const afterHandoff = await prisma.conversation.findUnique({
         where: { id: args.conversationId },
         select: {
@@ -1069,9 +1124,11 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           contactId: args.contactId,
           dealId: openDeal?.id ?? null,
           userMessage: args.userMessage,
-          reason: runHadTransferTools(result.toolCalls)
-            ? "Handoff com tool — reforço distribuição/fila"
-            : "Handoff por texto/nota — reforço backend",
+          reason: shouldHandoffOnLowConfidence(parsedEarly.confidence)
+            ? `Baixa confiança da IA (${parsedEarly.confidence?.toFixed(2)}) — handoff justificado`
+            : runHadTransferTools(result.toolCalls)
+              ? "Handoff justificado com tool — reforço distribuição/fila"
+              : "Handoff justificado — reforço backend",
         }).catch(() => null);
       }
       const afterQueue = await prisma.conversation.findUnique({

@@ -39,6 +39,32 @@ desconectado…") e no `TemplateComposePanel` aparece seletor de canal +
 banner de aviso quando o canal original não está na lista de CONNECTED —
 consegue redirecionar o envio manualmente por outro WhatsApp da mesma org.
 
+### 2026-08-10 — Agente acadêmico: atender primeiro; distribuir só se justificado
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão.** Handoff da IA acadêmica só conclui distribuição humana quando:
+1. o aluno **pede** atendente/humano/consultor, OU
+2. caso de **retenção** / course-shopping, OU
+3. **baixa confiança** (`[CONFIANCA:<0.4]`).
+
+Caso contrário (ex.: “início das aulas”), tools `transfer_to_human` /
+`execute_distribution` retornam `deferred` e o `inbox-handler` **envia a
+resposta da IA** em vez de redistribuir. Quando a distribuição é legítima,
+atribui humano (`Conversation.assignedToId` + `Deal.ownerId`, inclusive
+LOST) → dispara `lead_distributed` → automação de saudação.
+
+**Contexto.** O LLM chamava transfer cedo; com humano atribuído o backend
+zerava `outbound` e a saudação humana “passava por cima” do atendimento.
+Deal PERDIDO mantinha owner antigo (Danubia) enquanto o chat ia pra Joyce.
+
+**Arquivos.** `academic-department-routing.ts` (`isImmediateAcademicHandoffJustified`
++ align owner), `tools.ts` (defer), `inbox-handler.ts` (gate),
+`academic-atendimento-prompt.ts` (regra 8).
+
+**Alternativas descartadas.** Só reforçar prompt (já falhava); sticky owner
+sempre (bloqueava handoff legítimo para Atendimento).
+
 ---
 
 ### 2026-08-07 — Baseline `_prisma_migrations` das course_config em prod

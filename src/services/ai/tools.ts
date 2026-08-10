@@ -35,6 +35,7 @@ import {
   messageImpliesOperationalAtendimento,
   executeAcademicDepartmentHandoff,
   enforceAtendimentoIfAcolhimentoBlocked,
+  isImmediateAcademicHandoffJustified,
 } from "@/services/ai/academic-department-routing";
 import { closeAiOnlyConversation } from "@/services/ai/academic-closure";
 import type { ActivityType, Prisma } from "@prisma/client";
@@ -641,6 +642,18 @@ function transferToHumanTool(ctx: RunContext) {
     execute: async ({ reason, departmentName }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
+        // Atender primeiro: sem pedido de humano / retenção / curso-valor,
+        // não distribui aqui. Baixa confiança é concluída no inbox-handler.
+        if (!isImmediateAcademicHandoffJustified(ctx.userMessage)) {
+          return ok({
+            deferred: true,
+            assigned: false,
+            hint:
+              "Distribuição ADIADA. Responda a dúvida do aluno agora com KB + consultar_matricula. " +
+              "Só redistribua se o aluno pedir humano/consultor, for retenção (cancelar/trancar) " +
+              "ou você declarar baixa confiança ([CONFIANCA:<0.4]). NÃO diga que já conectou.",
+          });
+        }
         const result = await executeAcademicDepartmentHandoff({
           conversationId: ctx.conversationId,
           contactId: ctx.contactId,
@@ -819,6 +832,16 @@ function executeDistributionTool(ctx: RunContext) {
             select: { assignedTo: { select: { type: true } } },
           });
           if (conv?.assignedTo?.type === "AI") {
+            if (!isImmediateAcademicHandoffJustified(ctx.userMessage)) {
+              return ok({
+                deferred: true,
+                assigned: false,
+                hint:
+                  "Distribuição ADIADA. Responda a dúvida do aluno agora. " +
+                  "O backend só conclui a distribuição se houver pedido de humano, " +
+                  "retenção, ou baixa confiança ([CONFIANCA:<0.4]). NÃO diga que já conectou.",
+              });
+            }
             const handoff = await executeAcademicDepartmentHandoff({
               conversationId: ctx.conversationId,
               contactId: ctx.contactId ?? null,
