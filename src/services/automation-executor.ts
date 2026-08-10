@@ -4165,6 +4165,10 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
   let current: typeof automation.steps[0] | undefined = automation.steps[0];
   let iterations = 0;
   let flowVariables: Record<string, unknown> = {};
+  // Quando o último step executado pausou o fluxo (skipRemaining), o
+  // contexto recém-criado por pauseAwaitingReply precisa sobreviver ao
+  // fim da execução — senão o clique/resposta do cliente cai no vazio.
+  let pausedAtEnd = false;
 
   while (current && iterations < MAX_ITER) {
     iterations++;
@@ -4218,7 +4222,10 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
         message: `${stepLabel} — ${result.note ?? "OK"}`,
         payload: cleanConfig,
       });
-      if (result.skipRemaining && !result.gotoStepId) break;
+      if (result.skipRemaining && !result.gotoStepId) {
+        pausedAtEnd = true;
+        break;
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`[${traceId}] Falha no step "${step.type}":`, msg);
@@ -4285,7 +4292,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     }
   }
 
-  if (rt.contactId) {
+  if (rt.contactId && !pausedAtEnd) {
     try {
       await closeStrandedContext(automationId, rt.contactId);
     } catch (err) {
@@ -4513,6 +4520,10 @@ export async function continueFromStep(
   let current: typeof automation.steps[0] | undefined = automation.steps[fromIndex];
   let iterations = 0;
   let flowVariables: Record<string, unknown> = { ...variables };
+  // Mesmo guard do runAutomationInline: quando a continuação termina num
+  // passo pausante (question/interactive/template com botões), o contexto
+  // recém-pausado precisa sobreviver ao fim da execução.
+  let contPausedAtEnd = false;
 
   while (current && iterations < MAX_ITER) {
     iterations++;
@@ -4558,7 +4569,10 @@ export async function continueFromStep(
         status: "SUCCESS",
         message: `${stepLabel} — ${result.note ?? "OK"}`,
       });
-      if (result.skipRemaining && !result.gotoStepId) break;
+      if (result.skipRemaining && !result.gotoStepId) {
+        contPausedAtEnd = true;
+        break;
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const baseCfgForFail = step.config as Record<string, unknown>;
@@ -4617,7 +4631,9 @@ export async function continueFromStep(
   }
 
   try {
-    await closeStrandedContext(automationId, contactId);
+    if (!contPausedAtEnd) {
+      await closeStrandedContext(automationId, contactId);
+    }
   } catch (err) {
     log.warn(
       `continueFromStep closeStrandedContext falhou:`,
