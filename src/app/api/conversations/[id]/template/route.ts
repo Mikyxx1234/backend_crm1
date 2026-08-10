@@ -19,6 +19,13 @@ type TemplateBody = {
   flowToken?: unknown;
   /** JSON com dados iniciais do formulário / `navigate` — ver docs WhatsApp Flows. */
   flowActionData?: unknown;
+  /**
+   * Override do canal de saída (11/ago/26). Ausente = usa o canal da própria
+   * conversa. Presente = força um outro canal WhatsApp CONNECTED da mesma
+   * org — usado quando o canal original está DISCONNECTED e o operador
+   * precisa mandar template por outro número.
+   */
+  channelId?: unknown;
 };
 
 // Bug 24/abr/26: usavamos `auth()` direto. O envio depende da Prisma
@@ -63,6 +70,7 @@ export async function POST(request: Request, context: RouteContext) {
           b.flowActionData && typeof b.flowActionData === "object" && !Array.isArray(b.flowActionData)
             ? (b.flowActionData as Record<string, unknown>)
             : null,
+        channelId: typeof b.channelId === "string" && b.channelId.trim() ? b.channelId.trim() : null,
       });
 
       if (!result.ok) {

@@ -1041,7 +1041,10 @@ export async function getConversationLite(id: string) {
       channel: true, channelId: true, waJid: true, organizationId: true,
       number: true,
       channelRef: {
-        select: { id: true, provider: true, config: true, name: true, phoneNumber: true, type: true },
+        select: {
+          id: true, provider: true, config: true, name: true,
+          phoneNumber: true, type: true, status: true,
+        },
       },
     },
   });

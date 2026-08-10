@@ -1,5 +1,6 @@
 import type {
   ChannelProvider,
+  ChannelStatus,
   ChannelType,
   Prisma,
 } from "@prisma/client";
@@ -15,6 +16,10 @@ import { prisma } from "@/lib/prisma";
  *
  * Tipos `ChannelType` / `ChannelProvider` vêm do Prisma para que esta forma
  * seja substituível com `conv.channelRef` (mesma origem) sem cast.
+ *
+ * `status` incluso aqui (11/ago/26) para permitir bloquear envios por canal
+ * DISCONNECTED sem round-trip extra — o `outbound-messaging` já tem o
+ * `channelRef` em mãos via `getConversationLite`.
  */
 export type LiteChannelRef = {
   id: string;
@@ -23,6 +28,7 @@ export type LiteChannelRef = {
   name: string;
   phoneNumber: string | null;
   type: ChannelType;
+  status: ChannelStatus;
 } | null;
 
 /**
@@ -131,6 +137,7 @@ export async function resolveOutboundChannel(args: {
       name: channel.name,
       phoneNumber: channel.phoneNumber,
       type: channel.type,
+      status: channel.status,
     },
     channelId: channel.id,
   };

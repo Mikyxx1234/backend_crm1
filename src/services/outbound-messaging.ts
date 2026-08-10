@@ -128,6 +128,36 @@ async function reopenIfResolved(
   return { conv: fresh, reopenedConversationId: fresh.id };
 }
 
+/**
+ * Bloqueia envios sobre canal WhatsApp com status != CONNECTED.
+ *
+ * Motivo: até 10/ago/26 as rotas de envio confiavam apenas em
+ * `metaClientFromConfig` (accessToken + phoneNumberId presentes) — mas a Meta
+ * pode invalidar o token do lado dela (canal DISCONNECTED). Quando isso
+ * acontece a chamada fica pendurada até o proxy do EasyPanel derrubar em 502
+ * (HTML sem JSON) e o operador vê "Servidor temporariamente indisponível".
+ *
+ * `resolveOutboundChannel` já bloqueava overrides desconectados; este helper
+ * cobre o **caminho padrão** (usar o canal da própria conversa).
+ *
+ * Retorna `null` quando pode enviar; `OutboundFailure` (409) com mensagem
+ * clara caso contrário. Igual a `denialToFailure`, o service não conhece
+ * NextResponse — a rota traduz para HTTP.
+ */
+function ensureChannelConnected(
+  channelRef: { name?: string | null; status?: string | null; type?: string | null } | null | undefined,
+): OutboundFailure | null {
+  if (!channelRef) return null; // sem canal configurado: caminho localOnly/env fallback já tratado
+  if (channelRef.type && channelRef.type !== "WHATSAPP") return null;
+  if (!channelRef.status || channelRef.status === "CONNECTED") return null;
+  const label = channelRef.name?.trim() || "atual";
+  return {
+    ok: false,
+    status: 409,
+    message: `Canal "${label}" está desconectado. Reconecte em Configurações → Canais ou envie por outro canal WhatsApp da organização.`,
+  };
+}
+
 function publishNewMessage(
   conv: Pick<ConversationLite, "id" | "organizationId" | "contactId">,
   content: string,
@@ -300,6 +330,11 @@ export async function sendTextToConversation(args: {
 
   const outboundChannelRef = resolved.channelRef;
   const outboundChannelId = resolved.channelId;
+  // `resolveOutboundChannel` já bloqueia override desconectado; o caminho
+  // padrão (sem override) usa `conv.channelRef` sem checagem, então o guard
+  // precisa rodar aqui também.
+  const disconnected = ensureChannelConnected(outboundChannelRef);
+  if (disconnected) return disconnected;
   const useBaileys = isBaileysChannel(outboundChannelRef);
   const channelConfig = outboundChannelRef?.config as Record<string, unknown> | null | undefined;
   // Sem canal Meta configurado: persiste localmente (dev/mock) em vez de 500.
@@ -493,6 +528,8 @@ export async function sendInteractiveButtonsToConversation(args: {
 
   const outboundChannelRef = resolved.channelRef;
   const outboundChannelId = resolved.channelId;
+  const disconnected = ensureChannelConnected(outboundChannelRef);
+  if (disconnected) return disconnected;
   if (isBaileysChannel(outboundChannelRef)) {
     return {
       ok: false,
@@ -791,6 +828,8 @@ export async function sendInteractiveListToConversation(args: {
 
   const outboundChannelRef = resolved.channelRef;
   const outboundChannelId = resolved.channelId;
+  const disconnected = ensureChannelConnected(outboundChannelRef);
+  if (disconnected) return disconnected;
   if (isBaileysChannel(outboundChannelRef)) {
     return {
       ok: false,
@@ -946,6 +985,13 @@ export type SendTemplateArgs = {
   templateGraphId?: string | null;
   flowToken?: string | null;
   flowActionData?: Record<string, unknown> | null;
+  /**
+   * Override do canal de saída (11/ago/26): quando o canal original da
+   * conversa está DISCONNECTED, o operador pode escolher outro canal WhatsApp
+   * da mesma org. Passa por `resolveOutboundChannel` para validar
+   * organização/tipo/status/scope, como já acontece em `sendText`.
+   */
+  channelId?: string | null;
 };
 
 /**
@@ -971,7 +1017,15 @@ export async function sendTemplateToConversation(
         // Config do canal resolve o cliente Meta correto por org — o
         // singleton de env rotearia todo mundo pelo primeiro número
         // configurado (leak entre tenants).
-        channelRef: { select: { id: true, provider: true, config: true } },
+        // `name`/`status`/`phoneNumber`/`type` são o que o `LiteChannelRef` do
+        // `resolveOutboundChannel` espera; sem eles não dava para reusar a
+        // resolução de override e a mensagem de "canal desconectado".
+        channelRef: {
+          select: {
+            id: true, provider: true, config: true, name: true,
+            phoneNumber: true, type: true, status: true,
+          },
+        },
       },
     });
 
@@ -997,7 +1051,30 @@ export async function sendTemplateToConversation(
   );
   if (sendDenied) return denialToFailure(sendDenied);
 
-  if (conv.channelRef?.provider === "BAILEYS_MD") {
+  // Override de canal (11/ago/26): mesma máquina de resolução usada pelos
+  // demais envios. Sem override, devolve `conv.channelRef` sem round-trip.
+  const resolved = await resolveOutboundChannel({
+    conv: {
+      channelId: conv.channelId,
+      channelRef: conv.channelRef,
+      organizationId: conv.organizationId,
+    },
+    user: {
+      id: args.actor.id,
+      role: args.actor.role ?? null,
+      organizationId: args.actor.organizationId,
+      isSuperAdmin: args.actor.isSuperAdmin,
+    },
+    requestedChannelId: args.channelId ?? null,
+  });
+  if (!resolved.ok) return denialToFailure(resolved.response);
+  const outboundChannelRef = resolved.channelRef;
+  const outboundChannelId = resolved.channelId;
+
+  const disconnected = ensureChannelConnected(outboundChannelRef);
+  if (disconnected) return disconnected;
+
+  if (outboundChannelRef?.provider === "BAILEYS_MD") {
     return {
       ok: false,
       status: 400,
@@ -1013,14 +1090,14 @@ export async function sendTemplateToConversation(
     return { ok: false, status: 400, message: "Contato sem telefone nem BSUID WhatsApp (Meta)." };
   }
 
-  const channelConfig = conv.channelRef?.config as Record<string, unknown> | null | undefined;
+  const channelConfig = outboundChannelRef?.config as Record<string, unknown> | null | undefined;
   const metaClient = metaClientFromConfig(channelConfig);
   if (!metaClient.configured) {
     return {
       ok: false,
       status: 503,
       message:
-        "Canal WhatsApp da conversa sem credenciais Meta (accessToken/phoneNumberId). Configure em Canais ou defina META_WHATSAPP_* no env.",
+        "Canal WhatsApp escolhido sem credenciais Meta (accessToken/phoneNumberId). Configure em Canais ou defina META_WHATSAPP_* no env.",
     };
   }
 
@@ -1130,7 +1207,7 @@ export async function sendTemplateToConversation(
     );
     externalId = result.messages?.[0]?.id ?? null;
     console.log(
-      `[meta-send-template] template=${templateName} channel=${conv.channelRef?.id ?? "ENV"} to=${to ?? "—"}/${recipient ?? "—"} wamid=${externalId} flowEnrich=${knownHasFlowButton !== false}`,
+      `[meta-send-template] template=${templateName} channel=${outboundChannelId ?? "ENV"} to=${to ?? "—"}/${recipient ?? "—"} wamid=${externalId} flowEnrich=${knownHasFlowButton !== false}`,
     );
   } catch (e: unknown) {
     console.error("[meta-send-template]", e);
@@ -1144,7 +1221,7 @@ export async function sendTemplateToConversation(
   const saved = await prisma.message.create({
     data: withOrgFromCtx({
       conversationId: conv.id,
-      channelId: conv.channelRef?.id ?? undefined,
+      channelId: outboundChannelId ?? undefined,
       content,
       direction: "out",
       messageType: "template",

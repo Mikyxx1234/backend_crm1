@@ -5,6 +5,42 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-11 — Envio outbound bloqueia canal DISCONNECTED e template aceita `channelId`
+
+**Modelo usado.** Claude Opus 4.7.
+
+**Decisão.** (1) Todo envio (`sendText`, `sendInteractive{Buttons,List}`,
+`sendTemplate`) rejeita com **409** e mensagem clara quando o canal resolvido
+tem `status != CONNECTED`. (2) `sendTemplateToConversation` passa a resolver
+canal via `resolveOutboundChannel` — mesma máquina dos textos — e aceita
+`channelId` opcional no body de `POST /api/conversations/[id]/template` e
+`POST /api/deals/[id]/messages`. (3) `getConversationLite.channelRef` seleciona
+`status`; `LiteChannelRef` ganha `status`.
+
+**Contexto.** Cruzeiro EaD (`cmrmbn2lh0uz2nm016beqgbwb`) teve o canal `CSV
+Atendimento` (`cmrwauprp014nqh01zbe174ii`) desconectado pela Meta às
+10/ago 14:08 BRT — 899 conversas OPEN ficaram apontando pra ele. Ao enviar
+`iniciar_atendimento`, o `metaClientFromConfig` retornava configurado
+(token/phoneId presentes), a Cloud API respondia com token invalidado e o
+proxy do EasyPanel derrubava em 502 sem JSON. O parser genérico
+`parseApiResponse` traduzia isso para "Servidor temporariamente
+indisponível", mascarando a causa. `resolveOutboundChannel` já protegia o
+caminho de override, mas o padrão (canal da própria conversa) e o
+`sendTemplate` inteiro pulavam a validação de status.
+
+**Alternativas descartadas.** (a) *Migrar as 899 conversas para o canal
+`Acadêmico` automaticamente* — os números são diferentes (`883452561518366`
+vs `1233457866520521`), o cliente contactou o número antigo e receber
+resposta pelo novo confunde. (b) *Só reconectar o canal e ignorar código* —
+não resolve o próximo canal que cair e mantém a UX ruim (mensagem genérica).
+
+**Impacto.** Operador vê mensagem acionável (409 "Canal X está
+desconectado…") e no `TemplateComposePanel` aparece seletor de canal +
+banner de aviso quando o canal original não está na lista de CONNECTED —
+consegue redirecionar o envio manualmente por outro WhatsApp da mesma org.
+
+---
+
 ### 2026-08-07 — Baseline `_prisma_migrations` das course_config em prod
 
 **Modelo usado.** Cursor Grok 4.5.

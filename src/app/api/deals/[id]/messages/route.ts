@@ -433,6 +433,7 @@ export async function POST(request: Request, ctx: Ctx) {
             !Array.isArray(body.flowActionData)
               ? (body.flowActionData as Record<string, unknown>)
               : null,
+          channelId: typeof body.channelId === "string" ? body.channelId : null,
         }),
       );
     } catch (e) {
