@@ -15,12 +15,33 @@ import { resolveDefaultWhatsAppChannel } from "@/services/whatsapp-conversation"
 import { withConversationNumberRetry } from "@/services/conversations";
 import { fireTrigger } from "@/services/automation-triggers";
 import { getLogger } from "@/lib/logger";
+import { sseBus } from "@/lib/sse-bus";
+import { getOrgIdOrNull } from "@/lib/request-context";
 
 const log = getLogger("conversations.create");
+
+/** Origens conhecidas do create (UI / skipSend). Valor livre, truncado. */
+const CREATE_SOURCES = new Set([
+  "ui",
+  "ui_skip_send",
+  "deal_chat",
+  "deal_workspace",
+  "deal_panel",
+]);
 
 function str(cfg: Record<string, unknown>, key: string): string | undefined {
   const v = cfg[key];
   return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
+}
+
+function parseCreateSource(raw: unknown, skipSend: boolean): string {
+  if (typeof raw === "string") {
+    const s = raw.trim().slice(0, 64);
+    if (s && (CREATE_SOURCES.has(s) || /^[a-z][a-z0-9_]{0,63}$/i.test(s))) {
+      return s;
+    }
+  }
+  return skipSend ? "ui_skip_send" : "ui";
 }
 
 // Bug 27/abr/26: usavamos `auth()` direto. A rota chama `withOrgFromCtx`
@@ -40,6 +61,7 @@ export async function POST(request: Request) {
       const channelId = typeof body.channelId === "string" ? body.channelId : "";
       const message = typeof body.message === "string" ? body.message.trim() : "";
       const skipSend = body.skipSend === true;
+      const createSource = parseCreateSource(body.source, skipSend);
 
       if (!contactId) {
         return NextResponse.json({ message: "contactId obrigatório." }, { status: 400 });
@@ -133,7 +155,9 @@ export async function POST(request: Request) {
               },
             }),
           );
-          void logEvent({
+          // Await: a timeline da conversa depende deste evento. Sem await,
+          // o 1º GET /timeline após o create frequentemente voltava vazio.
+          await logEvent({
             type: "CONVERSATION_CREATED",
             entityType: "CONVERSATION",
             entityId: conversation.id,
@@ -144,15 +168,31 @@ export async function POST(request: Request) {
               channel: "whatsapp",
               inboxName: channelName,
               channelId: effectiveChannelId,
-              source: "ui",
+              source: createSource,
+              // skipSend = atendimento aberto sem mensagem (composer/templates).
+              openedWithoutMessage: true,
             },
           });
+          try {
+            sseBus.publish("conversation_timeline_updated", {
+              organizationId: getOrgIdOrNull(),
+              conversationId: conversation.id,
+              type: "CONVERSATION_CREATED",
+            });
+          } catch {
+            /* best-effort */
+          }
           // Ver AGENT.md "ID de conversa + logs + gatilho": tipo ja existia
           // registrado, mas o fireTrigger nunca era chamado. Fire-and-forget
           // pra nao bloquear a resposta HTTP.
           fireTrigger("conversation_created", {
             contactId: contact.id,
-            data: { channel: "whatsapp", inboxName: channelName, source: "ui" },
+            data: {
+              channel: "whatsapp",
+              inboxName: channelName,
+              source: createSource,
+              openedWithoutMessage: true,
+            },
           }).catch((err) => log.warn("Falha no gatilho conversation_created:", err));
         }
 
@@ -248,11 +288,20 @@ export async function POST(request: Request) {
           entityLabel: contact.name ?? contact.phone ?? null,
           conversationId: conversation.id,
           contactId: contact.id,
-          meta: { channel: "whatsapp", inboxName: channel.name, source: "ui" },
+          meta: {
+            channel: "whatsapp",
+            inboxName: channel.name,
+            source: createSource,
+            openedWithoutMessage: false,
+          },
         });
         fireTrigger("conversation_created", {
           contactId: contact.id,
-          data: { channel: "whatsapp", inboxName: channel.name, source: "ui" },
+          data: {
+            channel: "whatsapp",
+            inboxName: channel.name,
+            source: createSource,
+          },
         }).catch((err) => log.warn("Falha no gatilho conversation_created:", err));
       }
 

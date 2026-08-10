@@ -122,6 +122,7 @@ async function reopenIfResolved(
         channel: fresh.channel,
         source: "outbound_reopen",
         previousConversationId: conv.id,
+        openedWithoutMessage: true,
       },
     });
   }

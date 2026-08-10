@@ -601,6 +601,7 @@ export async function POST(request: Request, context: RouteContext) {
               inboxName: created.inboxName,
               source: "reopen",
               previousConversationId: id,
+              openedWithoutMessage: true,
             },
           });
         }
@@ -618,10 +619,20 @@ export async function POST(request: Request, context: RouteContext) {
               inboxName: created.inboxName,
               source: "reopen",
               previousConversationId: id,
+              openedWithoutMessage: true,
             },
           }).catch(() => {
             /* fire-and-forget */
           });
+          try {
+            sseBus.publish("conversation_timeline_updated", {
+              organizationId: conv.organizationId,
+              conversationId: created.id,
+              type: "CONVERSATION_CREATED",
+            });
+          } catch {
+            /* best-effort */
+          }
         }
 
         return NextResponse.json({
