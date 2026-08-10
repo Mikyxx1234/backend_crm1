@@ -4,7 +4,7 @@
  * Regras:
  *  - Só no funil acadêmico (nome ~ACADEM*, pipelineId do agente, ou
  *    org setting `ai.firstAttendancePipelineIds`).
- *  - Funil Acolhimento (nome ~acolh*) → nunca assume / limpa IA.
+ *  - Acolhimento (funil OU etapa com ~acolh*) → nunca assume / limpa IA.
  *  - Sem responsável humano → IA assume conversa + contato + deals OPEN.
  *  - Com responsável humano já atribuído → devolve o chat a esse humano
  *    (não “rouba” nem deixa na IA).
@@ -102,8 +102,17 @@ async function resolveConfiguredPipelineIds(
   return [...ids];
 }
 
+/** Nome de funil ou etapa indica Acolhimento (campanha com botão / sem IA). */
+export function nameLooksLikeAcolhimento(
+  pipelineName?: string | null,
+  stageName?: string | null,
+): boolean {
+  return /acolh/i.test(`${pipelineName ?? ""} ${stageName ?? ""}`);
+}
+
 /**
- * Aluno no funil Acolhimento (nome do pipeline contém "acolh").
+ * Aluno no Acolhimento: deal OPEN cujo **pipeline ou etapa** tem "acolh"
+ * no nome (ex.: etapa "ACOLHIMENTO ACADÊMICO" em funil "ACADÊMICO").
  * Esses leads ficam fora da IA — campanha com botão / fluxo humano.
  */
 export async function isAcolhimentoFunnelContact(
@@ -113,13 +122,17 @@ export async function isAcolhimentoFunnelContact(
     where: { contactId, status: "OPEN" },
     select: {
       stage: {
-        select: { pipeline: { select: { name: true } } },
+        select: {
+          name: true,
+          pipeline: { select: { name: true } },
+        },
       },
     },
   });
   for (const d of openDeals) {
-    const name = d.stage?.pipeline?.name ?? "";
-    if (/acolh/i.test(name)) return true;
+    if (nameLooksLikeAcolhimento(d.stage?.pipeline?.name, d.stage?.name)) {
+      return true;
+    }
   }
   return false;
 }
@@ -144,6 +157,7 @@ async function isAcademicPipeContact(
       id: true,
       stage: {
         select: {
+          name: true,
           pipeline: { select: { id: true, name: true } },
         },
       },
@@ -166,6 +180,7 @@ async function isAcademicPipeContact(
     });
     const pipe = conv?.channelRef?.defaultPipeline;
     if (!pipe) return false;
+    if (nameLooksLikeAcolhimento(pipe.name, null)) return false;
     if (configured.includes(pipe.id)) return true;
     return /academ/i.test(pipe.name ?? "");
   }
@@ -173,6 +188,9 @@ async function isAcademicPipeContact(
   for (const d of openDeals) {
     const pipe = d.stage?.pipeline;
     if (!pipe) continue;
+    // Etapa/funil Acolhimento nunca conta como acadêmico p/ a IA
+    // (senão "ACOLHIMENTO ACADÊMICO" casava em /academ/ e a IA assumia).
+    if (nameLooksLikeAcolhimento(pipe.name, d.stage?.name)) continue;
     if (configured.includes(pipe.id)) return true;
     if (/academ/i.test(pipe.name ?? "")) return true;
   }

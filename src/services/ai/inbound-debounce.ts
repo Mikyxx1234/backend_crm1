@@ -124,6 +124,23 @@ export async function scheduleAiReply(
     return;
   }
 
+  // Acolhimento (funil ou etapa): nem agenda resposta da IA.
+  try {
+    const { isAcolhimentoFunnelContact } = await import(
+      "@/services/ai/first-attendance"
+    );
+    if (await isAcolhimentoFunnelContact(input.contactId)) {
+      logAi("debounce_skip_acolhimento", {
+        conversationId: input.conversationId,
+        contactId: input.contactId,
+      });
+      return;
+    }
+  } catch (e) {
+    console.error("[ai] acolhimento debounce gate failed — blocking", e);
+    return;
+  }
+
   const claimed = await claimInboundMessageForAi(input.messageId);
   if (!claimed) return;
 

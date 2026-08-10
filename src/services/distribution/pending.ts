@@ -282,20 +282,24 @@ function hasRemainingCapacityInScope(
 
 /**
  * Marca como RESOLVED as pendências cuja conversa NÃO precisa mais ser
- * distribuída — ou seja, saiu do universo `ABERTA_SEM_RESPONSAVEL`. Cobre:
+ * distribuída. Continua ativa quando:
  *
- *   - Conversa encerrada por qualquer via (status != OPEN)
- *   - Conversa OPEN mas já atribuída por outro caminho (agente manual,
- *     herança de contato/deal, `maybeAssignExisting…`)
+ *   - OPEN sem responsável (`ABERTA_SEM_RESPONSAVEL` / assignedToId null), OU
+ *   - OPEN ainda com **IA** (handoff noturno: `NO_ELIGIBLE_RESPONSIBLE` →
+ *     enfileira + IA reassumiu para continuar falando; a fila deve drenar
+ *     quando um humano ficar elegível — ver `pendingOwnedByAi` abaixo).
+ *
+ * Resolve (cleanup) quando:
+ *
+ *   - Conversa encerrada (status != OPEN)
+ *   - Conversa OPEN já com **humano** (distribuída por outro caminho)
  *   - Conversa deletada
- *   - Conversa sem nenhuma mensagem inbound do aluno (só template BV / outbound)
  *
- * Sem essa limpeza, o motor rescheduling ficava batendo em pendências
- * fantasma (uma delas chegou a `attempts=1077` em prod — Cruzeiro EaD
- * 2026-07-30) e a "fila de espera" do dashboard mostrava valores enganosos.
+ * Bug histórico (ago/2026): tratar qualquer assignee ≠ null como órfã
+ * cancelava a fila no mesmo segundo em que a IA reassumia → centenas de
+ * alunos ficavam na aba Automação “para sempre” após expediente.
+ *
  * `resolvedUserId=null` marca que foi cleanup, não distribuição real.
- *
- * Idempotente e barata (uma consulta com IN() + updateMany).
  */
 async function cancelStalePendingOrphans(orgId: string): Promise<number> {
   const stale = await prisma.distributionPending.findMany({
@@ -315,10 +319,11 @@ async function cancelStalePendingOrphans(orgId: string): Promise<number> {
   const stillActive = await prisma.conversation.findMany({
     where: {
       id: { in: convIds },
+      status: "OPEN",
       OR: [
-        ABERTA_SEM_RESPONSAVEL,
-        // Redistribuição manual: OPEN sem dono conta mesmo sem inbound.
-        { status: "OPEN", assignedToId: null },
+        { assignedToId: null },
+        // Handoff fora do expediente: IA segura o chat até haver elegível.
+        { assignedTo: { type: "AI" } },
       ],
     },
     select: { id: true },

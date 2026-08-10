@@ -5,21 +5,41 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
-### 2026-08-10 — Agente IA não atende alunos no funil Acolhimento
+### 2026-08-10 — Fila noturna: não cancelar `distribution_pending` quando a IA reassumiu
 
 **Modelo usado.** Cursor Grok 4.5.
 
-**Decisão.** Se o contato tem deal OPEN cujo pipeline tem nome com
-`acolh` (ex.: Acolhimento), a IA **não assume** e **não responde**:
-- `first-attendance`: skip + limpa assignee IA se já estava na IA;
-- `maybeReplyAsAIAgent`: block `acolhimento_funnel` + limpa assignee IA.
+**Problema.** Fora do expediente o motor grava `NO_ELIGIBLE_RESPONSIBLE`,
+enfileira `distribution_pending` e a IA reassume o chat. No cron/drenagem,
+`cancelStalePendingOrphans` tratava “OPEN com qualquer assignee” como órfã
+e marcava a pendência `RESOLVED` (sem humano). Resultado: ~270 conversas
+abertas na Automação com promessa de atendimento e **0** PENDING vivos;
+343 pendências “falso-resolvidas” em 7 dias com a conversa ainda na IA.
 
-**Contexto.** Operação vai disparar campanha com botão nesse funil;
-resposta da IA competiria com o fluxo do botão / humano.
+**Decisão.** Pendência continua ativa se a conversa está OPEN e
+`assignedTo` é null **ou** tipo `AI`. Só limpa se encerrada ou já com
+humano. Ops: reenfileirar presos + `processPendingDistributionQueue`.
 
-**Alternativas descartadas.** Só prompt (LLM ainda poderia falar);
-filtrar só por departamento Acolhimento (aluno pode estar no funil
-sem dept setado).
+**Arquivos.** `services/distribution/pending.ts`
+(`cancelStalePendingOrphans`); script ops
+`scripts/ops-reenqueue-ai-overnight-handoffs.ts`.
+
+### 2026-08-10 — Agente IA não atende alunos no Acolhimento (funil OU etapa)
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão.** Se o contato tem deal OPEN cujo **pipeline ou stage** tem
+`acolh` no nome (ex.: etapa `ACOLHIMENTO ACADÊMICO` em funil `ACADÊMICO`),
+a IA **não assume** e **não responde**:
+- `first-attendance`: skip + limpa assignee IA; exclui do pipe acadêmico
+  (antes `/academ/` casava em “ACOLHIMENTO ACADÊMICO”);
+- `scheduleAiReply` / `maybeReplyAsAIAgent`: block cedo;
+- `POST …/conversations/:id/actions` assign → 409 se destino for User AI.
+
+**Contexto.** Campanha com botão no Acolhimento; v1 só olhava o nome do
+funil e a IA continuava atendendo quando só a **etapa** tinha “acolh”.
+
+**Alternativas descartadas.** Só prompt; filtrar só por departamento.
 
 ### 2026-08-11 — Envio outbound bloqueia canal DISCONNECTED e template aceita `channelId`
 
@@ -56,27 +76,39 @@ banner de aviso quando o canal original não está na lista de CONNECTED —
 consegue redirecionar o envio manualmente por outro WhatsApp da mesma org.
 
 ### 2026-08-10 — Agente acadêmico: atender primeiro; distribuir só se justificado
+**(REVISADA em 2026-08-10 — ver entrada abaixo “honrar handoff da IA”.)**
 
 **Modelo usado.** Cursor Grok 4.5.
 
-**Decisão.** Handoff da IA acadêmica só conclui distribuição humana quando:
-1. o aluno **pede** atendente/humano/consultor, OU
-2. caso de **retenção** / course-shopping, OU
-3. **baixa confiança** (`[CONFIANCA:<0.4]`).
+**Decisão original (parcialmente revertida).** Handoff só concluía distribuição
+quando o texto do aluno justificava OU baixa confiança; caso contrário tools
+retornavam `deferred` e o inbox enviava a resposta sem redistribuir.
 
-Caso contrário (ex.: “início das aulas”), tools `transfer_to_human` /
-`execute_distribution` retornam `deferred` e o `inbox-handler` **envia a
-resposta da IA** em vez de redistribuir. Quando a distribuição é legítima,
-atribui humano (`Conversation.assignedToId` + `Deal.ownerId`, inclusive
-LOST) → dispara `lead_distributed` → automação de saudação.
+**Problema.** A IA prometia “vou te conectar” / chamava tool, o backend
+adiava, e o aluno ficava com a IA (ex.: Ca #107152 — AVA sem matrícula).
 
-**Contexto.** O LLM chamava transfer cedo; com humano atribuído o backend
-zerava `outbound` e a saudação humana “passava por cima” do atendimento.
-Deal PERDIDO mantinha owner antigo (Danubia) enquanto o chat ia pra Joyce.
+### 2026-08-10 — Agente acadêmico: honrar handoff da IA (sem adiar distribuição)
 
-**Arquivos.** `academic-department-routing.ts` (`isImmediateAcademicHandoffJustified`
-+ align owner), `tools.ts` (defer), `inbox-handler.ts` (gate),
-`academic-atendimento-prompt.ts` (regra 8).
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão.** “Atender primeiro” = orientação de **quando** a IA deve
+continuar respondendo (dúvida que ela ainda resolve). **Não** é bloqueio
+de backend depois que ela já decidiu transferir.
+
+Distribuição humana **executa** quando:
+1. o aluno **pede** humano/consultor, OU
+2. retenção / course-shopping, OU
+3. **baixa confiança** (`[CONFIANCA:<0.4]`), OU
+4. a IA chama `transfer_to_human` / `execute_distribution`, OU
+5. a resposta da IA **promete** conexão (`textImpliesAcademicHandoff`).
+
+Removido o retorno `deferred` nas tools e o gate
+`handoff_deferred_answer_first` no `inbox-handler`.
+
+**Contexto.** Casos em que a IA dizia que ia distribuir e o aluno
+permanecia no Agente acadêmico.
+
+**Arquivos.** `tools.ts`, `inbox-handler.ts`, `academic-atendimento-prompt.ts`.
 
 **Alternativas descartadas.** Só reforçar prompt (já falhava); sticky owner
 sempre (bloqueava handoff legítimo para Atendimento).

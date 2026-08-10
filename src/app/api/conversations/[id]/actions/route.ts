@@ -134,6 +134,33 @@ export async function POST(request: Request, context: RouteContext) {
         } else {
           return NextResponse.json({ message: "assignedToId inválido." }, { status: 400 });
         }
+        // Acolhimento (funil/etapa): não permite devolver/atribuir à IA.
+        if (newAssigneeId) {
+          const targetUser = await prisma.user.findUnique({
+            where: { id: newAssigneeId },
+            select: { type: true },
+          });
+          if (targetUser?.type === "AI") {
+            const convContact = await prisma.conversation.findUnique({
+              where: { id },
+              select: { contactId: true },
+            });
+            if (convContact?.contactId) {
+              const { isAcolhimentoFunnelContact } = await import(
+                "@/services/ai/first-attendance"
+              );
+              if (await isAcolhimentoFunnelContact(convContact.contactId)) {
+                return NextResponse.json(
+                  {
+                    message:
+                      "IA não atende leads no Acolhimento (funil/etapa). Use um consultor humano.",
+                  },
+                  { status: 409 },
+                );
+              }
+            }
+          }
+        }
         const sessionUser = session.user as {
           id: string;
           role: "ADMIN" | "MANAGER" | "MEMBER";

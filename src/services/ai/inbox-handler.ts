@@ -40,7 +40,6 @@ import { cache } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { sseBus } from "@/lib/sse-bus";
 import {
   hasAgentGreetedInCurrentAssignment,
@@ -53,8 +52,8 @@ import {
   executeAcademicDepartmentHandoff,
   inferDepartmentFromContext,
   isCourseShoppingInquiry,
-  isImmediateAcademicHandoffJustified,
   moveOpenDealToEmAtendimento,
+  textImpliesAcademicHandoff,
 } from "@/services/ai/academic-department-routing";
 import {
   closeAiOnlyConversation,
@@ -1068,65 +1067,17 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
 
     const parsedEarly = parseAgentConfidence(result.text || "");
     const replyText = parsedEarly.text.trim();
+    // Tool/HANDOFF OU promessa explícita no texto ("vou te conectar…") →
+    // distribui de fato. "Atender primeiro" = não chamar tool / não prometer
+    // handoff enquanto ainda dá para orientar; se o agente já decidiu
+    // transferir, o backend NÃO adia.
     const transferred =
       result.status === "HANDOFF" ||
-      runHadTransferTools(result.toolCalls);
-    // Texto "vou te conectar" sozinho NÃO dispara distribuição (evita promessa
-    // sem tool / sem fila real). Só reforça se já houve tool ou status HANDOFF.
+      runHadTransferTools(result.toolCalls) ||
+      textImpliesAcademicHandoff(replyText) ||
+      shouldHandoffOnLowConfidence(parsedEarly.confidence);
 
     if (transferred) {
-      // Atender primeiro: só conclui distribuição se pedido de humano,
-      // retenção/curso-valor, ou baixa confiança. Evita handoff em dúvida
-      // simples (ex.: início das aulas) + saudação humana por cima da IA.
-      const handoffJustified =
-        isImmediateAcademicHandoffJustified(args.userMessage) ||
-        shouldHandoffOnLowConfidence(parsedEarly.confidence);
-
-      if (!handoffJustified) {
-        // Tools podem ter sido adiadas (deferred) ou só setaram dept —
-        // garante que a conversa continua com a IA e envia a resposta.
-        const convNow = await prisma.conversation.findUnique({
-          where: { id: args.conversationId },
-          select: {
-            assignedToId: true,
-            assignedTo: { select: { type: true } },
-          },
-        });
-        if (convNow?.assignedTo?.type === "HUMAN") {
-          await prisma.$transaction(async (tx) => {
-            await tx.conversation.update({
-              where: { id: args.conversationId },
-              data: { assignedToId: assignee.id, updatedAt: new Date() },
-            });
-            await tx.contact.update({
-              where: { id: args.contactId },
-              data: { assignedToId: assignee.id },
-            });
-          }).catch(() => null);
-        }
-        if (replyText) {
-          await sendAgentMessage({
-            conversationId: args.conversationId,
-            contactId: args.contactId,
-            agentUserId: assignee.id,
-            autonomyMode: cfg.autonomyMode,
-            text: replyText,
-            channel: args.channel,
-            kind: "text",
-            humanBehavior,
-            generationId: args.generationId,
-            bypassAssigneeCheck: true,
-          }).catch(() => null);
-        }
-        logAi("handoff_deferred_answer_first", {
-          conversationId: args.conversationId,
-          confidence: parsedEarly.confidence,
-          hadReply: Boolean(replyText),
-          durationMs: Date.now() - startedAt.getTime(),
-        });
-        return;
-      }
-
       const handoffText =
         replyText ||
         (inferDepartmentFromContext({ userMessage: args.userMessage }) ===
@@ -1165,10 +1116,12 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           dealId: openDeal?.id ?? null,
           userMessage: args.userMessage,
           reason: shouldHandoffOnLowConfidence(parsedEarly.confidence)
-            ? `Baixa confiança da IA (${parsedEarly.confidence?.toFixed(2)}) — handoff justificado`
+            ? `Baixa confiança da IA (${parsedEarly.confidence?.toFixed(2)})`
             : runHadTransferTools(result.toolCalls)
-              ? "Handoff justificado com tool — reforço distribuição/fila"
-              : "Handoff justificado — reforço backend",
+              ? "Handoff via tool da IA — distribuição/fila"
+              : textImpliesAcademicHandoff(replyText)
+                ? "IA prometeu conectar — reforço distribuição/fila"
+                : "Handoff acadêmico — reforço backend",
         }).catch(() => null);
       }
       const afterQueue = await prisma.conversation.findUnique({
@@ -1494,8 +1447,9 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         .update({
           where: { id: args.conversationId },
           data: {
+            lastMessageDirection: "out",
+            hasAgentReply: true,
             updatedAt: new Date(),
-            ...(await botOutboundReplyMark()),
           },
         })
         .catch(() => null);
