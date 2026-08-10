@@ -4,6 +4,7 @@
  * Regras:
  *  - Só no funil acadêmico (nome ~ACADEM*, pipelineId do agente, ou
  *    org setting `ai.firstAttendancePipelineIds`).
+ *  - Funil Acolhimento (nome ~acolh*) → nunca assume / limpa IA.
  *  - Sem responsável humano → IA assume conversa + contato + deals OPEN.
  *  - Com responsável humano já atribuído → devolve o chat a esse humano
  *    (não “rouba” nem deixa na IA).
@@ -99,6 +100,28 @@ async function resolveConfiguredPipelineIds(
     /* ignore */
   }
   return [...ids];
+}
+
+/**
+ * Aluno no funil Acolhimento (nome do pipeline contém "acolh").
+ * Esses leads ficam fora da IA — campanha com botão / fluxo humano.
+ */
+export async function isAcolhimentoFunnelContact(
+  contactId: string,
+): Promise<boolean> {
+  const openDeals = await prisma.deal.findMany({
+    where: { contactId, status: "OPEN" },
+    select: {
+      stage: {
+        select: { pipeline: { select: { name: true } } },
+      },
+    },
+  });
+  for (const d of openDeals) {
+    const name = d.stage?.pipeline?.name ?? "";
+    if (/acolh/i.test(name)) return true;
+  }
+  return false;
 }
 
 /**
@@ -264,6 +287,36 @@ export async function tryAssignFirstAttendanceAi(args: {
 
   const contactId = conv.contactId ?? args.contactId;
   if (!contactId) return null;
+
+  // Funil Acolhimento: não assume IA (disparo com botão / fluxo humano).
+  if (await isAcolhimentoFunnelContact(contactId)) {
+    if (conv.assignedToId && conv.assignedTo?.type === "AI") {
+      await prisma.$transaction(async (tx) => {
+        await tx.conversation.update({
+          where: { id: args.conversationId },
+          data: { assignedToId: null },
+        });
+        await tx.contact.update({
+          where: { id: contactId },
+          data: { assignedToId: null },
+        });
+        await tx.deal.updateMany({
+          where: { contactId, status: "OPEN" },
+          data: { ownerId: null },
+        });
+      });
+      logAi("first_attendance_clear_ai_acolhimento_funnel", {
+        conversationId: args.conversationId,
+        contactId,
+      });
+    } else {
+      logAi("first_attendance_skip_acolhimento_funnel", {
+        conversationId: args.conversationId,
+        contactId,
+      });
+    }
+    return null;
+  }
 
   // Já está na IA: verifica handoff/pending antes de confirmar.
   if (conv.assignedToId && conv.assignedTo?.type === "AI") {

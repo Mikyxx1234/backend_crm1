@@ -47,6 +47,7 @@ import {
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
+import { isAcolhimentoFunnelContact } from "@/services/ai/first-attendance";
 import {
   executeAcademicDepartmentHandoff,
   inferDepartmentFromContext,
@@ -239,6 +240,44 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     } catch (e) {
       console.error("[ai] phone allowlist in maybeReply — blocking", e);
+      return;
+    }
+
+    // Funil Acolhimento: IA não responde (disparo com botão / fluxo humano).
+    try {
+      if (await isAcolhimentoFunnelContact(args.contactId)) {
+        const convLite = await prisma.conversation.findUnique({
+          where: { id: args.conversationId },
+          select: {
+            assignedToId: true,
+            assignedTo: { select: { type: true } },
+          },
+        });
+        if (convLite?.assignedToId && convLite.assignedTo?.type === "AI") {
+          await prisma.$transaction(async (tx) => {
+            await tx.conversation.update({
+              where: { id: args.conversationId },
+              data: { assignedToId: null },
+            });
+            await tx.contact.update({
+              where: { id: args.contactId },
+              data: { assignedToId: null },
+            });
+            await tx.deal.updateMany({
+              where: { contactId: args.contactId, status: "OPEN" },
+              data: { ownerId: null },
+            });
+          });
+        }
+        logAi("blocked", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          reason: "acolhimento_funnel",
+        });
+        return;
+      }
+    } catch (e) {
+      console.error("[ai] acolhimento funnel gate failed — blocking", e);
       return;
     }
 
