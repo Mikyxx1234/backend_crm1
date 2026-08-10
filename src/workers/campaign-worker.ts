@@ -227,7 +227,11 @@ async function handleSend(
           context: {
             contactId,
             event: "campaign_trigger",
-            data: { campaignId, recipientId },
+            // channelId: canal escolhido no wizard da campanha. Sem ele o
+            // executor resolvia pela conversa do contato — que pode estar
+            // num canal DISCONNECTED (token invalidado pela Meta), falhando
+            // o disparo em massa. O executor lê em `rt.activeChannelId`.
+            data: { campaignId, recipientId, channelId: campaign.channelId },
           },
         });
       }

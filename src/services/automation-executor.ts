@@ -1449,7 +1449,14 @@ async function resolveRuntimeContext(
     contactCustomFields: customFieldsSnapshot.contactCustomFields,
     dealCustomFields: customFieldsSnapshot.dealCustomFields,
     depth: typeof ctx.depth === "number" ? ctx.depth : 0,
-    activeChannelId: null,
+    // Campanha tipo AUTOMATION (11/ago/26): o worker envia o canal escolhido
+    // no wizard em `data.channelId`. Sem isso, o 1º passo de envio resolvia
+    // o canal pela conversa do contato — que pode apontar para um canal
+    // DISCONNECTED (token invalidado pela Meta), derrubando o disparo.
+    activeChannelId:
+      typeof data.channelId === "string" && data.channelId.trim()
+        ? data.channelId.trim()
+        : null,
   };
 }
 
