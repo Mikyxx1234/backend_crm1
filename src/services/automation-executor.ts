@@ -360,6 +360,149 @@ async function resolveOutboundAuthor(
   return { authorType: "bot", senderName: fallbackSenderName, asHuman: false };
 }
 
+/** Tabulação já resolvida/validada, pronta pra gravar. */
+type ResolvedTabulation = {
+  tabulationId: string;
+  ancestorIds: string[];
+  departmentId: string;
+};
+
+/**
+ * Loga `CONVERSATION_TABULATED` — a fonte do dashboard de motivos de
+ * encerramento. `departmentId` é o da própria tabulação (não o da conversa),
+ * pra o registro cair na árvore a que a opção pertence mesmo quando a conversa
+ * está sem departamento.
+ */
+function logTabulated(
+  conv: { id: string; externalId: string | null },
+  contactId: string,
+  tab: Omit<ResolvedTabulation, "departmentId"> & {
+    departmentId: string | null;
+  },
+  extraMeta: Record<string, unknown>,
+): void {
+  void logEvent({
+    type: "CONVERSATION_TABULATED",
+    entityType: "CONVERSATION",
+    entityId: conv.id,
+    entityLabel: conv.externalId ?? null,
+    conversationId: conv.id,
+    contactId,
+    meta: {
+      tabulationId: tab.tabulationId,
+      ancestorIds: tab.ancestorIds,
+      departmentId: tab.departmentId,
+      source: "automation",
+      ...extraMeta,
+    },
+  });
+}
+
+/**
+ * Encerra as conversas abertas do contato. Compartilhado por
+ * `finish_conversation` e por `tabulate_conversation` com encerramento junto —
+ * neste caso a tabulação escolhida no passo entra na MESMA operação do
+ * fechamento, o que importa porque encerrar limpa o departamento da conversa
+ * (salvo `conversation.keepDepartmentOnEnd`).
+ *
+ * Sem `chosen`, mantém o comportamento antigo: cai na tabulação de
+ * encerramento automático do departamento, se houver.
+ */
+async function finishConversationsForContact(
+  rt: RuntimeContext,
+  chosen?: ResolvedTabulation | null,
+): Promise<void> {
+  if (!rt.contactId) return;
+  const { getOrgSettingBool } = await import("@/lib/org-settings");
+  const { updateConversationStatusInDb } = await import("@/services/conversations");
+
+  const [keepAgent, keepDepartment] = await Promise.all([
+    getOrgSettingBool("conversation.keepAgentOnEnd", false),
+    getOrgSettingBool("conversation.keepDepartmentOnEnd", false),
+  ]);
+  const clearAssignedTo = !keepAgent;
+  const clearDepartment = !keepDepartment;
+
+  const convs = await prisma.conversation.findMany({
+    where: { contactId: rt.contactId, status: { not: "RESOLVED" } },
+    select: {
+      id: true,
+      status: true,
+      externalId: true,
+      organizationId: true,
+      departmentId: true,
+    },
+  });
+
+  const orgId = getOrgIdOrNull();
+  const { resolveAutoCloseTabulation } = await import("@/services/tabulations");
+  for (const c of convs) {
+    const rowOrg = c.organizationId ?? orgId;
+    // A escolha do passo vence a tabulação padrão do departamento. Ausentes as
+    // duas => encerra sem tabular (comportamento anterior).
+    const autoTab =
+      chosen ??
+      (rowOrg
+        ? await resolveAutoCloseTabulation({
+            organizationId: rowOrg,
+            departmentId: c.departmentId,
+          }).catch(() => null)
+        : null);
+
+    const updated = await updateConversationStatusInDb(c.id, "RESOLVED", {
+      ...(autoTab ? { tabulationId: autoTab.tabulationId } : {}),
+      clearAssignedTo,
+      clearDepartment,
+    });
+
+    if (autoTab) {
+      logTabulated(
+        c,
+        rt.contactId,
+        {
+          tabulationId: autoTab.tabulationId,
+          ancestorIds: autoTab.ancestorIds,
+          // Sem escolha explícita, `autoTab` veio da árvore do próprio
+          // departamento da conversa — os dois valores coincidem.
+          departmentId: chosen ? chosen.departmentId : c.departmentId,
+        },
+        chosen ? { step: "tabulate_conversation" } : { auto: true },
+      );
+    }
+
+    void logEvent({
+      type: "CONVERSATION_CLOSED",
+      entityType: "CONVERSATION",
+      entityId: c.id,
+      entityLabel: c.externalId ?? null,
+      conversationId: c.id,
+      contactId: rt.contactId,
+      field: "status",
+      oldValue: c.status,
+      newValue: updated.status,
+      meta: { from: c.status, to: "RESOLVED", source: "automation" },
+    });
+
+    try {
+      if (rowOrg) {
+        sseBus.publish("conversation_updated", {
+          organizationId: rowOrg,
+          conversationId: c.id,
+          contactId: rt.contactId,
+          status: "RESOLVED",
+        });
+        sseBus.publish("conversation_timeline_updated", {
+          organizationId: rowOrg,
+          conversationId: c.id,
+          type: "CONVERSATION_CLOSED",
+        });
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
 /**
  * Resolve o cliente Meta WhatsApp correto para uma automação multi-tenant.
  *
@@ -3530,93 +3673,57 @@ async function executeStep(
     }
 
     case "finish_conversation": {
-      if (!rt.contactId) return {};
-      const { getOrgSettingBool } = await import("@/lib/org-settings");
-      const { updateConversationStatusInDb } = await import("@/services/conversations");
+      await finishConversationsForContact(rt);
+      return {};
+    }
 
-      const [keepAgent, keepDepartment] = await Promise.all([
-        getOrgSettingBool("conversation.keepAgentOnEnd", false),
-        getOrgSettingBool("conversation.keepDepartmentOnEnd", false),
-      ]);
-      const clearAssignedTo = !keepAgent;
-      const clearDepartment = !keepDepartment;
+    case "tabulate_conversation": {
+      if (!rt.contactId) return {};
+      const closeToo = cfg.closeConversation !== false;
+      const orgId = getOrgIdOrNull();
+      const { resolveTabulationForStep } = await import("@/services/tabulations");
+      const chosen = orgId
+        ? await resolveTabulationForStep({
+            organizationId: orgId,
+            tabulationId: readString(cfg, "tabulationId"),
+          }).catch(() => null)
+        : null;
+
+      // Tabulação apagada/desativada/movida depois de o fluxo ser montado: o
+      // passo não derruba a execução. Se o encerramento estava junto, ele
+      // acontece de todo jeito — só sem motivo gravado.
+      if (!chosen) {
+        log.warn(
+          `tabulate_conversation: tabulação inválida ou ausente (${readString(cfg, "tabulationId") ?? "vazio"}) — segue sem tabular`,
+        );
+        if (closeToo) await finishConversationsForContact(rt);
+        return {};
+      }
+
+      if (closeToo) {
+        await finishConversationsForContact(rt, chosen);
+        return {};
+      }
 
       const convs = await prisma.conversation.findMany({
         where: { contactId: rt.contactId, status: { not: "RESOLVED" } },
-        select: {
-          id: true,
-          status: true,
-          externalId: true,
-          organizationId: true,
-          departmentId: true,
-        },
+        select: { id: true, externalId: true, organizationId: true },
       });
-
-      const orgId = getOrgIdOrNull();
-      const { resolveAutoCloseTabulation } = await import(
-        "@/services/tabulations"
-      );
       for (const c of convs) {
-        // Tabulação padrão do departamento para encerramento automático.
-        // Ausente => encerra sem tabular (comportamento anterior).
-        const rowOrg = c.organizationId ?? orgId;
-        const autoTab = rowOrg
-          ? await resolveAutoCloseTabulation({
-              organizationId: rowOrg,
-              departmentId: c.departmentId,
-            }).catch(() => null)
-          : null;
-
-        const updated = await updateConversationStatusInDb(c.id, "RESOLVED", {
-          ...(autoTab ? { tabulationId: autoTab.tabulationId } : {}),
-          clearAssignedTo,
-          clearDepartment,
+        await prisma.conversation.update({
+          where: { id: c.id },
+          data: { tabulationId: chosen.tabulationId },
         });
-
-        if (autoTab) {
-          void logEvent({
-            type: "CONVERSATION_TABULATED",
-            entityType: "CONVERSATION",
-            entityId: c.id,
-            entityLabel: c.externalId ?? null,
-            conversationId: c.id,
-            contactId: rt.contactId,
-            meta: {
-              tabulationId: autoTab.tabulationId,
-              ancestorIds: autoTab.ancestorIds,
-              departmentId: c.departmentId,
-              source: "automation",
-              auto: true,
-            },
-          });
-        }
-
-        void logEvent({
-          type: "CONVERSATION_CLOSED",
-          entityType: "CONVERSATION",
-          entityId: c.id,
-          entityLabel: c.externalId ?? null,
-          conversationId: c.id,
-          contactId: rt.contactId,
-          field: "status",
-          oldValue: c.status,
-          newValue: updated.status,
-          meta: { from: c.status, to: "RESOLVED", source: "automation" },
+        logTabulated(c, rt.contactId, chosen, {
+          step: "tabulate_conversation",
         });
-
         try {
-          const rowOrgId = rowOrg;
-          if (rowOrgId) {
-            sseBus.publish("conversation_updated", {
-              organizationId: rowOrgId,
-              conversationId: c.id,
-              contactId: rt.contactId,
-              status: "RESOLVED",
-            });
+          const rowOrg = c.organizationId ?? orgId;
+          if (rowOrg) {
             sseBus.publish("conversation_timeline_updated", {
-              organizationId: rowOrgId,
+              organizationId: rowOrg,
               conversationId: c.id,
-              type: "CONVERSATION_CLOSED",
+              type: "CONVERSATION_TABULATED",
             });
           }
         } catch {
@@ -4236,6 +4343,7 @@ const STEP_TYPE_LABELS: Record<string, string> = {
   finish: "Finalizar fluxo",
   create_deal: "Criar negócio",
   finish_conversation: "Encerrar conversa",
+  tabulate_conversation: "Tabular conversa",
   business_hours: "Horário comercial",
   execute_distribution: "Executar distribuição",
 };

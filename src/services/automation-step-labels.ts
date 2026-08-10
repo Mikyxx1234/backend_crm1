@@ -27,6 +27,7 @@ export const STEP_LABELS: Record<string, string> = {
   finish: "Finalizando",
   create_deal: "Criando negócio",
   finish_conversation: "Encerrando conversa",
+  tabulate_conversation: "Tabulando conversa",
   business_hours: "Verificando horário",
   execute_distribution: "Distribuindo lead",
 };

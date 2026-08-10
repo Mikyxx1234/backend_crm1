@@ -134,6 +134,44 @@ export async function resolveAutoCloseTabulation(args: {
 }
 
 /**
+ * Tabulacao escolhida no passo `tabulate_conversation` de uma automacao.
+ * Revalida na hora do uso, como `resolveAutoCloseTabulation`: a arvore pode
+ * ter sido reorganizada ou desativada depois de o fluxo ser montado, e nesse
+ * caso devolve null pro passo seguir sem tabular em vez de derrubar o fluxo.
+ *
+ * Devolve o `departmentId` da propria tabulacao — e nao o da conversa. O log
+ * usa esse valor pro dashboard agrupar o registro na arvore a que a opcao
+ * pertence, inclusive quando a conversa esta sem departamento.
+ */
+export async function resolveTabulationForStep(args: {
+  organizationId: string;
+  tabulationId: string | null | undefined;
+}): Promise<{
+  tabulationId: string;
+  ancestorIds: string[];
+  departmentId: string;
+} | null> {
+  const { organizationId, tabulationId } = args;
+  if (!tabulationId) return null;
+
+  const node = await prisma.tabulation.findFirst({
+    where: { id: tabulationId, organizationId, active: true },
+    select: {
+      id: true,
+      departmentId: true,
+      _count: { select: { children: true } },
+    },
+  });
+  if (!node || node._count.children > 0) return null;
+
+  return {
+    tabulationId: node.id,
+    departmentId: node.departmentId,
+    ancestorIds: await ancestorsInOrg(node.id, organizationId),
+  };
+}
+
+/**
  * Garante que `id` existe, pertence ao `departmentId` E eh folha (sem
  * filhos). Lanca com `code` estavel pra rota mapear pra 400.
  */

@@ -87,6 +87,7 @@ export const ACTION_STEP_TYPES = [
   "finish",
   "create_deal",
   "finish_conversation",
+  "tabulate_conversation",
   "business_hours",
   "ask_ai_agent",
   "transfer_to_ai_agent",
@@ -197,6 +198,7 @@ export function stepTypeLabel(t: string): string {
     finish: "Finalizar fluxo",
     create_deal: "Criar negócio",
     finish_conversation: "Encerrar conversa",
+    tabulate_conversation: "Tabular conversa",
     business_hours: "Horário comercial",
     ask_ai_agent: "Perguntar ao agente IA",
     transfer_to_ai_agent: "Transferir para agente IA",
@@ -424,6 +426,12 @@ export function summarizeStepConfig(stepType: string, config: unknown, lookup?: 
     }
     case "finish_conversation":
       return "Resolver conversas abertas";
+    case "tabulate_conversation": {
+      const label = c.tabulationLabel ? String(c.tabulationLabel) : "";
+      const closes = c.closeConversation !== false;
+      if (!label) return "Selecionar tabulação";
+      return closes ? `${label} + encerrar` : label;
+    }
     case "business_hours": {
       const tz = c.timezone ? String(c.timezone) : "America/Sao_Paulo";
       return `Fuso: ${tz}`;
@@ -665,6 +673,17 @@ export function defaultStepConfig(stepType: string): Record<string, unknown> {
       return { stageId: "", title: "Novo negócio", value: 0 };
     case "finish_conversation":
       return {};
+    case "tabulate_conversation":
+      // `closeConversation` liga por padrao: encerrar junto grava a tabulacao
+      // na mesma operacao do fechamento. Tabular depois de encerrar perderia o
+      // departamento da conversa (o fechamento limpa, salvo
+      // `conversation.keepDepartmentOnEnd`).
+      return {
+        departmentId: "",
+        tabulationId: "",
+        tabulationLabel: "",
+        closeConversation: true,
+      };
     case "business_hours":
       return {
         schedule: [

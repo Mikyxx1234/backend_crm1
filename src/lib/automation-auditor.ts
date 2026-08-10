@@ -631,6 +631,9 @@ function categorizeStepType(type: string): ActionCategory {
     case "create_deal":
       return "deal_creation";
     case "finish_conversation":
+    // Encerra junto por padrão (`closeConversation`), então disputa o mesmo
+    // evento que qualquer outro fechamento automático.
+    case "tabulate_conversation":
       return "conversation_close";
     default:
       return "other";
