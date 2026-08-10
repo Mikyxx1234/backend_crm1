@@ -41,11 +41,31 @@ humano. Ops: reenfileirar presos + `processPendingDistributionQueue`.
 (`cancelStalePendingOrphans`); script ops
 `scripts/ops-reenqueue-ai-overnight-handoffs.ts`.
 
-### 2026-08-10 — Agente IA não atende alunos no Acolhimento (funil OU etapa)
+### 2026-08-10 — Aula inaugural: IA volta a atender funis + link YouTube (calouros1008)
 
 **Modelo usado.** Cursor Grok 4.5.
 
-**Decisão.** Se o contato tem deal OPEN cujo **pipeline ou stage** tem
+**Decisão (revisa o bloqueio de Acolhimento do mesmo dia).** A IA volta a
+atender normalmente em qualquer funil/etapa (removido o gate
+`isAcolhimentoFunnelContact` em first-attendance, inbox-handler,
+debounce e assign API). Na janela operacional (default 10–11/ago/2026 BRT,
+`INAUGURAL_LINK_DATES`):
+- se o aluno pedir o link / clicar “Clique para receber o link” / mencionar
+  problema na aula inaugural → a IA envia o YouTube oficial
+  (`INAUGURAL_CLASS_YOUTUBE_URL`) com mensagem empática (intercept antes do LLM);
+- **prioridade:** tags `calouros1008_1`…`_6` (case-insensitive) em contato
+  ou deal — qualquer etapa; first-attendance assume mesmo fora do pipe
+  acadêmico e mesmo com automação PAUSED aguardando botão.
+
+**Arquivos.** `inaugural-class-link.ts`; `first-attendance.ts`;
+`inbox-handler.ts`; `inbound-debounce.ts`; `actions/route.ts`; prompt.
+
+### 2026-08-10 — Agente IA não atende alunos no Acolhimento (funil OU etapa)
+**(REVERTIDA / revisada — ver entrada “Aula inaugural” acima.)**
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão (histórica).** Se o contato tem deal OPEN cujo **pipeline ou stage** tem
 `acolh` no nome (ex.: etapa `ACOLHIMENTO ACADÊMICO` em funil `ACADÊMICO`),
 a IA **não assume** e **não responde**:
 - `first-attendance`: skip + limpa assignee IA; exclui do pipe acadêmico

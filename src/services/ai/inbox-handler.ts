@@ -47,7 +47,11 @@ import {
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
-import { isAcolhimentoFunnelContact } from "@/services/ai/first-attendance";
+import {
+  buildInauguralClassLinkMessage,
+  conversationAlreadyGotInauguralLink,
+  shouldSendInauguralClassLink,
+} from "@/services/ai/inaugural-class-link";
 import {
   executeAcademicDepartmentHandoff,
   inferDepartmentFromContext,
@@ -240,44 +244,6 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     } catch (e) {
       console.error("[ai] phone allowlist in maybeReply — blocking", e);
-      return;
-    }
-
-    // Funil Acolhimento: IA não responde (disparo com botão / fluxo humano).
-    try {
-      if (await isAcolhimentoFunnelContact(args.contactId)) {
-        const convLite = await prisma.conversation.findUnique({
-          where: { id: args.conversationId },
-          select: {
-            assignedToId: true,
-            assignedTo: { select: { type: true } },
-          },
-        });
-        if (convLite?.assignedToId && convLite.assignedTo?.type === "AI") {
-          await prisma.$transaction(async (tx) => {
-            await tx.conversation.update({
-              where: { id: args.conversationId },
-              data: { assignedToId: null },
-            });
-            await tx.contact.update({
-              where: { id: args.contactId },
-              data: { assignedToId: null },
-            });
-            await tx.deal.updateMany({
-              where: { contactId: args.contactId, status: "OPEN" },
-              data: { ownerId: null },
-            });
-          });
-        }
-        logAi("blocked", {
-          conversationId: args.conversationId,
-          contactId: args.contactId,
-          reason: "acolhimento_funnel",
-        });
-        return;
-      }
-    } catch (e) {
-      console.error("[ai] acolhimento funnel gate failed — blocking", e);
       return;
     }
 
@@ -503,6 +469,51 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       model: cfg.model,
       agentUserId: assignee.id,
     });
+
+    // ── Aula inaugural (hoje/amanhã): envia YouTube sem passar pelo LLM ──
+    // Prioridade: tags calouros1008_1..6 (qualquer etapa). Demais: se pedirem.
+    try {
+      const inaugural = await shouldSendInauguralClassLink({
+        contactId: args.contactId,
+        userMessage: args.userMessage,
+      });
+      if (inaugural.send) {
+        const already = await conversationAlreadyGotInauguralLink(
+          args.conversationId,
+        );
+        if (!already) {
+          const text = buildInauguralClassLinkMessage({
+            problem: inaugural.problem,
+          });
+          await sendAgentMessage({
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            agentUserId: assignee.id,
+            autonomyMode: cfg.autonomyMode,
+            text,
+            channel: args.channel,
+            kind: "text",
+            humanBehavior,
+            generationId: args.generationId,
+            bypassAssigneeCheck: true,
+          });
+          logAi("inaugural_class_link_sent", {
+            conversationId: args.conversationId,
+            contactId: args.contactId,
+            priorityCalouros: inaugural.priorityCalouros,
+            problem: inaugural.problem,
+          });
+          return;
+        }
+        logAi("inaugural_class_link_skip_already_sent", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+        });
+        // Já enviou o link — deixa o LLM atender o follow-up.
+      }
+    } catch (e) {
+      console.error("[ai] inaugural class link intercept failed", e);
+    }
 
     const openDeal = await prisma.deal.findFirst({
       where: { contactId: args.contactId, status: "OPEN" },
