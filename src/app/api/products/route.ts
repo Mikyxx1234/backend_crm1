@@ -47,6 +47,11 @@ export async function GET(request: Request) {
       orderBy: { name: "asc" },
       skip: (page - 1) * perPage,
       take: perPage,
+      include: {
+        courseConfig: {
+          select: { level: true, mode: true, semester: true },
+        },
+      },
     }),
     prisma.product.count({ where }),
   ]);
