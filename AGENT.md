@@ -47,8 +47,6 @@ Delay curto (≤30s, ex.: "digitando…") segue inline.
 
 ---
 
-<<<<<<< HEAD
-=======
 ### 2026-08-11 — Contact.number atômico + reuso em P2002 de BSUID
 
 **Modelo usado.** Cursor Composer.
@@ -104,7 +102,6 @@ campaign-builder; schema zod; default Prisma.
 
 ---
 
->>>>>>> origin/DEV_BRANCH
 ### 2026-08-11 — Worker dedicado `worker-automation` para Salesbot/automações
 
 **Modelo usado.** Cursor Grok 4.5.
