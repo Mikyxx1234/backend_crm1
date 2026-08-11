@@ -7,11 +7,23 @@ name: Build & Deploy
 #
 # Setup no GitHub (Settings -> Secrets and variables -> Actions):
 #
-#   Secrets:
-#     EASYPANEL_WEBHOOK_PROD    URL do webhook do servico backend em prod
-#     EASYPANEL_WEBHOOK_DEV     URL do webhook do servico backend em dev
+#   Secrets (por ambiente, uma por serviço — API + workers):
+#     EASYPANEL_WEBHOOK_PROD                    serviço API (prod)
+#     EASYPANEL_WEBHOOK_PROD_WORKER_WHATSAPP    worker-whatsapp (prod)
+#     EASYPANEL_WEBHOOK_PROD_WORKER_LEADS       worker-leads (prod)
+#     EASYPANEL_WEBHOOK_PROD_WORKER_ETL         worker-etl (prod)
+#     EASYPANEL_WEBHOOK_PROD_WORKER_AUTOMATIONS worker-automations (prod)
+#     EASYPANEL_WEBHOOK_DEV                     serviço API (dev)
+#     EASYPANEL_WEBHOOK_DEV_WORKER_WHATSAPP     worker-whatsapp (dev)
+#     EASYPANEL_WEBHOOK_DEV_WORKER_LEADS        worker-leads (dev)
+#     EASYPANEL_WEBHOOK_DEV_WORKER_ETL          worker-etl (dev)
+#     EASYPANEL_WEBHOOK_DEV_WORKER_AUTOMATIONS  worker-automations (dev)
 #
-# Setup no Easypanel (por servico):
+#   Só a API é obrigatória. Webhooks de workers ausentes são ignorados —
+#   assim dá pra adotar o rollout por partes (cadastra o secret quando o
+#   serviço existir no Easypanel).
+#
+# Setup no Easypanel (por serviço):
 #   Source: Docker Image
 #   Image:  ghcr.io/mikyxx1234/backend_crm1:latest   (prod)
 #           ghcr.io/mikyxx1234/backend_crm1:dev      (dev)
@@ -19,7 +31,7 @@ name: Build & Deploy
 #     cadastre em Easypanel -> Registries. (Se o pacote estiver public,
 #     nao precisa autenticar.)
 #   Deploy webhook: copie do Easypanel (Settings do servico -> Deployments
-#     -> Deploy Hook) e coloque em EASYPANEL_WEBHOOK_PROD/DEV.
+#     -> Deploy Hook) e coloque na secret correspondente ao serviço.
 #
 # Backend nao precisa de build args (o server so le env em runtime).
 # BACKEND_PUBLIC_URL, DATABASE_URL, META_APP_SECRET etc. sao configurados
@@ -54,27 +66,49 @@ jobs:
         # Passar via `env:` (nao inline ${{ }}) e trim de \r\n protege
         # contra valores com Enter acidental colados no GitHub UI, que
         # quebravam o parser de $GITHUB_OUTPUT com "Invalid format".
+        #
+        # Monta uma LISTA de webhooks (um por serviço: API + workers) para
+        # o step de redeploy disparar todos. Workers sem secret cadastrada
+        # entram como string vazia e são pulados no step seguinte.
         env:
           BRANCH_REF: ${{ github.ref }}
           S_WEBHOOK_PROD: ${{ secrets.EASYPANEL_WEBHOOK_PROD }}
+          S_WEBHOOK_PROD_WA: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_WHATSAPP }}
+          S_WEBHOOK_PROD_LEADS: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_LEADS }}
+          S_WEBHOOK_PROD_ETL: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_ETL }}
+          S_WEBHOOK_PROD_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_AUTOMATIONS }}
           S_WEBHOOK_DEV: ${{ secrets.EASYPANEL_WEBHOOK_DEV }}
+          S_WEBHOOK_DEV_WA: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_WHATSAPP }}
+          S_WEBHOOK_DEV_LEADS: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_LEADS }}
+          S_WEBHOOK_DEV_ETL: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_ETL }}
+          S_WEBHOOK_DEV_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_AUTOMATIONS }}
         run: |
           if [ "$BRANCH_REF" = "refs/heads/main" ]; then
             TAG=latest
-            WEBHOOK="$S_WEBHOOK_PROD"
+            WEBHOOKS="$S_WEBHOOK_PROD $S_WEBHOOK_PROD_WA $S_WEBHOOK_PROD_LEADS $S_WEBHOOK_PROD_ETL $S_WEBHOOK_PROD_AUTO"
           else
             TAG=dev
-            WEBHOOK="$S_WEBHOOK_DEV"
+            WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO"
           fi
           TAG=$(printf '%s' "$TAG" | tr -d '\r\n')
-          WEBHOOK=$(printf '%s' "$WEBHOOK" | tr -d '\r\n')
+          # Normaliza: trim de \r\n por webhook e descarta vazios. Saída =
+          # lista separada por espaço, um webhook por serviço configurado.
+          CLEAN=""
+          COUNT=0
+          for w in $WEBHOOKS; do
+            w=$(printf '%s' "$w" | tr -d '\r\n')
+            [ -z "$w" ] && continue
+            CLEAN="$CLEAN $w"
+            COUNT=$((COUNT+1))
+          done
+          CLEAN=$(printf '%s' "$CLEAN" | sed 's/^ //')
           {
             echo "TAG=$TAG"
-            echo "WEBHOOK=$WEBHOOK"
+            echo "WEBHOOKS=$CLEAN"
           } >> "$GITHUB_OUTPUT"
           echo "::group::env resolved (values masked)"
-          [ -n "$TAG" ]     && echo "TAG=<set>"     || echo "TAG=<EMPTY>"
-          [ -n "$WEBHOOK" ] && echo "WEBHOOK=<set>" || echo "WEBHOOK=<EMPTY>"
+          [ -n "$TAG" ] && echo "TAG=<set>" || echo "TAG=<EMPTY>"
+          echo "WEBHOOKS_COUNT=$COUNT"
           echo "::endgroup::"
 
       - name: Set up Docker Buildx
@@ -104,45 +138,60 @@ jobs:
           cache-to: type=gha,scope=${{ github.ref_name }},mode=max
 
       - name: Trigger Easypanel redeploy
-        if: steps.env.outputs.WEBHOOK != ''
-        timeout-minutes: 5
+        if: steps.env.outputs.WEBHOOKS != ''
+        timeout-minutes: 15
         # A imagem já foi publicada no GHCR; webhook intermitente não deve
         # falhar o pipeline inteiro (Easypanel pode demorar ou resetar conexão).
         continue-on-error: true
         id: easypanel_webhook
         run: |
-          echo "Chamando webhook do Easypanel (fire-and-forget, com retry)..."
-          WEBHOOK="${{ steps.env.outputs.WEBHOOK }}"
-          code=000
-          for i in 1 2 3 4 5; do
-            # --connect-timeout: falha rapido se o host nao responder.
-            # --max-time: NUNCA pendura — o EasyPanel mantem a conexao aberta
-            #   transmitindo o build, entao limitamos o tempo de leitura.
-            out=$(curl -sS -o /dev/null \
-              -w "%{http_code} %{exitcode} %{time_connect}" \
-              --connect-timeout 15 --max-time 45 \
-              -X POST "$WEBHOOK" \
-              -H "User-Agent: github-actions/backend_crm1") || true
-            code=$(printf '%s' "$out" | awk '{print $1}')
-            ex=$(printf '%s' "$out" | awk '{print $2}')
-            tconn=$(printf '%s' "$out" | awk '{print $3}')
-            echo "Tentativa $i -> HTTP ${code:-000} (curl exit ${ex:-?}, connect ${tconn:-?}s)"
-            case "$code" in
-              2*) echo "Webhook aceito pelo Easypanel (HTTP $code)."; exit 0 ;;
-            esac
-            # Timeout de LEITURA apos conectar (exit 28 + conexao estabelecida):
-            # o EasyPanel ja RECEBEU o POST e faz o redeploy de forma assincrona.
-            if [ "$ex" = "28" ] && [ -n "$tconn" ] && [ "$tconn" != "0.000000" ] && [ "$tconn" != "0" ]; then
-              echo "Timeout de leitura apos envio — redeploy disparado (assincrono). OK."
-              exit 0
+          echo "Chamando webhooks do Easypanel (API + workers, fire-and-forget)..."
+          WEBHOOKS="${{ steps.env.outputs.WEBHOOKS }}"
+          FAILED=0
+          IDX=0
+          for WEBHOOK in $WEBHOOKS; do
+            IDX=$((IDX+1))
+            [ -z "$WEBHOOK" ] && continue
+            echo "── Serviço #$IDX ──"
+            code=000
+            ok=0
+            for i in 1 2 3 4 5; do
+              # --connect-timeout: falha rapido se o host nao responder.
+              # --max-time: NUNCA pendura — o EasyPanel mantem a conexao aberta
+              #   transmitindo o build, entao limitamos o tempo de leitura.
+              out=$(curl -sS -o /dev/null \
+                -w "%{http_code} %{exitcode} %{time_connect}" \
+                --connect-timeout 15 --max-time 45 \
+                -X POST "$WEBHOOK" \
+                -H "User-Agent: github-actions/backend_crm1") || true
+              code=$(printf '%s' "$out" | awk '{print $1}')
+              ex=$(printf '%s' "$out" | awk '{print $2}')
+              tconn=$(printf '%s' "$out" | awk '{print $3}')
+              echo "  Tentativa $i -> HTTP ${code:-000} (curl exit ${ex:-?}, connect ${tconn:-?}s)"
+              case "$code" in
+                2*) echo "  Webhook aceito (HTTP $code)."; ok=1; break ;;
+              esac
+              # Timeout de LEITURA apos conectar (exit 28 + conexao estabelecida):
+              # o EasyPanel ja RECEBEU o POST e faz o redeploy de forma assincrona.
+              if [ "$ex" = "28" ] && [ -n "$tconn" ] && [ "$tconn" != "0.000000" ] && [ "$tconn" != "0" ]; then
+                echo "  Timeout de leitura apos envio — redeploy disparado (assincrono). OK."
+                ok=1
+                break
+              fi
+              sleep 5
+            done
+            if [ "$ok" != "1" ]; then
+              echo "  ERRO: webhook falhou apos 5 tentativas (ultimo HTTP ${code:-000})."
+              FAILED=$((FAILED+1))
             fi
-            sleep 5
           done
-          echo "ERRO: webhook do Easypanel falhou apos 5 tentativas (ultimo HTTP ${code:-000})."
-          echo "::warning::Imagem publicada no GHCR, mas webhook Easypanel falhou — redeploy manual se necessario."
-          exit 1
+          if [ "$FAILED" -gt 0 ]; then
+            echo "::warning::$FAILED serviço(s) não dispararam redeploy — faça pull/restart manual no painel."
+            exit 1
+          fi
+          echo "Todos os $IDX serviço(s) dispararam redeploy."
 
       - name: Webhook Easypanel (aviso)
-        if: steps.env.outputs.WEBHOOK != '' && steps.easypanel_webhook.outcome == 'failure'
+        if: steps.env.outputs.WEBHOOKS != '' && steps.easypanel_webhook.outcome == 'failure'
         run: |
-          echo "::warning::Build OK (ghcr.io/${{ env.IMAGE_NAME }}:${{ steps.env.outputs.TAG }}). Webhook Easypanel falhou — faça pull/restart manual no painel se o servico nao atualizou."
+          echo "::warning::Build OK (ghcr.io/${{ env.IMAGE_NAME }}:${{ steps.env.outputs.TAG }}). Algum webhook Easypanel falhou — faça pull/restart manual no painel se algum serviço não atualizou."
