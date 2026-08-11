@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+import {
+  clampCampaignSendRate,
+  getCampaignSendRateDefault,
+} from "@/lib/campaign-send-rate";
+
 export const campaignTypeSchema = z.enum(["TEMPLATE", "TEXT", "AUTOMATION"]);
 export const builderStepSchema = z.enum([
   "impulse_type",
@@ -33,7 +38,13 @@ export const campaignBuilderDraftSchema = z.object({
   templateLanguage: z.string().trim().optional().default("pt_BR"),
   textContent: z.string().trim().optional(),
   automationId: z.string().trim().optional(),
-  sendRate: z.number().int().min(1).max(80).default(80),
+  // Clamp (não reject) para UI legada que ainda permite até 80 msgs/s.
+  sendRate: z
+    .number()
+    .int()
+    .min(1)
+    .default(getCampaignSendRateDefault())
+    .transform((n) => clampCampaignSendRate(n)),
   scheduledAt: z.string().datetime().optional(),
   step: builderStepSchema.default("impulse_type"),
 });

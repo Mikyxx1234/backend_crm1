@@ -31,7 +31,7 @@ import {
   withConversationNumberRetry,
 } from "@/services/conversations";
 import { maybeDistributeNewInboundTicket } from "@/services/distribution";
-import { nextContactNumber } from "@/services/contacts";
+import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services/contacts";
 import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { getLogger } from "@/lib/logger";
@@ -412,27 +412,9 @@ async function fetchProfileName(
 async function createContactWithNumber(
   fields: Record<string, unknown>,
 ): Promise<{ id: string; name: string }> {
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const number = await nextContactNumber();
-    try {
-      return await prisma.contact.create({
-        data: withOrgFromCtx({ number, ...fields } as unknown as Prisma.ContactUncheckedCreateInput),
-        select: { id: true, name: true },
-      });
-    } catch (err) {
-      if (isPrismaUniqueViolation(err)) continue;
-      throw err;
-    }
-  }
-  throw new Error("createContactWithNumber: max retries excedidos");
-}
-
-function isPrismaUniqueViolation(err: unknown): boolean {
-  return (
-    typeof err === "object" &&
-    err !== null &&
-    "code" in err &&
-    (err as { code: string }).code === "P2002"
+  return insertContactWithNextNumber(
+    fields as Omit<Prisma.ContactUncheckedCreateInput, "number" | "organizationId">,
+    { id: true, name: true },
   );
 }
 

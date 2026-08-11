@@ -47,6 +47,64 @@ Delay curto (≤30s, ex.: "digitando…") segue inline.
 
 ---
 
+<<<<<<< HEAD
+=======
+### 2026-08-11 — Contact.number atômico + reuso em P2002 de BSUID
+
+**Modelo usado.** Cursor Composer.
+
+**Problema.** `nextContactNumber` = MAX+1 sem lock → P2002 em
+`(organizationId, number)` sob webhook paralelo (DNAWork). Retry cego
+também falhava em P2002 de `whatsapp_bsuid`.
+
+**Decisão.** `pg_advisory_xact_lock` + MAX+1 + INSERT na **mesma**
+transaction (`insertContactWithNextNumber` / `createContact`). Em
+colisão de BSUID, `findFirst` e reusa o contato (não retenta número).
+
+**Arquivos.** `services/contacts.ts`; meta webhook handler/messaging;
+baileys message-handler.
+
+---
+
+### 2026-08-11 — Busca inbox/board: 1 JOIN em contacts (não N self-joins)
+
+**Modelo usado.** Cursor Composer.
+
+**Problema.** `buildConversationSearchWhere` e o OR de search em
+`kanban-filters` emitiam vários `{ contact: { campo } }` no mesmo OR —
+Prisma gera 1 LEFT JOIN por ramo → self-joins j0..jN no mesmo `contacts`.
+COUNT/listagem da inbox e board filtrado pagavam isso no pg_stat.
+
+**Decisão.** Agrupar predicados de contato sob `contact: { OR: [...] }`
+(e `assignedTo` idem). Já era o padrão em `deals.ts` (jul/26). Semântica
+igual; API pública inalterada. Coluna `search_text` desnormalizada fica
+como ADR (`docs/decisoes/search-text-denormalized.md`) — não neste PR
+(risco de backfill/triggers sob carga).
+
+**Arquivos.** `services/conversations.ts`; `services/kanban-filters.ts`.
+
+---
+
+### 2026-08-11 — Hard cap sendRate + backpressure no campaign-worker
+
+**Modelo usado.** Cursor Composer.
+
+**Problema.** Campanha com `sendRate=80` (msgs/s) + concurrency BullMQ 10
+saturava Postgres compartilhado (4 vCPU) e API; inbox/board 5–17s.
+
+**Decisão.** (1) Cap server-side em `CAMPAIGN_SEND_RATE_MAX` (default **30**
+msgs/s) com default de criação `CAMPAIGN_SEND_RATE_DEFAULT` (**20**);
+clamp na API/builder e no worker (campanhas antigas com 80 não disparam
+acima do cap). (2) Concurrency de envio via `CAMPAIGN_SEND_CONCURRENCY`
+(default **4**, antes 10). (3) Limiter BullMQ também teto pelo max de
+sendRate. Throttle Redis `campaign:meta:throttle:...` permanece.
+
+**Arquivos.** `lib/campaign-send-rate.ts`; worker; services campaigns /
+campaign-builder; schema zod; default Prisma.
+
+---
+
+>>>>>>> origin/DEV_BRANCH
 ### 2026-08-11 — Worker dedicado `worker-automation` para Salesbot/automações
 
 **Modelo usado.** Cursor Grok 4.5.
@@ -94,6 +152,8 @@ Match de opção também aceita fallback `row_N`/`btn_N` como no executor.
 
 **Arquivos.** `services/automation-context.ts`; teste
 `automation-branch-routing.test.ts`.
+
+---
 
 ### 2026-08-10 — Fila noturna: não cancelar `distribution_pending` quando a IA reassumiu
 

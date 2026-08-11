@@ -6,7 +6,10 @@ import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { phoneMatchVariants } from "@/lib/phone";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
-import { nextContactNumber } from "@/services/contacts";
+import {
+  insertContactWithNextNumber,
+  isContactBsuidUniqueViolation,
+} from "@/services/contacts";
 import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
@@ -655,18 +658,53 @@ async function resolveWebhookContact(
 
   const sourceName = await getChannelSourceName(phoneNumberId);
 
-  const created = await prisma.contact.create({
-    data: withOrgFromCtx({
-      number: await nextContactNumber(),
-      name,
-      ...(phone ? { phone } : {}),
-      ...(bsuid ? { whatsappBsuid: bsuid } : {}),
-      ...(username ? { whatsappUsername: username } : {}),
-      lifecycleStage: "LEAD" as const,
-      source: sourceName,
-    }),
-    select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
-  });
+  const contactSelect = {
+    id: true,
+    name: true,
+    phone: true,
+    whatsappBsuid: true,
+    whatsappUsername: true,
+  } as const;
+
+  let created: {
+    id: string;
+    name: string;
+    phone: string | null;
+    whatsappBsuid: string | null;
+    whatsappUsername: string | null;
+  };
+  try {
+    created = await insertContactWithNextNumber(
+      {
+        name,
+        ...(phone ? { phone } : {}),
+        ...(bsuid ? { whatsappBsuid: bsuid } : {}),
+        ...(username ? { whatsappUsername: username } : {}),
+        lifecycleStage: "LEAD" as const,
+        source: sourceName,
+      },
+      contactSelect,
+    );
+  } catch (err) {
+    // Corrida: outro webhook já inseriu o mesmo BSUID — reusa o vencedor
+    // (retry cego com novo number não resolve unique de bsuid).
+    if (isContactBsuidUniqueViolation(err) && bsuid) {
+      const won = await prisma.contact.findFirst({
+        where: { whatsappBsuid: bsuid },
+        select: contactSelect,
+      });
+      if (won) {
+        return {
+          id: won.id,
+          name: won.name,
+          phone: won.phone ?? null,
+          whatsappBsuid: won.whatsappBsuid ?? null,
+          whatsappUsername: won.whatsappUsername ?? null,
+        };
+      }
+    }
+    throw err;
+  }
 
   // Dispara automações com trigger "contact_created" (fire-and-forget,
   // não bloqueia a resposta ao webhook da Meta, que tem janela curta
