@@ -16,6 +16,7 @@ import {
   linearFallbackStepId,
   matchInteractiveOption,
   readStepRef,
+  shouldPersistDelay,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -193,6 +194,71 @@ describe("roteamento de timeout — regressão INICIO-PIPE", () => {
       { id: "ramo-vizinho", config: { __hasExplicitEdges: true } },
     ];
     expect(resolveTimeoutTarget(semTimeout, "menu")).toBeNull();
+  });
+});
+
+describe("delay persistido — incidente 11/ago/26 (worker travado por delay de 7d)", () => {
+  /**
+   * Reproduz a decisão de `processTimeout` para o step `delay`: a espera
+   * persistida (timeoutAt) expira e o fluxo segue a aresta `nextStepId`;
+   * o fallback linear só vale em fluxo legado (pré-canvas).
+   */
+  function resolveDelayTarget(
+    steps: { id: string; config: unknown }[],
+    currentStepId: string,
+  ): string | null {
+    const step = steps.find((s) => s.id === currentStepId);
+    return (
+      readStepRef(step?.config, "nextStepId") ??
+      linearFallbackStepId(steps, currentStepId)
+    );
+  }
+
+  it("delay curto roda inline; delay longo é persistido", () => {
+    // threshold default 30s (AUTOMATION_DELAY_INLINE_MAX_MS)
+    expect(shouldPersistDelay(5_000, 30_000)).toBe(false);
+    expect(shouldPersistDelay(30_000, 30_000)).toBe(false);
+    expect(shouldPersistDelay(60_000, 30_000)).toBe(true);
+    expect(shouldPersistDelay(604_800_000, 30_000)).toBe(true); // 7 dias
+    expect(shouldPersistDelay(10_000, 0)).toBe(true); // threshold 0 = sempre persiste
+  });
+
+  it("ao expirar, segue o nextStepId desenhado no canvas", () => {
+    const steps = [
+      {
+        id: "delay-7d",
+        config: { ms: 604_800_000, nextStepId: "tpl_prop_2", __hasExplicitEdges: true },
+      },
+      { id: "tpl_prop_2", config: { __hasExplicitEdges: true } },
+    ];
+    expect(resolveDelayTarget(steps, "delay-7d")).toBe("tpl_prop_2");
+  });
+
+  it("nextStepId __none__ (fim de ramo) encerra o fluxo", () => {
+    const steps = [
+      {
+        id: "delay",
+        config: { ms: 60_000, nextStepId: "__none__", __hasExplicitEdges: true },
+      },
+      { id: "outro", config: { __hasExplicitEdges: true } },
+    ];
+    expect(resolveDelayTarget(steps, "delay")).toBeNull();
+  });
+
+  it("delay sem aresta NÃO vaza pro próximo da array em canvas", () => {
+    const steps = [
+      { id: "delay", config: { ms: 60_000, __hasExplicitEdges: true } },
+      { id: "ramo-vizinho", config: { __hasExplicitEdges: true } },
+    ];
+    expect(resolveDelayTarget(steps, "delay")).toBeNull();
+  });
+
+  it("fluxo legado (sem __hasExplicitEdges) cai no próximo da array", () => {
+    const legacy = [
+      { id: "delay", config: { ms: 60_000 } },
+      { id: "proxima-msg", config: {} },
+    ];
+    expect(resolveDelayTarget(legacy, "delay")).toBe("proxima-msg");
   });
 });
 
