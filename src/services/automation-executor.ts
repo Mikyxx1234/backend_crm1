@@ -54,7 +54,10 @@ import {
   interpolateVariables,
   shouldPersistDelay,
 } from "@/services/automation-context";
-import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
+import {
+  ensureWhatsAppConversationForContact,
+  maybeResolveUnansweredOutboundTicket,
+} from "@/services/whatsapp-conversation";
 
 const log = getLogger("automation");
 
@@ -2713,6 +2716,15 @@ async function executeStep(
               : DEFAULT_WAIT_TIMEOUT_MS
             : rawTimeout;
         return pauseAwaitingReply(cfg, rt, tplTimeoutMs);
+      }
+
+      // Campanha AUTOMATION sem pausa (sem botão/timeout): fecha ticket se o
+      // aluno não respondeu — mesmo modelo do campaign-worker TEMPLATE/TEXT.
+      // Com pausa, o contexto PAUSED mantém a conversa na aba Automação.
+      if (rt.event === "campaign_trigger" && tplConversationId) {
+        await maybeResolveUnansweredOutboundTicket(tplConversationId).catch(
+          () => {},
+        );
       }
 
       return {};

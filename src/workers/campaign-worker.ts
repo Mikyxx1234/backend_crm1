@@ -9,7 +9,10 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { sseBus } from "@/lib/sse-bus";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
-import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
+import {
+  ensureWhatsAppConversationForContact,
+  maybeResolveUnansweredOutboundTicket,
+} from "@/services/whatsapp-conversation";
 import {
   CAMPAIGN_DISPATCH_QUEUE_NAME,
   CAMPAIGN_SEND_QUEUE_NAME,
@@ -510,36 +513,25 @@ async function persistCampaignOutboundMessage(input: {
     }),
   });
 
-  // Modelo de ticket para campanhas: se a conversa foi CRIADA agora só pra
-  // registrar o disparo (contato não tinha conversa OPEN no momento), a
-  // fechamos imediatamente após gravar a mensagem. Assim o histórico do
-  // envio fica preservado, mas o inbox NÃO recebe uma "Entrada" fantasma
-  // — a conversa só aparecerá quando o cliente responder (o webhook Meta
-  // em `findOrCreateConversation` cria nova conversa OPEN para inbound
-  // sobre contato só com RESOLVED — comportamento já implementado).
+  // Modelo de ticket para campanhas: após gravar o disparo, fecha o ticket
+  // se o aluno ainda não respondeu (`lastInboundAt` null). Cobre tanto
+  // `ensured=created` quanto reuso de OPEN órfão (`already_ok` /
+  // `backfilled_channel`) — regressão 2026-08-11: campanha "teste 1108"
+  // reaproveitou ticket vazio e ficou em Entrada porque só `created`
+  // auto-resolvia.
   //
-  // Se `ensured.status === "already_ok"` (contato tinha atendimento em
-  // curso) NÃO fechamos — a mensagem entra no chat aberto normalmente.
-  // Incidente: campanha 2026-08-06 gerou 1660 conversas fantasma no inbox
-  // da Cruzeiro EaD porque toda conversa ensured=created ficava OPEN sem
-  // resposta do cliente (herdando ainda o `assignedToId` do contato).
-  const shouldAutoResolve = ensured.status === "created";
+  // Se o contato já tinha atendimento com inbound, NÃO fecha — a mensagem
+  // entra no chat aberto normalmente.
   await prisma.conversation
     .update({
       where: { id: conversationId },
       data: {
         updatedAt: new Date(),
         ...(await botOutboundReplyMark()),
-        ...(shouldAutoResolve
-          ? {
-              status: "RESOLVED" as const,
-              closedAt: new Date(),
-              assignedToId: null,
-            }
-          : {}),
       },
     })
     .catch(() => {});
+  await maybeResolveUnansweredOutboundTicket(conversationId).catch(() => {});
 
   sseBus.publish("new_message", {
     organizationId: getOrgIdOrNull(),

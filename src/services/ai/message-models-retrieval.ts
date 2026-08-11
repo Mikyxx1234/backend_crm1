@@ -70,6 +70,23 @@ const MAX_CONTENT_CHARS = 700;
 /** Score mínimo para injetar (evita falso positivo fraco). */
 const MIN_SCORE = 2.5;
 
+/** Expande a query com sinônimos de acesso (PC ≠ só "Duda celular"). */
+const ACCESS_SYNONYMS: Array<{ match: RegExp; extra: string }> = [
+  {
+    match: /computador|notebook|pc\b|navegador|browser|desktop|\bsite\b|portal/i,
+    extra:
+      "portal aluno acessar conteudo portal do aluno blackboard ava ambiente virtual site web novoportal",
+  },
+  {
+    match: /aula|aulas|conteudo|conteúdo|disciplina/i,
+    extra: "acesso conteudo portal duda blackboard ava",
+  },
+  {
+    match: /\bduda\b/i,
+    extra: "aplicativo duda app mobile",
+  },
+];
+
 function normalize(s: string): string {
   return s
     .toLowerCase()
@@ -97,11 +114,19 @@ export function isExcludedMessageModel(parts: {
 }
 
 /** Score lexical: overlap + boost no título. */
+function expandQueryForAccess(query: string): string {
+  let expanded = query;
+  for (const { match, extra } of ACCESS_SYNONYMS) {
+    if (match.test(query)) expanded = `${expanded} ${extra}`;
+  }
+  return expanded;
+}
+
 export function scoreMessageModelMatch(
   query: string,
   model: { name: string; content: string; category?: string | null },
 ): number {
-  const qt = new Set(tokenizeForModelMatch(query));
+  const qt = new Set(tokenizeForModelMatch(expandQueryForAccess(query)));
   if (qt.size === 0) return 0;
   const titleTok = new Set(tokenizeForModelMatch(model.name));
   const bodyTok = new Set([
@@ -114,7 +139,18 @@ export function scoreMessageModelMatch(
     if (titleTok.has(t)) titleHits++;
     if (bodyTok.has(t)) bodyHits++;
   }
-  return bodyHits + titleHits * 1.5;
+  let score = bodyHits + titleHits * 1.5;
+  // PC/navegador → prioriza modelo "portal do aluno" sobre só "Duda".
+  const wantsPc =
+    /computador|notebook|\bpc\b|navegador|browser|desktop|\bsite\b|portal/i.test(
+      query,
+    );
+  const nameN = normalize(model.name);
+  if (wantsPc && nameN.includes("portal")) score += 4;
+  if (wantsPc && nameN.includes("duda") && !nameN.includes("portal")) {
+    score -= 1.5;
+  }
+  return score;
 }
 
 function truncateContent(content: string): string {
@@ -178,8 +214,10 @@ export function formatMessageModelsBlock(
   return [
     "",
     "MODELOS INTERNOS DE REFERÊNCIA (procedimentos operacionais do time):",
-    "- Use como FONTE da verdade para passos/links. Parafraseie em 1–3 frases curtas no WhatsApp.",
-    "- NÃO copie o texto integral do modelo nem envie blocos longos com muitos passos numerados.",
+    "- Use como FONTE da verdade. Resuma em poucas frases no WhatsApp e **envie os links/URLs** que aparecerem no modelo.",
+    "- Se o aluno pediu como fazer, pediu o site/link, ou confirmou (sim/pode ser/manda/envie): ENTREGUE passos + link agora. PROIBIDO só perguntar se ele quer o passo a passo de novo.",
+    "- Você NÃO envia arquivo de vídeo/imagem. Se o modelo citar vídeo sem URL, oriente só em texto; se tiver URL de tutorial, cole o link. PROIBIDO prometer 'vou te enviar o vídeo' ou escrever '[Envio do vídeo]'.",
+    "- NÃO copie o card inteiro com muitos passos numerados; 3–5 passos curtos + link bastam.",
     "- NUNCA use (nem parafraseie) modelos de cancelamento/trancamento/desistência/retenção/transferência — nesses casos transfira para Retenção com as tools.",
     "- Se o modelo cobrir o assunto, tende a confiança ALTA (0.8+).",
     sections,

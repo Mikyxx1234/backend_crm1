@@ -292,7 +292,10 @@ function tabToWhere(
             ...noCountableReplyWhere(countAgentReply),
             OR: [
               {
+                // Sem inbound = só disparo/órfão — não é Entrada (aparece
+                // quando o aluno responder e lastInboundAt for setado).
                 assignedToId: null,
+                lastInboundAt: { not: null },
                 contact: {
                   automationContexts: {
                     none: { status: ACTIVE_AUTOMATION_CTX },

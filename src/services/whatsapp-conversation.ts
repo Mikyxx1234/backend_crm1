@@ -238,3 +238,37 @@ export async function ensureWhatsAppConversationForContact(
     channelId: created.channelId ?? defaultChannel.id,
   };
 }
+
+/**
+ * Fecha ticket OPEN usado só para registrar disparo (campanha/automação) quando
+ * o aluno ainda não respondeu. Preserva histórico da mensagem outbound; o
+ * próximo inbound abre ticket novo via `findOrCreateConversation`.
+ *
+ * Não fecha se já houve inbound (`lastInboundAt`) ou reply humano — atendimento
+ * em curso reutilizado pelo ensure deve permanecer OPEN.
+ */
+export async function maybeResolveUnansweredOutboundTicket(
+  conversationId: string,
+): Promise<boolean> {
+  const conv = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: {
+      status: true,
+      lastInboundAt: true,
+      hasHumanReply: true,
+    },
+  });
+  if (!conv || conv.status !== "OPEN") return false;
+  if (conv.lastInboundAt != null || conv.hasHumanReply) return false;
+
+  await prisma.conversation.update({
+    where: { id: conversationId },
+    data: {
+      status: "RESOLVED",
+      closedAt: new Date(),
+      assignedToId: null,
+      updatedAt: new Date(),
+    },
+  });
+  return true;
+}
