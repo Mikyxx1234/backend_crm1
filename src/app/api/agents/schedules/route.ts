@@ -13,10 +13,23 @@ export async function GET() {
       name: true,
       email: true,
       role: true,
+      avatarUrl: true,
       schedule: true,
+      // Áreas (Departamentos) do agente — alimenta o filtro por área e o
+      // agrupamento da grade de cobertura (/settings/coverage).
+      departmentMemberships: {
+        select: {
+          department: { select: { id: true, name: true, color: true } },
+        },
+      },
     },
     orderBy: { name: "asc" },
   });
 
-  return NextResponse.json(users);
+  return NextResponse.json(
+    users.map(({ departmentMemberships, ...u }) => ({
+      ...u,
+      departments: departmentMemberships.map((m) => m.department),
+    })),
+  );
 }
