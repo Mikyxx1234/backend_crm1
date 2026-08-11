@@ -278,9 +278,13 @@ export async function enqueueAutomationJob(payload: AutomationJobPayload) {
       throw err;
     }
     console.info(`[queue] Enfileirando automação ${payload.automationId} no BullMQ`);
+    const attempts = readPositiveInt(process.env.AUTOMATION_MAX_ATTEMPTS, 3);
+    const backoffDelay = readPositiveInt(process.env.AUTOMATION_BACKOFF_DELAY, 3000);
     return queue.add(AUTOMATION_JOB_NAME, payload, {
       removeOnComplete: true,
       removeOnFail: false,
+      attempts,
+      backoff: { type: "exponential", delay: backoffDelay },
     });
   }
 
