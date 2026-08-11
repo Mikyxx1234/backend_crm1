@@ -350,7 +350,10 @@ function tabToWhere(
     case "finalizados":
       return { status: "RESOLVED" };
     case "erro":
-      return { hasError: true };
+      // Só tickets ABERTOS com falha de envio/webhook. RESOLVED com
+      // hasError sticky (ex.: timeout do sweeper depois entregue) poluía
+      // a fila — 1.2k+ Encerrada em Erro na Cruzeiro (ago/26).
+      return { status: "OPEN", hasError: true };
   }
 }
 
@@ -1159,7 +1162,14 @@ export async function updateConversationStatusInDb(
 
   const updated = await prisma.conversation.update({
     where: { id },
-    data: { status, ...closedAtPatch, ...tabulationPatch, ...clearPatch },
+    data: {
+      status,
+      ...closedAtPatch,
+      ...tabulationPatch,
+      ...clearPatch,
+      // Encerrar remove da fila Erro — hasError sticky não é mais acionável.
+      ...(status === "RESOLVED" ? { hasError: false } : {}),
+    },
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 
