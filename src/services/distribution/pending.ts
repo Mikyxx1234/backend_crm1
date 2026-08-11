@@ -28,6 +28,8 @@ import {
   isAssigneeCurrentlyEligible,
 } from "@/services/distribution/assignee-eligibility";
 
+import { WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
+
 import { executeDistribution } from "./engine";
 import { getDistributionResponsibles } from "./responsibles";
 
@@ -788,10 +790,13 @@ export async function processPendingDistributionQueue(opts: {
         .map((p) => p.conversationId)
         .filter((id): id is string => Boolean(id));
 
+      // Só drena quem ainda tem janela Meta aberta. Ticket com inbound antigo
+      // (ex.: após HSM de campanha zerar dono) não deve redistribuir + saudar.
+      const sessionOpenSince = new Date(Date.now() - WHATSAPP_SESSION_WINDOW_MS);
       const items = await prisma.conversation.findMany({
         where: {
           status: "OPEN",
-          lastInboundAt: { not: null },
+          lastInboundAt: { gte: sessionOpenSince },
           departmentId: departmentId === null ? null : departmentId,
           OR: [
             { assignedToId: null },

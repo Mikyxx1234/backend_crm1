@@ -126,21 +126,11 @@ export async function ensureWhatsAppConversationForContact(
   });
 
   if (existing) {
-    // Campanha/automation: não deixar ticket reutilizado com dono humano
-    // (Entrada via assignedTo=HUMAN + hasHumanReply=false).
-    if (!inheritAssignee && existing.assignedToId) {
-      await prisma.conversation
-        .update({
-          where: { id: existing.id },
-          data: { assignedToId: null },
-        })
-        .catch((err) => {
-          log.warn("Falha ao limpar assignee em ensure (não-fatal)", {
-            conversationId: existing.id,
-            err,
-          });
-        });
-    }
+    // Campanha/automation com inheritAssignee=false: NÃO zera o responsável
+    // de ticket já existente. Isso gerava redistribuição SYSTEM + gatilho
+    // lead_distributed (saudação em texto livre) logo após HSM — falha Meta
+    // 131047 fora da janela 24h e lotava a aba Erro (calouros_pt*, ago/2026).
+    // inheritAssignee=false vale só na CRIAÇÃO do ticket (abaixo).
     if (existing.channelId === defaultChannel.id) {
       return {
         status: "already_ok",
