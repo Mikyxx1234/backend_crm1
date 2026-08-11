@@ -365,18 +365,34 @@ export async function buildConversationSearchWhere(
   const q = search?.trim() ?? "";
   if (q.length === 0) return null;
 
+  // Agrupa predicados de `contact` / `assignedTo` sob UM join cada.
+  // Vários `{ contact: { campo } }` no OR faziam o Prisma emitir 4–8
+  // LEFT JOINs no mesmo contacts (mesmo contactId) — COUNT/listagem da
+  // inbox ~300–900ms mean no pg_stat (ago/26). Semanticamente idêntico.
   const or: Prisma.ConversationWhereInput[] = [
-    { contact: { name: { contains: q, mode: "insensitive" } } },
-    { contact: { phone: { contains: q, mode: "insensitive" } } },
-    { contact: { email: { contains: q, mode: "insensitive" } } },
-    { contact: { whatsappUsername: { contains: q, mode: "insensitive" } } },
-    { contact: { source: { contains: q, mode: "insensitive" } } },
-    { contact: { company: { name: { contains: q, mode: "insensitive" } } } },
-    { contact: { customFields: { some: { value: { contains: q, mode: "insensitive" } } } } },
-    { contact: { deals: { some: { title: { contains: q, mode: "insensitive" } } } } },
+    {
+      contact: {
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { phone: { contains: q, mode: "insensitive" } },
+          { email: { contains: q, mode: "insensitive" } },
+          { whatsappUsername: { contains: q, mode: "insensitive" } },
+          { source: { contains: q, mode: "insensitive" } },
+          { company: { name: { contains: q, mode: "insensitive" } } },
+          { customFields: { some: { value: { contains: q, mode: "insensitive" } } } },
+          { deals: { some: { title: { contains: q, mode: "insensitive" } } } },
+        ],
+      },
+    },
     { inboxName: { contains: q, mode: "insensitive" } },
-    { assignedTo: { name: { contains: q, mode: "insensitive" } } },
-    { assignedTo: { email: { contains: q, mode: "insensitive" } } },
+    {
+      assignedTo: {
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { email: { contains: q, mode: "insensitive" } },
+        ],
+      },
+    },
   ];
   // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
   // "+55 11 94501-0493". Mesma regra de deals/contatos/kanban.
