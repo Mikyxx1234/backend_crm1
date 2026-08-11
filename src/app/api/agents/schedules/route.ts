@@ -15,6 +15,11 @@ export async function GET() {
       role: true,
       avatarUrl: true,
       schedule: true,
+      // Presença ao vivo (ONLINE/AWAY/OFFLINE) — refletida na grade de
+      // cobertura (/settings/coverage) como dot no avatar + filtro.
+      agentStatus: {
+        select: { status: true, availableForVoiceCalls: true, updatedAt: true },
+      },
       // Áreas (Departamentos) do agente — alimenta o filtro por área e o
       // agrupamento da grade de cobertura (/settings/coverage).
       departmentMemberships: {
