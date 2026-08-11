@@ -5,6 +5,25 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-11 — Hard cap sendRate + backpressure no campaign-worker
+
+**Modelo usado.** Cursor Composer.
+
+**Problema.** Campanha com `sendRate=80` (msgs/s) + concurrency BullMQ 10
+saturava Postgres compartilhado (4 vCPU) e API; inbox/board 5–17s.
+
+**Decisão.** (1) Cap server-side em `CAMPAIGN_SEND_RATE_MAX` (default **30**
+msgs/s) com default de criação `CAMPAIGN_SEND_RATE_DEFAULT` (**20**);
+clamp na API/builder e no worker (campanhas antigas com 80 não disparam
+acima do cap). (2) Concurrency de envio via `CAMPAIGN_SEND_CONCURRENCY`
+(default **4**, antes 10). (3) Limiter BullMQ também teto pelo max de
+sendRate. Throttle Redis `campaign:meta:throttle:...` permanece.
+
+**Arquivos.** `lib/campaign-send-rate.ts`; worker; services campaigns /
+campaign-builder; schema zod; default Prisma.
+
+---
+
 ### 2026-08-10 — Fila noturna: não cancelar `distribution_pending` quando a IA reassumiu
 
 **Modelo usado.** Cursor Grok 4.5.
