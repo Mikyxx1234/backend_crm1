@@ -34,6 +34,10 @@ import {
 import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
 import { ACADEMIC_ATENDIMENTO_RULES } from "@/lib/ai-agents/academic-atendimento-prompt";
 import {
+  formatMessageModelsBlock,
+  retrieveRelevantMessageModels,
+} from "@/services/ai/message-models-retrieval";
+import {
   formatRetrievalBlock,
   retrieveRelevantChunks,
 } from "@/services/ai/retrieval";
@@ -172,6 +176,24 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const outputStyle = normalizeOutputStyle(agent.outputStyle);
 
     const isAcademicAttendance = agent.archetype === "ATENDIMENTO";
+    // Modelos internos do CRM (tela Internos) — só ATENDIMENTO; denylist
+    // de retenção fica em message-models-retrieval.
+    const messageModelsBlock = isAcademicAttendance
+      ? formatMessageModelsBlock(
+          await retrieveRelevantMessageModels(args.userMessage, 3).catch(
+            (err) => {
+              console.warn(
+                `[ai] modelos internos RAG falhou, seguindo sem: ${err}`,
+              );
+              return [];
+            },
+          ),
+        )
+      : "";
+    const retrievalWithModels = [retrievalBlock, messageModelsBlock]
+      .filter(Boolean)
+      .join("\n");
+
     const runtimeTools = isAcademicAttendance
       ? Array.from(new Set([...agent.enabledTools, ...ACADEMIC_RUNTIME_TOOLS]))
       : agent.enabledTools;
@@ -195,7 +217,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       autonomyMode: agent.autonomyMode,
       contact,
       deal,
-      retrievalBlock,
+      retrievalBlock: retrievalWithModels,
       qualificationQuestions,
       outputStyle,
     });
