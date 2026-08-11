@@ -24,11 +24,14 @@ if (!ORG_ID) {
 }
 
 // Mesma lista de PAUSING_STEP_TYPES em src/services/automation-context.ts
+// + "delay": espera persistida via timeoutAt (ver shouldPersistDelay) —
+// contexto parado em delay com cronômetro NÃO é zumbi, é espera legítima.
 const PAUSING_STEP_TYPES = [
   "question",
   "send_whatsapp_interactive",
   "send_whatsapp_template",
   "wait_for_reply",
+  "delay",
 ];
 
 const c = new Client({ connectionString: process.env.DATABASE_URL });

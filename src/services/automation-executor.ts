@@ -52,6 +52,7 @@ import {
   closeStrandedContext,
   getActiveContext,
   interpolateVariables,
+  shouldPersistDelay,
 } from "@/services/automation-context";
 import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
 
@@ -3308,7 +3309,22 @@ async function executeStep(
 
     case "delay": {
       const ms = readNumber(cfg, "ms") ?? readNumber(cfg, "milliseconds") ?? 0;
-      await new Promise((r) => setTimeout(r, Math.max(0, Math.floor(ms))));
+      const waitMs = Math.max(0, Math.floor(ms));
+      // 11/ago/26 — Delay longo NÃO pode ser setTimeout: segura um slot de
+      // concorrência do worker por dias (incidente dna_work: 5 jobs do
+      // "Follow-up de envio de vaga" c/ delay=7d travaram TODAS as
+      // automações) e a espera morre a cada restart/deploy. Acima do
+      // threshold persistimos a espera (contexto RUNNING + timeoutAt) —
+      // o sweeper `sweepExpiredTimeouts` retoma no `nextStepId`.
+      if (shouldPersistDelay(waitMs)) {
+        const until = new Date(Date.now() + waitMs);
+        const paused = await pauseAwaitingReply(cfg, rt, waitMs);
+        return {
+          ...paused,
+          note: `aguardando até ${until.toISOString().replace("T", " ").slice(0, 16)} UTC`,
+        };
+      }
+      await new Promise((r) => setTimeout(r, waitMs));
       return {};
     }
 

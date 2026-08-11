@@ -110,6 +110,23 @@ export function readStepRef(config: unknown, key: string): string | null {
   return trimmed;
 }
 
+/**
+ * Teto para o step `delay` rodar inline (setTimeout) no worker. Acima
+ * disso a espera é persistida (contexto RUNNING + `timeoutAt`) e retomada
+ * pelo `sweepExpiredTimeouts` — delays longos não seguram slot de
+ * concorrência nem morrem com restart/deploy (incidente 11/ago/26:
+ * delay de 7d do "Follow-up de envio de vaga" congelou os 5 slots do
+ * worker-automations e parou TODAS as automações).
+ */
+export const DELAY_INLINE_MAX_MS = Math.max(
+  0,
+  Number(process.env.AUTOMATION_DELAY_INLINE_MAX_MS ?? 30_000),
+);
+
+export function shouldPersistDelay(waitMs: number, inlineMax = DELAY_INLINE_MAX_MS): boolean {
+  return waitMs > inlineMax;
+}
+
 export type InteractiveOption = {
   text?: string;
   title?: string;
@@ -172,7 +189,10 @@ export async function closeStrandedContext(automationId: string, contactId: stri
       where: { id: ctx.currentStepId },
       select: { type: true },
     });
-    if (step && PAUSING_STEP_TYPES.has(step.type)) {
+    // `delay` persistido também é espera legítima (cronômetro via
+    // `timeoutAt`) — fechar aqui mataria a retomada pelo sweeper.
+    const isDelayWait = step?.type === "delay" && ctx.timeoutAt !== null;
+    if (step && (PAUSING_STEP_TYPES.has(step.type) || isDelayWait)) {
       return null;
     }
   }
@@ -471,7 +491,7 @@ export async function processIncomingMessage(
         } else if (elseGoto) {
           nextStepId = elseGoto;
           log.info(
-            `nenhum botão matched ("${normalized}") — auto=${ctx.automation.name} → fallback elseGotoStepId step=${nextStepId}`,
+            `nenhum botão matched ("${messageContent}") — auto=${ctx.automation.name} → fallback elseGotoStepId step=${nextStepId}`,
           );
         } else if (hasExplicitEdges(config)) {
           // Menu desenhado no canvas, cliente digitou texto livre e a saída
@@ -480,13 +500,13 @@ export async function processIncomingMessage(
           // mantemos o fluxo parado NESTE passo, aguardando um clique
           // válido (ou o timeout configurado).
           log.warn(
-            `nenhum botão matched ("${normalized}") e sem elseGotoStepId — auto=${ctx.automation.name} step=${currentStep.id} → mantendo no mesmo passo (conecte a saída "nenhuma opção" no canvas)`,
+            `nenhum botão matched ("${messageContent}") e sem elseGotoStepId — auto=${ctx.automation.name} step=${currentStep.id} → mantendo no mesmo passo (conecte a saída "nenhuma opção" no canvas)`,
           );
           return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
         } else {
           nextStepId = linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
           log.info(
-            `nenhum botão matched ("${normalized}") + sem elseGotoStepId — auto=${ctx.automation.name} → fallback linear step=${nextStepId ?? "(fim)"}`,
+            `nenhum botão matched ("${messageContent}") + sem elseGotoStepId — auto=${ctx.automation.name} → fallback linear step=${nextStepId ?? "(fim)"}`,
           );
         }
       } else {
@@ -667,6 +687,34 @@ export async function processTimeout(contextId: string) {
   }
 
   const step = ctx.automation.steps.find((s) => s.id === ctx.currentStepId);
+
+  // `delay` persistido: o "timeout" É a conclusão da espera — segue a
+  // aresta `nextStepId` (fallback linear só pra legado pré-canvas).
+  if (step && step.type === "delay") {
+    const delayConfig = step.config as Record<string, unknown>;
+    const delayVars = (ctx.variables as Record<string, unknown>) ?? {};
+    const delayNext =
+      readStepRef(delayConfig, "nextStepId") ??
+      linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
+    if (!delayNext) {
+      log.warn(
+        `delay expirou SEM nextStepId — auto=${ctx.automation.name} step=${step.id} → encerrando fluxo (conecte a saída no canvas)`,
+      );
+    }
+    await dispatchToNextStep(
+      {
+        id: ctx.id,
+        automationId: ctx.automationId,
+        contactId: ctx.contactId,
+        automation: ctx.automation,
+      },
+      delayNext,
+      delayVars,
+      "delay concluído",
+    );
+    return;
+  }
+
   if (!step || !PAUSING_STEP_TYPES.has(step.type)) {
     log.debug(
       `processTimeout — ctx ${contextId} step=${step?.type ?? "?"} não é interativo, ignorando`,

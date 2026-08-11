@@ -33,11 +33,13 @@ function loadDatabaseUrl() {
 const TARGET_AUTOMATION = process.argv[2] ?? "cmrxn191x0uz7o101espk5e99";
 
 // Mesma lista de PAUSING_STEP_TYPES em src/services/automation-context.ts
+// + "delay": espera persistida via timeoutAt (não é zumbi).
 const PAUSING_STEP_TYPES = [
   "question",
   "send_whatsapp_interactive",
   "send_whatsapp_template",
   "wait_for_reply",
+  "delay",
 ];
 
 const c = new Client({ connectionString: loadDatabaseUrl() });

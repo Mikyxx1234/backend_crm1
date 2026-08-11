@@ -5,6 +5,48 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-11 — Step `delay` longo vira espera persistida (não `setTimeout`)
+
+**Modelo usado.** Cursor Kimi K3.
+
+**Problema.** O step `delay` rodava `setTimeout(ms)` inline no worker. Um
+delay de **7 dias** ("Follow-up de envio de vaga", dna_work) segurava 1 dos
+5 slots de concorrência do `worker-automations` por dias. Com 5 jobs assim,
+o processo ficava vivo mas incapaz de processar qualquer outra automação —
+**todas** pararam (ENTRADA sem receptivo, ~120 leads parados em horas).
+A espera também morria a cada restart/deploy.
+
+**Decisão.** Delay acima de `AUTOMATION_DELAY_INLINE_MAX_MS` (default 30s)
+**persiste** a espera: contexto RUNNING + `timeoutAt` (mesma infra de
+`wait_for_reply`), e o `sweepExpiredTimeouts` (30s) retoma no `nextStepId`.
+Delay curto (≤30s, ex.: "digitando…") segue inline.
+
+**Implementação.**
+- `automation-context.ts`: `shouldPersistDelay`/`DELAY_INLINE_MAX_MS`;
+  branch `delay` em `processTimeout` (expirar = seguir `nextStepId`);
+  `closeStrandedContext` preserva delay com `timeoutAt`.
+- `automation-executor.ts`: `case "delay"` usa `pauseAwaitingReply` quando
+  `shouldPersistDelay`.
+- `delay` NÃO entra em `PAUSING_STEP_TYPES` (mensagem do cliente não pode
+  avançar a espera) — tratado explicitamente nos 3 pontos.
+- Scripts `cleanup-stranded-contexts` / `diag-automation-zombies`: `delay`
+  adicionado à lista pausante (espera legítima, não zumbi).
+- Fix piggyback: `normalized` fora de escopo em `processIncomingMessage`
+  (erro TS pré-existente) → `messageContent`.
+
+**Alternativas descartadas.**
+- BullMQ delayed job: mais moving parts; a infra de timeout já existia.
+- `delay` em `PAUSING_STEP_TYPES`: faria mensagem do cliente avançar a
+  espera (errado).
+
+**Impacto.**
+- Delay longo não trava mais o worker e sobrevive a restart.
+- Durante a espera o contato aparece na aba "Automação" (contexto RUNNING) —
+  esperado; reentrada na mesma automação é bloqueada enquanto aguarda.
+- Teste: `automation-branch-routing.test.ts` (5 casos novos).
+
+---
+
 ### 2026-08-11 — Worker dedicado `worker-automation` para Salesbot/automações
 
 **Modelo usado.** Cursor Grok 4.5.
