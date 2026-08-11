@@ -599,6 +599,7 @@ export async function handleBaileysMessage(
         lastInboundAt: new Date(),
         lastMessageDirection: "in",
         hasAgentReply: false,
+        hasError: false,
         updatedAt: new Date(),
       },
     }).catch(() => {});

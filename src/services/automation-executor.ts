@@ -139,6 +139,26 @@ function resolveTimeoutGotoStepId(cfg: Record<string, unknown>): string | null {
   return id;
 }
 
+/** Aresta "Enviado" / saída padrão (`nextStepId`). */
+function resolveNextStepId(cfg: Record<string, unknown>): string | null {
+  const id = typeof cfg.nextStepId === "string" ? cfg.nextStepId.trim() : "";
+  if (!id || id === "__none__") return null;
+  return id;
+}
+
+/**
+ * Pausa pós-envio só faz sentido se "Sem resposta" leva a um destino
+ * diferente de "Enviado". Quando as duas arestas apontam pro mesmo
+ * passo (ex.: Finalizar), esperar resposta só prende o contexto em
+ * RODANDO sem mudar o resultado — segue imediatamente.
+ */
+function shouldPauseAfterSendForTimeout(cfg: Record<string, unknown>): boolean {
+  const timeoutGoto = resolveTimeoutGotoStepId(cfg);
+  if (!timeoutGoto) return false;
+  const nextGoto = resolveNextStepId(cfg);
+  return !nextGoto || nextGoto !== timeoutGoto;
+}
+
 const DEFAULT_WAIT_TIMEOUT_MS = 86_400_000;
 
 /**
@@ -200,12 +220,10 @@ async function persistFailedAutomationOutbound(opts: {
     })
     .catch((e) => log.warn("Falha ao persistir mensagem de erro:", e));
 
-  await prisma.conversation
-    .update({
-      where: { id: opts.conversationId },
-      data: { hasError: true, updatedAt: new Date() },
-    })
-    .catch(() => {});
+  const { markConversationHasError } = await import(
+    "@/services/conversation-error-flag"
+  );
+  await markConversationHasError(opts.conversationId);
 }
 
 /**
@@ -2446,9 +2464,9 @@ async function executeStep(
         }
       }
 
-      // "Sem resposta": só pausa se a aresta de timeout estiver conectada —
-      // senão segue linear (comportamento antigo dos fluxos só-Enviado).
-      if (resolveTimeoutGotoStepId(cfg)) {
+      // "Sem resposta": pausa só se o destino for distinto de "Enviado"
+      // (mesmo destino = Finalizar em ambos → segue e encerra).
+      if (shouldPauseAfterSendForTimeout(cfg)) {
         const rawTimeout = readNumber(cfg, "timeoutMs");
         const timeoutMs =
           rawTimeout && rawTimeout > 0 ? rawTimeout : DEFAULT_WAIT_TIMEOUT_MS;
@@ -2698,7 +2716,7 @@ async function executeStep(
 
       // Pausa quando:
       //  1) há botões com `gotoStepId` (clique volta pelo webhook), ou
-      //  2) a aresta "Sem resposta" (`timeoutGotoStepId`) está conectada.
+      //  2) "Sem resposta" aponta pra destino ≠ "Enviado".
       // Sem nenhum dos dois, segue linear (comportamento antigo).
       const tplButtons = Array.isArray(cfg.buttons)
         ? (cfg.buttons as { gotoStepId?: string }[])
@@ -2706,7 +2724,7 @@ async function executeStep(
       const tplHasRouting = tplButtons.some(
         (b) => typeof b?.gotoStepId === "string" && b.gotoStepId.trim() !== "",
       );
-      const tplHasTimeout = !!resolveTimeoutGotoStepId(cfg);
+      const tplHasTimeout = shouldPauseAfterSendForTimeout(cfg);
       if (tplHasRouting || tplHasTimeout) {
         const rawTimeout = readNumber(cfg, "timeoutMs");
         const tplTimeoutMs =

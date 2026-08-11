@@ -101,12 +101,11 @@ export async function sweepStaleOutbound(
         },
       });
 
-      await prisma.conversation
-        .update({
-          where: { id: msg.conversationId },
-          data: { hasError: true },
-        })
-        .catch(() => {});
+      const { markConversationHasError } = await import(
+        "@/services/conversation-error-flag"
+      );
+      // Não recoloca em Erro se o cliente já respondeu depois do envio.
+      await markConversationHasError(msg.conversationId, prisma);
 
       try {
         sseBus.publish("message_status", {
