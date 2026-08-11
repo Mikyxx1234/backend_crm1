@@ -30,6 +30,9 @@ const log = getLogger("worker.automations");
  * já usada em `automation-worker-inline.ts`.
  *
  * Concurrency: `AUTOMATION_WORKER_CONCURRENCY` (default 5).
+ * Rate limit opcional (proteção de campanhas em massa):
+ *   `AUTOMATION_RATE_LIMIT_MAX` + `AUTOMATION_RATE_LIMIT_DURATION`.
+ *   Sem essas vars, sem limiter (comportamento atual).
  */
 
 function envInt(name: string, defaultValue: number): number {
@@ -76,10 +79,22 @@ export function startAutomationWorker() {
   // ex.: transfer_automation → enqueueAutomationJob).
   getBullConnection();
 
+  // Rate limiter opcional: útil quando a campanha WhatsApp em massa dispara
+  // automações (event `campaign_trigger`) — cada job pode enviar mensagem Meta
+  // e sem teto o worker estoura o rate limit da Cloud API.
+  const rateLimitMax = envInt("AUTOMATION_RATE_LIMIT_MAX", 0);
+  const limiter =
+    rateLimitMax > 0
+      ? {
+          max: rateLimitMax,
+          duration: envInt("AUTOMATION_RATE_LIMIT_DURATION", 1000),
+        }
+      : undefined;
+
   const worker = new Worker<AutomationJobPayload>(
     AUTOMATION_JOBS_QUEUE_NAME,
     processAutomationJob,
-    { connection, concurrency },
+    { connection, concurrency, limiter },
   );
 
   worker.on("completed", (job) => {
@@ -111,7 +126,11 @@ export function startAutomationWorker() {
   });
 
   log.info(
-    { concurrency, queue: AUTOMATION_JOBS_QUEUE_NAME },
+    {
+      concurrency,
+      queue: AUTOMATION_JOBS_QUEUE_NAME,
+      rateLimit: limiter ? `${limiter.max}/${limiter.duration}ms` : "off",
+    },
     "automation-worker started",
   );
 
