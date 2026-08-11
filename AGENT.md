@@ -47,6 +47,23 @@ Delay curto (≤30s, ex.: "digitando…") segue inline.
 
 ---
 
+### 2026-08-11 — Contact.number atômico + reuso em P2002 de BSUID
+
+**Modelo usado.** Cursor Composer.
+
+**Problema.** `nextContactNumber` = MAX+1 sem lock → P2002 em
+`(organizationId, number)` sob webhook paralelo (DNAWork). Retry cego
+também falhava em P2002 de `whatsapp_bsuid`.
+
+**Decisão.** `pg_advisory_xact_lock` + MAX+1 + INSERT na **mesma**
+transaction (`insertContactWithNextNumber` / `createContact`). Em
+colisão de BSUID, `findFirst` e reusa o contato (não retenta número).
+
+**Arquivos.** `services/contacts.ts`; meta webhook handler/messaging;
+baileys message-handler.
+
+---
+
 ### 2026-08-11 — Busca inbox/board: 1 JOIN em contacts (não N self-joins)
 
 **Modelo usado.** Cursor Composer.
