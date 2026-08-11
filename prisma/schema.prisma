@@ -3955,8 +3955,9 @@ model Campaign {
   automationId String?
   automation   Automation? @relation(fields: [automationId], references: [id], onDelete: SetNull)
 
-  /// Msgs por segundo (padrão 80 para Meta, 10 para Baileys)
-  sendRate    Int       @default(80)
+  /// Msgs por segundo. Cap server-side: CAMPAIGN_SEND_RATE_MAX (default 30).
+  /// Default de criação: CAMPAIGN_SEND_RATE_DEFAULT (default 20).
+  sendRate    Int       @default(20)
   scheduledAt DateTime?
   startedAt   DateTime?
   completedAt DateTime?

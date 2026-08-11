@@ -6,6 +6,7 @@ import type {
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { resolveCampaignSendRate } from "@/lib/campaign-send-rate";
 import type { SegmentFilters } from "./segments";
 
 export type GetCampaignsParams = {
@@ -87,7 +88,7 @@ export async function createCampaign(input: CreateCampaignInput) {
         : undefined,
       textContent: input.textContent,
       automationId: input.automationId ?? null,
-      sendRate: input.sendRate ?? 80,
+      sendRate: resolveCampaignSendRate(input.sendRate),
       scheduledAt: input.scheduledAt ?? null,
       createdById: input.createdById,
     }),
@@ -119,7 +120,7 @@ export async function updateCampaign(
     patch.automation = data.automationId
       ? { connect: { id: data.automationId } }
       : { disconnect: true };
-  if (data.sendRate !== undefined) patch.sendRate = data.sendRate;
+  if (data.sendRate !== undefined) patch.sendRate = resolveCampaignSendRate(data.sendRate);
   if (data.scheduledAt !== undefined) patch.scheduledAt = data.scheduledAt;
 
   return prisma.campaign.update({ where: { id }, data: patch });

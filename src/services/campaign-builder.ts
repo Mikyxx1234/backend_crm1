@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { enqueueCampaignDispatch } from "@/lib/queue";
+import { resolveCampaignSendRate } from "@/lib/campaign-send-rate";
 import { previewSegment } from "@/services/segments";
 
 import type { CampaignBuilderDraft } from "@/features/campaign-builder/schema";
@@ -60,7 +61,7 @@ export async function createDraft(organizationId: string, createdById: string, p
       templateLanguage: patch.templateLanguage ?? "pt_BR",
       textContent: patch.textContent ?? null,
       automationId: patch.automationId ?? null,
-      sendRate: patch.sendRate ?? 80,
+      sendRate: resolveCampaignSendRate(patch.sendRate),
       scheduledAt: toDate(patch.scheduledAt) ?? null,
       status: "DRAFT",
     },
@@ -87,7 +88,7 @@ export async function updateDraft(id: string, patch: DraftPatch, actor: Actor) {
   if (patch.templateLanguage !== undefined) data.templateLanguage = patch.templateLanguage;
   if (patch.textContent !== undefined) data.textContent = patch.textContent || null;
   if (patch.automationId !== undefined) data.automation = patch.automationId ? { connect: { id: patch.automationId } } : { disconnect: true };
-  if (patch.sendRate !== undefined) data.sendRate = patch.sendRate;
+  if (patch.sendRate !== undefined) data.sendRate = resolveCampaignSendRate(patch.sendRate);
   if (patch.scheduledAt !== undefined) data.scheduledAt = toDate(patch.scheduledAt) ?? null;
 
   return prisma.campaign.update({

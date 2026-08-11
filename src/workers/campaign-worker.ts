@@ -30,6 +30,11 @@ import {
   shouldRetryCampaignSendError,
   isWindowExpiredError,
 } from "@/services/campaign-builder/meta-compliance";
+import {
+  clampCampaignSendRate,
+  getCampaignSendConcurrency,
+  getCampaignSendRateMax,
+} from "@/lib/campaign-send-rate";
 
 const BATCH_SIZE = 500;
 const globalWorker = globalThis as unknown as { campaignThrottleRedis?: IORedis };
@@ -51,7 +56,8 @@ function getThrottleRedis(): IORedis {
 
 async function waitForMetaThrottle(phoneNumberId: string, sendRate: number) {
   const redis = getThrottleRedis();
-  const rate = Math.max(1, Math.min(80, sendRate));
+  // Defense-in-depth: clamp even if DB still has legacy sendRate=80.
+  const rate = clampCampaignSendRate(sendRate);
   const intervalMs = Math.max(1, Math.ceil(1000 / rate));
   const now = Date.now();
   const key = `campaign:meta:throttle:${phoneNumberId}`;
@@ -616,15 +622,20 @@ export function startCampaignWorkers() {
   const redisUrl = getRedisUrl();
   const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
 
-  // Rate limit do envio Meta — configurável por env para permitir afinar
-  // sem rebuild. Defaults preservam o comportamento histórico (80/s, que
-  // é o limite tier base da Meta Cloud API; clients com tier maior podem
-  // subir essa configuração).
-  const rateLimitMax = envPositiveInt("WHATSAPP_RATE_LIMIT_MAX", 80);
+  // Rate limit global do BullMQ (msgs / duration). Teto adicional além do
+  // throttle por phoneNumberId (`campaign:meta:throttle:...`). Capado por
+  // CAMPAIGN_SEND_RATE_MAX para não saturar PG/API mesmo se o tier Meta
+  // permitir mais. Ops pode subir WHATSAPP_RATE_LIMIT_MAX e
+  // CAMPAIGN_SEND_RATE_MAX juntos se a infra aguentar.
+  const rateLimitMax = Math.min(
+    envPositiveInt("WHATSAPP_RATE_LIMIT_MAX", 80),
+    getCampaignSendRateMax(),
+  );
   const rateLimitDuration = envPositiveInt(
     "WHATSAPP_RATE_LIMIT_DURATION",
     1000,
   );
+  const sendConcurrency = getCampaignSendConcurrency();
 
   /**
    * Workers BullMQ rodam fora de qualquer request handler — sem session
@@ -666,7 +677,7 @@ export function startCampaignWorkers() {
     },
     {
       connection: connection.duplicate(),
-      concurrency: 10,
+      concurrency: sendConcurrency,
       limiter: { max: rateLimitMax, duration: rateLimitDuration },
     },
   );
@@ -679,7 +690,9 @@ export function startCampaignWorkers() {
     console.error(`[campaign-send] Job ${job?.id} failed:`, err.message);
   });
 
-  console.info("[campaign-worker] Dispatch and send workers started");
+  console.info(
+    `[campaign-worker] Dispatch and send workers started (sendConcurrency=${sendConcurrency}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, sendRateMax=${getCampaignSendRateMax()})`,
+  );
 
   return { dispatchWorker, sendWorker };
 }
