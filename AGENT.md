@@ -5,6 +5,25 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-11 — Busca inbox/board: 1 JOIN em contacts (não N self-joins)
+
+**Modelo usado.** Cursor Composer.
+
+**Problema.** `buildConversationSearchWhere` e o OR de search em
+`kanban-filters` emitiam vários `{ contact: { campo } }` no mesmo OR —
+Prisma gera 1 LEFT JOIN por ramo → self-joins j0..jN no mesmo `contacts`.
+COUNT/listagem da inbox e board filtrado pagavam isso no pg_stat.
+
+**Decisão.** Agrupar predicados de contato sob `contact: { OR: [...] }`
+(e `assignedTo` idem). Já era o padrão em `deals.ts` (jul/26). Semântica
+igual; API pública inalterada. Coluna `search_text` desnormalizada fica
+como ADR (`docs/decisoes/search-text-denormalized.md`) — não neste PR
+(risco de backfill/triggers sob carga).
+
+**Arquivos.** `services/conversations.ts`; `services/kanban-filters.ts`.
+
+---
+
 ### 2026-08-11 — Hard cap sendRate + backpressure no campaign-worker
 
 **Modelo usado.** Cursor Composer.
