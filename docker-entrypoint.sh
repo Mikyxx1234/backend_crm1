@@ -145,9 +145,13 @@ case "$APP_MODE" in
     echo "[entrypoint] starting Automations worker (automation-jobs)..."
     exec node dist/workers/automation-worker.js
     ;;
+  worker-meta-webhook)
+    echo "[entrypoint] starting Meta Webhook worker (meta-webhook-events)..."
+    exec node dist/workers/meta-webhook-worker.js
+    ;;
   *)
     echo "[entrypoint] !! ERRO: APP_MODE='${APP_MODE}' não reconhecido."
-    echo "[entrypoint] !! Valores válidos: api | worker-whatsapp | worker-leads | worker-etl | worker-automation"
+    echo "[entrypoint] !! Valores válidos: api | worker-whatsapp | worker-leads | worker-etl | worker-automation | worker-meta-webhook"
     exit 1
     ;;
 esac

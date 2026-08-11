@@ -127,6 +127,8 @@ const entries = [
   "src/workers/etl-worker.ts",
   // Automações / Salesbot — consome a fila `automation-jobs`.
   "src/workers/automation-worker.ts",
+  // Webhooks Meta — consome `meta-webhook-events` (offload da API do inbox).
+  "src/workers/meta-webhook-worker.ts",
 ];
 
 await build({

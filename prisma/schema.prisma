@@ -2999,6 +2999,9 @@ model MetaWebhookEvent {
   @@index([organizationId, receivedAt(sort: Desc)])
   @@index([waMessageId])
   @@index([phoneNumberId, receivedAt(sort: Desc)])
+  /// Recovery de backlog do worker-meta-webhook: eventos não processados
+  /// (processed=false) em ordem de chegada.
+  @@index([processed, receivedAt])
   @@map("meta_webhook_events")
 }
 

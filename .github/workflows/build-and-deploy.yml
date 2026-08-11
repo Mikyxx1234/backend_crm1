@@ -13,11 +13,13 @@ name: Build & Deploy
 #     EASYPANEL_WEBHOOK_PROD_WORKER_LEADS       worker-leads (prod)
 #     EASYPANEL_WEBHOOK_PROD_WORKER_ETL         worker-etl (prod)
 #     EASYPANEL_WEBHOOK_PROD_WORKER_AUTOMATIONS worker-automations (prod)
+#     EASYPANEL_WEBHOOK_PROD_WORKER_META_WEBHOOK worker-meta-webhook (prod)
 #     EASYPANEL_WEBHOOK_DEV                     serviço API (dev)
 #     EASYPANEL_WEBHOOK_DEV_WORKER_WHATSAPP     worker-whatsapp (dev)
 #     EASYPANEL_WEBHOOK_DEV_WORKER_LEADS        worker-leads (dev)
 #     EASYPANEL_WEBHOOK_DEV_WORKER_ETL          worker-etl (dev)
 #     EASYPANEL_WEBHOOK_DEV_WORKER_AUTOMATIONS  worker-automations (dev)
+#     EASYPANEL_WEBHOOK_DEV_WORKER_META_WEBHOOK worker-meta-webhook (dev)
 #
 #   Só a API é obrigatória. Webhooks de workers ausentes são ignorados —
 #   assim dá pra adotar o rollout por partes (cadastra o secret quando o
@@ -77,18 +79,20 @@ jobs:
           S_WEBHOOK_PROD_LEADS: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_LEADS }}
           S_WEBHOOK_PROD_ETL: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_ETL }}
           S_WEBHOOK_PROD_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_AUTOMATIONS }}
+          S_WEBHOOK_PROD_META: ${{ secrets.EASYPANEL_WEBHOOK_PROD_WORKER_META_WEBHOOK }}
           S_WEBHOOK_DEV: ${{ secrets.EASYPANEL_WEBHOOK_DEV }}
           S_WEBHOOK_DEV_WA: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_WHATSAPP }}
           S_WEBHOOK_DEV_LEADS: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_LEADS }}
           S_WEBHOOK_DEV_ETL: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_ETL }}
           S_WEBHOOK_DEV_AUTO: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_AUTOMATIONS }}
+          S_WEBHOOK_DEV_META: ${{ secrets.EASYPANEL_WEBHOOK_DEV_WORKER_META_WEBHOOK }}
         run: |
           if [ "$BRANCH_REF" = "refs/heads/main" ]; then
             TAG=latest
-            WEBHOOKS="$S_WEBHOOK_PROD $S_WEBHOOK_PROD_WA $S_WEBHOOK_PROD_LEADS $S_WEBHOOK_PROD_ETL $S_WEBHOOK_PROD_AUTO"
+            WEBHOOKS="$S_WEBHOOK_PROD $S_WEBHOOK_PROD_WA $S_WEBHOOK_PROD_LEADS $S_WEBHOOK_PROD_ETL $S_WEBHOOK_PROD_AUTO $S_WEBHOOK_PROD_META"
           else
             TAG=dev
-            WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO"
+            WEBHOOKS="$S_WEBHOOK_DEV $S_WEBHOOK_DEV_WA $S_WEBHOOK_DEV_LEADS $S_WEBHOOK_DEV_ETL $S_WEBHOOK_DEV_AUTO $S_WEBHOOK_DEV_META"
           fi
           TAG=$(printf '%s' "$TAG" | tr -d '\r\n')
           # Normaliza: trim de \r\n por webhook e descarta vazios. Saída =
