@@ -1473,7 +1473,13 @@ async function processStatusUpdate(status: Record<string, unknown>) {
           where: { id: msg.id },
           data: {
             sendStatus: s,
-            ...(isFailure ? { sendError } : {}),
+            ...(isFailure
+              ? { sendError }
+              : // Entrega/leitura posteriores limpam erro stale (ex.: sweeper
+                // marcou timeout e a Meta confirmou delivered depois).
+                s === "delivered" || s === "read"
+                ? { sendError: null }
+                : {}),
           },
         });
 
@@ -1533,6 +1539,25 @@ async function processStatusUpdate(status: Record<string, unknown>) {
               channel: "WhatsApp",
             });
           })();
+        } else if (s === "delivered" || s === "read") {
+          // Se não sobrou mensagem failed nesta conversa, tira da fila Erro
+          // (caso clássico: sweeper marcou timeout e a Meta entregou depois).
+          const stillFailed = await prisma.message
+            .count({
+              where: {
+                conversationId: msg.conversationId,
+                sendStatus: "failed",
+              },
+            })
+            .catch(() => 1);
+          if (stillFailed === 0) {
+            await prisma.conversation
+              .update({
+                where: { id: msg.conversationId },
+                data: { hasError: false },
+              })
+              .catch(() => {});
+          }
         }
 
         // O GET /messages expõe id = externalId ?? id (id da bolha no
