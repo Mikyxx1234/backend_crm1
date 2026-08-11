@@ -399,14 +399,10 @@ export async function buildDealWhereFromFilters(
         conditions.push({ id: "__no_phone_match__" });
       }
     } else {
+      // Mesmo padrão de `deals.ts` / listagem: 1 LEFT JOIN em contacts
+      // (campos do contato + customFields aninhados), em vez de N self-joins.
       const or: Prisma.DealWhereInput[] = [
         { title: { contains: search, mode: "insensitive" } },
-        { contact: { name: { contains: search, mode: "insensitive" } } },
-        { contact: { email: { contains: search, mode: "insensitive" } } },
-        { contact: { phone: { contains: search } } },
-        // Busca em QUALQUER valor de campo personalizado (RGM, CPF, matrícula,
-        // etc.) — tanto do negócio quanto do contato vinculado. Espelha o que a
-        // lista de contatos já faz (services/contacts.ts).
         {
           customFields: {
             some: { value: { contains: search, mode: "insensitive" } },
@@ -414,9 +410,16 @@ export async function buildDealWhereFromFilters(
         },
         {
           contact: {
-            customFields: {
-              some: { value: { contains: search, mode: "insensitive" } },
-            },
+            OR: [
+              { name: { contains: search, mode: "insensitive" } },
+              { email: { contains: search, mode: "insensitive" } },
+              { phone: { contains: search } },
+              {
+                customFields: {
+                  some: { value: { contains: search, mode: "insensitive" } },
+                },
+              },
+            ],
           },
         },
       ];
