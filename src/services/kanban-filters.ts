@@ -42,6 +42,53 @@ export async function findContactIdsByPhoneDigits(
   return rows.map((r) => r.id);
 }
 
+/**
+ * Teto de candidatos por pré-query de busca. Termos genéricos ("a", "silva")
+ * casariam com dezenas de milhares de contatos — o IN gigante degradaria a
+ * query de deals mais do que ajudaria. Com o teto, a busca fica "melhor
+ * esforço" e o usuário refina o termo (padrão de CRMs: Kommo/Pipedrive).
+ */
+const SEARCH_CANDIDATE_CAP = 5000;
+
+/**
+ * Resolve os candidatos de busca em pré-queries indexadas (trgm GIN em
+ * contacts.name/email/phone, ccfv.value, dcfv.value) e devolve IDs para o
+ * filtro final de deals usar SÓ colunas da própria tabela (title ILIKE +
+ * contactId/id IN). O planner consegue BitmapOr dos índices; o OR cross-table
+ * anterior (self-joins em contacts + EXISTS aninhados por linha) seq-scaneava
+ * deals — ~1s por COUNT no board e top-1 de CPU no pg_stat_statements.
+ */
+export async function resolveDealSearchCandidates(
+  search: string,
+): Promise<{ contactIds: string[]; dealIds: string[] }> {
+  const ctx = getRequestContext();
+  const orgId = ctx?.organizationId;
+  if (!orgId) return { contactIds: [], dealIds: [] };
+  const pattern = `%${search}%`;
+  const [byFields, byCcfv, byDcfv] = await Promise.all([
+    prisma.$queryRaw<{ id: string }[]>`
+      SELECT id FROM contacts
+      WHERE "organizationId" = ${orgId}
+        AND (name ILIKE ${pattern} OR email ILIKE ${pattern} OR phone ILIKE ${pattern})
+      LIMIT ${SEARCH_CANDIDATE_CAP}
+    `,
+    prisma.$queryRaw<{ contactId: string }[]>`
+      SELECT "contactId" FROM contact_custom_field_values
+      WHERE "organizationId" = ${orgId} AND value ILIKE ${pattern}
+      LIMIT ${SEARCH_CANDIDATE_CAP}
+    `,
+    prisma.$queryRaw<{ dealId: string }[]>`
+      SELECT "dealId" FROM deal_custom_field_values
+      WHERE "organizationId" = ${orgId} AND value ILIKE ${pattern}
+      LIMIT ${SEARCH_CANDIDATE_CAP}
+    `,
+  ]);
+  const contactIds = [
+    ...new Set([...byFields.map((r) => r.id), ...byCcfv.map((r) => r.contactId)]),
+  ];
+  return { contactIds, dealIds: byDcfv.map((r) => r.dealId) };
+}
+
 export type DateRangeValue = {
   from?: string | null;
   to?: string | null;
@@ -399,35 +446,20 @@ export async function buildDealWhereFromFilters(
         conditions.push({ id: "__no_phone_match__" });
       }
     } else {
-      // Mesmo padrão de `deals.ts` / listagem: 1 LEFT JOIN em contacts
-      // (campos do contato + customFields aninhados), em vez de N self-joins.
+      // Pré-resolve candidatos em queries indexadas (trgm) e filtra deals só
+      // por colunas próprias — ver `resolveDealSearchCandidates`.
+      const { contactIds, dealIds } = await resolveDealSearchCandidates(search);
+      const contactIdSet = new Set(contactIds);
       const or: Prisma.DealWhereInput[] = [
         { title: { contains: search, mode: "insensitive" } },
-        {
-          customFields: {
-            some: { value: { contains: search, mode: "insensitive" } },
-          },
-        },
-        {
-          contact: {
-            OR: [
-              { name: { contains: search, mode: "insensitive" } },
-              { email: { contains: search, mode: "insensitive" } },
-              { phone: { contains: search } },
-              {
-                customFields: {
-                  some: { value: { contains: search, mode: "insensitive" } },
-                },
-              },
-            ],
-          },
-        },
       ];
+      if (dealIds.length > 0) {
+        or.push({ id: { in: dealIds } });
+      }
 
       if (digits.length >= 3) {
-        const contactIds = await findContactIdsByPhoneDigits(digits);
-        if (contactIds.length > 0) {
-          or.push({ contactId: { in: contactIds } });
+        for (const id of await findContactIdsByPhoneDigits(digits)) {
+          contactIdSet.add(id);
         }
         // Se a busca é PURAMENTE numérica, também tenta casar o número do
         // próprio deal (`#123` na busca → match no `number`).
@@ -445,6 +477,10 @@ export async function buildDealWhereFromFilters(
             or.push({ number: asNumber });
           }
         }
+      }
+
+      if (contactIdSet.size > 0) {
+        or.push({ contactId: { in: [...contactIdSet] } });
       }
 
       conditions.push({ OR: or });

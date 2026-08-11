@@ -1413,7 +1413,11 @@ model Deal {
   dealRole       DealRole     @default(COMMERCIAL)
   expectedClose  DateTime?
   lostReason     String?
-  position       Int          @default(0)
+  /// Ordem do card no estágio. Float (indexação fracionária): mover um card
+  /// grava o ponto médio entre os vizinhos — 1 UPDATE na linha movida, sem
+  /// reescrever o estágio inteiro (o shift `position+1` custava ~900ms por
+  /// move em estágios grandes e era top-3 de CPU no banco).
+  position       Float        @default(0)
 
   contactId String?
   contact   Contact? @relation(fields: [contactId], references: [id])

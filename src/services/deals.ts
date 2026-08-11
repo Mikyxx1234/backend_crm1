@@ -13,6 +13,7 @@ import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
 import {
   buildDealWhereFromFilters,
   findContactIdsByPhoneDigits,
+  resolveDealSearchCandidates,
   type AdvancedDealFilters,
 } from "@/services/kanban-filters";
 
@@ -211,34 +212,25 @@ export async function getDeals(params: GetDealsParams = {}) {
 
   const search = params.search?.trim();
   if (search) {
-    // Agrupa TODOS os filtros de `contact` sob um único `contact: { OR: [...] }`.
-    // Prisma gera 1 LEFT JOIN de `contacts` em vez de 1 por condição — antes eram
-    // 4 self-joins (j0..j4) que faziam o board de busca custar ~2,4s no Postgres
-    // (24/jul/26). Semanticamente idêntico ao anterior.
+    // Pré-resolve candidatos em queries indexadas (trgm) e filtra deals só
+    // por colunas próprias (title ILIKE + contactId/id IN) — o planner faz
+    // BitmapOr dos índices. O OR cross-table anterior (self-joins em
+    // contacts + EXISTS por linha) seq-scaneava deals (~1s por query).
+    const { contactIds, dealIds } = await resolveDealSearchCandidates(search);
+    const contactIdSet = new Set(contactIds);
     const or: Prisma.DealWhereInput[] = [
       { title: { contains: search, mode: "insensitive" } },
-      // Campos personalizados do NEGÓCIO (RGM, CPF, matrícula, ...).
-      { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
-      {
-        contact: {
-          OR: [
-            { name: { contains: search, mode: "insensitive" } },
-            { email: { contains: search, mode: "insensitive" } },
-            { phone: { contains: search } },
-            // Campos personalizados do CONTATO vinculado.
-            { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
-          ],
-        },
-      },
     ];
+    if (dealIds.length > 0) {
+      or.push({ id: { in: dealIds } });
+    }
 
     // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
     // "+55 11 94501-0493". Mesma regra do kanban (`findContactIdsByPhoneDigits`).
     const digits = search.replace(/\D+/g, "");
     if (digits.length >= 3) {
-      const contactIds = await findContactIdsByPhoneDigits(digits);
-      if (contactIds.length > 0) {
-        or.push({ contactId: { in: contactIds } });
+      for (const id of await findContactIdsByPhoneDigits(digits)) {
+        contactIdSet.add(id);
       }
       if (/^\d+$/.test(search)) {
         const asNumber = Number(search);
@@ -246,6 +238,10 @@ export async function getDeals(params: GetDealsParams = {}) {
           or.push({ number: asNumber });
         }
       }
+    }
+
+    if (contactIdSet.size > 0) {
+      or.push({ contactId: { in: [...contactIdSet] } });
     }
 
     conditions.push({ OR: or });
@@ -853,6 +849,95 @@ async function lockStagesForMove(
   }
 }
 
+/**
+ * Gap mínimo entre vizinhos para inserir um ponto médio. Float64 comporta
+ * ~50 bisseções consecutivas entre inteiros adjacentes antes de esgotar;
+ * abaixo do epsilon o estágio é renormalizado para 0..n-1.
+ */
+const POSITION_GAP_EPSILON = 1e-9;
+
+/**
+ * Vizinhos de posição em torno do índice de inserção (0-based, excluindo
+ * opcionalmente o deal movido). Index-only scan ordenado — substitui o
+ * "carrega o estágio inteiro" do reorder anterior.
+ */
+async function findPositionNeighbors(
+  tx: ScopedTx,
+  stageId: string,
+  index: number,
+  excludeDealId?: string,
+): Promise<{ prev: number | null; next: number | null }> {
+  const rows = await tx.deal.findMany({
+    where: {
+      stageId,
+      ...(excludeDealId ? { id: { not: excludeDealId } } : {}),
+    },
+    orderBy: { position: "asc" },
+    select: { position: true },
+    skip: Math.max(0, index - 1),
+    take: 2,
+  });
+  if (index === 0) {
+    return { prev: null, next: rows[0]?.position ?? null };
+  }
+  return { prev: rows[0]?.position ?? null, next: rows[1]?.position ?? null };
+}
+
+/** Ponto médio entre vizinhos; `null` quando o gap esgotou (renormalizar). */
+function midpointPosition(
+  prev: number | null,
+  next: number | null,
+): number | null {
+  if (prev === null) return next === null ? 0 : next - 1;
+  if (next === null) return prev + 1;
+  if (next - prev < POSITION_GAP_EPSILON) return null;
+  return (prev + next) / 2;
+}
+
+/**
+ * Renumera o estágio para 0..n-1 (um UPDATE com VALUES). Só roda quando o
+ * gap fracionário esgota — raro (dezenas de moves consecutivos entre os
+ * mesmos 2 cards).
+ */
+async function renormalizeStagePositions(
+  tx: ScopedTx,
+  stageId: string,
+): Promise<void> {
+  const deals = await tx.deal.findMany({
+    where: { stageId },
+    orderBy: { position: "asc" },
+    select: { id: true },
+  });
+  if (deals.length === 0) return;
+  const values = deals.map((d, i) => Prisma.sql`(${d.id}, ${i})`);
+  await tx.$executeRaw`
+    UPDATE deals AS d
+    SET position = v.pos::float8
+    FROM (VALUES ${Prisma.join(values)}) AS v(id, pos)
+    WHERE d.id = v.id AND d.position IS DISTINCT FROM v.pos::float8
+  `;
+}
+
+/**
+ * Posição fracionária para inserir um deal no `index` do estágio.
+ * Renormaliza o estágio se o gap entre vizinhos tiver esgotado.
+ */
+async function resolveInsertionPosition(
+  tx: ScopedTx,
+  stageId: string,
+  index: number,
+  excludeDealId?: string,
+): Promise<number> {
+  let neighbors = await findPositionNeighbors(tx, stageId, index, excludeDealId);
+  let pos = midpointPosition(neighbors.prev, neighbors.next);
+  if (pos === null) {
+    await renormalizeStagePositions(tx, stageId);
+    neighbors = await findPositionNeighbors(tx, stageId, index, excludeDealId);
+    pos = midpointPosition(neighbors.prev, neighbors.next) ?? index;
+  }
+  return pos;
+}
+
 export async function moveDeal(
   dealId: string,
   targetStageId: string,
@@ -943,7 +1028,6 @@ export async function moveDeal(
           }
 
           const oldStageId = deal.stageId;
-          const oldPos = deal.position;
           const statusPatch = buildStatusSyncPatch(
             deal.status,
             targetStage,
@@ -956,51 +1040,43 @@ export async function moveDeal(
           await lockStagesForMove(tx, [oldStageId, targetStageId]);
 
           if (oldStageId === targetStageId) {
-            const deals = await tx.deal.findMany({
-              where: { stageId: targetStageId },
-              orderBy: { position: "asc" },
-              select: { id: true, position: true },
+            // Indexação fracionária: grava o ponto médio entre os vizinhos
+            // do índice alvo — 1 UPDATE na linha movida. Antes reescrevia
+            // TODAS as posições do estágio (bulk VALUES) a cada drag.
+            const siblings = await tx.deal.count({
+              where: { stageId: targetStageId, id: { not: dealId } },
             });
-            const ordered = deals.filter((d) => d.id !== dealId);
-            const clamped = Math.min(position, ordered.length);
-            ordered.splice(clamped, 0, deal);
-
-            // Um UPDATE com VALUES em vez de N round-trips (estágio com
-            // centenas de cards estourava o timeout de 5s).
-            if (ordered.length > 0) {
-              const values = ordered.map(
-                (d, i) => Prisma.sql`(${d.id}, ${i})`,
-              );
-              await tx.$executeRaw`
-                UPDATE deals AS d
-                SET position = v.pos::int
-                FROM (VALUES ${Prisma.join(values)}) AS v(id, pos)
-                WHERE d.id = v.id AND d.position IS DISTINCT FROM v.pos::int
-              `;
-            }
-
-            if (Object.keys(statusPatch).length > 0) {
-              await tx.deal.update({
-                where: { id: dealId },
-                data: statusPatch,
-              });
-            }
+            const clamped = Math.min(position, siblings);
+            const newPos = await resolveInsertionPosition(
+              tx,
+              targetStageId,
+              clamped,
+              dealId,
+            );
+            await tx.deal.update({
+              where: { id: dealId },
+              data: { position: newPos, ...statusPatch },
+            });
             return;
           }
 
-          await tx.deal.updateMany({
-            where: { stageId: targetStageId, position: { gte: position } },
-            data: { position: { increment: 1 } },
+          // Cross-stage: idem — ponto médio no destino, SEM shift em massa
+          // (`position+1` no destino e `position-1` na origem custavam ~900ms
+          // por move em estágios grandes; posições esparsas na origem
+          // preservam a ordem sem nenhum UPDATE adicional).
+          const targetSiblings = await tx.deal.count({
+            where: { stageId: targetStageId },
           });
+          const clamped = Math.min(position, targetSiblings);
+          const newPos = await resolveInsertionPosition(
+            tx,
+            targetStageId,
+            clamped,
+          );
 
           await tx.deal.update({
             where: { id: dealId },
-            data: { stageId: targetStageId, position, ...statusPatch },
-          });
-
-          await tx.deal.updateMany({
-            where: { stageId: oldStageId, position: { gt: oldPos } },
-            data: { position: { decrement: 1 } },
+            data: { stageId: targetStageId, position: newPos, ...statusPatch },
           });
         },
         { timeout: 20_000, maxWait: 10_000 },
