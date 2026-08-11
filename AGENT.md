@@ -5,6 +5,37 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-11 — Worker dedicado `worker-automation` para Salesbot/automações
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão.** Automações pesadas saem do processo da API. Em produção a API
+só chama `enqueueAutomationJob` (fila BullMQ `automation-jobs`); o consumo
+fica em `APP_MODE=worker-automation` → `node dist/workers/automation-worker.js`.
+
+**Contexto.** Já existiam `automation-worker.ts` (sem tenant context),
+`automation-worker-inline.ts` (tenant-safe mas dead code) e a fila
+`automation-jobs`, mas sem build/Docker/`APP_MODE`. Default era execução
+inline na API. Fallback com Redis down em `AUTOMATION_WORKER_MODE=external`
+também rodava inline e sobrecarregava a API.
+
+**Implementação.**
+- Worker canônico em `automation-worker.ts` (padrão leads/ETL + lookup
+  `organizationId` via `prismaBase` + `withSystemContext`).
+- Build em `build-workers.mjs`; branch no `docker-entrypoint.sh`.
+- Sem Redis em modo `external`: erro controlado (sem fallback inline).
+- `transfer_automation` passa a `enqueueAutomationJob` (não mais
+  `setImmediate(runAutomationInline)`).
+
+**Alternativas descartadas.**
+- Segunda fila / segundo executor — duplicaria o sistema já existente.
+- Rodar worker in-process na API — compete com HTTP e não isola falhas.
+
+**Impacto.** EasyPanel: novo serviço com a mesma imagem e
+`APP_MODE=worker-automation`; API com `AUTOMATION_WORKER_MODE=external`.
+
+---
+
 ### 2026-08-10 — Retomada de Lista/botão com conversa já na IA
 
 **Modelo usado.** Cursor Grok 4.5.

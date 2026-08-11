@@ -269,13 +269,13 @@ export async function enqueueAutomationJob(payload: AutomationJobPayload) {
   if (workerMode === "external") {
     const queue = getQueue();
     if (!queue) {
-      console.warn(`[queue] AUTOMATION_WORKER_MODE=external mas Redis indisponível — fallback para execução direta`);
-      try {
-        await executeAutomationDirect(payload);
-      } catch (err) {
-        console.error("[queue] direct execution error (fallback):", err);
-      }
-      return null;
+      // Em modo external a API NÃO deve executar automações pesadas inline
+      // (evita sobrecarregar o processo HTTP). Falhar de forma controlada.
+      const err = new Error(
+        `[queue] AUTOMATION_WORKER_MODE=external mas Redis/fila indisponível — não executando inline (automationId=${payload.automationId})`,
+      );
+      console.error(err.message);
+      throw err;
     }
     console.info(`[queue] Enfileirando automação ${payload.automationId} no BullMQ`);
     return queue.add(AUTOMATION_JOB_NAME, payload, {

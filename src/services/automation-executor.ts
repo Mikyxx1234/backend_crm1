@@ -3617,14 +3617,16 @@ async function executeStep(
           contactId: rt.contactId ?? undefined,
           dealId: rt.dealId ?? undefined,
           data: rt.data,
+          // Herda profundidade (+1) para o anti-loop de encadeamento.
+          depth: (rt.depth ?? 0) + 1,
         },
       };
 
-      setImmediate(() => {
-        runAutomationInline(transferPayload).catch((err) => {
-          log.error(`Falha ao executar automação de destino ${targetId}:`, err);
-        });
-      });
+      // Em modo external vai para a fila `automation-jobs` (worker dedicado).
+      // Em modo inline (dev), enqueueAutomationJob ainda executa direto —
+      // sem setImmediate/runAutomationInline paralelo na API.
+      const { enqueueAutomationJob } = await import("@/lib/queue");
+      await enqueueAutomationJob(transferPayload);
 
       return { skipRemaining: true };
     }
