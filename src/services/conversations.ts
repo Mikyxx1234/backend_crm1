@@ -773,6 +773,72 @@ export async function getConversations(
   return { items, total, page, perPage };
 }
 
+/**
+ * Lista leve por contato — seed do Sales Hub / deal panel.
+ * Evita o caminho inbox (collapse em lotes + listSelect + previews) que
+ * custava segundos só pra descobrir o conversationId do deal aberto.
+ */
+export async function getConversationsByContactLight(
+  contactId: string,
+  perPage = 10,
+): Promise<{
+  items: Array<{
+    id: string;
+    number: number | null;
+    status: ConversationStatus;
+    channel: string | null;
+    updatedAt: Date;
+    lastInboundAt: Date | null;
+    closedAt: Date | null;
+    assignedToId: string | null;
+    assignedTo: { id: string; name: string; email: string | null } | null;
+    tags: { id: string; name: string; color: string | null }[];
+  }>;
+  total: number;
+  page: number;
+  perPage: number;
+}> {
+  const take = Math.min(50, Math.max(1, perPage));
+  const rows = await prisma.conversation.findMany({
+    where: withOrgFromCtx({ contactId }),
+    orderBy: { updatedAt: "desc" },
+    take,
+    select: {
+      id: true,
+      number: true,
+      status: true,
+      channel: true,
+      updatedAt: true,
+      lastInboundAt: true,
+      closedAt: true,
+      assignedToId: true,
+      assignedTo: { select: { id: true, name: true, email: true } },
+      contact: {
+        select: {
+          tags: {
+            select: { tag: { select: { id: true, name: true, color: true } } },
+          },
+        },
+      },
+    },
+  });
+  const items = rows.map((row) => ({
+    id: row.id,
+    number: row.number,
+    status: row.status,
+    channel: row.channel,
+    updatedAt: row.updatedAt,
+    lastInboundAt: row.lastInboundAt,
+    closedAt: row.closedAt,
+    assignedToId: row.assignedToId,
+    assignedTo: row.assignedTo,
+    tags: (row.contact?.tags ?? [])
+      .map((t) => t.tag)
+      .filter((t) => t != null),
+  }));
+  return { items, total: items.length, page: 1, perPage: take };
+}
+
 /** Lista só categorias (exclui "todos") — contagens por aba e grants. */
 export const INBOX_TAB_LIST: readonly InboxCategoryTab[] = INBOX_CATEGORY_TABS;
 

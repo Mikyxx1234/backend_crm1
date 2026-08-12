@@ -266,36 +266,44 @@ export async function getDeals(params: GetDealsParams = {}) {
   return { items, total, page, perPage };
 }
 
-const detailInclude = {
-  contact: {
+const contactDetailSelect = {
+  id: true, number: true, name: true, email: true, phone: true, avatarUrl: true,
+  whatsappUsername: true,
+  // `source` (nativo de Contact) usado pelo deal detail (frontend
+  // mostra/edita inline no cabecalho fixo da sidebar via
+  // InlineNativeEditor). Antes o painel tentava ler `Deal.source` que
+  // nao existe no schema; passou a usar contact.source.
+  source: true,
+  conversations: {
+    orderBy: { updatedAt: "desc" as const },
     select: {
-      id: true, number: true, name: true, email: true, phone: true, avatarUrl: true,
-      whatsappUsername: true,
-      // `source` (nativo de Contact) usado pelo deal detail (frontend
-      // mostra/edita inline no cabecalho fixo da sidebar via
-      // InlineNativeEditor). Antes o painel tentava ler `Deal.source` que
-      // nao existe no schema; passou a usar contact.source.
-      source: true,
-      conversations: {
-        orderBy: { updatedAt: "desc" as const },
-        select: {
-          id: true, number: true, externalId: true, channel: true,
-          status: true, inboxName: true, closedAt: true,
-          createdAt: true, updatedAt: true,
-          departmentId: true,
-          department: {
-            select: { id: true, name: true, requireTabulationOnClose: true },
-          },
-          assignedTo: { select: { id: true, name: true } },
-        },
+      id: true, number: true, externalId: true, channel: true,
+      status: true, inboxName: true, closedAt: true,
+      createdAt: true, updatedAt: true,
+      departmentId: true,
+      department: {
+        select: { id: true, name: true, requireTabulationOnClose: true },
       },
-      tags: {
-        select: {
-          tag: { select: { id: true, name: true, color: true } },
-        },
-      },
+      assignedTo: { select: { id: true, name: true } },
     },
   },
+  tags: {
+    select: {
+      tag: { select: { id: true, name: true, color: true } },
+    },
+  },
+} satisfies Prisma.ContactSelect;
+
+/** Painel pipeline/inbox: só a conversa mais recente (chat binding usa [0]). */
+const contactPanelSelect = {
+  ...contactDetailSelect,
+  conversations: {
+    ...contactDetailSelect.conversations,
+    take: 1,
+  },
+} satisfies Prisma.ContactSelect;
+
+const stageOwnerTagsInclude = {
   tags: {
     select: {
       tag: { select: { id: true, name: true, color: true } },
@@ -316,6 +324,12 @@ const detailInclude = {
     },
   },
   owner: { select: { id: true, name: true, email: true, avatarUrl: true, role: true } },
+} satisfies Prisma.DealInclude;
+
+const detailInclude = {
+  contact: { select: contactDetailSelect },
+  ...stageOwnerTagsInclude,
+  // Legacy deal-workspace ainda lê activities/notes embutidos.
   activities: {
     take: 30,
     orderBy: [{ scheduledAt: "asc" }, { createdAt: "desc" }],
@@ -332,18 +346,30 @@ const detailInclude = {
   },
 } satisfies Prisma.DealInclude;
 
+/** GET ?view=panel — abre o card rápido: sem activities/notes (tabs têm endpoints próprios). */
+const panelDetailInclude = {
+  contact: { select: contactPanelSelect },
+  ...stageOwnerTagsInclude,
+} satisfies Prisma.DealInclude;
+
 export type DealDetail = Prisma.DealGetPayload<{
   include: typeof detailInclude;
 }>;
 
-export async function getDealById(idOrNumber: string): Promise<DealDetail | null> {
+export type DealDetailView = "full" | "panel";
+
+export async function getDealById(
+  idOrNumber: string,
+  opts?: { view?: DealDetailView },
+): Promise<DealDetail | null> {
   const isNumeric = /^\d+$/.test(idOrNumber);
   const orgId = getOrgIdOrThrow();
+  const view = opts?.view ?? "full";
   const deal = (await prisma.deal.findUnique({
     where: isNumeric
       ? { organizationId_number: { organizationId: orgId, number: parseInt(idOrNumber, 10) } }
       : { id: idOrNumber },
-    include: detailInclude,
+    include: view === "panel" ? panelDetailInclude : detailInclude,
   })) as DealDetail | null;
   if (deal?.contact) {
     await enrichContactsWithUserAvatarFallback([deal.contact]);
@@ -1732,6 +1758,8 @@ async function computeBoardData(
   // lastMessage = msg mais recente do contato (qualquer conv).
   type BoardConvRow = {
     contactId: string;
+    /** Conversa mais recente do contato (updatedAt desc) — seed do chat no open. */
+    conversationId: string | null;
     channel: string | null;
     unreadCount: number;
     msgId: string | null;
@@ -1762,7 +1790,7 @@ async function computeBoardData(
           ),
           latest_channel AS (
             SELECT DISTINCT ON ("contactId")
-              "contactId", channel
+              "contactId", id AS "conversationId", channel
             FROM conversations
             WHERE "contactId" = ANY(${allContactIds})
               AND "organizationId" = ${orgIdForBoard}
@@ -1798,6 +1826,7 @@ async function computeBoardData(
           )
           SELECT
             cu."contactId",
+            lc."conversationId",
             lc.channel,
             COALESCE(cu.unread, 0) AS "unreadCount",
             lm."msgId",
@@ -1886,10 +1915,14 @@ async function computeBoardData(
     }
   >();
   const unreadMap = new Map<string, number>();
+  const conversationIdMap = new Map<string, string>();
   const channelMap = new Map<string, { channel: string; updatedAt: Date }>();
   for (const row of convs) {
     if (!row.contactId) continue;
     unreadMap.set(row.contactId, row.unreadCount ?? 0);
+    if (row.conversationId) {
+      conversationIdMap.set(row.contactId, row.conversationId);
+    }
     if (row.channel) {
       channelMap.set(row.contactId, {
         channel: row.channel,
@@ -2002,6 +2035,9 @@ async function computeBoardData(
                 }
               : null,
             awaitingMessages,
+            conversationId: deal.contactId
+              ? conversationIdMap.get(deal.contactId) ?? null
+              : null,
             channel: deal.contactId
               ? channelMap.get(deal.contactId)?.channel ?? null
               : null,

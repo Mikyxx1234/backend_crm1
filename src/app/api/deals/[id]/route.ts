@@ -24,10 +24,26 @@ export async function GET(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }
 
-    const deal = await getDealById(id);
+    const viewParam = new URL(request.url).searchParams.get("view");
+    const detailView = viewParam === "panel" ? "panel" as const : "full" as const;
+    const isNumericId = /^\d+$/.test(id);
+
+    // CUID: panel fields em paralelo. Número sequencial: precisa do deal.id real.
+    const fieldsPromise = !isNumericId
+      ? getDealPanelFieldsForDeal(id).catch(
+          () => [] as Awaited<ReturnType<typeof getDealPanelFieldsForDeal>>,
+        )
+      : null;
+
+    const deal = await getDealById(id, { view: detailView });
     if (!deal) {
       return NextResponse.json({ message: "Negócio não encontrado." }, { status: 404 });
     }
+    const dealPanelFields =
+      (await fieldsPromise) ??
+      (await getDealPanelFieldsForDeal(deal.id).catch(
+        () => [] as Awaited<ReturnType<typeof getDealPanelFieldsForDeal>>,
+      ));
     const stageDenied = await requireStageScope(authResult.user, "view", deal.stage.id);
     if (stageDenied) return stageDenied;
     const pipelineDenied = await requirePipelineScope(
@@ -54,8 +70,6 @@ export async function GET(request: Request, context: RouteContext) {
     // e disparava o warning de "unique key" no React.
     type NestedTag = { tag: { id: string; name: string; color: string | null } };
     const flattenTags = (arr?: NestedTag[] | null) => (arr ?? []).map((t) => t.tag);
-    // Campos do negócio visíveis no painel Deal Detail (filtrados por showInDealPanel)
-    const dealPanelFields = await getDealPanelFieldsForDeal(id).catch(() => []);
 
     const responseDeal = {
       ...deal,
