@@ -27,9 +27,9 @@ const log = getLogger("worker.meta-webhook");
  * Multi-tenant: workers rodam fora de RequestContext — embrulhamos em
  * `withSystemContext(organizationId)` (vem no payload, sem query extra).
  *
- * Concurrency: `META_WEBHOOK_WORKER_CONCURRENCY` (default 8) — maior que o
- * `CAMPAIGN_SEND_CONCURRENCY` (4) para drenar webhooks mais rápido que o
- * envio de campanha os gera.
+ * Concurrency: `META_WEBHOOK_WORKER_CONCURRENCY` (default 4) — deve ficar
+ * ≤ `DB_POOL_MAX` do processo (default worker=4). Default antigo 8 estourava
+ * o pool pg ("timeout exceeded when trying to connect") sob campanha.
  */
 
 function envInt(name: string, defaultValue: number): number {
@@ -60,7 +60,7 @@ async function processMetaWebhookJob(
 }
 
 export function startMetaWebhookWorker() {
-  const concurrency = envInt("META_WEBHOOK_WORKER_CONCURRENCY", 8);
+  const concurrency = envInt("META_WEBHOOK_WORKER_CONCURRENCY", 4);
   const connection = duplicateBullConnection();
   // Inicializa o singleton de filas (produtores no mesmo processo, ex.:
   // fallback de re-enqueue de backlog).

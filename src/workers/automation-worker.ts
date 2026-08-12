@@ -29,7 +29,7 @@ const log = getLogger("worker.automations");
  * A lookup por automationId é a fonte da verdade do tenant — mesma abordagem
  * já usada em `automation-worker-inline.ts`.
  *
- * Concurrency: `AUTOMATION_WORKER_CONCURRENCY` (default 5).
+ * Concurrency: `AUTOMATION_WORKER_CONCURRENCY` (default 4; ≤ DB_POOL_MAX).
  * Rate limit opcional (proteção de campanhas em massa):
  *   `AUTOMATION_RATE_LIMIT_MAX` + `AUTOMATION_RATE_LIMIT_DURATION`.
  *   Sem essas vars, sem limiter (comportamento atual).
@@ -73,7 +73,7 @@ async function processAutomationJob(job: Job<AutomationJobPayload>): Promise<voi
 }
 
 export function startAutomationWorker() {
-  const concurrency = envInt("AUTOMATION_WORKER_CONCURRENCY", 5);
+  const concurrency = envInt("AUTOMATION_WORKER_CONCURRENCY", 4);
   const connection = duplicateBullConnection();
   // Força inicialização do singleton de filas (produtores no mesmo processo,
   // ex.: transfer_automation → enqueueAutomationJob).

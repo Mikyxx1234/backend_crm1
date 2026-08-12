@@ -29,10 +29,25 @@ Novo serviço **`worker-meta-webhook`** (prod e dev):
 - `DATABASE_URL`, `REDIS_URL` (obrigatórias)
 - Meta/storage: `STORAGE_ROOT`, `META_*` (o worker baixa mídia inbound)
 - `APP_MODE=worker-meta-webhook`
-- `META_WEBHOOK_WORKER_CONCURRENCY=8` (opcional, default 8)
+- `DB_POOL_MAX=4` (recomendado; default código = 4 para workers não-whatsapp)
+- `META_WEBHOOK_WORKER_CONCURRENCY=4` (≤ `DB_POOL_MAX` — senão pg-pool timeout)
 
 **Não** setar `SKIP_PRISMA_MIGRATE` — o entrypoint já pula migrations para
 qualquer `APP_MODE != api`.
+
+### Pool Postgres (checklist multi-serviço)
+
+| Serviço | `APP_MODE` | `DB_POOL_MAX` | concurrency relacionada |
+|---|---|---|---|
+| backend-api | `api` | `20` | — |
+| worker-whatsapp | `worker-whatsapp` | `6` | `CAMPAIGN_SEND_CONCURRENCY=4` |
+| worker-meta-webhook | `worker-meta-webhook` | `4` | `META_WEBHOOK_WORKER_CONCURRENCY=4` |
+| worker-automation | `worker-automation` | `4` | `AUTOMATION_WORKER_CONCURRENCY=4` |
+
+Erro `timeout exceeded when trying to connect` = esgotamento do **pg-pool**
+(ou Postgres `max_connections`), não timeout de delivery Meta nem curl 28
+do deploy hook EasyPanel. Log de diagnóstico:
+`[prisma-base] pool exhausted APP_MODE=worker-meta-webhook ...`.
 
 ## 2. Deploy hook no GitHub
 
