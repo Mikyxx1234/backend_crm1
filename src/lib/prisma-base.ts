@@ -25,12 +25,21 @@ function envInt(name: string, defaultValue: number): number {
   return Number.isFinite(n) && n > 0 ? n : defaultValue;
 }
 
+function defaultPoolMax(): number {
+  // Workers (campaign / webhook / automation / etl / leads) nao devem
+  // competir com a API pelo orcamento de conexoes do Postgres compartilhado.
+  // Sem override, cada worker fica com pool pequeno; API mantem 20.
+  const mode = (process.env.APP_MODE ?? "api").trim().toLowerCase();
+  return mode.startsWith("worker") ? 6 : 20;
+}
+
 function createPrismaClient() {
   // Pool config tunado para multi-tenant SaaS:
   //
-  //   - DB_POOL_MAX (default 20): conexoes concorrentes ATIVAS por replica.
-  //     Em prod com 4 replicas = 80 conexoes totais. Postgres default
-  //     max_connections = 100 — deixa folga pra superuser/admin/scripts.
+  //   - DB_POOL_MAX (default 20 na API, 6 em APP_MODE=worker-*): conexoes
+  //     concorrentes ATIVAS por processo. Em prod com 4 replicas API +
+  //     workers pequenos cabe no Postgres default max_connections=100
+  //     sem esgotar a folga de superuser/admin/scripts.
   //   - DB_POOL_IDLE_TIMEOUT_MS (default 30s): idle conn devolve pro
   //     pool depois desse tempo. Reduz pressao em janelas de baixo
   //     trafego (off-hours).
@@ -42,7 +51,7 @@ function createPrismaClient() {
   //     publicos drenarem o pool inteiro.
   //
   // Tunar via env. Defaults ja servem dev e prod pequena (1-2 replicas).
-  const max = envInt("DB_POOL_MAX", 20);
+  const max = envInt("DB_POOL_MAX", defaultPoolMax());
   const idleTimeoutMillis = envInt("DB_POOL_IDLE_TIMEOUT_MS", 30_000);
   const connectionTimeoutMillis = envInt("DB_POOL_CONN_TIMEOUT_MS", 5_000);
   const statementTimeoutMs = envInt("DB_STATEMENT_TIMEOUT_MS", 30_000);

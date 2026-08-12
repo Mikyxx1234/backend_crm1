@@ -408,23 +408,45 @@ export async function enqueueCampaignDispatch(payload: CampaignDispatchPayload, 
   });
 }
 
+function campaignSendJobOptions(): JobsOptions {
+  // Retries/backoff configuráveis via env para permitir afinar comportamento
+  // sem rebuild. Defaults preservam o comportamento histórico (6 tentativas,
+  // backoff exponencial iniciando em 3s).
+  const attempts = readPositiveInt(process.env.WHATSAPP_MAX_ATTEMPTS, 6);
+  const backoffDelay = readPositiveInt(process.env.WHATSAPP_BACKOFF_DELAY, 3000);
+  return {
+    removeOnComplete: true,
+    removeOnFail: false,
+    attempts,
+    backoff: { type: "exponential", delay: backoffDelay },
+  };
+}
+
 export async function enqueueCampaignSend(payload: CampaignSendPayload) {
   const queue = getCampaignSendQueue();
   if (!queue) {
     console.warn("[queue] Redis indisponível — não é possível enviar mensagem de campanha");
     return null;
   }
-  // Retries/backoff configuráveis via env para permitir afinar comportamento
-  // sem rebuild. Defaults preservam o comportamento histórico (6 tentativas,
-  // backoff exponencial iniciando em 3s).
-  const attempts = readPositiveInt(process.env.WHATSAPP_MAX_ATTEMPTS, 6);
-  const backoffDelay = readPositiveInt(process.env.WHATSAPP_BACKOFF_DELAY, 3000);
-  return queue.add("send", payload, {
-    removeOnComplete: true,
-    removeOnFail: false,
-    attempts,
-    backoff: { type: "exponential", delay: backoffDelay },
-  });
+  return queue.add("send", payload, campaignSendJobOptions());
+}
+
+/** Enfileira um lote de envios (evita N round-trips Redis no dispatch). */
+export async function enqueueCampaignSendBulk(payloads: CampaignSendPayload[]) {
+  const queue = getCampaignSendQueue();
+  if (!queue) {
+    console.warn("[queue] Redis indisponível — não é possível enviar mensagem de campanha");
+    return null;
+  }
+  if (payloads.length === 0) return [];
+  const opts = campaignSendJobOptions();
+  return queue.addBulk(
+    payloads.map((data) => ({
+      name: "send",
+      data,
+      opts,
+    })),
+  );
 }
 
 // ── Leads bulk queue ─────────────────────────────────────

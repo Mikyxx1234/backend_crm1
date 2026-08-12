@@ -1437,6 +1437,11 @@ async function processStatusUpdate(status: Record<string, unknown>) {
       ? (msg.sendStatus ?? "").toLowerCase() !== "failed"
       : newPriority > currentPriority;
 
+    // Sempre sincroniza CampaignRecipient (contadores delivered/read), mesmo
+    // quando o Message já está no mesmo status — e usa o retorno para
+    // silenciar SSE/activity em blast.
+    const isCampaignMsg = await updateCampaignRecipientStatus(wamid, s, status);
+
     if (shouldUpdate) {
         // Estrutura oficial do erro do webhook (Meta docs):
         //   errors[i] = { code, title, message, error_data: { details }, href }
@@ -1573,18 +1578,24 @@ async function processStatusUpdate(status: Record<string, unknown>) {
         // nunca casa e os ticks só mudam no refetch/poll.
         const bubbleId = msg.externalId ?? msg.id;
         const orgId = getOrgIdOrNull() ?? msg.organizationId;
-        try {
-          sseBus.publish("message_status", {
-            organizationId: orgId,
-            conversationId: msg.conversationId,
-            messageId: bubbleId,
-            internalId: msg.id,
-            status: s,
-            ...(isFailure && sendError ? { error: sendError } : {}),
-          });
-        } catch {}
 
-        if (s === "read") {
+        // Campanha: NÃO faz fan-out SSE nem activity-log de leitura.
+        // Em blast (~2k) cada wamid gera 2–4 statuses → stampede de
+        // invalidate inbox em todos os operadores.
+        if (!isCampaignMsg) {
+          try {
+            sseBus.publish("message_status", {
+              organizationId: orgId,
+              conversationId: msg.conversationId,
+              messageId: bubbleId,
+              internalId: msg.id,
+              status: s,
+              ...(isFailure && sendError ? { error: sendError } : {}),
+            });
+          } catch {}
+        }
+
+        if (s === "read" && !isCampaignMsg) {
           log.info(
             `Mensagem lida wamid=${wamid} conversationId=${msg.conversationId} bubbleId=${bubbleId}`,
           );
@@ -1636,25 +1647,24 @@ async function processStatusUpdate(status: Record<string, unknown>) {
         }
     }
 
-    await updateCampaignRecipientStatus(wamid, s, status);
-
     log.debug(`Status ${wamid} → ${s}`);
   } catch (err) {
     log.warn("Erro ao atualizar status da mensagem:", err);
   }
 }
 
+/** @returns true se o wamid pertence a um destinatário de campanha. */
 async function updateCampaignRecipientStatus(
   metaMessageId: string,
   status: string,
   raw: Record<string, unknown>,
-) {
+): Promise<boolean> {
   try {
     const recipient = await prisma.campaignRecipient.findFirst({
       where: { metaMessageId },
       select: { id: true, status: true, campaignId: true },
     });
-    if (!recipient) return;
+    if (!recipient) return false;
 
     const statusMap: Record<string, string> = {
       sent: "SENT",
@@ -1663,10 +1673,12 @@ async function updateCampaignRecipientStatus(
       failed: "FAILED",
     };
     const newStatus = statusMap[status];
-    if (!newStatus) return;
+    if (!newStatus) return true;
 
     const priority: Record<string, number> = { PENDING: 0, SENDING: 1, SENT: 2, DELIVERED: 3, READ: 4, FAILED: 0 };
-    if ((priority[newStatus] ?? 0) <= (priority[recipient.status] ?? 0) && newStatus !== "FAILED") return;
+    if ((priority[newStatus] ?? 0) <= (priority[recipient.status] ?? 0) && newStatus !== "FAILED") {
+      return true;
+    }
 
     const data: Record<string, unknown> = { status: newStatus };
     if (status === "delivered") data.deliveredAt = new Date();
@@ -1701,8 +1713,10 @@ async function updateCampaignRecipientStatus(
         data: { [counterField]: { increment: 1 } },
       });
     }
+    return true;
   } catch (err) {
     log.warn("Erro ao atualizar destinatário da campanha:", err);
+    return false;
   }
 }
 

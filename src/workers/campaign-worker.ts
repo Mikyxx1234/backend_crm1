@@ -5,9 +5,7 @@ import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { getOrgIdOrNull } from "@/lib/request-context";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
-import { sseBus } from "@/lib/sse-bus";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import {
   ensureWhatsAppConversationForContact,
@@ -18,7 +16,7 @@ import {
   CAMPAIGN_SEND_QUEUE_NAME,
   type CampaignDispatchPayload,
   type CampaignSendPayload,
-  enqueueCampaignSend,
+  enqueueCampaignSendBulk,
   enqueueAutomationJob,
   enqueueBaileysOutbound,
 } from "@/lib/queue";
@@ -148,6 +146,7 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
       return;
     }
 
+    let enqueued = 0;
     for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
       const batch = contacts.slice(i, i + BATCH_SIZE);
       await prisma.campaignRecipient.createMany({
@@ -159,6 +158,35 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
         })),
         skipDuplicates: true,
       });
+
+      // 1 findMany + addBulk por lote — evita N× (findUnique + queue.add)
+      // que gerava storm de Redis/DB no início do disparo (~2k destinatários).
+      const recipients = await prisma.campaignRecipient.findMany({
+        where: {
+          campaignId,
+          contactId: { in: batch.map((c) => c.id) },
+        },
+        select: { id: true, contactId: true },
+      });
+      const contactById = new Map(batch.map((c) => [c.id, c]));
+      const payloads = recipients.flatMap((r) => {
+        const contact = contactById.get(r.contactId);
+        if (!contact?.phone) return [];
+        return [
+          {
+            campaignId,
+            recipientId: r.id,
+            contactId: r.contactId,
+            contactPhone: contact.phone,
+            contactBsuid: contact.whatsappBsuid ?? undefined,
+          },
+        ];
+      });
+      const jobs = await enqueueCampaignSendBulk(payloads);
+      if (!jobs) {
+        throw new Error("Fila campaign-send indisponível (Redis) durante dispatch");
+      }
+      enqueued += payloads.length;
     }
 
     await prisma.campaign.update({
@@ -170,23 +198,7 @@ async function handleDispatch(payload: CampaignDispatchPayload) {
       },
     });
 
-    for (const contact of contacts) {
-      const recipient = await prisma.campaignRecipient.findUnique({
-        where: { campaignId_contactId: { campaignId, contactId: contact.id } },
-        select: { id: true },
-      });
-      if (!recipient) continue;
-
-      await enqueueCampaignSend({
-        campaignId,
-        recipientId: recipient.id,
-        contactId: contact.id,
-        contactPhone: contact.phone!,
-        contactBsuid: contact.whatsappBsuid ?? undefined,
-      });
-    }
-
-    console.info(`[campaign-dispatch] Enqueued ${contacts.length} send jobs for campaign ${campaignId}`);
+    console.info(`[campaign-dispatch] Enqueued ${enqueued} send jobs for campaign ${campaignId}`);
   } catch (err) {
     console.error(`[campaign-dispatch] Error dispatching campaign ${campaignId}:`, err);
     await prisma.campaign.update({
@@ -533,14 +545,11 @@ async function persistCampaignOutboundMessage(input: {
     .catch(() => {});
   await maybeResolveUnansweredOutboundTicket(conversationId).catch(() => {});
 
-  sseBus.publish("new_message", {
-    organizationId: getOrgIdOrNull(),
-    conversationId,
-    contactId: input.contactId,
-    direction: "out",
-    content: saved.content,
-    timestamp: saved.createdAt,
-  });
+  // NÃO publicar SSE `new_message` em blast de campanha.
+  // Cada publish → Redis pub/sub → todos os clientes da org → invalidate
+  // inbox/board (scheduleBoardInvalidation). Em ~2k envios isso vira
+  // stampede de GET /api/conversations e satura a API/Postgres compartilhado.
+  // A mensagem permanece no histórico; o operador vê ao abrir o ticket.
 
   return saved.id;
 }
