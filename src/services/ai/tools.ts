@@ -22,7 +22,6 @@ import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
-import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { lookupStudent } from "@/services/academic-records";
 import { createActivity } from "@/services/activities";
 import { notifyDealStageChanged } from "@/services/automation-triggers";
@@ -36,7 +35,6 @@ import {
   messageImpliesOperationalAtendimento,
   executeAcademicDepartmentHandoff,
   enforceAtendimentoIfAcolhimentoBlocked,
-  isImmediateAcademicHandoffJustified,
 } from "@/services/ai/academic-department-routing";
 import { closeAiOnlyConversation } from "@/services/ai/academic-closure";
 import type { ActivityType, Prisma } from "@prisma/client";
@@ -427,8 +425,9 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
           .update({
             where: { id: ctx.conversationId },
             data: {
+              lastMessageDirection: "out",
+              hasAgentReply: true,
               updatedAt: new Date(),
-              ...(await botOutboundReplyMark(conv.organizationId)),
             },
           })
           .catch(() => null);
@@ -625,7 +624,12 @@ function searchProductsTool(_ctx: RunContext) {
 function transferToHumanTool(ctx: RunContext) {
   return tool({
     description:
-      "Transfere a conversa para um consultor humano via Distribuição Inteligente. Prefira informar `departmentName` (Acolhimento / Retenção / Atendimento). Se omitir, o sistema infere: retenção (cancelar/trancar/transferência curso-polo), acolhimento (funil acolhimento), senão atendimento. Após chamar, NÃO envie mais mensagens longas — só confirme ao aluno que um consultor vai ajudar.",
+      "Transfere a conversa para um consultor humano via Distribuição Inteligente. " +
+      "Use SOMENTE quando: o aluno pedir humano/consultor, for retenção, ou você NÃO puder " +
+      "continuar atendendo com segurança (sem base nas refs / confiança baixa). " +
+      "Se você puder orientar o aluno, NÃO chame esta tool — responda você. " +
+      "Quando chamar, a distribuição EXECUTA de verdade; confirme ao aluno que um consultor vai ajudar. " +
+      "Prefira `departmentName` (Acolhimento / Retenção / Atendimento). Se omitir, o sistema infere.",
     inputSchema: z.object({
       reason: z
         .string()
@@ -642,18 +646,8 @@ function transferToHumanTool(ctx: RunContext) {
     execute: async ({ reason, departmentName }) => {
       try {
         if (!ctx.conversationId) return fail("Sem conversa ativa.");
-        // Atender primeiro: sem pedido de humano / retenção / curso-valor,
-        // não distribui aqui. Baixa confiança é concluída no inbox-handler.
-        if (!isImmediateAcademicHandoffJustified(ctx.userMessage)) {
-          return ok({
-            deferred: true,
-            assigned: false,
-            hint:
-              "Distribuição ADIADA. Responda a dúvida do aluno agora com KB + consultar_matricula. " +
-              "Só redistribua se o aluno pedir humano/consultor, for retenção (cancelar/trancar) " +
-              "ou você declarar baixa confiança ([CONFIANCA:<0.4]). NÃO diga que já conectou.",
-          });
-        }
+        // Chamou a tool = decidiu não seguir atendendo → distribui de fato.
+        // "Atender primeiro" é orientação de QUANDO chamar, não um bloqueio aqui.
         const result = await executeAcademicDepartmentHandoff({
           conversationId: ctx.conversationId,
           contactId: ctx.contactId,
@@ -832,16 +826,8 @@ function executeDistributionTool(ctx: RunContext) {
             select: { assignedTo: { select: { type: true } } },
           });
           if (conv?.assignedTo?.type === "AI") {
-            if (!isImmediateAcademicHandoffJustified(ctx.userMessage)) {
-              return ok({
-                deferred: true,
-                assigned: false,
-                hint:
-                  "Distribuição ADIADA. Responda a dúvida do aluno agora. " +
-                  "O backend só conclui a distribuição se houver pedido de humano, " +
-                  "retenção, ou baixa confiança ([CONFIANCA:<0.4]). NÃO diga que já conectou.",
-              });
-            }
+            // Tool chamada = handoff intencional. Não adiar (evita promessa
+            // "vou conectar" sem fila real).
             const handoff = await executeAcademicDepartmentHandoff({
               conversationId: ctx.conversationId,
               contactId: ctx.contactId ?? null,

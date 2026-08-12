@@ -7,7 +7,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { fireTrigger } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
-import { nextContactNumber } from "@/services/contacts";
+import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services/contacts";
 import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
@@ -87,16 +87,40 @@ async function resolveContact(
   }
 
   const name = pushName || `Lead ${phone}`;
-  const created = await prisma.contact.create({
-    data: withOrgFromCtx({
-      number: await nextContactNumber(),
-      name,
-      phone,
-      lifecycleStage: "LEAD" as const,
-      source: "WhatsApp QR",
-    }),
-    select: { id: true, name: true, phone: true, avatarUrl: true, organizationId: true },
-  });
+  const contactSelect = {
+    id: true,
+    name: true,
+    phone: true,
+    avatarUrl: true,
+    organizationId: true,
+  } as const;
+  let created: {
+    id: string;
+    name: string;
+    phone: string | null;
+    avatarUrl: string | null;
+    organizationId: string;
+  };
+  try {
+    created = await insertContactWithNextNumber(
+      {
+        name,
+        phone,
+        lifecycleStage: "LEAD" as const,
+        source: "WhatsApp QR",
+      },
+      contactSelect,
+    );
+  } catch (err) {
+    if (isPrismaUniqueViolation(err)) {
+      const won = await prisma.contact.findFirst({
+        where: { phone },
+        select: contactSelect,
+      });
+      if (won) return won;
+    }
+    throw err;
+  }
 
   // Dispara automações com trigger "contact_created" antes do auto-deal,
   // mantendo a ordem semântica (contato → deal). Fire-and-forget para
@@ -575,6 +599,7 @@ export async function handleBaileysMessage(
         lastInboundAt: new Date(),
         lastMessageDirection: "in",
         hasAgentReply: false,
+        hasError: false,
         updatedAt: new Date(),
       },
     }).catch(() => {});

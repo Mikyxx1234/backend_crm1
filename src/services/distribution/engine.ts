@@ -23,6 +23,7 @@ import {
   syncOwnershipForContact,
 } from "@/services/deals";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
+import { WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
 import {
   clearOwnershipForRedistribution,
@@ -894,11 +895,25 @@ export async function executeDistribution(
     }
   }
 
-  // Saudação pós-distribuição: sempre que um HUMAN assume vindo de IA/null
-  // (mesmo se já houve atendimento humano nesta conversa). Não re-dispara
-  // em handoff humano → humano (priorWasHuman).
+  // Saudação pós-distribuição (`lead_distributed`): HUMAN assumindo vindo
+  // de IA/null. Não re-dispara em handoff humano→humano.
+  //
+  // Fora da janela Meta 24h a saudação em texto livre falha (131047) e marca
+  // hasError — típico após disparo HSM em ticket antigo. Sem inbound recente
+  // NÃO dispara a automação; o aluno reabre a janela ao responder o template.
   const priorWasHuman = preAssignSnap?.assigneeType === "HUMAN";
-  const shouldFireLeadDistributed = selectedIsHuman && !priorWasHuman;
+  let sessionOpenForFreeText = true;
+  if (input.conversationId) {
+    const sess = await prisma.conversation.findUnique({
+      where: { id: input.conversationId },
+      select: { lastInboundAt: true },
+    });
+    const lastIn = sess?.lastInboundAt?.getTime() ?? null;
+    sessionOpenForFreeText =
+      lastIn != null && Date.now() - lastIn < WHATSAPP_SESSION_WINDOW_MS;
+  }
+  const shouldFireLeadDistributed =
+    selectedIsHuman && !priorWasHuman && sessionOpenForFreeText;
 
   if (shouldFireLeadDistributed) {
     const contactId =
@@ -927,6 +942,15 @@ export async function executeDistribution(
         ),
       );
     }
+  } else if (selectedIsHuman && !priorWasHuman && !sessionOpenForFreeText) {
+    console.info(
+      "[distribution] skip lead_distributed — sessão 24h fechada",
+      JSON.stringify({
+        conversationId: input.conversationId ?? null,
+        triggerSource: input.triggerSource,
+        selectedUserId: selected.userId,
+      }),
+    );
   }
 
   return {

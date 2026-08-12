@@ -110,6 +110,61 @@ export function readStepRef(config: unknown, key: string): string | null {
   return trimmed;
 }
 
+/**
+ * Teto para o step `delay` rodar inline (setTimeout) no worker. Acima
+ * disso a espera é persistida (contexto RUNNING + `timeoutAt`) e retomada
+ * pelo `sweepExpiredTimeouts` — delays longos não seguram slot de
+ * concorrência nem morrem com restart/deploy (incidente 11/ago/26:
+ * delay de 7d do "Follow-up de envio de vaga" congelou os 5 slots do
+ * worker-automations e parou TODAS as automações).
+ */
+export const DELAY_INLINE_MAX_MS = Math.max(
+  0,
+  Number(process.env.AUTOMATION_DELAY_INLINE_MAX_MS ?? 30_000),
+);
+
+export function shouldPersistDelay(waitMs: number, inlineMax = DELAY_INLINE_MAX_MS): boolean {
+  return waitMs > inlineMax;
+}
+
+export type InteractiveOption = {
+  text?: string;
+  title?: string;
+  id?: string;
+  gotoStepId?: string;
+};
+
+/**
+ * Casa resposta de botão/lista com a opção do config.
+ * O executor envia `b.id || btn_${i}` / `r.id || row_${i}` (0-based) — quando
+ * o JSON salvo não tem `id`, o `list_reply.id`/`button_reply.id` ainda casa
+ * pelo fallback de índice.
+ */
+export function matchInteractiveOption(
+  options: InteractiveOption[],
+  messageContent: string,
+  interactiveId?: string | null,
+): InteractiveOption | undefined {
+  const normalized = messageContent.trim().toLowerCase();
+  const idNorm = (interactiveId ?? "").trim().toLowerCase();
+  return options.find((b, idx) => {
+    const label = (b.title || b.text || "").trim().toLowerCase();
+    const btnId = (b.id || "").trim().toLowerCase();
+    // Ids efetivos iguais aos gerados em automation-executor.ts
+    const effectiveRowId = (btnId || `row_${idx}`).toLowerCase();
+    const effectiveBtnId = (btnId || `btn_${idx}`).toLowerCase();
+    return (
+      (label && label === normalized) ||
+      (btnId && btnId === normalized) ||
+      (idNorm && btnId && btnId === idNorm) ||
+      (idNorm && (idNorm === effectiveRowId || idNorm === effectiveBtnId)) ||
+      (!btnId &&
+        idNorm &&
+        (idNorm === `row_${idx}` || idNorm === `btn_${idx}`))
+    );
+  });
+}
+
 export async function getActiveContext(automationId: string, contactId: string) {
   return prisma.automationContext.findFirst({
     where: {
@@ -134,7 +189,10 @@ export async function closeStrandedContext(automationId: string, contactId: stri
       where: { id: ctx.currentStepId },
       select: { type: true },
     });
-    if (step && PAUSING_STEP_TYPES.has(step.type)) {
+    // `delay` persistido também é espera legítima (cronômetro via
+    // `timeoutAt`) — fechar aqui mataria a retomada pelo sweeper.
+    const isDelayWait = step?.type === "delay" && ctx.timeoutAt !== null;
+    if (step && (PAUSING_STEP_TYPES.has(step.type) || isDelayWait)) {
       return null;
     }
   }
@@ -279,19 +337,32 @@ export async function getContactAutomationHistory(contactId: string, limit = 20)
   });
 }
 
-export async function processIncomingMessage(contactId: string, messageContent: string) {
-  // Se humano já está atendendo, encerra salesbot ativo e não avança passos.
+export async function processIncomingMessage(
+  contactId: string,
+  messageContent: string,
+  opts?: { interactiveId?: string | null },
+) {
+  // Só cancela/bloqueia retomada quando HUMANO está no atendimento
+  // (`humanAttending`). `suppressAutomation` também é true com assignee IA
+  // e serve para NÃO disparar automações novas nos triggers — aqui não
+  // usamos, senão o clique na lista/botão morre se a IA já era assignee
+  // antes do gatilho manual.
   try {
     const { getHumanAttendanceForContact } = await import(
       "@/services/attendance-guards"
     );
     const snap = await getHumanAttendanceForContact(contactId);
-    if (snap?.suppressAutomation) {
+    if (snap?.humanAttending) {
       const cancelled = await cancelActiveContextsForContact(contactId);
       log.info(
-        `processIncomingMessage skip — atendimento ativo contact=${contactId} cancelled=${cancelled} assignee=${snap.assignedToId ?? "-"}`,
+        `processIncomingMessage skip — humano atendendo contact=${contactId} cancelled=${cancelled} assignee=${snap.assignedToId ?? "-"} hasHumanReply=${snap.hasHumanReply}`,
       );
       return { handled: false as const };
+    }
+    if (snap?.assignedToId) {
+      log.debug(
+        `processIncomingMessage — assignee IA/não-humano contact=${contactId} assignee=${snap.assignedToId} type=${snap.assigneeType ?? "-"} — mantém contextos pausados`,
+      );
     }
   } catch (err) {
     log.warn(
@@ -382,12 +453,14 @@ export async function processIncomingMessage(contactId: string, messageContent: 
         buttonsFromButtons.length > 0 ? buttonsFromButtons : buttonsFromRows;
 
       if (buttons.length > 0) {
-        const normalized = messageContent.trim().toLowerCase();
-        const matchedBtn = buttons.find((b) => {
-          const label = (b.title || b.text || "").trim().toLowerCase();
-          const btnId = (b.id || "").trim().toLowerCase();
-          return label === normalized || btnId === normalized;
-        });
+        // Match por título, id do config, interactiveId e fallback row_N/btn_N
+        // (quando o executor gerou id e o JSON salvo não tem). Ver
+        // matchInteractiveOption.
+        const matchedBtn = matchInteractiveOption(
+          buttons,
+          messageContent,
+          opts?.interactiveId,
+        );
 
         const elseGoto = readStepRef(config, "elseGotoStepId");
         // Saída padrão do passo. Em menus do canvas é comum vários botões
@@ -418,7 +491,7 @@ export async function processIncomingMessage(contactId: string, messageContent: 
         } else if (elseGoto) {
           nextStepId = elseGoto;
           log.info(
-            `nenhum botão matched ("${normalized}") — auto=${ctx.automation.name} → fallback elseGotoStepId step=${nextStepId}`,
+            `nenhum botão matched ("${messageContent}") — auto=${ctx.automation.name} → fallback elseGotoStepId step=${nextStepId}`,
           );
         } else if (hasExplicitEdges(config)) {
           // Menu desenhado no canvas, cliente digitou texto livre e a saída
@@ -427,13 +500,13 @@ export async function processIncomingMessage(contactId: string, messageContent: 
           // mantemos o fluxo parado NESTE passo, aguardando um clique
           // válido (ou o timeout configurado).
           log.warn(
-            `nenhum botão matched ("${normalized}") e sem elseGotoStepId — auto=${ctx.automation.name} step=${currentStep.id} → mantendo no mesmo passo (conecte a saída "nenhuma opção" no canvas)`,
+            `nenhum botão matched ("${messageContent}") e sem elseGotoStepId — auto=${ctx.automation.name} step=${currentStep.id} → mantendo no mesmo passo (conecte a saída "nenhuma opção" no canvas)`,
           );
           return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
         } else {
           nextStepId = linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
           log.info(
-            `nenhum botão matched ("${normalized}") + sem elseGotoStepId — auto=${ctx.automation.name} → fallback linear step=${nextStepId ?? "(fim)"}`,
+            `nenhum botão matched ("${messageContent}") + sem elseGotoStepId — auto=${ctx.automation.name} → fallback linear step=${nextStepId ?? "(fim)"}`,
           );
         }
       } else {
@@ -614,6 +687,34 @@ export async function processTimeout(contextId: string) {
   }
 
   const step = ctx.automation.steps.find((s) => s.id === ctx.currentStepId);
+
+  // `delay` persistido: o "timeout" É a conclusão da espera — segue a
+  // aresta `nextStepId` (fallback linear só pra legado pré-canvas).
+  if (step && step.type === "delay") {
+    const delayConfig = step.config as Record<string, unknown>;
+    const delayVars = (ctx.variables as Record<string, unknown>) ?? {};
+    const delayNext =
+      readStepRef(delayConfig, "nextStepId") ??
+      linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
+    if (!delayNext) {
+      log.warn(
+        `delay expirou SEM nextStepId — auto=${ctx.automation.name} step=${step.id} → encerrando fluxo (conecte a saída no canvas)`,
+      );
+    }
+    await dispatchToNextStep(
+      {
+        id: ctx.id,
+        automationId: ctx.automationId,
+        contactId: ctx.contactId,
+        automation: ctx.automation,
+      },
+      delayNext,
+      delayVars,
+      "delay concluído",
+    );
+    return;
+  }
+
   if (!step || !PAUSING_STEP_TYPES.has(step.type)) {
     log.debug(
       `processTimeout — ctx ${contextId} step=${step?.type ?? "?"} não é interativo, ignorando`,

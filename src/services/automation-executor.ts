@@ -52,8 +52,12 @@ import {
   closeStrandedContext,
   getActiveContext,
   interpolateVariables,
+  shouldPersistDelay,
 } from "@/services/automation-context";
-import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
+import {
+  ensureWhatsAppConversationForContact,
+  maybeResolveUnansweredOutboundTicket,
+} from "@/services/whatsapp-conversation";
 
 const log = getLogger("automation");
 
@@ -135,6 +139,26 @@ function resolveTimeoutGotoStepId(cfg: Record<string, unknown>): string | null {
   return id;
 }
 
+/** Aresta "Enviado" / saída padrão (`nextStepId`). */
+function resolveNextStepId(cfg: Record<string, unknown>): string | null {
+  const id = typeof cfg.nextStepId === "string" ? cfg.nextStepId.trim() : "";
+  if (!id || id === "__none__") return null;
+  return id;
+}
+
+/**
+ * Pausa pós-envio só faz sentido se "Sem resposta" leva a um destino
+ * diferente de "Enviado". Quando as duas arestas apontam pro mesmo
+ * passo (ex.: Finalizar), esperar resposta só prende o contexto em
+ * RODANDO sem mudar o resultado — segue imediatamente.
+ */
+function shouldPauseAfterSendForTimeout(cfg: Record<string, unknown>): boolean {
+  const timeoutGoto = resolveTimeoutGotoStepId(cfg);
+  if (!timeoutGoto) return false;
+  const nextGoto = resolveNextStepId(cfg);
+  return !nextGoto || nextGoto !== timeoutGoto;
+}
+
 const DEFAULT_WAIT_TIMEOUT_MS = 86_400_000;
 
 /**
@@ -196,12 +220,10 @@ async function persistFailedAutomationOutbound(opts: {
     })
     .catch((e) => log.warn("Falha ao persistir mensagem de erro:", e));
 
-  await prisma.conversation
-    .update({
-      where: { id: opts.conversationId },
-      data: { hasError: true, updatedAt: new Date() },
-    })
-    .catch(() => {});
+  const { markConversationHasError } = await import(
+    "@/services/conversation-error-flag"
+  );
+  await markConversationHasError(opts.conversationId);
 }
 
 /**
@@ -2442,9 +2464,9 @@ async function executeStep(
         }
       }
 
-      // "Sem resposta": só pausa se a aresta de timeout estiver conectada —
-      // senão segue linear (comportamento antigo dos fluxos só-Enviado).
-      if (resolveTimeoutGotoStepId(cfg)) {
+      // "Sem resposta": pausa só se o destino for distinto de "Enviado"
+      // (mesmo destino = Finalizar em ambos → segue e encerra).
+      if (shouldPauseAfterSendForTimeout(cfg)) {
         const rawTimeout = readNumber(cfg, "timeoutMs");
         const timeoutMs =
           rawTimeout && rawTimeout > 0 ? rawTimeout : DEFAULT_WAIT_TIMEOUT_MS;
@@ -2694,7 +2716,7 @@ async function executeStep(
 
       // Pausa quando:
       //  1) há botões com `gotoStepId` (clique volta pelo webhook), ou
-      //  2) a aresta "Sem resposta" (`timeoutGotoStepId`) está conectada.
+      //  2) "Sem resposta" aponta pra destino ≠ "Enviado".
       // Sem nenhum dos dois, segue linear (comportamento antigo).
       const tplButtons = Array.isArray(cfg.buttons)
         ? (cfg.buttons as { gotoStepId?: string }[])
@@ -2702,7 +2724,7 @@ async function executeStep(
       const tplHasRouting = tplButtons.some(
         (b) => typeof b?.gotoStepId === "string" && b.gotoStepId.trim() !== "",
       );
-      const tplHasTimeout = !!resolveTimeoutGotoStepId(cfg);
+      const tplHasTimeout = shouldPauseAfterSendForTimeout(cfg);
       if (tplHasRouting || tplHasTimeout) {
         const rawTimeout = readNumber(cfg, "timeoutMs");
         const tplTimeoutMs =
@@ -2712,6 +2734,15 @@ async function executeStep(
               : DEFAULT_WAIT_TIMEOUT_MS
             : rawTimeout;
         return pauseAwaitingReply(cfg, rt, tplTimeoutMs);
+      }
+
+      // Campanha AUTOMATION sem pausa (sem botão/timeout): fecha ticket se o
+      // aluno não respondeu — mesmo modelo do campaign-worker TEMPLATE/TEXT.
+      // Com pausa, o contexto PAUSED mantém a conversa na aba Automação.
+      if (rt.event === "campaign_trigger" && tplConversationId) {
+        await maybeResolveUnansweredOutboundTicket(tplConversationId).catch(
+          () => {},
+        );
       }
 
       return {};
@@ -3308,7 +3339,22 @@ async function executeStep(
 
     case "delay": {
       const ms = readNumber(cfg, "ms") ?? readNumber(cfg, "milliseconds") ?? 0;
-      await new Promise((r) => setTimeout(r, Math.max(0, Math.floor(ms))));
+      const waitMs = Math.max(0, Math.floor(ms));
+      // 11/ago/26 — Delay longo NÃO pode ser setTimeout: segura um slot de
+      // concorrência do worker por dias (incidente dna_work: 5 jobs do
+      // "Follow-up de envio de vaga" c/ delay=7d travaram TODAS as
+      // automações) e a espera morre a cada restart/deploy. Acima do
+      // threshold persistimos a espera (contexto RUNNING + timeoutAt) —
+      // o sweeper `sweepExpiredTimeouts` retoma no `nextStepId`.
+      if (shouldPersistDelay(waitMs)) {
+        const until = new Date(Date.now() + waitMs);
+        const paused = await pauseAwaitingReply(cfg, rt, waitMs);
+        return {
+          ...paused,
+          note: `aguardando até ${until.toISOString().replace("T", " ").slice(0, 16)} UTC`,
+        };
+      }
+      await new Promise((r) => setTimeout(r, waitMs));
       return {};
     }
 
@@ -3617,14 +3663,16 @@ async function executeStep(
           contactId: rt.contactId ?? undefined,
           dealId: rt.dealId ?? undefined,
           data: rt.data,
+          // Herda profundidade (+1) para o anti-loop de encadeamento.
+          depth: (rt.depth ?? 0) + 1,
         },
       };
 
-      setImmediate(() => {
-        runAutomationInline(transferPayload).catch((err) => {
-          log.error(`Falha ao executar automação de destino ${targetId}:`, err);
-        });
-      });
+      // Em modo external vai para a fila `automation-jobs` (worker dedicado).
+      // Em modo inline (dev), enqueueAutomationJob ainda executa direto —
+      // sem setImmediate/runAutomationInline paralelo na API.
+      const { enqueueAutomationJob } = await import("@/lib/queue");
+      await enqueueAutomationJob(transferPayload);
 
       return { skipRemaining: true };
     }
@@ -4165,6 +4213,10 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
   let current: typeof automation.steps[0] | undefined = automation.steps[0];
   let iterations = 0;
   let flowVariables: Record<string, unknown> = {};
+  // Quando o último step executado pausou o fluxo (skipRemaining), o
+  // contexto recém-criado por pauseAwaitingReply precisa sobreviver ao
+  // fim da execução — senão o clique/resposta do cliente cai no vazio.
+  let pausedAtEnd = false;
 
   while (current && iterations < MAX_ITER) {
     iterations++;
@@ -4218,7 +4270,10 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
         message: `${stepLabel} — ${result.note ?? "OK"}`,
         payload: cleanConfig,
       });
-      if (result.skipRemaining && !result.gotoStepId) break;
+      if (result.skipRemaining && !result.gotoStepId) {
+        pausedAtEnd = true;
+        break;
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`[${traceId}] Falha no step "${step.type}":`, msg);
@@ -4285,7 +4340,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     }
   }
 
-  if (rt.contactId) {
+  if (rt.contactId && !pausedAtEnd) {
     try {
       await closeStrandedContext(automationId, rt.contactId);
     } catch (err) {
@@ -4513,6 +4568,10 @@ export async function continueFromStep(
   let current: typeof automation.steps[0] | undefined = automation.steps[fromIndex];
   let iterations = 0;
   let flowVariables: Record<string, unknown> = { ...variables };
+  // Mesmo guard do runAutomationInline: quando a continuação termina num
+  // passo pausante (question/interactive/template com botões), o contexto
+  // recém-pausado precisa sobreviver ao fim da execução.
+  let contPausedAtEnd = false;
 
   while (current && iterations < MAX_ITER) {
     iterations++;
@@ -4558,7 +4617,10 @@ export async function continueFromStep(
         status: "SUCCESS",
         message: `${stepLabel} — ${result.note ?? "OK"}`,
       });
-      if (result.skipRemaining && !result.gotoStepId) break;
+      if (result.skipRemaining && !result.gotoStepId) {
+        contPausedAtEnd = true;
+        break;
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const baseCfgForFail = step.config as Record<string, unknown>;
@@ -4617,7 +4679,9 @@ export async function continueFromStep(
   }
 
   try {
-    await closeStrandedContext(automationId, contactId);
+    if (!contPausedAtEnd) {
+      await closeStrandedContext(automationId, contactId);
+    }
   } catch (err) {
     log.warn(
       `continueFromStep closeStrandedContext falhou:`,

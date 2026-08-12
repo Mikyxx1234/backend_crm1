@@ -113,12 +113,14 @@ fi
 
 # Roteamento APP_MODE → processo a iniciar.
 #
-# - api              → Next.js standalone server (comportamento histórico)
-# - worker-whatsapp  → worker BullMQ que consome campaign-dispatch + campaign-send
-#                      (script único: src/workers/campaign-worker.ts; sem reescrever
-#                      lógica de envio Meta)
-# - worker-leads     → worker BullMQ que consome leads-bulk
-#                      (operações em massa de Deals com BulkOperation tracking)
+# - api                 → Next.js standalone server (comportamento histórico)
+# - worker-whatsapp     → worker BullMQ que consome campaign-dispatch + campaign-send
+#                         (script único: src/workers/campaign-worker.ts; sem reescrever
+#                         lógica de envio Meta)
+# - worker-leads        → worker BullMQ que consome leads-bulk
+#                         (operações em massa de Deals com BulkOperation tracking)
+# - worker-etl          → worker BullMQ que consome import-etl
+# - worker-automation   → worker BullMQ que consome automation-jobs (Salesbot/automações)
 #
 # Workers são compilados via esbuild (npm run build:workers) e copiados para
 # /app/dist/workers no Dockerfile runner stage. Executar com `node` direto.
@@ -139,9 +141,17 @@ case "$APP_MODE" in
     echo "[entrypoint] starting ETL worker (import-etl)..."
     exec node dist/workers/etl-worker.js
     ;;
+  worker-automation)
+    echo "[entrypoint] starting Automations worker (automation-jobs)..."
+    exec node dist/workers/automation-worker.js
+    ;;
+  worker-meta-webhook)
+    echo "[entrypoint] starting Meta Webhook worker (meta-webhook-events)..."
+    exec node dist/workers/meta-webhook-worker.js
+    ;;
   *)
     echo "[entrypoint] !! ERRO: APP_MODE='${APP_MODE}' não reconhecido."
-    echo "[entrypoint] !! Valores válidos: api | worker-whatsapp | worker-leads | worker-etl"
+    echo "[entrypoint] !! Valores válidos: api | worker-whatsapp | worker-leads | worker-etl | worker-automation | worker-meta-webhook"
     exit 1
     ;;
 esac

@@ -6,7 +6,10 @@ import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
 import { phoneMatchVariants } from "@/lib/phone";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
-import { nextContactNumber } from "@/services/contacts";
+import {
+  insertContactWithNextNumber,
+  isContactBsuidUniqueViolation,
+} from "@/services/contacts";
 import {
   isActiveConversationUniqueViolation,
   withConversationNumberRetry,
@@ -15,6 +18,7 @@ import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
+import { enqueueMetaWebhookEvent } from "@/lib/queue";
 
 /**
  * Scope multi-tenancy do webhook. Quando presente:
@@ -89,6 +93,15 @@ const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN?.trim() || "";
 // ambiente pre-prod exposto na internet.
 const REQUIRE_SIGNATURE =
   process.env.NODE_ENV !== "development" || !!process.env.CI_STAGING;
+
+/**
+ * Processamento assíncrono do webhook Meta (default ligado).
+ * A API valida assinatura + persiste MetaWebhookEvent + enfileira e
+ * responde 200 imediatamente; o `worker-meta-webhook` executa o loop
+ * pesado (status de campanha + mensagens) fora do processo do inbox.
+ * `META_WEBHOOK_ASYNC=0` volta ao comportamento síncrono (rollback).
+ */
+const META_WEBHOOK_ASYNC = process.env.META_WEBHOOK_ASYNC !== "0";
 
 const recentlyProcessed = new Map<string, number>();
 const DEDUP_TTL = 30_000;
@@ -655,18 +668,53 @@ async function resolveWebhookContact(
 
   const sourceName = await getChannelSourceName(phoneNumberId);
 
-  const created = await prisma.contact.create({
-    data: withOrgFromCtx({
-      number: await nextContactNumber(),
-      name,
-      ...(phone ? { phone } : {}),
-      ...(bsuid ? { whatsappBsuid: bsuid } : {}),
-      ...(username ? { whatsappUsername: username } : {}),
-      lifecycleStage: "LEAD" as const,
-      source: sourceName,
-    }),
-    select: { id: true, name: true, phone: true, whatsappBsuid: true, whatsappUsername: true },
-  });
+  const contactSelect = {
+    id: true,
+    name: true,
+    phone: true,
+    whatsappBsuid: true,
+    whatsappUsername: true,
+  } as const;
+
+  let created: {
+    id: string;
+    name: string;
+    phone: string | null;
+    whatsappBsuid: string | null;
+    whatsappUsername: string | null;
+  };
+  try {
+    created = await insertContactWithNextNumber(
+      {
+        name,
+        ...(phone ? { phone } : {}),
+        ...(bsuid ? { whatsappBsuid: bsuid } : {}),
+        ...(username ? { whatsappUsername: username } : {}),
+        lifecycleStage: "LEAD" as const,
+        source: sourceName,
+      },
+      contactSelect,
+    );
+  } catch (err) {
+    // Corrida: outro webhook já inseriu o mesmo BSUID — reusa o vencedor
+    // (retry cego com novo number não resolve unique de bsuid).
+    if (isContactBsuidUniqueViolation(err) && bsuid) {
+      const won = await prisma.contact.findFirst({
+        where: { whatsappBsuid: bsuid },
+        select: contactSelect,
+      });
+      if (won) {
+        return {
+          id: won.id,
+          name: won.name,
+          phone: won.phone ?? null,
+          whatsappBsuid: won.whatsappBsuid ?? null,
+          whatsappUsername: won.whatsappUsername ?? null,
+        };
+      }
+    }
+    throw err;
+  }
 
   // Dispara automações com trigger "contact_created" (fire-and-forget,
   // não bloqueia a resposta ao webhook da Meta, que tem janela curta
@@ -1435,17 +1483,21 @@ async function processStatusUpdate(status: Record<string, unknown>) {
           where: { id: msg.id },
           data: {
             sendStatus: s,
-            ...(isFailure ? { sendError } : {}),
+            ...(isFailure
+              ? { sendError }
+              : // Entrega/leitura posteriores limpam erro stale (ex.: sweeper
+                // marcou timeout e a Meta confirmou delivered depois).
+                s === "delivered" || s === "read"
+                ? { sendError: null }
+                : {}),
           },
         });
 
         if (isFailure) {
-          await prisma.conversation
-            .update({
-              where: { id: msg.conversationId },
-              data: { hasError: true },
-            })
-            .catch(() => {});
+          const { markConversationHasError } = await import(
+            "@/services/conversation-error-flag"
+          );
+          await markConversationHasError(msg.conversationId);
           log.warn(
             `Mensagem ${wamid} falhou no envio: code=${errorInfo?.code ?? "?"} title="${errorInfo?.title ?? ""}" details="${errorInfo?.details ?? ""}" href=${errorInfo?.href ?? "-"}`,
           );
@@ -1495,6 +1547,25 @@ async function processStatusUpdate(status: Record<string, unknown>) {
               channel: "WhatsApp",
             });
           })();
+        } else if (s === "delivered" || s === "read") {
+          // Se não sobrou mensagem failed nesta conversa, tira da fila Erro
+          // (caso clássico: sweeper marcou timeout e a Meta entregou depois).
+          const stillFailed = await prisma.message
+            .count({
+              where: {
+                conversationId: msg.conversationId,
+                sendStatus: "failed",
+              },
+            })
+            .catch(() => 1);
+          if (stillFailed === 0) {
+            await prisma.conversation
+              .update({
+                where: { id: msg.conversationId },
+                data: { hasError: false },
+              })
+              .catch(() => {});
+          }
         }
 
         // O GET /messages expõe id = externalId ?? id (id da bolha no
@@ -1988,6 +2059,47 @@ async function executePostBody(
     return NextResponse.json({ status: "ignored" });
   }
 
+  // Offload: API só audita + enfileira; o worker-meta-webhook executa o
+  // loop pesado. Sem isso, status de campanha (2-4 por mensagem) processam
+  // síncrono no processo do inbox e derrubam GET /api/conversations.
+  if (META_WEBHOOK_ASYNC && metaWebhookEventId) {
+    const organizationId =
+      scope?.organizationId ??
+      (await prismaBase.metaWebhookEvent
+        .findUnique({ where: { id: metaWebhookEventId }, select: { organizationId: true } })
+        .then((e) => e?.organizationId ?? null)
+        .catch(() => null));
+    if (organizationId) {
+      const queued = await enqueueMetaWebhookEvent({
+        metaWebhookEventId,
+        organizationId,
+      }).catch(() => null);
+      if (queued) {
+        return NextResponse.json({ status: "accepted" });
+      }
+      log.warn(
+        "enqueue meta-webhook falhou (Redis?) — processando síncrono (fail-open)",
+      );
+    } else {
+      log.warn(
+        "MetaWebhookEvent sem organizationId — processando síncrono (fail-open)",
+      );
+    }
+  }
+
+  return processMetaWebhookPayload(body, { metaWebhookEventId });
+}
+
+/**
+ * Loop de processamento do payload Meta (statuses + mensagens + calls).
+ * Extraído de `executePostBody` para reuso pelo `worker-meta-webhook`.
+ * Deve rodar dentro de `withSystemContext(organizationId)`.
+ */
+export async function processMetaWebhookPayload(
+  body: Record<string, unknown>,
+  opts: { metaWebhookEventId: string | null },
+): Promise<Response> {
+  const { metaWebhookEventId } = opts;
   const entries = arr(body.entry);
 
   for (const entry of entries) {
@@ -2490,16 +2602,21 @@ async function executePostBody(
                   lastInboundAt: parsed.timestamp ?? new Date(),
                   lastMessageDirection: "in",
                   hasAgentReply: false,
+                  // Cliente respondeu → sai da fila Erro (fase adequada).
                   hasError: false,
                 },
               });
             } catch {
+              // Fallback ainda limpa Erro + direção — senão race com
+              // webhook `failed` deixa a conversa presa em Erro.
               await prisma.conversation.update({
                 where: { id: conversation.id },
                 data: {
                   updatedAt: new Date(),
                   unreadCount: { increment: 1 },
                   lastInboundAt: parsed.timestamp ?? new Date(),
+                  lastMessageDirection: "in",
+                  hasError: false,
                 },
               }).catch(() => {});
             }
@@ -2543,7 +2660,9 @@ async function executePostBody(
 
             let salesbotHandled = false;
             try {
-              const salesbotResult = await processSalesbotMessage(contact.id, parsed.text);
+              const salesbotResult = await processSalesbotMessage(contact.id, parsed.text, {
+                interactiveId: parsed.interactiveButtonId,
+              });
               salesbotHandled = Boolean(salesbotResult?.handled);
             } catch (err) {
               log.error("Falha no salesbot:", err);
@@ -2600,6 +2719,37 @@ async function executePostBody(
   }
 
   return NextResponse.json({ status: "ok" });
+}
+
+/**
+ * Reprocessa um MetaWebhookEvent persistido (usado pelo worker-meta-webhook).
+ * Carrega o `rawBody`, resolve o tenant e executa o loop de processamento
+ * dentro de `withSystemContext`. Idempotente: se já `processed`, no-op.
+ */
+export async function processStoredMetaWebhookEvent(
+  metaWebhookEventId: string,
+): Promise<void> {
+  const event = await prismaBase.metaWebhookEvent.findUnique({
+    where: { id: metaWebhookEventId },
+    select: { id: true, organizationId: true, rawBody: true, processed: true },
+  });
+  if (!event) {
+    throw new Error(`MetaWebhookEvent ${metaWebhookEventId} não encontrado`);
+  }
+  if (event.processed) {
+    log.debug(`MetaWebhookEvent ${metaWebhookEventId} já processado — skip`);
+    return;
+  }
+  if (!event.organizationId) {
+    await markWebhookEventProcessed(metaWebhookEventId, "no_organization");
+    return;
+  }
+  await withSystemContext(event.organizationId, async () => {
+    await processMetaWebhookPayload(
+      event.rawBody as Record<string, unknown>,
+      { metaWebhookEventId },
+    );
+  });
 }
 
 // ─── Auditoria do webhook Meta ────────────────────────────────

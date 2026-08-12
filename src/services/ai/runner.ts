@@ -32,7 +32,15 @@ import {
   type QualificationQuestion,
 } from "@/lib/ai-agents/piloting";
 import { DEFAULT_CHAT_MODEL, generateWithTools } from "@/services/ai/provider";
-import { ACADEMIC_ATENDIMENTO_RULES } from "@/lib/ai-agents/academic-atendimento-prompt";
+import {
+  ACADEMIC_ATENDIMENTO_RULES,
+  ACADEMIC_MEDIA_CAPABILITY_RULES,
+  formatCanonicalPortalAccessHint,
+} from "@/lib/ai-agents/academic-atendimento-prompt";
+import {
+  formatMessageModelsBlock,
+  retrieveRelevantMessageModels,
+} from "@/services/ai/message-models-retrieval";
 import {
   formatRetrievalBlock,
   retrieveRelevantChunks,
@@ -172,17 +180,48 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
     const outputStyle = normalizeOutputStyle(agent.outputStyle);
 
     const isAcademicAttendance = agent.archetype === "ATENDIMENTO";
+    // Modelos internos do CRM (tela Internos) — só ATENDIMENTO; denylist
+    // de retenção fica em message-models-retrieval.
+    const messageModelsBlock = isAcademicAttendance
+      ? formatMessageModelsBlock(
+          await retrieveRelevantMessageModels(args.userMessage, 3).catch(
+            (err) => {
+              console.warn(
+                `[ai] modelos internos RAG falhou, seguindo sem: ${err}`,
+              );
+              return [];
+            },
+          ),
+        )
+      : "";
+    const portalAccessHint = isAcademicAttendance
+      ? formatCanonicalPortalAccessHint(args.userMessage)
+      : "";
+    const retrievalWithModels = [
+      retrievalBlock,
+      messageModelsBlock,
+      portalAccessHint,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
     const runtimeTools = isAcademicAttendance
       ? Array.from(new Set([...agent.enabledTools, ...ACADEMIC_RUNTIME_TOOLS]))
       : agent.enabledTools;
     const runtimeOverride = isAcademicAttendance
-      ? agent.systemPromptOverride?.includes(
-          "## DISTRIBUIÇÃO POR DEPARTAMENTO",
-        )
-        ? agent.systemPromptOverride
-        : [agent.systemPromptOverride, ACADEMIC_ATENDIMENTO_RULES]
-            .filter(Boolean)
-            .join("\n\n")
+      ? [
+          agent.systemPromptOverride?.includes(
+            "## DISTRIBUIÇÃO POR DEPARTAMENTO",
+          )
+            ? agent.systemPromptOverride
+            : [agent.systemPromptOverride, ACADEMIC_ATENDIMENTO_RULES]
+                .filter(Boolean)
+                .join("\n\n"),
+          // Sempre: override no banco pode estar velho sem a regra de mídia.
+          ACADEMIC_MEDIA_CAPABILITY_RULES,
+        ]
+          .filter(Boolean)
+          .join("\n\n")
       : agent.systemPromptOverride;
 
     const systemPrompt = renderSystemPrompt({
@@ -195,7 +234,7 @@ export async function runAgent(args: RunArgs): Promise<RunResult> {
       autonomyMode: agent.autonomyMode,
       contact,
       deal,
-      retrievalBlock,
+      retrievalBlock: retrievalWithModels,
       qualificationQuestions,
       outputStyle,
     });
@@ -434,7 +473,13 @@ function renderSystemPrompt(args: RenderArgs): string {
       "- Use no máximo 1–2 emojis discretos na mensagem inteira, e só se combinar com o tom.",
     );
     lines.push(
-      "- Prefira 1 a 4 frases curtas, e termine sempre com UMA única pergunta curta que faça a conversa avançar.",
+      "- Prefira 1 a 4 frases curtas. Pode terminar com UMA pergunta curta **só se** ainda faltar um dado para ajudar.",
+    );
+    lines.push(
+      "- Se o aluno já pediu o passo a passo/site/link ou disse sim/pode ser/envie: ENTREGUE a orientação (com link das refs se houver). NÃO termine de novo perguntando se ele quer as instruções.",
+    );
+    lines.push(
+      "- PROIBIDO prometer ou fingir envio de vídeo/arquivo (ex.: 'vou te enviar o vídeo', '[Envio do vídeo]'). Sem URL nas refs, só texto; com URL, cole o link.",
     );
   }
 

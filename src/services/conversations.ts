@@ -262,6 +262,16 @@ function noCountableReplyWhere(
     : { hasHumanReply: false };
 }
 
+/**
+ * Contexto de automação ainda "vivo" no contato: RUNNING (executando) ou
+ * PAUSED (aguardando reply/botão — típico pós-template de campanha).
+ * Entrada só excluía RUNNING; PAUSED sem dono caía em Entrada e poluía a
+ * fila dos consultores após disparos AUTOMATION.
+ */
+const ACTIVE_AUTOMATION_CTX: Prisma.EnumAutomationCtxStatusFilter = {
+  in: ["RUNNING", "PAUSED"],
+};
+
 function tabToWhere(
   tab: InboxCategoryTab,
   countAgentReply = false,
@@ -282,9 +292,14 @@ function tabToWhere(
             ...noCountableReplyWhere(countAgentReply),
             OR: [
               {
+                // Sem inbound = só disparo/órfão — não é Entrada (aparece
+                // quando o aluno responder e lastInboundAt for setado).
                 assignedToId: null,
+                lastInboundAt: { not: null },
                 contact: {
-                  automationContexts: { none: { status: "RUNNING" } },
+                  automationContexts: {
+                    none: { status: ACTIVE_AUTOMATION_CTX },
+                  },
                 },
               },
               { assignedTo: { is: { type: "HUMAN" } } },
@@ -318,15 +333,18 @@ function tabToWhere(
         hasError: false,
       };
     case "automacao":
-      // Robô ativo sem dono humano, OU assignee IA. Quem já tem consultor
-      // humano vai para Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
+      // Robô ativo (RUNNING ou PAUSED aguardando cliente) sem dono humano,
+      // OU assignee IA. Quem já tem consultor humano vai para
+      // Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
       return {
         status: "OPEN",
         OR: [
           {
             assignedToId: null,
             contact: {
-              automationContexts: { some: { status: "RUNNING" } },
+              automationContexts: {
+                some: { status: ACTIVE_AUTOMATION_CTX },
+              },
             },
           },
           { assignedTo: { is: { type: "AI" } } },
@@ -335,7 +353,10 @@ function tabToWhere(
     case "finalizados":
       return { status: "RESOLVED" };
     case "erro":
-      return { hasError: true };
+      // Só tickets ABERTOS com falha de envio/webhook. RESOLVED com
+      // hasError sticky (ex.: timeout do sweeper depois entregue) poluía
+      // a fila — 1.2k+ Encerrada em Erro na Cruzeiro (ago/26).
+      return { status: "OPEN", hasError: true };
   }
 }
 
@@ -350,18 +371,34 @@ export async function buildConversationSearchWhere(
   const q = search?.trim() ?? "";
   if (q.length === 0) return null;
 
+  // Agrupa predicados de `contact` / `assignedTo` sob UM join cada.
+  // Vários `{ contact: { campo } }` no OR faziam o Prisma emitir 4–8
+  // LEFT JOINs no mesmo contacts (mesmo contactId) — COUNT/listagem da
+  // inbox ~300–900ms mean no pg_stat (ago/26). Semanticamente idêntico.
   const or: Prisma.ConversationWhereInput[] = [
-    { contact: { name: { contains: q, mode: "insensitive" } } },
-    { contact: { phone: { contains: q, mode: "insensitive" } } },
-    { contact: { email: { contains: q, mode: "insensitive" } } },
-    { contact: { whatsappUsername: { contains: q, mode: "insensitive" } } },
-    { contact: { source: { contains: q, mode: "insensitive" } } },
-    { contact: { company: { name: { contains: q, mode: "insensitive" } } } },
-    { contact: { customFields: { some: { value: { contains: q, mode: "insensitive" } } } } },
-    { contact: { deals: { some: { title: { contains: q, mode: "insensitive" } } } } },
+    {
+      contact: {
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { phone: { contains: q, mode: "insensitive" } },
+          { email: { contains: q, mode: "insensitive" } },
+          { whatsappUsername: { contains: q, mode: "insensitive" } },
+          { source: { contains: q, mode: "insensitive" } },
+          { company: { name: { contains: q, mode: "insensitive" } } },
+          { customFields: { some: { value: { contains: q, mode: "insensitive" } } } },
+          { deals: { some: { title: { contains: q, mode: "insensitive" } } } },
+        ],
+      },
+    },
     { inboxName: { contains: q, mode: "insensitive" } },
-    { assignedTo: { name: { contains: q, mode: "insensitive" } } },
-    { assignedTo: { email: { contains: q, mode: "insensitive" } } },
+    {
+      assignedTo: {
+        OR: [
+          { name: { contains: q, mode: "insensitive" } },
+          { email: { contains: q, mode: "insensitive" } },
+        ],
+      },
+    },
   ];
   // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
   // "+55 11 94501-0493". Mesma regra de deals/contatos/kanban.
@@ -1128,7 +1165,14 @@ export async function updateConversationStatusInDb(
 
   const updated = await prisma.conversation.update({
     where: { id },
-    data: { status, ...closedAtPatch, ...tabulationPatch, ...clearPatch },
+    data: {
+      status,
+      ...closedAtPatch,
+      ...tabulationPatch,
+      ...clearPatch,
+      // Encerrar remove da fila Erro — hasError sticky não é mais acionável.
+      ...(status === "RESOLVED" ? { hasError: false } : {}),
+    },
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
 

@@ -1413,7 +1413,11 @@ model Deal {
   dealRole       DealRole     @default(COMMERCIAL)
   expectedClose  DateTime?
   lostReason     String?
-  position       Int          @default(0)
+  /// Ordem do card no estágio. Float (indexação fracionária): mover um card
+  /// grava o ponto médio entre os vizinhos — 1 UPDATE na linha movida, sem
+  /// reescrever o estágio inteiro (o shift `position+1` custava ~900ms por
+  /// move em estágios grandes e era top-3 de CPU no banco).
+  position       Float        @default(0)
 
   contactId String?
   contact   Contact? @relation(fields: [contactId], references: [id])
@@ -2999,6 +3003,9 @@ model MetaWebhookEvent {
   @@index([organizationId, receivedAt(sort: Desc)])
   @@index([waMessageId])
   @@index([phoneNumberId, receivedAt(sort: Desc)])
+  /// Recovery de backlog do worker-meta-webhook: eventos não processados
+  /// (processed=false) em ordem de chegada.
+  @@index([processed, receivedAt])
   @@map("meta_webhook_events")
 }
 
@@ -3955,8 +3962,9 @@ model Campaign {
   automationId String?
   automation   Automation? @relation(fields: [automationId], references: [id], onDelete: SetNull)
 
-  /// Msgs por segundo (padrão 80 para Meta, 10 para Baileys)
-  sendRate    Int       @default(80)
+  /// Msgs por segundo. Cap server-side: CAMPAIGN_SEND_RATE_MAX (default 30).
+  /// Default de criação: CAMPAIGN_SEND_RATE_DEFAULT (default 20).
+  sendRate    Int       @default(20)
   scheduledAt DateTime?
   startedAt   DateTime?
   completedAt DateTime?

@@ -85,6 +85,12 @@ export async function sweepStaleOutbound(
       isPrivate: false,
     },
     select: { id: true, conversationId: true, createdAt: true, organizationId: true },
+    // Ordenar por createdAt (e não pelo default id) permite ao planner usar
+    // o índice parcial messages_stale_outbound_idx (createdAt WHERE
+    // direction='out' AND sendStatus='sent') para filtro+ordenação. Com
+    // ORDER BY id o planner preferia varrer a PK e filtrar ~500k linhas
+    // por chamada (~470ms) — top-2 em tempo total no pg_stat_statements.
+    orderBy: { createdAt: "asc" },
     take: BATCH_SIZE,
   });
 
@@ -101,12 +107,11 @@ export async function sweepStaleOutbound(
         },
       });
 
-      await prisma.conversation
-        .update({
-          where: { id: msg.conversationId },
-          data: { hasError: true },
-        })
-        .catch(() => {});
+      const { markConversationHasError } = await import(
+        "@/services/conversation-error-flag"
+      );
+      // Não recoloca em Erro se o cliente já respondeu depois do envio.
+      await markConversationHasError(msg.conversationId, prisma);
 
       try {
         sseBus.publish("message_status", {

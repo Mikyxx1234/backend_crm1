@@ -9,6 +9,13 @@ export const BAILEYS_CONTROL_QUEUE_NAME = "baileys-control" as const;
 export const CAMPAIGN_DISPATCH_QUEUE_NAME = "campaign-dispatch" as const;
 export const CAMPAIGN_SEND_QUEUE_NAME = "campaign-send" as const;
 /**
+ * Fila de processamento de webhooks Meta (WhatsApp Cloud API).
+ * A API valida assinatura + persiste `MetaWebhookEvent` + enfileira;
+ * o `worker-meta-webhook` consome e executa o handler pesado fora do
+ * processo HTTP do inbox (evita storm de status de campanha na API).
+ */
+export const META_WEBHOOK_QUEUE_NAME = "meta-webhook-events" as const;
+/**
  * Fila de operações em massa sobre Deals (bulk update de custom fields,
  * bulk move de stage). Foi nomeada `leads-bulk` (não `deals-bulk`) por
  * convenção de produto — no falar do usuário do CRM "lead" e "deal" se
@@ -91,6 +98,13 @@ export type CampaignSendPayload = {
   contactId: string;
   contactPhone: string;
   contactBsuid?: string;
+};
+
+export type MetaWebhookJobPayload = {
+  /** ID do registro MetaWebhookEvent (fonte da verdade do payload). */
+  metaWebhookEventId: string;
+  /** Tenant — evita query extra no worker antes de withSystemContext. */
+  organizationId: string;
 };
 
 // ── Leads bulk payloads ──────────────────────────────────
@@ -239,6 +253,7 @@ const globalForQueue = globalThis as unknown as {
   campaignSendQueue?: Queue<CampaignSendPayload>;
   leadsBulkQueue?: Queue<LeadsBulkPayload>;
   importEtlQueue?: Queue<ContactImportPayload>;
+  metaWebhookQueue?: Queue<MetaWebhookJobPayload>;
 };
 
 function getQueueRedis(): IORedis | null {
@@ -269,18 +284,22 @@ export async function enqueueAutomationJob(payload: AutomationJobPayload) {
   if (workerMode === "external") {
     const queue = getQueue();
     if (!queue) {
-      console.warn(`[queue] AUTOMATION_WORKER_MODE=external mas Redis indisponível — fallback para execução direta`);
-      try {
-        await executeAutomationDirect(payload);
-      } catch (err) {
-        console.error("[queue] direct execution error (fallback):", err);
-      }
-      return null;
+      // Em modo external a API NÃO deve executar automações pesadas inline
+      // (evita sobrecarregar o processo HTTP). Falhar de forma controlada.
+      const err = new Error(
+        `[queue] AUTOMATION_WORKER_MODE=external mas Redis/fila indisponível — não executando inline (automationId=${payload.automationId})`,
+      );
+      console.error(err.message);
+      throw err;
     }
     console.info(`[queue] Enfileirando automação ${payload.automationId} no BullMQ`);
+    const attempts = readPositiveInt(process.env.AUTOMATION_MAX_ATTEMPTS, 3);
+    const backoffDelay = readPositiveInt(process.env.AUTOMATION_BACKOFF_DELAY, 3000);
     return queue.add(AUTOMATION_JOB_NAME, payload, {
       removeOnComplete: true,
       removeOnFail: false,
+      attempts,
+      backoff: { type: "exponential", delay: backoffDelay },
     });
   }
 
@@ -508,6 +527,45 @@ export async function enqueueImportEtl(
     ...overrides,
   };
   return queue.add(jobName, payload, opts);
+}
+
+// ── Meta webhook queue ───────────────────────────────────
+
+function getMetaWebhookQueue(): Queue<MetaWebhookJobPayload> | null {
+  const redis = getQueueRedis();
+  if (!redis) return null;
+  if (!globalForQueue.metaWebhookQueue) {
+    globalForQueue.metaWebhookQueue = new Queue<MetaWebhookJobPayload>(
+      META_WEBHOOK_QUEUE_NAME,
+      { connection: redis },
+    );
+  }
+  return globalForQueue.metaWebhookQueue;
+}
+
+/**
+ * Enfileira um MetaWebhookEvent para processamento assíncrono pelo
+ * `worker-meta-webhook`. `jobId = metaWebhookEventId` deduplica retries
+ * da Meta (mesmo evento não vira dois jobs).
+ *
+ * Retorna `null` se Redis indisponível — o caller decide o fallback
+ * (processar síncrono para não perder o evento).
+ */
+export async function enqueueMetaWebhookEvent(payload: MetaWebhookJobPayload) {
+  const queue = getMetaWebhookQueue();
+  if (!queue) {
+    console.warn("[queue] Redis indisponível — não é possível enfileirar meta-webhook");
+    return null;
+  }
+  const attempts = readPositiveInt(process.env.META_WEBHOOK_MAX_ATTEMPTS, 5);
+  const backoffDelay = readPositiveInt(process.env.META_WEBHOOK_BACKOFF_DELAY, 2000);
+  return queue.add("process", payload, {
+    jobId: payload.metaWebhookEventId,
+    removeOnComplete: true,
+    removeOnFail: false,
+    attempts,
+    backoff: { type: "exponential", delay: backoffDelay },
+  });
 }
 
 // ── Helpers privados ─────────────────────────────────────

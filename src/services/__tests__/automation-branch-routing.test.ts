@@ -14,7 +14,9 @@ import { describe, expect, it } from "vitest";
 import {
   hasExplicitEdges,
   linearFallbackStepId,
+  matchInteractiveOption,
   readStepRef,
+  shouldPersistDelay,
 } from "@/services/automation-context";
 
 /** Recorte fiel da automação "inicio - pipe" que expôs o bug. */
@@ -195,6 +197,71 @@ describe("roteamento de timeout — regressão INICIO-PIPE", () => {
   });
 });
 
+describe("delay persistido — incidente 11/ago/26 (worker travado por delay de 7d)", () => {
+  /**
+   * Reproduz a decisão de `processTimeout` para o step `delay`: a espera
+   * persistida (timeoutAt) expira e o fluxo segue a aresta `nextStepId`;
+   * o fallback linear só vale em fluxo legado (pré-canvas).
+   */
+  function resolveDelayTarget(
+    steps: { id: string; config: unknown }[],
+    currentStepId: string,
+  ): string | null {
+    const step = steps.find((s) => s.id === currentStepId);
+    return (
+      readStepRef(step?.config, "nextStepId") ??
+      linearFallbackStepId(steps, currentStepId)
+    );
+  }
+
+  it("delay curto roda inline; delay longo é persistido", () => {
+    // threshold default 30s (AUTOMATION_DELAY_INLINE_MAX_MS)
+    expect(shouldPersistDelay(5_000, 30_000)).toBe(false);
+    expect(shouldPersistDelay(30_000, 30_000)).toBe(false);
+    expect(shouldPersistDelay(60_000, 30_000)).toBe(true);
+    expect(shouldPersistDelay(604_800_000, 30_000)).toBe(true); // 7 dias
+    expect(shouldPersistDelay(10_000, 0)).toBe(true); // threshold 0 = sempre persiste
+  });
+
+  it("ao expirar, segue o nextStepId desenhado no canvas", () => {
+    const steps = [
+      {
+        id: "delay-7d",
+        config: { ms: 604_800_000, nextStepId: "tpl_prop_2", __hasExplicitEdges: true },
+      },
+      { id: "tpl_prop_2", config: { __hasExplicitEdges: true } },
+    ];
+    expect(resolveDelayTarget(steps, "delay-7d")).toBe("tpl_prop_2");
+  });
+
+  it("nextStepId __none__ (fim de ramo) encerra o fluxo", () => {
+    const steps = [
+      {
+        id: "delay",
+        config: { ms: 60_000, nextStepId: "__none__", __hasExplicitEdges: true },
+      },
+      { id: "outro", config: { __hasExplicitEdges: true } },
+    ];
+    expect(resolveDelayTarget(steps, "delay")).toBeNull();
+  });
+
+  it("delay sem aresta NÃO vaza pro próximo da array em canvas", () => {
+    const steps = [
+      { id: "delay", config: { ms: 60_000, __hasExplicitEdges: true } },
+      { id: "ramo-vizinho", config: { __hasExplicitEdges: true } },
+    ];
+    expect(resolveDelayTarget(steps, "delay")).toBeNull();
+  });
+
+  it("fluxo legado (sem __hasExplicitEdges) cai no próximo da array", () => {
+    const legacy = [
+      { id: "delay", config: { ms: 60_000 } },
+      { id: "proxima-msg", config: {} },
+    ];
+    expect(resolveDelayTarget(legacy, "delay")).toBe("proxima-msg");
+  });
+});
+
 describe("roteamento de botão — botão válido sem aresta conectada", () => {
   /**
    * Reproduz a decisão de `processIncomingMessage` quando o cliente
@@ -205,19 +272,15 @@ describe("roteamento de botão — botão válido sem aresta conectada", () => {
   function resolveButtonTarget(
     config: Record<string, unknown>,
     resposta: string,
+    interactiveId?: string | null,
   ): string | null {
-    const buttons = (config.buttons ?? []) as {
+    const buttons = ((config.buttons ?? config.rows) ?? []) as {
       title?: string;
       text?: string;
       id?: string;
       gotoStepId?: string;
     }[];
-    const normalized = resposta.trim().toLowerCase();
-    const matched = buttons.find((b) => {
-      const label = (b.title || b.text || "").trim().toLowerCase();
-      const btnId = (b.id || "").trim().toLowerCase();
-      return label === normalized || btnId === normalized;
-    });
+    const matched = matchInteractiveOption(buttons, resposta, interactiveId);
     const elseGoto = readStepRef(config, "elseGotoStepId");
     const defaultOut = readStepRef(config, "nextStepId");
     if (matched) {
@@ -278,5 +341,54 @@ describe("roteamento de botão — botão válido sem aresta conectada", () => {
       buttons: [{ title: "Órfão", gotoStepId: "" }],
     };
     expect(resolveButtonTarget(semDefault, "Órfão")).toBe("repetir-menu");
+  });
+
+  it("lista com título template casa pelo interactiveId (list_reply.id)", () => {
+    // Envio interpola {{contact.name}} → "João"; config cru não bate no título.
+    const lista = {
+      __hasExplicitEdges: true,
+      nextStepId: "__none__",
+      elseGotoStepId: "",
+      rows: [
+        {
+          id: "row-nome",
+          title: "{{contact.name}}",
+          gotoStepId: "proximo-passo",
+        },
+      ],
+    };
+    expect(resolveButtonTarget(lista, "João")).toBeNull();
+    expect(resolveButtonTarget(lista, "João", "row-nome")).toBe("proximo-passo");
+  });
+
+  it("lista com título template e id ausente casa pelo fallback row_N do executor", () => {
+    // Executor envia r.id || `row_${i}` — JSON salvo sem id ainda retoma o ramo.
+    const lista = {
+      __hasExplicitEdges: true,
+      nextStepId: "__none__",
+      elseGotoStepId: "",
+      rows: [
+        {
+          title: "{{contact.name}}",
+          gotoStepId: "tag-pos-lista",
+        },
+      ],
+    };
+    expect(resolveButtonTarget(lista, "Maria")).toBeNull();
+    expect(resolveButtonTarget(lista, "Maria", "row_0")).toBe("tag-pos-lista");
+  });
+});
+
+describe("matchInteractiveOption", () => {
+  it("casa título, id do config e fallback btn_N / row_N", () => {
+    const opts = [
+      { title: "Alpha", id: "a1", gotoStepId: "s1" },
+      { title: "{{contact.name}}", gotoStepId: "s2" },
+    ];
+    expect(matchInteractiveOption(opts, "Alpha")?.gotoStepId).toBe("s1");
+    expect(matchInteractiveOption(opts, "x", "a1")?.gotoStepId).toBe("s1");
+    expect(matchInteractiveOption(opts, "João", "row_1")?.gotoStepId).toBe("s2");
+    expect(matchInteractiveOption(opts, "João", "btn_1")?.gotoStepId).toBe("s2");
+    expect(matchInteractiveOption(opts, "João", "ROW_1")?.gotoStepId).toBe("s2");
   });
 });

@@ -937,23 +937,185 @@ export async function getContactById(id: string) {
 }
 
 /**
- * Retorna o próximo número sequencial de contato para a organização corrente.
- * Usado em conjunto com retry em P2002 para lidar com corridas concorrentes.
+ * Aloca o próximo `Contact.number` da org sob advisory lock **na mesma
+ * transaction** do INSERT. `MAX+1` sem lock colidia sob webhook/import
+ * concorrente (P2002 em `contacts_organization_id_number_key` — DNAWork
+ * ago/26). O lock é `xact` → liberado no commit/rollback da tx.
  */
-export async function nextContactNumber(): Promise<number> {
-  const r = await prisma.contact.aggregate({ _max: { number: true } });
-  return (r._max.number ?? 0) + 1;
+export async function allocateNextContactNumber(
+  tx: {
+    $executeRaw: typeof prisma.$executeRaw;
+    $queryRaw: typeof prisma.$queryRaw;
+  },
+  orgId: string,
+): Promise<number> {
+  await tx.$executeRaw`
+    SELECT pg_advisory_xact_lock(hashtextextended(${orgId + ":contact_number"}, 0))
+  `;
+  const rows = await tx.$queryRaw<Array<{ next: bigint | number | string }>>`
+    SELECT COALESCE(MAX(number), 0) + 1 AS next
+    FROM contacts
+    WHERE "organizationId" = ${orgId}
+  `;
+  return Number(rows[0]?.next ?? 1);
 }
 
-const CONTACT_NUMBER_MAX_RETRIES = 5;
+/**
+ * Compat: retorna o próximo número (com lock numa tx curta). Preferir
+ * `insertContactWithNextNumber` / `createContact` para allocate+INSERT
+ * na mesma transaction — senão ainda há janela entre return e create.
+ */
+export async function nextContactNumber(): Promise<number> {
+  const orgId = getOrgIdOrThrow();
+  return prisma.$transaction(async (tx) => allocateNextContactNumber(tx, orgId));
+}
 
-function isPrismaUniqueViolation(err: unknown): boolean {
+const CONTACT_NUMBER_MAX_RETRIES = 8;
+
+function prismaUniqueMetaTarget(err: unknown): string {
+  if (!err || typeof err !== "object") return "";
+  const e = err as {
+    code?: string;
+    message?: string;
+    meta?: { target?: string[] | string };
+  };
+  if (e.code !== "P2002") return "";
+  const t = e.meta?.target;
+  if (Array.isArray(t)) return t.map(String).join(",");
+  if (typeof t === "string") return t;
+  return typeof e.message === "string" ? e.message : "";
+}
+
+export function isPrismaUniqueViolation(err: unknown): boolean {
   return (
     typeof err === "object" &&
     err !== null &&
     "code" in err &&
     (err as { code: string }).code === "P2002"
   );
+}
+
+/** P2002 no unique (organizationId, number) — vale retry com novo número. */
+export function isContactNumberUniqueViolation(err: unknown): boolean {
+  if (!isPrismaUniqueViolation(err)) return false;
+  const t = prismaUniqueMetaTarget(err);
+  return (
+    (/\bnumber\b/i.test(t) && /organizationId/i.test(t)) ||
+    /organization_id_number/i.test(t)
+  );
+}
+
+/** P2002 no unique de BSUID — não retry; reusar o contato existente. */
+export function isContactBsuidUniqueViolation(err: unknown): boolean {
+  if (!isPrismaUniqueViolation(err)) return false;
+  const t = prismaUniqueMetaTarget(err);
+  return /whatsapp_bsuid|whatsappBsuid/i.test(t);
+}
+
+/**
+ * INSERT de contato alocando `number` sob advisory lock na mesma tx.
+ * Retenta só colisão de número (com jitter). Outros P2002 (bsuid/phone/…)
+ * sobem pro caller tratar (find + reusar).
+ */
+export async function insertContactWithNextNumber<T extends Prisma.ContactSelect>(
+  fields: Omit<Prisma.ContactUncheckedCreateInput, "number" | "organizationId"> & {
+    organizationId?: string;
+  },
+  select: T,
+): Promise<Prisma.ContactGetPayload<{ select: T }>> {
+  const orgId = getOrgIdOrThrow();
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < CONTACT_NUMBER_MAX_RETRIES; attempt++) {
+    try {
+      return await prisma.$transaction(async (tx) => {
+        const number = await allocateNextContactNumber(tx, orgId);
+        return tx.contact.create({
+          data: withOrgFromCtx({
+            ...fields,
+            number,
+          }) as Prisma.ContactUncheckedCreateInput,
+          select,
+        });
+      });
+    } catch (err) {
+      if (isContactNumberUniqueViolation(err)) {
+        lastErr = err;
+        const delayMs = 5 + Math.floor(Math.random() * 15 * (attempt + 1));
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw (
+    lastErr ??
+    new Error(
+      `insertContactWithNextNumber: max ${CONTACT_NUMBER_MAX_RETRIES} retries exceeded`,
+    )
+  );
+}
+
+export async function createContact(data: CreateContactInput) {
+  const normalizedPhone = normalizeContactPhoneInput(data.phone);
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < CONTACT_NUMBER_MAX_RETRIES; attempt++) {
+    try {
+      const orgId = getOrgIdOrThrow();
+      const created = await prisma.$transaction(async (tx) => {
+        const number = await allocateNextContactNumber(tx, orgId);
+        return tx.contact.create({
+          data: withOrgFromCtx({
+            ...(data.id ? { id: data.id } : {}),
+            number,
+            name: sanitizeContactName(data.name) || data.name,
+            externalId: data.externalId === undefined ? undefined : data.externalId,
+            email: data.email ?? undefined,
+            phone: normalizedPhone ?? undefined,
+            avatarUrl: data.avatarUrl ?? undefined,
+            leadScore: data.leadScore ?? undefined,
+            lifecycleStage: data.lifecycleStage ?? undefined,
+            source: data.source ?? undefined,
+            companyId: data.companyId ?? undefined,
+            assignedToId: data.assignedToId ?? undefined,
+          }),
+          include: {
+            company: { select: { id: true, name: true, domain: true } },
+            tags: { include: { tag: { select: { id: true, name: true, color: true } } } },
+            assignedTo: { select: assignedToSelect },
+          },
+        });
+      });
+
+      void logEvent({
+        type: "CONTACT_CREATED",
+        entityType: "CONTACT",
+        entityId: created.id,
+        entityLabel: created.name ?? created.phone ?? created.email ?? null,
+        contactId: created.id,
+        meta: {
+          email: created.email,
+          phone: created.phone,
+          source: data.source ?? null,
+          createdAt: created.createdAt.toISOString(),
+          name: created.name ?? created.phone ?? created.email,
+        },
+      });
+
+      return created;
+    } catch (err) {
+      if (
+        isContactNumberUniqueViolation(err) &&
+        attempt < CONTACT_NUMBER_MAX_RETRIES - 1
+      ) {
+        lastErr = err;
+        const delayMs = 5 + Math.floor(Math.random() * 15 * (attempt + 1));
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 /**
@@ -974,62 +1136,6 @@ export async function findContactIdByPhone(
     orderBy: { createdAt: "asc" },
   });
   return c?.id ?? null;
-}
-
-export async function createContact(data: CreateContactInput) {
-  const normalizedPhone = normalizeContactPhoneInput(data.phone);
-  let lastErr: unknown;
-  for (let attempt = 0; attempt < CONTACT_NUMBER_MAX_RETRIES; attempt++) {
-    const number = await nextContactNumber();
-    try {
-      const created = await prisma.contact.create({
-        data: withOrgFromCtx({
-          ...(data.id ? { id: data.id } : {}),
-          number,
-          // Contato nunca deve herdar prefixo de negócio ("Negócio Marcelo…").
-          name: sanitizeContactName(data.name) || data.name,
-          externalId: data.externalId === undefined ? undefined : data.externalId,
-          email: data.email ?? undefined,
-          phone: normalizedPhone ?? undefined,
-          avatarUrl: data.avatarUrl ?? undefined,
-          leadScore: data.leadScore ?? undefined,
-          lifecycleStage: data.lifecycleStage ?? undefined,
-          source: data.source ?? undefined,
-          companyId: data.companyId ?? undefined,
-          assignedToId: data.assignedToId ?? undefined,
-        }),
-        include: {
-          company: { select: { id: true, name: true, domain: true } },
-          tags: { include: { tag: { select: { id: true, name: true, color: true } } } },
-          assignedTo: { select: assignedToSelect },
-        },
-      });
-
-      void logEvent({
-        type: "CONTACT_CREATED",
-        entityType: "CONTACT",
-        entityId: created.id,
-        entityLabel: created.name ?? created.phone ?? created.email ?? null,
-        contactId: created.id,
-        meta: {
-          email: created.email,
-          phone: created.phone,
-          source: data.source ?? null,
-          createdAt: created.createdAt.toISOString(),
-          name: created.name ?? created.phone ?? created.email,
-        },
-      });
-
-      return created;
-    } catch (err) {
-      if (isPrismaUniqueViolation(err) && attempt < CONTACT_NUMBER_MAX_RETRIES - 1) {
-        lastErr = err;
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastErr;
 }
 
 export async function updateContact(id: string, data: UpdateContactInput) {

@@ -4,7 +4,8 @@
  * Regras:
  *  - Só no funil acadêmico (nome ~ACADEM*, pipelineId do agente, ou
  *    org setting `ai.firstAttendancePipelineIds`).
- *  - Funil Acolhimento (nome ~acolh*) → nunca assume / limpa IA.
+ *  - Exceção (janela inaugural): tags calouros1008_1..6 → IA assume
+ *    independente da etapa/funil.
  *  - Sem responsável humano → IA assume conversa + contato + deals OPEN.
  *  - Com responsável humano já atribuído → devolve o chat a esse humano
  *    (não “rouba” nem deixa na IA).
@@ -13,6 +14,10 @@
 
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
+import {
+  contactHasCalouros1008Tag,
+  isInauguralLinkWindow,
+} from "@/services/ai/inaugural-class-link";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 
 function logAi(event: string, payload: Record<string, unknown>) {
@@ -103,28 +108,6 @@ async function resolveConfiguredPipelineIds(
 }
 
 /**
- * Aluno no funil Acolhimento (nome do pipeline contém "acolh").
- * Esses leads ficam fora da IA — campanha com botão / fluxo humano.
- */
-export async function isAcolhimentoFunnelContact(
-  contactId: string,
-): Promise<boolean> {
-  const openDeals = await prisma.deal.findMany({
-    where: { contactId, status: "OPEN" },
-    select: {
-      stage: {
-        select: { pipeline: { select: { name: true } } },
-      },
-    },
-  });
-  for (const d of openDeals) {
-    const name = d.stage?.pipeline?.name ?? "";
-    if (/acolh/i.test(name)) return true;
-  }
-  return false;
-}
-
-/**
  * Contato está no pipe acadêmico se tem deal OPEN cujo pipeline:
  *  - está na lista configurada (agente / org setting), OU
  *  - nome contém "academ" (ex.: ACADEMICO).
@@ -144,6 +127,7 @@ async function isAcademicPipeContact(
       id: true,
       stage: {
         select: {
+          name: true,
           pipeline: { select: { id: true, name: true } },
         },
       },
@@ -262,24 +246,32 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
-  // Automação pausada aguardando resposta do contato (ex.: template de
-  // campanha com botões): a mensagem inbound é a RESPOSTA ESPERADA pelo
-  // fluxo. Se a IA assumir a conversa aqui, o guarda `suppressAutomation`
-  // do salesbot cancela o contexto e o clique nunca casa com o botão —
-  // a automação morre e a IA responde fora de contexto. (Incidente
-  // 10/ago/26 — campanha "calouros_parte1": contatos interceptados.)
+  // Automação pausada aguardando resposta do contato (ex.: template com
+  // botões): em geral a IA NÃO assume, pra não matar o salesbot.
+  // Exceção na janela da aula inaugural: tags calouros1008_* — a IA
+  // assume e envia o link (campanha de botão que não entrega o YouTube).
   try {
     const { getContactActiveContexts } = await import(
       "@/services/automation-context"
     );
     const activeCtxs = await getContactActiveContexts(args.contactId);
     if (activeCtxs.length > 0) {
-      logAi("first_attendance_skip_automation_waiting", {
+      const calourosPriority =
+        isInauguralLinkWindow() &&
+        (await contactHasCalouros1008Tag(args.contactId));
+      if (!calourosPriority) {
+        logAi("first_attendance_skip_automation_waiting", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          contexts: activeCtxs.length,
+        });
+        return null;
+      }
+      logAi("first_attendance_bypass_automation_calouros1008", {
         conversationId: args.conversationId,
         contactId: args.contactId,
         contexts: activeCtxs.length,
       });
-      return null;
     }
   } catch (e) {
     console.error("[ai] first_attendance automation-context check failed — skipping", e);
@@ -311,36 +303,6 @@ export async function tryAssignFirstAttendanceAi(args: {
 
   const contactId = conv.contactId ?? args.contactId;
   if (!contactId) return null;
-
-  // Funil Acolhimento: não assume IA (disparo com botão / fluxo humano).
-  if (await isAcolhimentoFunnelContact(contactId)) {
-    if (conv.assignedToId && conv.assignedTo?.type === "AI") {
-      await prisma.$transaction(async (tx) => {
-        await tx.conversation.update({
-          where: { id: args.conversationId },
-          data: { assignedToId: null },
-        });
-        await tx.contact.update({
-          where: { id: contactId },
-          data: { assignedToId: null },
-        });
-        await tx.deal.updateMany({
-          where: { contactId, status: "OPEN" },
-          data: { ownerId: null },
-        });
-      });
-      logAi("first_attendance_clear_ai_acolhimento_funnel", {
-        conversationId: args.conversationId,
-        contactId,
-      });
-    } else {
-      logAi("first_attendance_skip_acolhimento_funnel", {
-        conversationId: args.conversationId,
-        contactId,
-      });
-    }
-    return null;
-  }
 
   // Já está na IA: verifica handoff/pending antes de confirmar.
   if (conv.assignedToId && conv.assignedTo?.type === "AI") {
@@ -483,7 +445,9 @@ export async function tryAssignFirstAttendanceAi(args: {
   }
 
   const academic = await isAcademicPipeContact(contactId, agent.pipelineId);
-  if (!academic) {
+  const calourosPriority =
+    isInauguralLinkWindow() && (await contactHasCalouros1008Tag(contactId));
+  if (!academic && !calourosPriority) {
     // Fora do acadêmico: se havia humano no contato/deal, devolve.
     const humanOwner =
       (args.assignedToId
@@ -514,6 +478,12 @@ export async function tryAssignFirstAttendanceAi(args: {
       });
     }
     return null;
+  }
+  if (calourosPriority && !academic) {
+    logAi("first_attendance_calouros1008_any_stage", {
+      conversationId: args.conversationId,
+      contactId,
+    });
   }
 
   const aiUserId = agent.userId;

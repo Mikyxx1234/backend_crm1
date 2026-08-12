@@ -5,21 +5,208 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
-### 2026-08-10 — Agente IA não atende alunos no funil Acolhimento
+### 2026-08-11 — Step `delay` longo vira espera persistida (não `setTimeout`)
+
+**Modelo usado.** Cursor Kimi K3.
+
+**Problema.** O step `delay` rodava `setTimeout(ms)` inline no worker. Um
+delay de **7 dias** ("Follow-up de envio de vaga", dna_work) segurava 1 dos
+5 slots de concorrência do `worker-automations` por dias. Com 5 jobs assim,
+o processo ficava vivo mas incapaz de processar qualquer outra automação —
+**todas** pararam (ENTRADA sem receptivo, ~120 leads parados em horas).
+A espera também morria a cada restart/deploy.
+
+**Decisão.** Delay acima de `AUTOMATION_DELAY_INLINE_MAX_MS` (default 30s)
+**persiste** a espera: contexto RUNNING + `timeoutAt` (mesma infra de
+`wait_for_reply`), e o `sweepExpiredTimeouts` (30s) retoma no `nextStepId`.
+Delay curto (≤30s, ex.: "digitando…") segue inline.
+
+**Implementação.**
+- `automation-context.ts`: `shouldPersistDelay`/`DELAY_INLINE_MAX_MS`;
+  branch `delay` em `processTimeout` (expirar = seguir `nextStepId`);
+  `closeStrandedContext` preserva delay com `timeoutAt`.
+- `automation-executor.ts`: `case "delay"` usa `pauseAwaitingReply` quando
+  `shouldPersistDelay`.
+- `delay` NÃO entra em `PAUSING_STEP_TYPES` (mensagem do cliente não pode
+  avançar a espera) — tratado explicitamente nos 3 pontos.
+- Scripts `cleanup-stranded-contexts` / `diag-automation-zombies`: `delay`
+  adicionado à lista pausante (espera legítima, não zumbi).
+- Fix piggyback: `normalized` fora de escopo em `processIncomingMessage`
+  (erro TS pré-existente) → `messageContent`.
+
+**Alternativas descartadas.**
+- BullMQ delayed job: mais moving parts; a infra de timeout já existia.
+- `delay` em `PAUSING_STEP_TYPES`: faria mensagem do cliente avançar a
+  espera (errado).
+
+**Impacto.**
+- Delay longo não trava mais o worker e sobrevive a restart.
+- Durante a espera o contato aparece na aba "Automação" (contexto RUNNING) —
+  esperado; reentrada na mesma automação é bloqueada enquanto aguarda.
+- Teste: `automation-branch-routing.test.ts` (5 casos novos).
+
+---
+
+### 2026-08-11 — Contact.number atômico + reuso em P2002 de BSUID
+
+**Modelo usado.** Cursor Composer.
+
+**Problema.** `nextContactNumber` = MAX+1 sem lock → P2002 em
+`(organizationId, number)` sob webhook paralelo (DNAWork). Retry cego
+também falhava em P2002 de `whatsapp_bsuid`.
+
+**Decisão.** `pg_advisory_xact_lock` + MAX+1 + INSERT na **mesma**
+transaction (`insertContactWithNextNumber` / `createContact`). Em
+colisão de BSUID, `findFirst` e reusa o contato (não retenta número).
+
+**Arquivos.** `services/contacts.ts`; meta webhook handler/messaging;
+baileys message-handler.
+
+---
+
+### 2026-08-11 — Busca inbox/board: 1 JOIN em contacts (não N self-joins)
+
+**Modelo usado.** Cursor Composer.
+
+**Problema.** `buildConversationSearchWhere` e o OR de search em
+`kanban-filters` emitiam vários `{ contact: { campo } }` no mesmo OR —
+Prisma gera 1 LEFT JOIN por ramo → self-joins j0..jN no mesmo `contacts`.
+COUNT/listagem da inbox e board filtrado pagavam isso no pg_stat.
+
+**Decisão.** Agrupar predicados de contato sob `contact: { OR: [...] }`
+(e `assignedTo` idem). Já era o padrão em `deals.ts` (jul/26). Semântica
+igual; API pública inalterada. Coluna `search_text` desnormalizada fica
+como ADR (`docs/decisoes/search-text-denormalized.md`) — não neste PR
+(risco de backfill/triggers sob carga).
+
+**Arquivos.** `services/conversations.ts`; `services/kanban-filters.ts`.
+
+---
+
+### 2026-08-11 — Hard cap sendRate + backpressure no campaign-worker
+
+**Modelo usado.** Cursor Composer.
+
+**Problema.** Campanha com `sendRate=80` (msgs/s) + concurrency BullMQ 10
+saturava Postgres compartilhado (4 vCPU) e API; inbox/board 5–17s.
+
+**Decisão.** (1) Cap server-side em `CAMPAIGN_SEND_RATE_MAX` (default **30**
+msgs/s) com default de criação `CAMPAIGN_SEND_RATE_DEFAULT` (**20**);
+clamp na API/builder e no worker (campanhas antigas com 80 não disparam
+acima do cap). (2) Concurrency de envio via `CAMPAIGN_SEND_CONCURRENCY`
+(default **4**, antes 10). (3) Limiter BullMQ também teto pelo max de
+sendRate. Throttle Redis `campaign:meta:throttle:...` permanece.
+
+**Arquivos.** `lib/campaign-send-rate.ts`; worker; services campaigns /
+campaign-builder; schema zod; default Prisma.
+
+---
+
+### 2026-08-11 — Worker dedicado `worker-automation` para Salesbot/automações
 
 **Modelo usado.** Cursor Grok 4.5.
 
-**Decisão.** Se o contato tem deal OPEN cujo pipeline tem nome com
-`acolh` (ex.: Acolhimento), a IA **não assume** e **não responde**:
-- `first-attendance`: skip + limpa assignee IA se já estava na IA;
-- `maybeReplyAsAIAgent`: block `acolhimento_funnel` + limpa assignee IA.
+**Decisão.** Automações pesadas saem do processo da API. Em produção a API
+só chama `enqueueAutomationJob` (fila BullMQ `automation-jobs`); o consumo
+fica em `APP_MODE=worker-automation` → `node dist/workers/automation-worker.js`.
 
-**Contexto.** Operação vai disparar campanha com botão nesse funil;
-resposta da IA competiria com o fluxo do botão / humano.
+**Contexto.** Já existiam `automation-worker.ts` (sem tenant context),
+`automation-worker-inline.ts` (tenant-safe mas dead code) e a fila
+`automation-jobs`, mas sem build/Docker/`APP_MODE`. Default era execução
+inline na API. Fallback com Redis down em `AUTOMATION_WORKER_MODE=external`
+também rodava inline e sobrecarregava a API.
 
-**Alternativas descartadas.** Só prompt (LLM ainda poderia falar);
-filtrar só por departamento Acolhimento (aluno pode estar no funil
-sem dept setado).
+**Implementação.**
+- Worker canônico em `automation-worker.ts` (padrão leads/ETL + lookup
+  `organizationId` via `prismaBase` + `withSystemContext`).
+- Build em `build-workers.mjs`; branch no `docker-entrypoint.sh`.
+- Sem Redis em modo `external`: erro controlado (sem fallback inline).
+- `transfer_automation` passa a `enqueueAutomationJob` (não mais
+  `setImmediate(runAutomationInline)`).
+
+**Alternativas descartadas.**
+- Segunda fila / segundo executor — duplicaria o sistema já existente.
+- Rodar worker in-process na API — compete com HTTP e não isola falhas.
+
+**Impacto.** EasyPanel: novo serviço com a mesma imagem e
+`APP_MODE=worker-automation`; API com `AUTOMATION_WORKER_MODE=external`.
+
+---
+
+### 2026-08-10 — Retomada de Lista/botão com conversa já na IA
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Problema.** Gatilho manual envia Lista WhatsApp; contato clica; IA
+responde saudação e o fluxo não avança. A conversa já tinha `assignedToId`
+da IA; `processIncomingMessage` usava `suppressAutomation` e cancelava o
+contexto pausado antes do match.
+
+**Decisão.** Retomada só bloqueia com `humanAttending` (humano dono ou
+`hasHumanReply`). Assignee só IA não mata contexto pausado.
+`suppressAutomation` permanece nos triggers (não iniciar automação nova).
+Match de opção também aceita fallback `row_N`/`btn_N` como no executor.
+
+**Arquivos.** `services/automation-context.ts`; teste
+`automation-branch-routing.test.ts`.
+
+---
+
+### 2026-08-10 — Fila noturna: não cancelar `distribution_pending` quando a IA reassumiu
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Problema.** Fora do expediente o motor grava `NO_ELIGIBLE_RESPONSIBLE`,
+enfileira `distribution_pending` e a IA reassume o chat. No cron/drenagem,
+`cancelStalePendingOrphans` tratava “OPEN com qualquer assignee” como órfã
+e marcava a pendência `RESOLVED` (sem humano). Resultado: ~270 conversas
+abertas na Automação com promessa de atendimento e **0** PENDING vivos;
+343 pendências “falso-resolvidas” em 7 dias com a conversa ainda na IA.
+
+**Decisão.** Pendência continua ativa se a conversa está OPEN e
+`assignedTo` é null **ou** tipo `AI`. Só limpa se encerrada ou já com
+humano. Ops: reenfileirar presos + `processPendingDistributionQueue`.
+
+**Arquivos.** `services/distribution/pending.ts`
+(`cancelStalePendingOrphans`); script ops
+`scripts/ops-reenqueue-ai-overnight-handoffs.ts`.
+
+### 2026-08-10 — Aula inaugural: IA volta a atender funis + link YouTube (calouros1008)
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão (revisa o bloqueio de Acolhimento do mesmo dia).** A IA volta a
+atender normalmente em qualquer funil/etapa (removido o gate
+`isAcolhimentoFunnelContact` em first-attendance, inbox-handler,
+debounce e assign API). Na janela operacional (default 10–11/ago/2026 BRT,
+`INAUGURAL_LINK_DATES`):
+- se o aluno pedir o link / clicar “Clique para receber o link” / mencionar
+  problema na aula inaugural → a IA envia o YouTube oficial
+  (`INAUGURAL_CLASS_YOUTUBE_URL`) com mensagem empática (intercept antes do LLM);
+- **prioridade:** tags `calouros1008_1`…`_6` (case-insensitive) em contato
+  ou deal — qualquer etapa; first-attendance assume mesmo fora do pipe
+  acadêmico e mesmo com automação PAUSED aguardando botão.
+
+**Arquivos.** `inaugural-class-link.ts`; `first-attendance.ts`;
+`inbox-handler.ts`; `inbound-debounce.ts`; `actions/route.ts`; prompt.
+
+### 2026-08-10 — Agente IA não atende alunos no Acolhimento (funil OU etapa)
+**(REVERTIDA / revisada — ver entrada “Aula inaugural” acima.)**
+
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão (histórica).** Se o contato tem deal OPEN cujo **pipeline ou stage** tem
+`acolh` no nome (ex.: etapa `ACOLHIMENTO ACADÊMICO` em funil `ACADÊMICO`),
+a IA **não assume** e **não responde**:
+- `first-attendance`: skip + limpa assignee IA; exclui do pipe acadêmico
+  (antes `/academ/` casava em “ACOLHIMENTO ACADÊMICO”);
+- `scheduleAiReply` / `maybeReplyAsAIAgent`: block cedo;
+- `POST …/conversations/:id/actions` assign → 409 se destino for User AI.
+
+**Contexto.** Campanha com botão no Acolhimento; v1 só olhava o nome do
+funil e a IA continuava atendendo quando só a **etapa** tinha “acolh”.
+
+**Alternativas descartadas.** Só prompt; filtrar só por departamento.
 
 ### 2026-08-11 — Envio outbound bloqueia canal DISCONNECTED e template aceita `channelId`
 
@@ -56,27 +243,39 @@ banner de aviso quando o canal original não está na lista de CONNECTED —
 consegue redirecionar o envio manualmente por outro WhatsApp da mesma org.
 
 ### 2026-08-10 — Agente acadêmico: atender primeiro; distribuir só se justificado
+**(REVISADA em 2026-08-10 — ver entrada abaixo “honrar handoff da IA”.)**
 
 **Modelo usado.** Cursor Grok 4.5.
 
-**Decisão.** Handoff da IA acadêmica só conclui distribuição humana quando:
-1. o aluno **pede** atendente/humano/consultor, OU
-2. caso de **retenção** / course-shopping, OU
-3. **baixa confiança** (`[CONFIANCA:<0.4]`).
+**Decisão original (parcialmente revertida).** Handoff só concluía distribuição
+quando o texto do aluno justificava OU baixa confiança; caso contrário tools
+retornavam `deferred` e o inbox enviava a resposta sem redistribuir.
 
-Caso contrário (ex.: “início das aulas”), tools `transfer_to_human` /
-`execute_distribution` retornam `deferred` e o `inbox-handler` **envia a
-resposta da IA** em vez de redistribuir. Quando a distribuição é legítima,
-atribui humano (`Conversation.assignedToId` + `Deal.ownerId`, inclusive
-LOST) → dispara `lead_distributed` → automação de saudação.
+**Problema.** A IA prometia “vou te conectar” / chamava tool, o backend
+adiava, e o aluno ficava com a IA (ex.: Ca #107152 — AVA sem matrícula).
 
-**Contexto.** O LLM chamava transfer cedo; com humano atribuído o backend
-zerava `outbound` e a saudação humana “passava por cima” do atendimento.
-Deal PERDIDO mantinha owner antigo (Danubia) enquanto o chat ia pra Joyce.
+### 2026-08-10 — Agente acadêmico: honrar handoff da IA (sem adiar distribuição)
 
-**Arquivos.** `academic-department-routing.ts` (`isImmediateAcademicHandoffJustified`
-+ align owner), `tools.ts` (defer), `inbox-handler.ts` (gate),
-`academic-atendimento-prompt.ts` (regra 8).
+**Modelo usado.** Cursor Grok 4.5.
+
+**Decisão.** “Atender primeiro” = orientação de **quando** a IA deve
+continuar respondendo (dúvida que ela ainda resolve). **Não** é bloqueio
+de backend depois que ela já decidiu transferir.
+
+Distribuição humana **executa** quando:
+1. o aluno **pede** humano/consultor, OU
+2. retenção / course-shopping, OU
+3. **baixa confiança** (`[CONFIANCA:<0.4]`), OU
+4. a IA chama `transfer_to_human` / `execute_distribution`, OU
+5. a resposta da IA **promete** conexão (`textImpliesAcademicHandoff`).
+
+Removido o retorno `deferred` nas tools e o gate
+`handoff_deferred_answer_first` no `inbox-handler`.
+
+**Contexto.** Casos em que a IA dizia que ia distribuir e o aluno
+permanecia no Agente acadêmico.
+
+**Arquivos.** `tools.ts`, `inbox-handler.ts`, `academic-atendimento-prompt.ts`.
 
 **Alternativas descartadas.** Só reforçar prompt (já falhava); sticky owner
 sempre (bloqueava handoff legítimo para Atendimento).

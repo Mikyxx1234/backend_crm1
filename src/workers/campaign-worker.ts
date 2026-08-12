@@ -9,7 +9,10 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { sseBus } from "@/lib/sse-bus";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
-import { ensureWhatsAppConversationForContact } from "@/services/whatsapp-conversation";
+import {
+  ensureWhatsAppConversationForContact,
+  maybeResolveUnansweredOutboundTicket,
+} from "@/services/whatsapp-conversation";
 import {
   CAMPAIGN_DISPATCH_QUEUE_NAME,
   CAMPAIGN_SEND_QUEUE_NAME,
@@ -30,6 +33,11 @@ import {
   shouldRetryCampaignSendError,
   isWindowExpiredError,
 } from "@/services/campaign-builder/meta-compliance";
+import {
+  clampCampaignSendRate,
+  getCampaignSendConcurrency,
+  getCampaignSendRateMax,
+} from "@/lib/campaign-send-rate";
 
 const BATCH_SIZE = 500;
 const globalWorker = globalThis as unknown as { campaignThrottleRedis?: IORedis };
@@ -51,7 +59,8 @@ function getThrottleRedis(): IORedis {
 
 async function waitForMetaThrottle(phoneNumberId: string, sendRate: number) {
   const redis = getThrottleRedis();
-  const rate = Math.max(1, Math.min(80, sendRate));
+  // Defense-in-depth: clamp even if DB still has legacy sendRate=80.
+  const rate = clampCampaignSendRate(sendRate);
   const intervalMs = Math.max(1, Math.ceil(1000 / rate));
   const now = Date.now();
   const key = `campaign:meta:throttle:${phoneNumberId}`;
@@ -504,36 +513,25 @@ async function persistCampaignOutboundMessage(input: {
     }),
   });
 
-  // Modelo de ticket para campanhas: se a conversa foi CRIADA agora só pra
-  // registrar o disparo (contato não tinha conversa OPEN no momento), a
-  // fechamos imediatamente após gravar a mensagem. Assim o histórico do
-  // envio fica preservado, mas o inbox NÃO recebe uma "Entrada" fantasma
-  // — a conversa só aparecerá quando o cliente responder (o webhook Meta
-  // em `findOrCreateConversation` cria nova conversa OPEN para inbound
-  // sobre contato só com RESOLVED — comportamento já implementado).
+  // Modelo de ticket para campanhas: após gravar o disparo, fecha o ticket
+  // se o aluno ainda não respondeu (`lastInboundAt` null). Cobre tanto
+  // `ensured=created` quanto reuso de OPEN órfão (`already_ok` /
+  // `backfilled_channel`) — regressão 2026-08-11: campanha "teste 1108"
+  // reaproveitou ticket vazio e ficou em Entrada porque só `created`
+  // auto-resolvia.
   //
-  // Se `ensured.status === "already_ok"` (contato tinha atendimento em
-  // curso) NÃO fechamos — a mensagem entra no chat aberto normalmente.
-  // Incidente: campanha 2026-08-06 gerou 1660 conversas fantasma no inbox
-  // da Cruzeiro EaD porque toda conversa ensured=created ficava OPEN sem
-  // resposta do cliente (herdando ainda o `assignedToId` do contato).
-  const shouldAutoResolve = ensured.status === "created";
+  // Se o contato já tinha atendimento com inbound, NÃO fecha — a mensagem
+  // entra no chat aberto normalmente.
   await prisma.conversation
     .update({
       where: { id: conversationId },
       data: {
         updatedAt: new Date(),
         ...(await botOutboundReplyMark()),
-        ...(shouldAutoResolve
-          ? {
-              status: "RESOLVED" as const,
-              closedAt: new Date(),
-              assignedToId: null,
-            }
-          : {}),
       },
     })
     .catch(() => {});
+  await maybeResolveUnansweredOutboundTicket(conversationId).catch(() => {});
 
   sseBus.publish("new_message", {
     organizationId: getOrgIdOrNull(),
@@ -616,15 +614,20 @@ export function startCampaignWorkers() {
   const redisUrl = getRedisUrl();
   const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
 
-  // Rate limit do envio Meta — configurável por env para permitir afinar
-  // sem rebuild. Defaults preservam o comportamento histórico (80/s, que
-  // é o limite tier base da Meta Cloud API; clients com tier maior podem
-  // subir essa configuração).
-  const rateLimitMax = envPositiveInt("WHATSAPP_RATE_LIMIT_MAX", 80);
+  // Rate limit global do BullMQ (msgs / duration). Teto adicional além do
+  // throttle por phoneNumberId (`campaign:meta:throttle:...`). Capado por
+  // CAMPAIGN_SEND_RATE_MAX para não saturar PG/API mesmo se o tier Meta
+  // permitir mais. Ops pode subir WHATSAPP_RATE_LIMIT_MAX e
+  // CAMPAIGN_SEND_RATE_MAX juntos se a infra aguentar.
+  const rateLimitMax = Math.min(
+    envPositiveInt("WHATSAPP_RATE_LIMIT_MAX", 80),
+    getCampaignSendRateMax(),
+  );
   const rateLimitDuration = envPositiveInt(
     "WHATSAPP_RATE_LIMIT_DURATION",
     1000,
   );
+  const sendConcurrency = getCampaignSendConcurrency();
 
   /**
    * Workers BullMQ rodam fora de qualquer request handler — sem session
@@ -666,7 +669,7 @@ export function startCampaignWorkers() {
     },
     {
       connection: connection.duplicate(),
-      concurrency: 10,
+      concurrency: sendConcurrency,
       limiter: { max: rateLimitMax, duration: rateLimitDuration },
     },
   );
@@ -679,7 +682,9 @@ export function startCampaignWorkers() {
     console.error(`[campaign-send] Job ${job?.id} failed:`, err.message);
   });
 
-  console.info("[campaign-worker] Dispatch and send workers started");
+  console.info(
+    `[campaign-worker] Dispatch and send workers started (sendConcurrency=${sendConcurrency}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, sendRateMax=${getCampaignSendRateMax()})`,
+  );
 
   return { dispatchWorker, sendWorker };
 }

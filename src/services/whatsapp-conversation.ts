@@ -71,10 +71,9 @@ export type EnsureWhatsAppConversationOptions = {
   /**
    * Quando true (default), conversa nova herda `contact.assignedToId`.
    * Campanhas AUTOMATION devem passar false: o ticket fica sem dono enquanto
-   * o robô aguarda clique/resposta, e a aba Entrada esconde via predicate
-   * `assignedToId=null` + contexto RUNNING. Herdar o dono do contato jogava
-   * centenas de disparos na Entrada dos consultores (Cruzeiro EaD,
-   * campanha cmsni2x8l01zqp201n4g43loc / incidente irmão de 8fdd2a5).
+   * o robô aguarda clique/resposta. Em ticket já OPEN reutilizado, também
+   * remove o assignee atual — senão a aba Entrada (HUMAN + sem hasHumanReply)
+   * engolia o disparo. A aba Automação cobre RUNNING e PAUSED.
    */
   inheritAssignee?: boolean;
 };
@@ -123,10 +122,15 @@ export async function ensureWhatsAppConversationForContact(
       channel: "whatsapp",
       status: { not: "RESOLVED" },
     },
-    select: { id: true, channelId: true, inboxName: true },
+    select: { id: true, channelId: true, inboxName: true, assignedToId: true },
   });
 
   if (existing) {
+    // Campanha/automation com inheritAssignee=false: NÃO zera o responsável
+    // de ticket já existente. Isso gerava redistribuição SYSTEM + gatilho
+    // lead_distributed (saudação em texto livre) logo após HSM — falha Meta
+    // 131047 fora da janela 24h e lotava a aba Erro (calouros_pt*, ago/2026).
+    // inheritAssignee=false vale só na CRIAÇÃO do ticket (abaixo).
     if (existing.channelId === defaultChannel.id) {
       return {
         status: "already_ok",
@@ -223,4 +227,38 @@ export async function ensureWhatsAppConversationForContact(
     conversationId: created.id,
     channelId: created.channelId ?? defaultChannel.id,
   };
+}
+
+/**
+ * Fecha ticket OPEN usado só para registrar disparo (campanha/automação) quando
+ * o aluno ainda não respondeu. Preserva histórico da mensagem outbound; o
+ * próximo inbound abre ticket novo via `findOrCreateConversation`.
+ *
+ * Não fecha se já houve inbound (`lastInboundAt`) ou reply humano — atendimento
+ * em curso reutilizado pelo ensure deve permanecer OPEN.
+ */
+export async function maybeResolveUnansweredOutboundTicket(
+  conversationId: string,
+): Promise<boolean> {
+  const conv = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: {
+      status: true,
+      lastInboundAt: true,
+      hasHumanReply: true,
+    },
+  });
+  if (!conv || conv.status !== "OPEN") return false;
+  if (conv.lastInboundAt != null || conv.hasHumanReply) return false;
+
+  await prisma.conversation.update({
+    where: { id: conversationId },
+    data: {
+      status: "RESOLVED",
+      closedAt: new Date(),
+      assignedToId: null,
+      updatedAt: new Date(),
+    },
+  });
+  return true;
 }

@@ -1,44 +1,159 @@
 import { Worker, type Job } from "bullmq";
-import IORedis from "ioredis";
 
-import { prisma } from "@/lib/prisma";
+import { getLogger } from "@/lib/logger";
+import { prismaBase } from "@/lib/prisma-base";
+import {
+  duplicateBullConnection,
+  getBullConnection,
+} from "@/lib/queue-connection";
+import {
+  AUTOMATION_JOBS_QUEUE_NAME,
+  type AutomationJobPayload,
+} from "@/lib/queue";
+import { withSystemContext } from "@/lib/webhook-context";
 import { runAutomationInline } from "@/services/automation-executor";
-import type { AutomationJobPayload } from "@/lib/queue";
 
-const AUTOMATION_QUEUE_NAME = "automation-jobs";
-const redisUrl = process.env.REDIS_URL ?? "redis://localhost:6379";
+const log = getLogger("worker.automations");
 
-async function processAutomationJob(job: Job<AutomationJobPayload>) {
+/**
+ * Worker BullMQ dedicado que consome a fila `automation-jobs`.
+ *
+ * Multi-tenant (cuidado importante):
+ *   - Workers rodam fora de qualquer RequestContext HTTP/Next.js.
+ *   - `prisma` (cliente scoped) exige RequestContext — usar fora dele
+ *     lança "chamado fora de RequestContext" ou executa sem filtro de tenant.
+ *   - Solução: resolver `organizationId` via `prismaBase` a partir do
+ *     `automationId` do payload e embrulhar em `withSystemContext`.
+ *
+ * O payload histórico NÃO carrega `organizationId` (diferente de leads/ETL).
+ * A lookup por automationId é a fonte da verdade do tenant — mesma abordagem
+ * já usada em `automation-worker-inline.ts`.
+ *
+ * Concurrency: `AUTOMATION_WORKER_CONCURRENCY` (default 5).
+ * Rate limit opcional (proteção de campanhas em massa):
+ *   `AUTOMATION_RATE_LIMIT_MAX` + `AUTOMATION_RATE_LIMIT_DURATION`.
+ *   Sem essas vars, sem limiter (comportamento atual).
+ */
+
+function envInt(name: string, defaultValue: number): number {
+  const raw = process.env[name];
+  if (!raw) return defaultValue;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : defaultValue;
+}
+
+async function processAutomationJob(job: Job<AutomationJobPayload>): Promise<void> {
   const { automationId, context } = job.data;
-  console.info(`[automation-worker] Processando job ${job.id} para automação ${automationId} (evento: ${context.event})`);
-  await runAutomationInline(job.data);
+  const jobCtx = log.child({
+    automationId,
+    jobId: job.id,
+    event: context.event,
+    attempt: job.attemptsMade + 1,
+  });
+
+  const automation = await prismaBase.automation.findUnique({
+    where: { id: automationId },
+    select: { organizationId: true },
+  });
+
+  if (!automation) {
+    jobCtx.warn("Automação não encontrada — descartando job");
+    // Não re-throw: retries não vão recuperar um ID inexistente.
+    return;
+  }
+
+  jobCtx.info(
+    { organizationId: automation.organizationId },
+    "Processando job de automação",
+  );
+
+  await withSystemContext(automation.organizationId, async () => {
+    await runAutomationInline(job.data);
+  });
 }
 
-const connection = new IORedis(redisUrl, { maxRetriesPerRequest: null });
+export function startAutomationWorker() {
+  const concurrency = envInt("AUTOMATION_WORKER_CONCURRENCY", 5);
+  const connection = duplicateBullConnection();
+  // Força inicialização do singleton de filas (produtores no mesmo processo,
+  // ex.: transfer_automation → enqueueAutomationJob).
+  getBullConnection();
 
-const worker = new Worker<AutomationJobPayload>(AUTOMATION_QUEUE_NAME, processAutomationJob, {
-  connection,
-});
+  // Rate limiter opcional: útil quando a campanha WhatsApp em massa dispara
+  // automações (event `campaign_trigger`) — cada job pode enviar mensagem Meta
+  // e sem teto o worker estoura o rate limit da Cloud API.
+  const rateLimitMax = envInt("AUTOMATION_RATE_LIMIT_MAX", 0);
+  const limiter =
+    rateLimitMax > 0
+      ? {
+          max: rateLimitMax,
+          duration: envInt("AUTOMATION_RATE_LIMIT_DURATION", 1000),
+        }
+      : undefined;
 
-worker.on("failed", (job, err) => {
-  console.error(`[automation-worker] job ${job?.id} falhou`, err);
-});
+  const worker = new Worker<AutomationJobPayload>(
+    AUTOMATION_JOBS_QUEUE_NAME,
+    processAutomationJob,
+    { connection, concurrency, limiter },
+  );
 
-worker.on("completed", (job) => {
-  console.info(`[automation-worker] job ${job.id} concluído`);
-});
+  worker.on("completed", (job) => {
+    log.info(
+      {
+        automationId: job.data.automationId,
+        jobId: job.id,
+        event: job.data.context.event,
+      },
+      "Job concluído",
+    );
+  });
 
-async function shutdown() {
-  await worker.close();
-  await connection.quit();
-  await prisma.$disconnect();
+  worker.on("failed", (job, err) => {
+    log.error(
+      {
+        automationId: job?.data.automationId,
+        jobId: job?.id,
+        event: job?.data.context.event,
+        attempt: (job?.attemptsMade ?? 0) + 1,
+        err: err?.message ?? String(err),
+      },
+      "Job falhou",
+    );
+  });
+
+  worker.on("error", (err) => {
+    log.error({ err: err?.message ?? String(err) }, "Worker error");
+  });
+
+  log.info(
+    {
+      concurrency,
+      queue: AUTOMATION_JOBS_QUEUE_NAME,
+      rateLimit: limiter ? `${limiter.max}/${limiter.duration}ms` : "off",
+    },
+    "automation-worker started",
+  );
+
+  const shutdown = async (signal: string) => {
+    log.info({ signal }, "Recebido sinal de shutdown — fechando worker");
+    try {
+      await worker.close();
+    } catch (err) {
+      log.error(
+        { err: err instanceof Error ? err.message : String(err) },
+        "Erro ao fechar worker",
+      );
+    }
+    process.exit(0);
+  };
+
+  process.once("SIGINT", () => void shutdown("SIGINT"));
+  process.once("SIGTERM", () => void shutdown("SIGTERM"));
+
+  return worker;
 }
 
-process.on("SIGINT", () => {
-  void shutdown().then(() => process.exit(0));
-});
-process.on("SIGTERM", () => {
-  void shutdown().then(() => process.exit(0));
-});
-
-console.info(`[automation-worker] ouvindo fila "${AUTOMATION_QUEUE_NAME}" em ${redisUrl}`);
+// Bootstrap quando executado diretamente (npm script ou node dist/.../automation-worker.js).
+if (require.main === module) {
+  startAutomationWorker();
+}
