@@ -114,6 +114,9 @@ function createPrismaClient() {
     max,
     idleTimeoutMillis,
     connectionTimeoutMillis,
+    // Após restart do Postgres, conexões idle mortas saem do pool em vez
+    // de ficarem "in use" até o statement_timeout.
+    allowExitOnIdle: true,
     options: `-c statement_timeout=${statementTimeoutMs} -c application_name=${appName}`,
   });
 

@@ -248,6 +248,15 @@ function bootstrapBackgroundServices() {
     return;
   }
 
+  // Sweepers no mesmo processo da API competem pelo pool no boot
+  // (inbox + health + 6 timers). Atrasa o 1º tick para o Postgres
+  // aceitar conexões e o GET /conversations não ficar atrás da fila.
+  const bootDelayMs = Number(process.env.API_SWEEPER_BOOT_DELAY_MS) || 25_000;
+  console.info(`[sse-bus] sweepers agendados em ${bootDelayMs}ms`);
+  setTimeout(() => startBackgroundSweepers(), bootDelayMs);
+}
+
+function startBackgroundSweepers() {
   import("@/services/automation-context")
     .then(({ startTimeoutSweeper }) => startTimeoutSweeper())
     .catch((e) => console.error("[sse-bus] failed to start timeout sweeper:", e));
