@@ -4,16 +4,22 @@
  *  - fora do expediente (antes das 8h/9h ou a partir da pausa pré-fim), informa o próximo horário;
  *  - dentro do expediente, não promete "em breve" como se já houvesse alguém na linha.
  *
- * Expediente humano (SP): seg–sex 8h–19h, sábado 9h–19h.
- * Pausa na fila: 30 min antes da saída → janela efetiva até 18h30.
+ * Expediente humano (SP): seg–sex 8h–19h, sábado 9h–16h.
+ * Pausa na fila: 30 min antes da saída → janela efetiva até 18h30 (seg–sex)
+ * e 15h30 (sábado).
  */
 
 const TZ = "America/Sao_Paulo";
 
-/** Fim oficial do expediente (hora cheia). */
+/** Fim oficial do expediente em dias úteis (hora cheia). */
 export const HUMAN_ATTENDANCE_END_HOUR = 19;
+/** Fim oficial do expediente no sábado (hora cheia). */
+export const HUMAN_ATTENDANCE_SATURDAY_END_HOUR = 16;
 /** Minutos de pausa na fila antes da saída (não oferece lead perto do fim). */
 export const HUMAN_ATTENDANCE_PRE_END_MINUTES = 30;
+
+const HOURS_FOOTER_TEXT =
+  "segunda a sexta das 8h às 19h e sábado das 9h às 16h";
 
 function normalizeMsg(raw: string): string {
   return raw
@@ -44,9 +50,16 @@ function clockInSaoPaulo(now = new Date()): {
   return { weekday, hour: hour === 24 ? 0 : hour, minute };
 }
 
-/** Minuto-do-dia em que a janela fecha (19h − 30min = 18h30). */
-export function humanAttendanceEffectiveEndMinutes(): number {
-  return HUMAN_ATTENDANCE_END_HOUR * 60 - HUMAN_ATTENDANCE_PRE_END_MINUTES;
+/** Minuto-do-dia em que a janela fecha (fim − pausa pré-fim). */
+export function humanAttendanceEffectiveEndMinutes(
+  now = new Date(),
+): number {
+  const { weekday } = clockInSaoPaulo(now);
+  const endHour =
+    weekday === "Sat"
+      ? HUMAN_ATTENDANCE_SATURDAY_END_HOUR
+      : HUMAN_ATTENDANCE_END_HOUR;
+  return endHour * 60 - HUMAN_ATTENDANCE_PRE_END_MINUTES;
 }
 
 /**
@@ -59,7 +72,7 @@ export function humanAttendanceStartHint(now = new Date()): {
 } {
   const { weekday, hour, minute } = clockInSaoPaulo(now);
   const mins = hour * 60 + minute;
-  const endMins = humanAttendanceEffectiveEndMinutes();
+  const endMins = humanAttendanceEffectiveEndMinutes(now);
 
   if (weekday === "Sun") {
     return { startHour: 8, dayLabel: "segunda-feira" };
@@ -91,14 +104,14 @@ export function humanAttendanceStartHint(now = new Date()): {
 
 /**
  * True se estamos na janela em que faz sentido prometer atendimento humano
- * "no mesmo dia" (SP): após abertura e antes da pausa pré-fim (18h30).
+ * "no mesmo dia" (SP): após abertura e antes da pausa pré-fim.
  */
 export function isHumanAttendanceWindowOpen(now = new Date()): boolean {
   const { weekday, hour, minute } = clockInSaoPaulo(now);
   if (weekday === "Sun") return false;
   const startHour = weekday === "Sat" ? 9 : 8;
   const mins = hour * 60 + minute;
-  const endMins = humanAttendanceEffectiveEndMinutes();
+  const endMins = humanAttendanceEffectiveEndMinutes(now);
   return mins >= startHour * 60 && mins < endMins;
 }
 
@@ -106,13 +119,13 @@ function hoursFooter(now = new Date()): string {
   if (isHumanAttendanceWindowOpen(now)) {
     return (
       `Assim que um(a) consultor(a) puder, te atendem ` +
-      `(expediente: segunda a sexta das 8h às 19h e sábado das 9h às 19h).`
+      `(expediente: ${HOURS_FOOTER_TEXT}).`
     );
   }
   const { startHour, dayLabel } = humanAttendanceStartHint(now);
   return (
     `O atendimento humano retoma às *${startHour}h* ${dayLabel} ` +
-    `(segunda a sexta das 8h às 19h e sábado das 9h às 19h).`
+    `(${HOURS_FOOTER_TEXT}).`
   );
 }
 
@@ -129,7 +142,7 @@ export function buildHumanUnavailableOfferMessage(now = new Date()): string {
   return (
     `Combinado — já registrei seu pedido com a equipe. O atendimento humano ` +
     `retoma às *${startHour}h* ${dayLabel} ` +
-    `(segunda a sexta das 8h às 19h e sábado das 9h às 19h). ` +
+    `(${HOURS_FOOTER_TEXT}). ` +
     `Enquanto isso, se quiser tirar alguma dúvida, *estou aqui* contigo. ` +
     `Se preferir só esperar, também tudo bem — me avisa 💛`
   );

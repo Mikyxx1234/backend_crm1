@@ -712,7 +712,7 @@ function transferToHumanTool(ctx: RunContext) {
           distributionReason: result.distribution?.reason ?? null,
           queuedWaiting,
           hint: queuedWaiting
-            ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–19h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
+            ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–16h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
             : undefined,
         });
       } catch (err) {
@@ -847,7 +847,7 @@ function executeDistributionTool(ctx: RunContext) {
               reason: handoff.distribution?.reason ?? null,
               queuedWaiting,
               hint: queuedWaiting
-                ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–19h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
+                ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–16h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
                 : undefined,
             });
           }
@@ -900,7 +900,7 @@ function executeDistributionTool(ctx: RunContext) {
           reason: result.reason,
           hint:
             result.reason === "NO_ELIGIBLE_RESPONSIBLE"
-              ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–19h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
+              ? "Lead na fila (sem consultor elegível agora). Avise UMA vez com empatia: já registrou o pedido. Fora do expediente (antes das 8h/9h ou a partir das 18h30) diga que o atendimento humano retoma no horário (seg–sex 8h–19h, sáb 9h–16h). Dentro do expediente: NÃO diga 'ninguém disponível' nem 'em breve' — diga que a equipe continua quando puder. Ofereça continuar ajudando. NÃO repita."
               : result.reason === "NO_DEPARTMENT"
                 ? "A conversa não está em um departamento com distribuição automática. Chame `transfer_to_department` primeiro."
                 : "Distribuição não realizada. Considere transferir para humano manualmente.",
