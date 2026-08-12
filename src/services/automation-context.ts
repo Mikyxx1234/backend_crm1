@@ -192,7 +192,20 @@ export async function closeStrandedContext(automationId: string, contactId: stri
     // `delay` persistido também é espera legítima (cronômetro via
     // `timeoutAt`) — fechar aqui mataria a retomada pelo sweeper.
     const isDelayWait = step?.type === "delay" && ctx.timeoutAt !== null;
-    if (step && (PAUSING_STEP_TYPES.has(step.type) || isDelayWait)) {
+    // send_whatsapp_message (texto puro) só "pausa" via humanize — sempre
+    // com timeoutAt armado. RUNNING nesse step SEM timer = ponteiro stale
+    // de uma continuação que já passou do step (o motor não avança
+    // currentStepId a cada step executado em memória). Sem este recorte o
+    // contexto vazava RUNNING pra sempre e a trava de reentrada impedia a
+    // automação de re-disparar pro contato (bug "Aguardando Resposta
+    // parou de funcionar", ago/2026 — 869 contextos vazados).
+    const isStalePlainSend =
+      step?.type === "send_whatsapp_message" && ctx.timeoutAt === null;
+    if (
+      step &&
+      (PAUSING_STEP_TYPES.has(step.type) || isDelayWait) &&
+      !isStalePlainSend
+    ) {
       return null;
     }
   }
@@ -666,6 +679,12 @@ async function dispatchToNextStep(
         `continueFromStep error (${reason}) — auto=${ctx.automation.name ?? ctx.automationId} step=${nextStepId}:`,
         err,
       );
+      // A continuação morreu no meio do ramo SEM re-pausar (um throw sai
+      // do loop antes de qualquer wait). Se não fecharmos aqui, o contexto
+      // fica RUNNING eternamente no step despachado e a trava de reentrada
+      // (getActiveContext no fireTrigger) bloqueia a automação pro contato
+      // pra sempre.
+      await advanceContext(ctx.id, null, variables).catch(() => {});
     }
   } else if (PAUSING_STEP_TYPES.has(targetStep.type)) {
     log.info(
