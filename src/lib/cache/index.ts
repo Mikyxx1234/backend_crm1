@@ -57,9 +57,9 @@ const log = getLogger("cache");
 const KEY_PREFIX = "cache:";
 const LOCK_PREFIX = "cache-lock:";
 const DEFAULT_TTL_SEC = 60;
-const LOCK_TTL_MS = 5_000;
-const STAMPEDE_RETRY_DELAY_MS = 50;
-const STAMPEDE_MAX_RETRIES = 6;
+const LOCK_TTL_MS = 20_000;
+const STAMPEDE_RETRY_DELAY_MS = 150;
+const STAMPEDE_MAX_RETRIES = 50;
 
 let redis: IORedisClient | null = null;
 let redisDisabled = false;
@@ -270,21 +270,39 @@ export async function wrap<T>(
 
   if (client) {
     let acquired = false;
+    let lockUnavailable = false;
     try {
       const reply = await client.set(lockKey, "1", "PX", LOCK_TTL_MS, "NX");
       acquired = reply === "OK";
     } catch (err) {
+      lockUnavailable = true;
       log.warn({ err, key }, "[cache] lock falhou — seguindo sem stampede protection");
     }
 
-    if (!acquired) {
-      // Outro request esta carregando — espera curto e tenta read.
+    if (!acquired && !lockUnavailable) {
+      // Outro request está carregando. NÃO cair no loader: inbox counts
+      // levam 4–7s e o wait antigo (300ms) fazia N loaders × 8 COUNTs
+      // esgotarem o pool Postgres.
       for (let i = 0; i < STAMPEDE_MAX_RETRIES; i++) {
         await new Promise((r) => setTimeout(r, STAMPEDE_RETRY_DELAY_MS));
         const retry = await get<T>(key);
         if (retry !== undefined) return retry;
+        try {
+          const again = await client.set(lockKey, "1", "PX", LOCK_TTL_MS, "NX");
+          if (again === "OK") {
+            acquired = true;
+            break;
+          }
+        } catch {
+          lockUnavailable = true;
+          break;
+        }
       }
-      // Loader fica como fallback se o lock holder demorou demais.
+      if (!acquired && !lockUnavailable) {
+        const late = await get<T>(key);
+        if (late !== undefined) return late;
+        throw new Error(`[cache] stampede timeout key=${key}`);
+      }
     }
 
     try {

@@ -1,8 +1,6 @@
-import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { Pool } from "pg";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "@prisma/client";
-
-// Prisma adapter-pg só usa pool.connect() em forma Promise (sem callback).
 
 /**
  * Cliente Prisma cru (sem extension de organizationId). Use quando:
@@ -81,53 +79,6 @@ export async function withPgPoolRetry<T>(
   }
 }
 
-/**
- * Pool com log identificando APP_MODE + retry único no acquire.
- * Cobre o caso em que vários jobs/requests esperam slot e estouram
- * `DB_POOL_CONN_TIMEOUT_MS` (mensagem: "timeout exceeded when trying to connect").
- */
-function createInstrumentedPool(
-  config: PoolConfig,
-  mode: string,
-  poolMax: number,
-): Pool {
-  const pool = new Pool(config);
-
-  const logExhausted = (phase: string) => {
-    console.warn(
-      `[prisma-base] pool exhausted APP_MODE=${mode} phase=${phase}` +
-        ` max=${poolMax}` +
-        ` total=${pool.totalCount}` +
-        ` idle=${pool.idleCount}` +
-        ` waiting=${pool.waitingCount}`,
-    );
-  };
-
-  const originalConnect = pool.connect.bind(pool) as {
-    (): Promise<PoolClient>;
-  };
-
-  // Só a forma Promise — adapter-pg não usa callback.
-  (pool as { connect: () => Promise<PoolClient> }).connect =
-    async function connectWithRetry(): Promise<PoolClient> {
-      try {
-        return await originalConnect();
-      } catch (err) {
-        if (!isPgPoolTimeoutError(err)) throw err;
-        logExhausted("retrying once");
-        await sleep(50 + Math.floor(Math.random() * 100));
-        try {
-          return await originalConnect();
-        } catch (err2) {
-          if (isPgPoolTimeoutError(err2)) logExhausted("giving up");
-          throw err2;
-        }
-      }
-    };
-
-  return pool;
-}
-
 function createPrismaClient() {
   // Pool config tunado para multi-tenant SaaS:
   //
@@ -155,18 +106,16 @@ function createPrismaClient() {
   // segura conexao quando max_connections aperta.
   const appName = `crm_${mode}`.replace(/[^a-z0-9_]/gi, "_").slice(0, 63);
 
-  const pool = createInstrumentedPool(
-    {
-      connectionString: process.env.DATABASE_URL,
-      max,
-      idleTimeoutMillis,
-      connectionTimeoutMillis,
-      // statement_timeout + application_name em cada conexao nova.
-      options: `-c statement_timeout=${statementTimeoutMs} -c application_name=${appName}`,
-    },
-    mode,
+  // NÃO monkey-patchar pool.connect: pg.Pool.query usa a forma callback.
+  // Substituir só a Promise (c2892a0) vazava conexões — SELECT 1 do /health
+  // estourava 2s e login/inbox devolviam "Internal Server Error".
+  const pool = new Pool({
+    connectionString: process.env.DATABASE_URL,
     max,
-  );
+    idleTimeoutMillis,
+    connectionTimeoutMillis,
+    options: `-c statement_timeout=${statementTimeoutMs} -c application_name=${appName}`,
+  });
 
   // Resiliencia: log mas nao crash em erros transientes do pool.
   pool.on("error", (err) => {

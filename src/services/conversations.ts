@@ -821,18 +821,29 @@ export async function getTabCounts(
   search?: string | null,
 ): Promise<Record<InboxTab, number>> {
   const orgId = getOrgIdOrNull() ?? "noorg";
-  const scopeFp = createHash("sha1")
-    .update(
-      JSON.stringify({
-        v: visibilityWhere ?? null,
-        m: todosMemberCategoryTabs ?? null,
-        c: allowedChannelIds ?? null,
-        f: filterConditions ?? [],
-        s: search?.trim() || null,
-      }),
-    )
-    .digest("hex")
-    .slice(0, 20);
+  let scopeFp: string;
+  try {
+    scopeFp = createHash("sha1")
+      .update(
+        JSON.stringify({
+          v: visibilityWhere ?? null,
+          m: todosMemberCategoryTabs ?? null,
+          c: allowedChannelIds ?? null,
+          f: filterConditions ?? [],
+          s: search?.trim() || null,
+        }),
+      )
+      .digest("hex")
+      .slice(0, 20);
+  } catch {
+    return computeTabCounts(
+      visibilityWhere,
+      todosMemberCategoryTabs,
+      allowedChannelIds,
+      filterConditions,
+      search,
+    );
+  }
 
   return cache.wrap(
     inboxTabCountsKey(orgId, scopeFp),
@@ -878,31 +889,34 @@ async function computeTabCounts(
     return prisma.conversation.count({ where });
   };
 
-  const [lightResults, finalizados, todos, abertas] = await Promise.all([
-    Promise.all(lightTabs.map(async (tab) => [tab, await countTab(tab)] as const)),
-    countTab("finalizados"),
-    countTodosTab(
-      visibilityWhere,
-      todosMemberCategoryTabs ?? null,
-      allowedChannelIds,
-      extra,
-      searchWhere,
-      countAgentReply,
-    ),
-    (() => {
-      const conditions: Prisma.ConversationWhereInput[] = [];
-      if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
-        conditions.push(visibilityWhere);
-      }
-      conditions.push({ status: "OPEN" });
-      if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
-      if (extra.length > 0) conditions.push(...extra);
-      if (searchWhere) conditions.push(searchWhere);
-      return prisma.conversation.count({
-        where: conditions.length > 0 ? { AND: conditions } : {},
-      });
-    })(),
-  ]);
+  // Sequencial de propósito: 8 COUNT em paralelo (cold load) esgotava o
+  // pool da API e o login/inbox viravam 500 "Internal Server Error".
+  const lightResults: Array<readonly [InboxCategoryTab, number]> = [];
+  for (const tab of lightTabs) {
+    lightResults.push([tab, await countTab(tab)]);
+  }
+  const finalizados = await countTab("finalizados");
+  const todos = await countTodosTab(
+    visibilityWhere,
+    todosMemberCategoryTabs ?? null,
+    allowedChannelIds,
+    extra,
+    searchWhere,
+    countAgentReply,
+  );
+  const abertas = await (() => {
+    const conditions: Prisma.ConversationWhereInput[] = [];
+    if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
+      conditions.push(visibilityWhere);
+    }
+    conditions.push({ status: "OPEN" });
+    if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
+    if (extra.length > 0) conditions.push(...extra);
+    if (searchWhere) conditions.push(searchWhere);
+    return prisma.conversation.count({
+      where: conditions.length > 0 ? { AND: conditions } : {},
+    });
+  })();
 
   const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
   record.finalizados = finalizados;
