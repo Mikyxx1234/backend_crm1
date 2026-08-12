@@ -42,6 +42,133 @@ export async function findContactIdsByPhoneDigits(
   return rows.map((r) => r.id);
 }
 
+/** Máximo de ids retornados pelos lookups por dígitos (evita IN gigante). */
+const DIGITS_LOOKUP_LIMIT = 2000;
+
+/**
+ * Casa uma busca só-dígitos contra valores de campos personalizados
+ * **normalizados** (apenas dígitos). Cobre o caso do CPF/RGM salvo com
+ * máscara ("123.456.789-00", "12.345.678") quando o operador digita só
+ * números — e o inverso.
+ *
+ * Zeros à esquerda são descartados do termo porque a base tem CPF vindo do
+ * ERP com o zero perdido ("1234567890" para 01234567890): com `%digits%` o
+ * termo sem zero casa as duas formas.
+ */
+export async function findCustomFieldMatchesByDigits(digits: string): Promise<{
+  dealIds: string[];
+  contactIds: string[];
+}> {
+  const empty = { dealIds: [], contactIds: [] };
+  const core = digits.replace(/^0+/, "");
+  if (core.length < 6) return empty;
+  const orgId = getRequestContext()?.organizationId;
+  if (!orgId) return empty;
+  const pattern = `%${core}%`;
+  const [dealRows, contactRows] = await Promise.all([
+    prisma.$queryRaw<{ dealId: string }[]>`
+      SELECT DISTINCT "dealId" FROM deal_custom_field_values
+      WHERE "organizationId" = ${orgId}
+        AND regexp_replace(value, '\D', '', 'g') LIKE ${pattern}
+      LIMIT ${DIGITS_LOOKUP_LIMIT}
+    `,
+    prisma.$queryRaw<{ contactId: string }[]>`
+      SELECT DISTINCT "contactId" FROM contact_custom_field_values
+      WHERE "organizationId" = ${orgId}
+        AND regexp_replace(value, '\D', '', 'g') LIKE ${pattern}
+      LIMIT ${DIGITS_LOOKUP_LIMIT}
+    `,
+  ]);
+  return {
+    dealIds: dealRows.map((r) => r.dealId),
+    contactIds: contactRows.map((r) => r.contactId),
+  };
+}
+
+/**
+ * Monta o `OR` de busca livre de negócios — usado pelo Kanban (POST /board),
+ * pela listagem (`getDeals`) e pela exportação, para que os três respondam
+ * exatamente a mesma coisa.
+ *
+ * Campos cobertos: título, nome/e-mail/telefone do contato, número do
+ * negócio, e QUALQUER valor de campo personalizado do negócio ou do contato
+ * (CPF, RGM, matrícula, polo, curso…). Busca só-dígitos também casa telefone
+ * e campos personalizados com máscara.
+ */
+export async function buildDealSearchOr(
+  searchRaw: string,
+): Promise<Prisma.DealWhereInput[]> {
+  const search = searchRaw.trim();
+  if (!search) return [];
+
+  const digits = search.replace(/\D+/g, "");
+  // Termo "numérico": CPF, RGM, matrícula, telefone ou número do negócio, com
+  // ou sem máscara. Aqui trocamos os `contains` de texto pelos dois lookups
+  // indexados por dígitos — mais barato e ainda mais abrangente (casa
+  // "123.456.789-00" quando o operador digita só números). O `contains` em
+  // nome/e-mail do contato é dispensável: nomes não têm CPF dentro.
+  // O corte usa os dígitos sem zero à esquerda porque é isso que o lookup
+  // indexado consegue casar — abaixo disso caímos no `contains` normal.
+  const numericTerm =
+    digits.replace(/^0+/, "").length >= 6 && /^[\d\s+().-]+$/.test(search);
+
+  const or: Prisma.DealWhereInput[] = [
+    { title: { contains: search, mode: "insensitive" } },
+  ];
+
+  if (!numericTerm) {
+    or.push(
+      {
+        contact: {
+          OR: [
+            { name: { contains: search, mode: "insensitive" } },
+            { email: { contains: search, mode: "insensitive" } },
+            { phone: { contains: search } },
+            {
+              customFields: {
+                some: { value: { contains: search, mode: "insensitive" } },
+              },
+            },
+          ],
+        },
+      },
+      {
+        customFields: {
+          some: { value: { contains: search, mode: "insensitive" } },
+        },
+      },
+    );
+  }
+
+  if (digits.length >= 3) {
+    const [phoneContactIds, cfMatches] = await Promise.all([
+      findContactIdsByPhoneDigits(digits),
+      findCustomFieldMatchesByDigits(digits),
+    ]);
+    const contactIds = [
+      ...new Set([...phoneContactIds, ...cfMatches.contactIds]),
+    ];
+    if (contactIds.length > 0) or.push({ contactId: { in: contactIds } });
+    if (cfMatches.dealIds.length > 0) or.push({ id: { in: cfMatches.dealIds } });
+
+    // Número do negócio ("#123" digitado sem o #). `Deal.number` é int4:
+    // termos numéricos longos (CPF, RGM, telefone) estouram o limite e fazem
+    // o Postgres abortar a query inteira — por isso o teto de int32.
+    if (/^\d+$/.test(search)) {
+      const asNumber = Number(search);
+      if (
+        Number.isInteger(asNumber) &&
+        asNumber >= 0 &&
+        asNumber <= 2147483647
+      ) {
+        or.push({ number: asNumber });
+      }
+    }
+  }
+
+  return or;
+}
+
 export type DateRangeValue = {
   from?: string | null;
   to?: string | null;
@@ -368,84 +495,8 @@ export async function buildDealWhereFromFilters(
 
   const search = filters.search?.trim();
   if (search) {
-    // Casa busca por telefone independente da formatação salva no banco.
-    const digits = search.replace(/\D+/g, "");
-    // Atalho (ago/26): buscas longas só-dígitos (telefone) geravam OR com
-    // contains em title/name/customFields + regexp em contacts — board
-    // ~6s por tecla. Com ≥8 dígitos e match em contacts, filtra só por
-    // contactId (e deal.number se couber em int4).
-    if (digits.length >= 8 && /^\+?[\d\s().-]+$/.test(search)) {
-      const contactIds = await findContactIdsByPhoneDigits(digits);
-      const phoneOr: Prisma.DealWhereInput[] = [];
-      if (contactIds.length > 0) {
-        phoneOr.push({ contactId: { in: contactIds } });
-      }
-      if (/^\d+$/.test(search)) {
-        const asNumber = Number(search);
-        if (
-          Number.isInteger(asNumber) &&
-          asNumber >= 0 &&
-          asNumber <= 2147483647
-        ) {
-          phoneOr.push({ number: asNumber });
-        }
-      }
-      if (phoneOr.length > 0) {
-        conditions.push(
-          phoneOr.length === 1 ? phoneOr[0] : { OR: phoneOr },
-        );
-      } else {
-        // Nenhum contato: força zero matches (evita scan full-text inútil).
-        conditions.push({ id: "__no_phone_match__" });
-      }
-    } else {
-      const or: Prisma.DealWhereInput[] = [
-        { title: { contains: search, mode: "insensitive" } },
-        { contact: { name: { contains: search, mode: "insensitive" } } },
-        { contact: { email: { contains: search, mode: "insensitive" } } },
-        { contact: { phone: { contains: search } } },
-        // Busca em QUALQUER valor de campo personalizado (RGM, CPF, matrícula,
-        // etc.) — tanto do negócio quanto do contato vinculado. Espelha o que a
-        // lista de contatos já faz (services/contacts.ts).
-        {
-          customFields: {
-            some: { value: { contains: search, mode: "insensitive" } },
-          },
-        },
-        {
-          contact: {
-            customFields: {
-              some: { value: { contains: search, mode: "insensitive" } },
-            },
-          },
-        },
-      ];
-
-      if (digits.length >= 3) {
-        const contactIds = await findContactIdsByPhoneDigits(digits);
-        if (contactIds.length > 0) {
-          or.push({ contactId: { in: contactIds } });
-        }
-        // Se a busca é PURAMENTE numérica, também tenta casar o número do
-        // próprio deal (`#123` na busca → match no `number`).
-        // IMPORTANTE: `Deal.number` é Int (int4, máx 2.147.483.647). Buscas
-        // numéricas longas (CPF, RGM, telefone) estouram esse limite e fazem
-        // o Postgres abortar a query inteira ("value out of range for type
-        // integer") — por isso só aplicamos o match quando cabe no int32.
-        if (/^\d+$/.test(search)) {
-          const asNumber = Number(search);
-          if (
-            Number.isInteger(asNumber) &&
-            asNumber >= 0 &&
-            asNumber <= 2147483647
-          ) {
-            or.push({ number: asNumber });
-          }
-        }
-      }
-
-      conditions.push({ OR: or });
-    }
+    const or = await buildDealSearchOr(search);
+    if (or.length > 0) conditions.push({ OR: or });
   }
 
   if (filters.pipelineId) {
@@ -769,4 +820,35 @@ export function parseAdvancedDealFilters(input: unknown): AdvancedDealFilters {
   }
 
   return out;
+}
+
+/**
+ * Lê os filtros avançados de uma querystring: `filters` (JSON) ou `f`
+ * (base64url do mesmo JSON, usado quando o payload é grande demais para a URL
+ * legível). Devolve `{}` quando não há filtro válido.
+ */
+export function parseAdvancedDealFiltersFromParams(
+  searchParams: URLSearchParams,
+): AdvancedDealFilters {
+  const raw = searchParams.get("filters");
+  if (raw) {
+    try {
+      const parsed = parseAdvancedDealFilters(JSON.parse(raw));
+      if (Object.keys(parsed).length > 0) return parsed;
+    } catch {
+      /* ignora filters inválido */
+    }
+  }
+  const f = searchParams.get("f");
+  if (f) {
+    try {
+      const b64 = f.replace(/-/g, "+").replace(/_/g, "/");
+      const pad = b64.length % 4 === 0 ? "" : "=".repeat(4 - (b64.length % 4));
+      const json = Buffer.from(b64 + pad, "base64").toString("utf8");
+      return parseAdvancedDealFilters(JSON.parse(json));
+    } catch {
+      /* ignora f inválido */
+    }
+  }
+  return {};
 }

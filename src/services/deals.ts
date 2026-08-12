@@ -11,8 +11,8 @@ import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallb
 import { cache } from "@/lib/cache";
 import { boardDataKey, invalidateBoardData } from "@/lib/cache/keys";
 import {
+  buildDealSearchOr,
   buildDealWhereFromFilters,
-  findContactIdsByPhoneDigits,
   type AdvancedDealFilters,
 } from "@/services/kanban-filters";
 
@@ -211,44 +211,10 @@ export async function getDeals(params: GetDealsParams = {}) {
 
   const search = params.search?.trim();
   if (search) {
-    // Agrupa TODOS os filtros de `contact` sob um único `contact: { OR: [...] }`.
-    // Prisma gera 1 LEFT JOIN de `contacts` em vez de 1 por condição — antes eram
-    // 4 self-joins (j0..j4) que faziam o board de busca custar ~2,4s no Postgres
-    // (24/jul/26). Semanticamente idêntico ao anterior.
-    const or: Prisma.DealWhereInput[] = [
-      { title: { contains: search, mode: "insensitive" } },
-      // Campos personalizados do NEGÓCIO (RGM, CPF, matrícula, ...).
-      { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
-      {
-        contact: {
-          OR: [
-            { name: { contains: search, mode: "insensitive" } },
-            { email: { contains: search, mode: "insensitive" } },
-            { phone: { contains: search } },
-            // Campos personalizados do CONTATO vinculado.
-            { customFields: { some: { value: { contains: search, mode: "insensitive" } } } },
-          ],
-        },
-      },
-    ];
-
-    // Telefone parcial por dígitos (ignora +, espaços, DDI): "11945" casa
-    // "+55 11 94501-0493". Mesma regra do kanban (`findContactIdsByPhoneDigits`).
-    const digits = search.replace(/\D+/g, "");
-    if (digits.length >= 3) {
-      const contactIds = await findContactIdsByPhoneDigits(digits);
-      if (contactIds.length > 0) {
-        or.push({ contactId: { in: contactIds } });
-      }
-      if (/^\d+$/.test(search)) {
-        const asNumber = Number(search);
-        if (Number.isInteger(asNumber) && asNumber >= 0 && asNumber <= 2147483647) {
-          or.push({ number: asNumber });
-        }
-      }
-    }
-
-    conditions.push({ OR: or });
+    // Mesma engine de busca livre do Kanban (título, contato, número do
+    // negócio e qualquer campo personalizado — inclusive CPF/RGM com máscara).
+    const or = await buildDealSearchOr(search);
+    if (or.length > 0) conditions.push({ OR: or });
   }
 
   if (params.contactId) {

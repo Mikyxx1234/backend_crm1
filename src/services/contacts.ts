@@ -9,7 +9,10 @@ import { getOrgIdOrThrow, getRequestContext } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { getLogger } from "@/lib/logger";
 import { logEvent } from "@/services/activity-log";
-import { findContactIdsByPhoneDigits } from "@/services/kanban-filters";
+import {
+  findContactIdsByPhoneDigits,
+  findCustomFieldMatchesByDigits,
+} from "@/services/kanban-filters";
 
 const log = getLogger("contacts-service");
 
@@ -142,11 +145,20 @@ export async function getContacts(params: GetContactsParams = {}) {
       },
     ];
     // Parcial por dígitos: "11945" encontra "+5511945…" sem precisar de +/DDI.
+    // Também casa CPF/RGM salvo com máscara ("123.456.789-00") quando o
+    // operador digita só números.
     const digits = search.replace(/\D+/g, "");
     if (digits.length >= 3) {
-      const ids = await findContactIdsByPhoneDigits(digits);
+      const [phoneIds, cfMatches] = await Promise.all([
+        findContactIdsByPhoneDigits(digits),
+        findCustomFieldMatchesByDigits(digits),
+      ]);
+      const ids = [...new Set([...phoneIds, ...cfMatches.contactIds])];
       if (ids.length > 0) {
         or.push({ id: { in: ids } });
+      }
+      if (cfMatches.dealIds.length > 0) {
+        or.push({ deals: { some: { id: { in: cfMatches.dealIds } } } });
       }
     }
     where.OR = or;

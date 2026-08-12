@@ -1,21 +1,32 @@
 import { NextResponse } from "next/server";
 
+import type { Prisma } from "@prisma/client";
+
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { csvDate, escapeCsvCell, DEFAULT_CSV_DELIMITER } from "@/lib/csv-stringify";
 import { resolveContactDisplayName } from "@/lib/display-name";
 import { prisma } from "@/lib/prisma";
 import { getVisibilityFilter } from "@/lib/visibility";
+import { isValidDealStatus } from "@/services/deals";
+import {
+  buildDealWhereFromFilters,
+  parseAdvancedDealFiltersFromParams,
+} from "@/services/kanban-filters";
 
 const MAX_ROWS = 100_000;
 const BATCH_SIZE = 400;
 
 /**
- * GET /api/deals/export?pipelineId=<id>
+ * GET /api/deals/export?pipelineId=<id>&status=<OPEN|WON|LOST>&filters=<json>
  *
  * Exporta negócios em CSV (streaming em lotes) para não estourar memória/
  * timeout em pipelines grandes (ex.: ACADÊMICO). Sem `pipelineId` (ou
  * `pipelineId=all`) exporta todos os pipelines da org.
+ *
+ * `filters` (JSON) / `f` (base64url) aceitam o mesmo `AdvancedDealFilters` do
+ * board — é assim que a UI exporta "somente a base filtrada" em vez do funil
+ * inteiro. Sem eles, exporta tudo que o usuário pode ver.
  */
 
 export const maxDuration = 300;
@@ -40,6 +51,18 @@ export async function GET(request: Request) {
       const pipelineParam = searchParams.get("pipelineId");
       const pipelineId =
         pipelineParam && pipelineParam !== "all" ? pipelineParam : undefined;
+
+      const statusParam = searchParams.get("status");
+      const status =
+        statusParam && statusParam !== "ALL" && isValidDealStatus(statusParam)
+          ? statusParam
+          : undefined;
+
+      const advancedFilters = parseAdvancedDealFiltersFromParams(searchParams);
+      const filterConditions =
+        Object.keys(advancedFilters).length > 0
+          ? await buildDealWhereFromFilters(advancedFilters)
+          : [];
 
       const visibility = await getVisibilityFilter(
         authResult.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" },
@@ -85,13 +108,18 @@ export async function GET(request: Request) {
       const headers = [...baseHeaders, ...dealCfHeaders, ...contactCfHeaders];
       const delimiter = DEFAULT_CSV_DELIMITER;
 
-      const where = {
-        ...visibility.dealWhere,
-        ...(pipelineId ? { stage: { pipelineId } } : {}),
+      const where: Prisma.DealWhereInput = {
+        AND: [
+          visibility.dealWhere,
+          ...(pipelineId ? [{ stage: { pipelineId } }] : []),
+          ...(status ? [{ status }] : []),
+          ...filterConditions,
+        ],
       };
 
       const stamp = new Date().toISOString().slice(0, 10);
-      const filename = `negocios-${stamp}.csv`;
+      const filtered = filterConditions.length > 0 || !!status;
+      const filename = `negocios${filtered ? "-filtrado" : ""}-${stamp}.csv`;
       const encoder = new TextEncoder();
 
       const stream = new ReadableStream<Uint8Array>({
