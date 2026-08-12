@@ -110,16 +110,20 @@ export async function findCustomFieldMatchesByDigits(digits: string): Promise<{
   if (!orgId) return empty;
   const pattern = `%${core}%`;
   const [dealRows, contactRows] = await Promise.all([
+    // `'\\D'` (e não `'\D'`): em template literal o `\D` é cozido para `D` e o
+    // regexp_replace passaria a remover a letra D, deixando a máscara intacta —
+    // exatamente o que a normalização existe para evitar. O texto precisa bater
+    // com a expressão do índice `*_cfv_value_digits_trgm_idx`.
     prisma.$queryRaw<{ dealId: string }[]>`
       SELECT DISTINCT "dealId" FROM deal_custom_field_values
       WHERE "organizationId" = ${orgId}
-        AND regexp_replace(value, '\D', '', 'g') LIKE ${pattern}
+        AND regexp_replace(value, '\\D', '', 'g') LIKE ${pattern}
       LIMIT ${SEARCH_CANDIDATE_CAP}
     `,
     prisma.$queryRaw<{ contactId: string }[]>`
       SELECT DISTINCT "contactId" FROM contact_custom_field_values
       WHERE "organizationId" = ${orgId}
-        AND regexp_replace(value, '\D', '', 'g') LIKE ${pattern}
+        AND regexp_replace(value, '\\D', '', 'g') LIKE ${pattern}
       LIMIT ${SEARCH_CANDIDATE_CAP}
     `,
   ]);
