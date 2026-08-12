@@ -18,6 +18,27 @@ export type MetaErrorInfo = {
   action?: string;
 };
 
+/**
+ * Códigos transitórios de infra/serviço Meta (downtime, overload, 5xx interno).
+ * NÃO confundir com 131047 (fora da janela 24h) nem com 190 (token).
+ * Adequados para retry com backoff curto.
+ *
+ * @see https://developers.facebook.com/docs/whatsapp/cloud-api/support/error-codes
+ */
+export const META_TRANSIENT_SERVICE_CODES = new Set([
+  1, // API Unknown — possível server error
+  2, // API Service — downtime / overloaded (HTTP 503)
+  131000, // Something went wrong (erro interno)
+  131016, // Serviço temporariamente indisponível
+  133004, // Servidor temporariamente indisponível
+]);
+
+export function isMetaTransientServiceCode(
+  code: number | null | undefined,
+): boolean {
+  return typeof code === "number" && META_TRANSIENT_SERVICE_CODES.has(code);
+}
+
 const CATALOG: Record<number, MetaErrorInfo> = {
   // ── Genéricos / infra ───────────────────────────────────────
   1: {
@@ -26,6 +47,9 @@ const CATALOG: Record<number, MetaErrorInfo> = {
       "Tente reenviar. Se persistir, verifique a saúde da conta WhatsApp e o status da Cloud API.",
   },
   2: {
+    // Oficial: "Temporary due to downtime or due to being overloaded."
+    // O Graph costuma devolver message "Something went wrong" — isso NÃO é
+    // janela 24h (131047) nem token inválido (190).
     reason: "Serviço da Meta temporariamente indisponível.",
     action: "Tente novamente em alguns minutos.",
   },

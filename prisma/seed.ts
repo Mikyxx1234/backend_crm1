@@ -83,14 +83,15 @@ async function main() {
       data: {
         organizationId: EDUIT_ORG_ID,
         name: "Pipeline Principal",
+        slug: "pipeline-principal",
         isDefault: true,
         stages: {
           create: [
-            { organizationId: EDUIT_ORG_ID, name: "Qualificação", position: 0, color: "#6366f1", winProbability: 10, rottingDays: 7, isIncoming: true },
-            { organizationId: EDUIT_ORG_ID, name: "Contato Feito", position: 1, color: "#8b5cf6", winProbability: 25, rottingDays: 14 },
-            { organizationId: EDUIT_ORG_ID, name: "Proposta Enviada", position: 2, color: "#a855f7", winProbability: 50, rottingDays: 14 },
-            { organizationId: EDUIT_ORG_ID, name: "Negociação", position: 3, color: "#f59e0b", winProbability: 75, rottingDays: 21 },
-            { organizationId: EDUIT_ORG_ID, name: "Fechamento", position: 4, color: "#22c55e", winProbability: 90, rottingDays: 7 },
+            { organizationId: EDUIT_ORG_ID, name: "Qualificação", slug: "qualificacao", position: 0, color: "#6366f1", winProbability: 10, rottingDays: 7, isIncoming: true },
+            { organizationId: EDUIT_ORG_ID, name: "Contato Feito", slug: "contato-feito", position: 1, color: "#8b5cf6", winProbability: 25, rottingDays: 14 },
+            { organizationId: EDUIT_ORG_ID, name: "Proposta Enviada", slug: "proposta-enviada", position: 2, color: "#a855f7", winProbability: 50, rottingDays: 14 },
+            { organizationId: EDUIT_ORG_ID, name: "Negociação", slug: "negociacao", position: 3, color: "#f59e0b", winProbability: 75, rottingDays: 21 },
+            { organizationId: EDUIT_ORG_ID, name: "Fechamento", slug: "fechamento", position: 4, color: "#22c55e", winProbability: 90, rottingDays: 7 },
           ],
         },
       },

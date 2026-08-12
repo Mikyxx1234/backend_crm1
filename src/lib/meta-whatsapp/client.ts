@@ -2,7 +2,10 @@ import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { isVerboseLogging } from "@/lib/debug-log";
 import { CRM_META_APP_ID } from "@/lib/meta-constants";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
-import { metaErrorReason } from "@/lib/meta-whatsapp/error-catalog";
+import {
+  isMetaTransientServiceCode,
+  metaErrorReason,
+} from "@/lib/meta-whatsapp/error-catalog";
 import { metrics, templatizeRoute } from "@/lib/metrics";
 
 /**
@@ -35,6 +38,14 @@ const GRAPH_VERSION = "v21.0";
  * latência normal da Meta (< 2s na maioria dos envios).
  */
 const GRAPH_TIMEOUT_MS = 20_000;
+
+/** Retries curtos no Graph para code 2 / 5xx transitórios (antes de falhar a bolha). */
+const GRAPH_TRANSIENT_MAX_ATTEMPTS = 3;
+const GRAPH_TRANSIENT_BACKOFF_MS = 1_000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * Estrutura oficial de erro do Graph/Cloud API (v16+), documentada em
@@ -259,6 +270,31 @@ export class MetaWhatsAppClient {
   }
 
   private async graphFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+    let lastErr: unknown;
+    for (let attempt = 1; attempt <= GRAPH_TRANSIENT_MAX_ATTEMPTS; attempt++) {
+      try {
+        return await this.graphFetchOnce<T>(path, init);
+      } catch (err) {
+        lastErr = err;
+        const transient =
+          isMetaGraphError(err) &&
+          (isMetaTransientServiceCode(err.code) ||
+            err.httpStatus === 502 ||
+            err.httpStatus === 503);
+        if (!transient || attempt >= GRAPH_TRANSIENT_MAX_ATTEMPTS) {
+          throw err;
+        }
+        const delay = GRAPH_TRANSIENT_BACKOFF_MS * attempt;
+        console.warn(
+          `[MetaWA] transient code=${isMetaGraphError(err) ? err.code : "?"} http=${isMetaGraphError(err) ? err.httpStatus : "?"} — retry ${attempt}/${GRAPH_TRANSIENT_MAX_ATTEMPTS - 1} em ${delay}ms (${path})`,
+        );
+        await sleep(delay);
+      }
+    }
+    throw lastErr;
+  }
+
+  private async graphFetchOnce<T>(path: string, init: RequestInit = {}): Promise<T> {
     const url = MetaWhatsAppClient.buildGraphUrl(path);
     const headers = new Headers(init.headers);
     headers.set("Authorization", `Bearer ${this.accessToken}`);

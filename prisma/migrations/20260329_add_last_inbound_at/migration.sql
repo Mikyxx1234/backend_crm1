@@ -1,5 +1,5 @@
--- AlterTable
-ALTER TABLE "conversations" ADD COLUMN "lastInboundAt" TIMESTAMP(3);
+-- AlterTable (idempotent: coluna já existe no init 20240101000000)
+ALTER TABLE "conversations" ADD COLUMN IF NOT EXISTS "lastInboundAt" TIMESTAMP(3);
 
 -- Backfill from existing messages
 UPDATE "conversations" c
@@ -10,4 +10,5 @@ FROM (
   WHERE "direction" = 'in'
   GROUP BY "conversationId"
 ) sub
-WHERE c.id = sub."conversationId";
+WHERE c.id = sub."conversationId"
+  AND c."lastInboundAt" IS NULL;

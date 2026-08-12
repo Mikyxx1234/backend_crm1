@@ -1,13 +1,36 @@
-export const META_RETRYABLE_CODES = new Set([130429, 131048, 131056, 131049]);
+import {
+  isMetaTransientServiceCode,
+  META_TRANSIENT_SERVICE_CODES,
+} from "@/lib/meta-whatsapp/error-catalog";
 
+/** Rate limits / throughput — reenfileirar campanha com backoff. */
+const META_RATE_LIMIT_RETRY_CODES = new Set([130429, 131048, 131056, 131049]);
+
+/** União: rate-limit + falhas transitórias de serviço (code 2, 131016, …). */
+export const META_RETRYABLE_CODES = new Set([
+  ...META_RATE_LIMIT_RETRY_CODES,
+  ...META_TRANSIENT_SERVICE_CODES,
+]);
+
+/**
+ * Extrai o código Meta de uma mensagem de erro persistida.
+ * Prefere o sufixo canônico `(code N, …)` de `formatMetaSendError`.
+ */
 export function extractMetaRetryCode(message: string): number | null {
-  const match = message.match(/\b(130429|131048|131056|131049)\b/);
-  return match ? Number(match[1]) : null;
+  const fromLabel = message.match(/\bcode\s+(\d+)/i);
+  if (fromLabel) {
+    const code = Number(fromLabel[1]);
+    return Number.isFinite(code) ? code : null;
+  }
+  // Fallback legado: códigos rate-limit soltos no texto.
+  const bare = message.match(/\b(130429|131048|131056|131049)\b/);
+  return bare ? Number(bare[1]) : null;
 }
 
 export function isMetaRetryableError(message: string): boolean {
   const code = extractMetaRetryCode(message);
-  return code !== null && META_RETRYABLE_CODES.has(code);
+  if (code === null) return false;
+  return META_RETRYABLE_CODES.has(code) || isMetaTransientServiceCode(code);
 }
 
 export function isInside24hWindow(lastInboundAt: Date | null, now = new Date()): boolean {
