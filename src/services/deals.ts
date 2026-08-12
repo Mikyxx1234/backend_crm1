@@ -1680,6 +1680,18 @@ async function computeBoardData(
         .filter((id): id is string => !!id),
     ),
   ];
+  // Preview "N aguardando" só faz sentido em etapas abertas — Ganho/Perdido
+  // não mostram o footer de inbound. Excluir esses contactIds do SQL pesado
+  // de awaitingMsgs (ROW_NUMBER em messages) quando status=ALL.
+  const openStageContactIds = [
+    ...new Set(
+      stages
+        .filter((s) => !s.isWon && !s.isLost)
+        .flatMap((s) => s.deals)
+        .map((d) => d.contactId)
+        .filter((id): id is string => !!id),
+    ),
+  ];
   const allContacts = stages
     .flatMap((s) => s.deals)
     .map((d) => d.contact)
@@ -1802,7 +1814,7 @@ async function computeBoardData(
       : Promise.resolve([]);
 
   const awaitingMsgsPromise: Promise<BoardAwaitingMsgRow[]> =
-    allContactIds.length > 0
+    openStageContactIds.length > 0
       ? prisma.$queryRaw<BoardAwaitingMsgRow[]>`
           SELECT
             ranked."contactId",
@@ -1820,7 +1832,7 @@ async function computeBoardData(
               )::int AS rn
             FROM conversations c
             INNER JOIN messages m ON m."conversationId" = c.id
-            WHERE c."contactId" = ANY(${allContactIds})
+            WHERE c."contactId" = ANY(${openStageContactIds})
               AND c."organizationId" = ${orgIdForBoard}
               AND m."organizationId" = ${orgIdForBoard}
               AND m."isPrivate" = false

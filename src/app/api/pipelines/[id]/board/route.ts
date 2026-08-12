@@ -11,6 +11,7 @@ import {
 } from "@/services/deals";
 import { parseAdvancedDealFilters } from "@/services/kanban-filters";
 import { getPipelineMeta } from "@/services/pipelines";
+import { prisma } from "@/lib/prisma";
 
 /**
  * Aceita `sort` e `direction` vindos do client (GET via query string ou
@@ -29,6 +30,39 @@ function parseBoardSortDirection(raw: unknown): BoardSortDirection | undefined {
 
 type RouteContext = { params: Promise<{ id: string }> };
 
+/**
+ * Stages leves (sem deals) — usado quando a UI só precisa do funil
+ * (segmentos, move-to-stage) e NÃO do payload de cards (~900KB).
+ */
+async function getBoardStagesOnly(pipelineId: string) {
+  const stages = await prisma.stage.findMany({
+    where: { pipelineId },
+    orderBy: { position: "asc" },
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+      color: true,
+      position: true,
+      winProbability: true,
+      rottingDays: true,
+      pipelineId: true,
+      isIncoming: true,
+      isWon: true,
+      isLost: true,
+    },
+  });
+  return stages.map((s) => ({
+    ...s,
+    conversionRate: 0,
+    avgDaysInStage: 0,
+    totalCount: 0,
+    loadedCount: 0,
+    hasMore: false,
+    deals: [] as unknown[],
+  }));
+}
+
 // Bug 24/abr/26: usavamos `auth()` direto. As chamadas getPipelineMeta /
 // getVisibilityFilter / getBoardData rodam queries Prisma e dependem da
 // extension multi-tenant pra resolver organizationId no where. Sem o
@@ -44,18 +78,30 @@ export async function GET(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "ID inválido." }, { status: 400 });
       }
 
-      const meta = await getPipelineMeta(pipelineId);
+      const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
+      const url = new URL(request.url);
+      const view = url.searchParams.get("view");
+
+      // Meta + scope + (visibility só se for board completo) em paralelo —
+      // antes eram awaits em série somando round-trips.
+      const [meta, scopeDenied, visibility] = await Promise.all([
+        getPipelineMeta(pipelineId),
+        requirePipelineScope(session.user, "view", pipelineId),
+        view === "stages"
+          ? Promise.resolve(null)
+          : getVisibilityFilter(user),
+      ]);
+
       if (!meta) {
         return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
       }
-
-      const scopeDenied = await requirePipelineScope(session.user, "view", pipelineId);
       if (scopeDenied) return scopeDenied;
 
-      const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
-      const visibility = await getVisibilityFilter(user);
+      if (view === "stages") {
+        const stages = await getBoardStagesOnly(pipelineId);
+        return NextResponse.json(stages);
+      }
 
-      const url = new URL(request.url);
       const statusParam = url.searchParams.get("status");
       const statusFilter = statusParam === "ALL"
         ? "ALL" as const
@@ -67,7 +113,7 @@ export async function GET(request: Request, context: RouteContext) {
       const sortField = parseBoardSortField(url.searchParams.get("sort"));
       const sortDirection = parseBoardSortDirection(url.searchParams.get("direction"));
 
-      const board = await getBoardData(pipelineId, visibility.dealWhere, statusFilter, undefined, {
+      const board = await getBoardData(pipelineId, visibility!.dealWhere, statusFilter, undefined, {
         perStage,
         sortField,
         sortDirection,
@@ -100,16 +146,18 @@ export async function POST(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "ID inválido." }, { status: 400 });
       }
 
-      const meta = await getPipelineMeta(pipelineId);
+      const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
+
+      const [meta, scopeDenied, visibility] = await Promise.all([
+        getPipelineMeta(pipelineId),
+        requirePipelineScope(session.user, "view", pipelineId),
+        getVisibilityFilter(user),
+      ]);
+
       if (!meta) {
         return NextResponse.json({ message: "Pipeline não encontrado." }, { status: 404 });
       }
-
-      const scopeDenied = await requirePipelineScope(session.user, "view", pipelineId);
       if (scopeDenied) return scopeDenied;
-
-      const user = session.user as { id: string; role: "ADMIN" | "MANAGER" | "MEMBER" };
-      const visibility = await getVisibilityFilter(user);
 
       let bodyJson: unknown = null;
       try {
