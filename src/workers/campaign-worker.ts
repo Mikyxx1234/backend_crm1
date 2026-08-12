@@ -38,7 +38,34 @@ import {
 } from "@/lib/campaign-send-rate";
 
 const BATCH_SIZE = 500;
-const globalWorker = globalThis as unknown as { campaignThrottleRedis?: IORedis };
+const globalWorker = globalThis as unknown as {
+  campaignThrottleRedis?: IORedis;
+  campaignRowCache?: Map<string, { row: unknown; at: number }>;
+};
+
+/** Cache curto do row da campanha no processo do worker — evita 1
+ * findUnique por destinatário (2k envios = 2k reads no PG compartilhado). */
+const CAMPAIGN_ROW_CACHE_TTL_MS = 5_000;
+
+type CampaignRow = Awaited<ReturnType<typeof loadCampaignRowUncached>>;
+
+async function loadCampaignRowUncached(campaignId: string) {
+  return prisma.campaign.findUnique({
+    where: { id: campaignId },
+    include: { channel: { select: { id: true, provider: true, config: true } } },
+  });
+}
+
+async function loadCampaignRow(campaignId: string): Promise<CampaignRow> {
+  const cache = (globalWorker.campaignRowCache ??= new Map());
+  const hit = cache.get(campaignId);
+  if (hit && Date.now() - hit.at < CAMPAIGN_ROW_CACHE_TTL_MS) {
+    return hit.row as CampaignRow;
+  }
+  const row = await loadCampaignRowUncached(campaignId);
+  cache.set(campaignId, { row, at: Date.now() });
+  return row;
+}
 
 function getRedisUrl(): string {
   const url = process.env.REDIS_URL;
@@ -216,12 +243,8 @@ async function handleSend(
 ) {
   const { campaignId, recipientId, contactId, contactPhone, contactBsuid } = payload;
 
-  const campaign = await prisma.campaign.findUnique({
-    where: { id: campaignId },
-    include: {
-      channel: { select: { id: true, provider: true, config: true } },
-    },
-  });
+  // Cache curto (5s) — sem isso cada destinatário relê a campanha.
+  const campaign = await loadCampaignRow(campaignId);
 
   if (!campaign) return;
 
@@ -594,6 +617,14 @@ async function markRecipientSent(recipientId: string, campaignId: string) {
 }
 
 async function checkCampaignCompletion(campaignId: string) {
+  // Amostra 1/N — evita 1 read por destinatário só pra checar se acabou.
+  // O residual (últimos N-1) é coberto pelo sweep periódico no dispatch.
+  const n = envPositiveInt("CAMPAIGN_COMPLETION_CHECK_EVERY", 25);
+  if (Math.floor(Math.random() * n) !== 0) return;
+  await checkCampaignCompletionNow(campaignId);
+}
+
+async function checkCampaignCompletionNow(campaignId: string) {
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
     select: { totalRecipients: true, sentCount: true, failedCount: true, status: true },
