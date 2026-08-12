@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { getHumanAttendanceForContact } from "@/services/attendance-guards";
 import { getActiveContext } from "@/services/automation-context";
 
@@ -368,8 +369,44 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
   return context;
 }
 
-export async function fireTrigger(
-  event: string,
+/**
+ * Lista automações ativas por gatilho com cache curto por org+evento.
+ * Em blast de campanha, `conversation_created` dispara 1× por ticket criado
+ * (~2k) — sem cache cada chamada relia a tabela automation no PG
+ * compartilhado. 10s de staleness: ativação/edição de automação pode
+ * demorar até 10s pra refletir em gatilhos — aceitável.
+ */
+const TRIGGER_LIST_CACHE_TTL_MS = 10_000;
+const globalForTriggers = globalThis as unknown as {
+  triggerAutomationCache?: Map<
+    string,
+    {
+      rows: {
+        id: string;
+        name: string;
+        triggerType: string;
+        triggerConfig: unknown;
+      }[];
+      at: number;
+    }
+  >;
+};
+
+async function listActiveAutomationsForTrigger(event: string) {
+  const orgId = getOrgIdOrNull() ?? "global";
+  const key = `${orgId}:${event}`;
+  const cache = (globalForTriggers.triggerAutomationCache ??= new Map());
+  const hit = cache.get(key);
+  if (hit && Date.now() - hit.at < TRIGGER_LIST_CACHE_TTL_MS) return hit.rows;
+  const rows = await prisma.automation.findMany({
+    where: { active: true, triggerType: event },
+    select: { id: true, name: true, triggerType: true, triggerConfig: true },
+  });
+  cache.set(key, { rows, at: Date.now() });
+  return rows;
+}
+
+export async function fireTrigger(  event: string,
   context: { contactId?: string; dealId?: string; data?: unknown; depth?: number }
 ): Promise<void> {
   // Guarda só no INBOUND: não responder por cima de atendimento humano.
@@ -393,10 +430,7 @@ export async function fireTrigger(
 
   let automations;
   try {
-    automations = await prisma.automation.findMany({
-      where: { active: true, triggerType: event },
-      select: { id: true, name: true, triggerType: true, triggerConfig: true },
-    });
+    automations = await listActiveAutomationsForTrigger(event);
   } catch (dbErr) {
     console.error(`[fireTrigger] DB error:`, dbErr);
     return;

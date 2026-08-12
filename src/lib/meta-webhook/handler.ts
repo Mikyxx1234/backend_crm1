@@ -66,6 +66,10 @@ import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { markCampaignReplyByContact } from "@/services/campaigns";
 import {
+  incrementCampaignCounter,
+  type CampaignCounterField,
+} from "@/lib/campaign-counters";
+import {
   formatWhatsappFlowResponse,
   parseWhatsappFlowResponsePayload,
 } from "@/lib/meta-whatsapp/parse-flow-response";
@@ -1555,21 +1559,27 @@ async function processStatusUpdate(status: Record<string, unknown>) {
         } else if (s === "delivered" || s === "read") {
           // Se não sobrou mensagem failed nesta conversa, tira da fila Erro
           // (caso clássico: sweeper marcou timeout e a Meta entregou depois).
-          const stillFailed = await prisma.message
-            .count({
-              where: {
-                conversationId: msg.conversationId,
-                sendStatus: "failed",
-              },
-            })
-            .catch(() => 1);
-          if (stillFailed === 0) {
-            await prisma.conversation
-              .update({
-                where: { id: msg.conversationId },
-                data: { hasError: false },
+          // Só vale rodar o count quando ESTA mensagem estava failed — em
+          // blast (sent→delivered/read sem falha prévia) o count por status
+          // gerava ~4-6k queries inúteis no PG compartilhado.
+          const wasFailed = (msg.sendStatus ?? "").toLowerCase() === "failed";
+          if (wasFailed) {
+            const stillFailed = await prisma.message
+              .count({
+                where: {
+                  conversationId: msg.conversationId,
+                  sendStatus: "failed",
+                },
               })
-              .catch(() => {});
+              .catch(() => 1);
+            if (stillFailed === 0) {
+              await prisma.conversation
+                .update({
+                  where: { id: msg.conversationId },
+                  data: { hasError: false },
+                })
+                .catch(() => {});
+            }
           }
         }
 
@@ -1699,19 +1709,19 @@ async function updateCampaignRecipientStatus(
       data,
     });
 
-    const counterField = status === "delivered"
-      ? "deliveredCount"
-      : status === "read"
-        ? "readCount"
-        : status === "failed" && recipient.status !== "FAILED"
-          ? "failedCount"
-          : null;
+    const counterField: CampaignCounterField | null =
+      status === "delivered"
+        ? "deliveredCount"
+        : status === "read"
+          ? "readCount"
+          : status === "failed" && recipient.status !== "FAILED"
+            ? "failedCount"
+            : null;
 
     if (counterField) {
-      await prisma.campaign.update({
-        where: { id: recipient.campaignId },
-        data: { [counterField]: { increment: 1 } },
-      });
+      // Bufferizado (flush em lote ~2s/50) — em blast, 1 UPDATE por status
+      // na mesma row da Campaign gerava lock contention no PG compartilhado.
+      incrementCampaignCounter(recipient.campaignId, counterField);
     }
     return true;
   } catch (err) {

@@ -36,6 +36,14 @@ import {
   getCampaignSendConcurrency,
   getCampaignSendRateMax,
 } from "@/lib/campaign-send-rate";
+import {
+  flushCampaignCounters,
+  incrementCampaignCounter,
+} from "@/lib/campaign-counters";
+import {
+  buildFlowButtonComponent,
+} from "@/lib/meta-whatsapp/enrich-template-flow";
+import { randomUUID } from "node:crypto";
 
 const BATCH_SIZE = 500;
 const globalWorker = globalThis as unknown as {
@@ -65,6 +73,140 @@ async function loadCampaignRow(campaignId: string): Promise<CampaignRow> {
   const row = await loadCampaignRowUncached(campaignId);
   cache.set(campaignId, { row, at: Date.now() });
   return row;
+}
+
+// ── Template preparation cache ───────────────────────────
+// Antes: por destinatário, 1 read PG (whatsAppTemplateConfig) + 1 chamada
+// Meta Graph (GET template / listagem paginada) dentro de
+// enrichTemplateComponentsForFlowSend. Em blast de 2k: 2k reads + 2k
+// chamadas Graph. A definição do template não muda durante o disparo —
+// resolvemos 1× por campanha e só regeneramos o flow_token (UUID) por
+// destinatário, preservando a correlação por mensagem.
+
+type PreparedTemplate = {
+  templateConfigId: string | null;
+  bodyPreview: string | null;
+  category: string | null;
+  /** Componentes base SEM o botão flow (undefined = sem componentes). */
+  baseComponents: unknown[] | undefined;
+  /** Índice do botão flow na definição; null = template sem flow. */
+  flowIndex: string | null;
+};
+
+const PREPARED_TEMPLATE_TTL_MS = 60_000;
+
+type PreparedCacheEntry = { prepared: PreparedTemplate; at: number };
+
+function preparedTemplateCache(): Map<string, PreparedCacheEntry> {
+  const g = globalWorker as unknown as {
+    preparedTemplateCache?: Map<string, PreparedCacheEntry>;
+  };
+  return (g.preparedTemplateCache ??= new Map());
+}
+
+/** Remove o botão flow (probado com token descartável) e devolve o índice. */
+function stripFlowButton(components: unknown[]): {
+  base: unknown[];
+  flowIndex: string | null;
+} {
+  const base: unknown[] = [];
+  let flowIndex: string | null = null;
+  for (const c of components) {
+    const o = c && typeof c === "object" ? (c as Record<string, unknown>) : null;
+    const type = String(o?.type ?? "").toLowerCase();
+    const sub = String(
+      o?.sub_type ?? (o as { subType?: string } | null)?.subType ?? "",
+    ).toLowerCase();
+    if (type === "button" && sub === "flow") {
+      flowIndex = typeof o?.index === "string" ? o.index : String(o?.index ?? "0");
+      continue;
+    }
+    base.push(c);
+  }
+  return { base, flowIndex };
+}
+
+async function prepareTemplateForCampaign(
+  campaign: {
+    id: string;
+    templateName: string | null;
+    templateLanguage: string | null;
+    templateComponents: unknown;
+  },
+  client: ReturnType<typeof metaClientFromConfig>,
+): Promise<PreparedTemplate> {
+  const cache = preparedTemplateCache();
+  const hit = cache.get(campaign.id);
+  if (hit && Date.now() - hit.at < PREPARED_TEMPLATE_TTL_MS) return hit.prepared;
+
+  if (!campaign.templateName) throw new Error("Template não definido na campanha.");
+  const components = campaign.templateComponents
+    ? (campaign.templateComponents as unknown[])
+    : undefined;
+
+  let templateGraphId: string | null = null;
+  let templateConfigId: string | null = null;
+  let bodyPreview: string | null = null;
+  let category: string | null = null;
+  try {
+    const row = await prisma.whatsAppTemplateConfig.findFirst({
+      where: { metaTemplateName: campaign.templateName },
+      select: { id: true, metaTemplateId: true, bodyPreview: true, category: true },
+    });
+    templateGraphId = row?.metaTemplateId?.trim() || null;
+    templateConfigId = row?.id ?? null;
+    bodyPreview = row?.bodyPreview ?? null;
+    category = row?.category ?? null;
+  } catch {
+    /* ignore */
+  }
+
+  const probe = await enrichTemplateComponentsForFlowSend(client, {
+    templateName: campaign.templateName,
+    languageCode: campaign.templateLanguage ?? "pt_BR",
+    components,
+    templateGraphId,
+    // Token sonda — descartado; por destinatário geramos UUID novo.
+    flowToken: randomUUID(),
+  });
+
+  let prepared: PreparedTemplate;
+  if (probe.flowToken && probe.components) {
+    const { base, flowIndex } = stripFlowButton(probe.components);
+    prepared = {
+      templateConfigId,
+      bodyPreview,
+      category,
+      baseComponents: base.length ? base : undefined,
+      flowIndex,
+    };
+  } else {
+    prepared = {
+      templateConfigId,
+      bodyPreview,
+      category,
+      baseComponents: probe.components,
+      flowIndex: null,
+    };
+  }
+  cache.set(campaign.id, { prepared, at: Date.now() });
+  return prepared;
+}
+
+/** Monta os componentes finais do envio, com flow_token fresco por destinatário. */
+function buildSendComponents(prepared: PreparedTemplate): {
+  components: unknown[] | undefined;
+  flowToken: string | null;
+} {
+  if (prepared.flowIndex == null) {
+    return { components: prepared.baseComponents, flowToken: null };
+  }
+  const token = randomUUID();
+  const btn = buildFlowButtonComponent(prepared.flowIndex, token, null);
+  return {
+    components: [...(prepared.baseComponents ?? []), btn],
+    flowToken: token,
+  };
 }
 
 function getRedisUrl(): string {
@@ -340,10 +482,7 @@ async function handleSend(
       },
     });
     if (failedUpdate.count > 0) {
-      await prisma.campaign.update({
-        where: { id: campaignId },
-        data: { failedCount: { increment: 1 } },
-      });
+      incrementCampaignCounter(campaignId, "failedCount");
     }
     metrics.messages.outbound.inc({
       channel_provider: campaign.channel.provider,
@@ -395,55 +534,24 @@ async function sendViaMetaCloudApi(
   let flowToken: string | null = null;
 
   if (campaign.type === "TEMPLATE") {
-    if (!campaign.templateName) throw new Error("Template não definido na campanha.");
-    const components = campaign.templateComponents
-      ? (campaign.templateComponents as unknown[])
-      : undefined;
-    let templateGraphId: string | null = null;
-    let bodyPreview: string | null = null;
-    let category: string | null = null;
-    try {
-      const row = await prisma.whatsAppTemplateConfig.findFirst({
-        where: { metaTemplateName: campaign.templateName },
-        select: {
-          id: true,
-          metaTemplateId: true,
-          bodyPreview: true,
-          category: true,
-        },
-      });
-      templateGraphId = row?.metaTemplateId?.trim() || null;
-      templateConfigId = row?.id ?? null;
-      bodyPreview = row?.bodyPreview ?? null;
-      category = row?.category ?? null;
-    } catch {
-      /* ignore */
-    }
-    const { components: sendComponents, flowToken: campaignFlowToken } =
-      await enrichTemplateComponentsForFlowSend(client, {
-        templateName: campaign.templateName,
-        languageCode: campaign.templateLanguage ?? "pt_BR",
-        components,
-        templateGraphId,
-      });
-    flowToken =
-      typeof campaignFlowToken === "string" && campaignFlowToken.trim()
-        ? campaignFlowToken.trim()
-        : null;
+    const prepared = await prepareTemplateForCampaign(campaign, client);
+    templateConfigId = prepared.templateConfigId;
+    const built = buildSendComponents(prepared);
+    flowToken = built.flowToken;
     const result = await client.sendTemplate(
       phone,
-      campaign.templateName,
+      campaign.templateName!,
       campaign.templateLanguage ?? "pt_BR",
-      sendComponents,
+      built.components,
       bsuid,
     );
     metaMessageId = result.messages?.[0]?.id ?? null;
     messageType = "template";
     content = buildOutboundTemplateMessageContent(
-      campaign.templateName,
+      campaign.templateName!,
       "generic",
-      category,
-      bodyPreview,
+      prepared.category,
+      prepared.bodyPreview,
     );
   } else if (campaign.type === "TEXT") {
     if (!campaign.textContent) throw new Error("Conteúdo de texto não definido na campanha.");
@@ -461,10 +569,7 @@ async function sendViaMetaCloudApi(
     where: { id: recipientId },
     data: { status: "SENT", sentAt: new Date(), metaMessageId },
   });
-  await prisma.campaign.update({
-    where: { id: campaignId },
-    data: { sentCount: { increment: 1 } },
-  });
+  incrementCampaignCounter(campaignId, "sentCount");
 
   // Grava no chat (Message) — sem isso a campanha some do histórico do inbox.
   try {
@@ -609,10 +714,7 @@ async function markRecipientSent(recipientId: string, campaignId: string) {
     where: { id: recipientId },
     data: { status: "SENT", sentAt: new Date() },
   });
-  await prisma.campaign.update({
-    where: { id: campaignId },
-    data: { sentCount: { increment: 1 } },
-  });
+  incrementCampaignCounter(campaignId, "sentCount");
   await checkCampaignCompletion(campaignId);
 }
 
@@ -625,6 +727,9 @@ async function checkCampaignCompletion(campaignId: string) {
 }
 
 async function checkCampaignCompletionNow(campaignId: string) {
+  // Contadores são bufferizados (campaign-counters) — flusha antes de ler,
+  // senão o check de conclusão enxerga valores defasados.
+  await flushCampaignCounters(campaignId);
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
     select: { totalRecipients: true, sentCount: true, failedCount: true, status: true },
@@ -648,6 +753,23 @@ function envPositiveInt(name: string, defaultValue: number): number {
   if (!raw) return defaultValue;
   const n = Number(raw);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : defaultValue;
+}
+
+/** orgId por campanha — sem TTL longo porque campanha não troca de org. */
+async function resolveCampaignOrgId(campaignId: string): Promise<string | null> {
+  const g = globalWorker as unknown as {
+    campaignOrgCache?: Map<string, string | null>;
+  };
+  const cache = (g.campaignOrgCache ??= new Map());
+  if (cache.has(campaignId)) return cache.get(campaignId) ?? null;
+  const camp = await prismaBase.campaign.findUnique({
+    where: { id: campaignId },
+    select: { organizationId: true },
+  });
+  const orgId = camp?.organizationId ?? null;
+  // Não cachear miss — campanha pode ter sido criada depois do enqueue.
+  if (orgId) cache.set(campaignId, orgId);
+  return orgId;
 }
 
 export function startCampaignWorkers() {
@@ -697,15 +819,14 @@ export function startCampaignWorkers() {
   const sendWorker = new Worker<CampaignSendPayload>(
     CAMPAIGN_SEND_QUEUE_NAME,
     async (job: Job<CampaignSendPayload>) => {
-      const camp = await prismaBase.campaign.findUnique({
-        where: { id: job.data.campaignId },
-        select: { organizationId: true },
-      });
-      if (!camp) {
+      // orgId da campanha não muda — cache por processo evita 1 read PG por
+      // job (2k destinatários = 2k reads só pra resolver tenant).
+      const orgId = await resolveCampaignOrgId(job.data.campaignId);
+      if (!orgId) {
         console.warn(`[campaign-send] Campaign ${job.data.campaignId} não encontrada`);
         return;
       }
-      await withSystemContext(camp.organizationId, () => handleSend(job.data, job));
+      await withSystemContext(orgId, () => handleSend(job.data, job));
     },
     {
       connection: connection.duplicate(),

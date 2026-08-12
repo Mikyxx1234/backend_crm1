@@ -1,0 +1,100 @@
+import { prismaBase } from "@/lib/prisma-base";
+
+/**
+ * Contadores denormalizados da Campaign (sentCount/deliveredCount/readCount/
+ * failedCount). Em blast (~2k destinatários × 3-4 eventos) o caminho antigo
+ * fazia 1 UPDATE por evento na MESMA row — lock contention no Postgres
+ * compartilhado com a API (CRM congelava durante ativação).
+ *
+ * Aqui acumulamos em memória e flushamos em lote (por quantidade ou janela
+ * de tempo). A UI de campanha passa a ver contadores com ~2s de atraso —
+ * aceitável. A fonte da verdade continua sendo CampaignRecipient.status.
+ *
+ * Buffer é por processo (campaign-worker e meta-webhook-worker flusham
+ * independentemente). Perda em crash é tolerável: contadores são
+ * denormalizados e reconciliáveis a partir de CampaignRecipient.
+ */
+
+export type CampaignCounterField =
+  | "sentCount"
+  | "deliveredCount"
+  | "readCount"
+  | "failedCount";
+
+type Pending = {
+  sentCount: number;
+  deliveredCount: number;
+  readCount: number;
+  failedCount: number;
+  timer: NodeJS.Timeout | null;
+};
+
+const FLUSH_THRESHOLD = 50;
+const FLUSH_INTERVAL_MS = 2_000;
+
+const globalForCounters = globalThis as unknown as {
+  campaignCounterBuffer?: Map<string, Pending>;
+};
+
+function buffer(): Map<string, Pending> {
+  return (globalForCounters.campaignCounterBuffer ??= new Map());
+}
+
+async function flush(campaignId: string): Promise<void> {
+  const buf = buffer();
+  const p = buf.get(campaignId);
+  if (!p) return;
+  if (p.timer) {
+    clearTimeout(p.timer);
+    p.timer = null;
+  }
+  const data: Record<string, { increment: number }> = {};
+  if (p.sentCount > 0) data.sentCount = { increment: p.sentCount };
+  if (p.deliveredCount > 0) data.deliveredCount = { increment: p.deliveredCount };
+  if (p.readCount > 0) data.readCount = { increment: p.readCount };
+  if (p.failedCount > 0) data.failedCount = { increment: p.failedCount };
+  buf.delete(campaignId);
+  if (Object.keys(data).length === 0) return;
+  try {
+    // prismaBase: workers rodam fora de RequestContext; campaign.update por id
+    // não precisa de filtro de tenant (id é global único).
+    await prismaBase.campaign.update({ where: { id: campaignId }, data });
+  } catch (err) {
+    console.warn(
+      `[campaign-counters] flush falhou campaign=${campaignId}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
+}
+
+export function incrementCampaignCounter(
+  campaignId: string,
+  field: CampaignCounterField,
+  by = 1,
+): void {
+  const buf = buffer();
+  const p = buf.get(campaignId) ?? {
+    sentCount: 0,
+    deliveredCount: 0,
+    readCount: 0,
+    failedCount: 0,
+    timer: null,
+  };
+  p[field] += by;
+  buf.set(campaignId, p);
+
+  const total = p.sentCount + p.deliveredCount + p.readCount + p.failedCount;
+  if (total >= FLUSH_THRESHOLD) {
+    void flush(campaignId);
+    return;
+  }
+  if (!p.timer) {
+    p.timer = setTimeout(() => void flush(campaignId), FLUSH_INTERVAL_MS);
+    p.timer.unref?.();
+  }
+}
+
+/** Força flush — usar antes de ler contadores (ex.: check de conclusão). */
+export async function flushCampaignCounters(campaignId: string): Promise<void> {
+  await flush(campaignId);
+}

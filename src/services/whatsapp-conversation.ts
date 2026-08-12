@@ -18,6 +18,7 @@ import type { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import { logEvent } from "@/services/activity-log";
 import {
   isActiveConversationUniqueViolation,
@@ -47,6 +48,14 @@ export type DefaultWhatsAppChannel = {
  *   canal Meta CONNECTED.
  */
 export async function resolveDefaultWhatsAppChannel(): Promise<DefaultWhatsAppChannel | null> {
+  // Cache curto por org: em blast de campanha esta query rodava 1× por
+  // destinatário (2k reads no PG compartilhado). Canal CONNECTED muda
+  // raramente; 30s de staleness é seguro pra envio.
+  const orgId = getOrgIdOrNull() ?? "global";
+  const cache = (globalForWAChannel.defaultChannelCache ??= new Map());
+  const hit = cache.get(orgId);
+  if (hit && Date.now() - hit.at < 30_000) return hit.channel;
+
   const ch = await prisma.channel.findFirst({
     where: {
       type: "WHATSAPP",
@@ -56,8 +65,17 @@ export async function resolveDefaultWhatsAppChannel(): Promise<DefaultWhatsAppCh
     select: { id: true, name: true },
     orderBy: { createdAt: "asc" },
   });
-  return ch ? { id: ch.id, name: ch.name } : null;
+  const channel = ch ? { id: ch.id, name: ch.name } : null;
+  cache.set(orgId, { channel, at: Date.now() });
+  return channel;
 }
+
+const globalForWAChannel = globalThis as unknown as {
+  defaultChannelCache?: Map<
+    string,
+    { channel: DefaultWhatsAppChannel | null; at: number }
+  >;
+};
 
 export type EnsureConversationResult =
   | { status: "created"; conversationId: string; channelId: string }
