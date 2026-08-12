@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
+import { getConversationSession } from "@/lib/channel-session";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
@@ -137,6 +138,23 @@ export async function POST(request: Request, context: RouteContext) {
           { message: "Contato de destino sem telefone nem BSUID WhatsApp." },
           { status: 400 }
         );
+      }
+
+      // Encaminhamento é envio humano de texto livre: mesmo bloqueio duro
+      // da janela de 24h do POST /messages (rota session-only). ANTES do
+      // message.create — encaminhamento bloqueado não marca erro na
+      // conversa de destino.
+      if (targetConv.channelRef?.provider === "META_CLOUD_API") {
+        const targetSession = await getConversationSession(targetConv);
+        if (!targetSession.active) {
+          return NextResponse.json(
+            {
+              message: "Sessão de 24h encerrada neste canal. Envie um template.",
+              code: "SESSION_CLOSED",
+            },
+            { status: 409 },
+          );
+        }
       }
 
       const senderName = session.user.name ?? session.user.email ?? "Agente";

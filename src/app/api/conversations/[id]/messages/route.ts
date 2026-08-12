@@ -9,6 +9,7 @@ import {
   canDoChannelAction,
   requireChannelScope,
 } from "@/lib/authz/resource-policy";
+import { getContactChannelSession, getConversationSession } from "@/lib/channel-session";
 import { getContactWhatsAppTargets } from "@/lib/contact-whatsapp-target";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
@@ -604,6 +605,37 @@ export async function POST(request: Request, context: RouteContext) {
       if (!resolved.ok) return resolved.response;
       outboundChannelRef = resolved.channelRef;
       outboundChannelId = resolved.channelId;
+
+      // Bloqueio duro para envio HUMANO (sessão NextAuth) de texto livre
+      // fora da janela de 24h em canal Meta Cloud API: a mensagem nem é
+      // criada — nunca chega a falhar na Meta (131047). Com override de
+      // canal, valida a janela NO canal de destino; sem override, usa o
+      // lastInboundAt da conversa (mesmo critério do GET messages — roda
+      // DEPOIS do "reabrir = novo ticket", com o estado fresco de `conv`).
+      // Integrações (Bearer) e automações não levam 409: nelas o envio
+      // fora da janela deve seguir pra Meta e marcar erro (sendStatus
+      // failed / hasError). Templates usam a rota /template (não entram
+      // aqui); notas privadas nem chegam neste bloco.
+      if (
+        !authResult.viaToken &&
+        outboundChannelRef?.provider === "META_CLOUD_API"
+      ) {
+        const hasChannelOverride =
+          !!requestedChannelId && requestedChannelId !== conv.channelId;
+        const targetSession =
+          hasChannelOverride && conv.contactId
+            ? await getContactChannelSession(conv.contactId, outboundChannelRef.id)
+            : await getConversationSession(conv);
+        if (!targetSession.active) {
+          return NextResponse.json(
+            {
+              message: "Sessão de 24h encerrada neste canal. Envie um template.",
+              code: "SESSION_CLOSED",
+            },
+            { status: 409 },
+          );
+        }
+      }
     }
 
     const senderName = authResult.user.name ?? authResult.user.email ?? "Agente";

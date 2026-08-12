@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireChannelScope } from "@/lib/authz/resource-policy";
+import { getContactChannelSession, getConversationSession } from "@/lib/channel-session";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import {
@@ -153,6 +154,29 @@ export async function POST(request: Request, context: RouteContext) {
       if (!resolved.ok) return resolved.response;
       const outboundChannelRef = resolved.channelRef;
       const outboundChannelId = resolved.channelId;
+
+      // Bloqueio duro de envio humano fora da janela de 24h em canal Meta
+      // Cloud API (mídia também é envio livre) — mesmo critério do POST
+      // /messages. Roda ANTES de qualquer message.create: anexo bloqueado
+      // não vira sendStatus=failed nem marca hasError na conversa. Esta
+      // rota é session-only (withOrgContext), então todo caller é humano.
+      if (outboundChannelRef?.provider === "META_CLOUD_API") {
+        const hasChannelOverride =
+          !!requestedChannelId && requestedChannelId !== conv.channelId;
+        const targetSession =
+          hasChannelOverride && conv.contactId
+            ? await getContactChannelSession(conv.contactId, outboundChannelRef.id)
+            : await getConversationSession(conv);
+        if (!targetSession.active) {
+          return NextResponse.json(
+            {
+              message: "Sessão de 24h encerrada neste canal. Envie um template.",
+              code: "SESSION_CLOSED",
+            },
+            { status: 409 },
+          );
+        }
+      }
 
       if (raw.size > MAX_FILE_SIZE) {
         return NextResponse.json({ message: "Arquivo muito grande (máx 16 MB)." }, { status: 400 });
