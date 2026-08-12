@@ -4568,10 +4568,6 @@ export async function continueFromStep(
   let current: typeof automation.steps[0] | undefined = automation.steps[fromIndex];
   let iterations = 0;
   let flowVariables: Record<string, unknown> = { ...variables };
-  // Mesmo guard do runAutomationInline: quando a continuação termina num
-  // passo pausante (question/interactive/template com botões), o contexto
-  // recém-pausado precisa sobreviver ao fim da execução.
-  let contPausedAtEnd = false;
 
   while (current && iterations < MAX_ITER) {
     iterations++;
@@ -4618,7 +4614,6 @@ export async function continueFromStep(
         message: `${stepLabel} — ${result.note ?? "OK"}`,
       });
       if (result.skipRemaining && !result.gotoStepId) {
-        contPausedAtEnd = true;
         break;
       }
     } catch (err) {
@@ -4678,10 +4673,19 @@ export async function continueFromStep(
     }
   }
 
+  // 12/ago/26 — closeStrandedContext roda INCONDICIONALMENTE ao fim da
+  // continuação. O guard `contPausedAtEnd` deixava vazar o contexto quando
+  // o fluxo terminava num step que retorna skipRemaining SEM persistir
+  // espera (condition sem branch casada e sem else, round_robin sem
+  // destino, business_hours fechado sem else): RUNNING eterno sem timer,
+  // segurando a trava de reentrada do contato. Esperas legítimas não são
+  // afetadas — toda pausa real persiste currentStepId pausante
+  // (question/wait_for_reply/interactive/list/template/send c/ "Sem
+  // resposta") ou timeoutAt (delay persistido) ANTES de retornar
+  // skipRemaining, e closeStrandedContext recusa o fechamento nesses
+  // casos (PAUSING_STEP_TYPES + isDelayWait).
   try {
-    if (!contPausedAtEnd) {
-      await closeStrandedContext(automationId, contactId);
-    }
+    await closeStrandedContext(automationId, contactId);
   } catch (err) {
     log.warn(
       `continueFromStep closeStrandedContext falhou:`,
