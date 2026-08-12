@@ -117,7 +117,9 @@ function createPrismaClient() {
     // Após restart do Postgres, conexões idle mortas saem do pool em vez
     // de ficarem "in use" até o statement_timeout.
     allowExitOnIdle: true,
-    options: `-c statement_timeout=${statementTimeoutMs} -c application_name=${appName}`,
+    // Só statement_timeout. `application_name` via options (c2892a0) pode
+    // travar o handshake no PgBouncer — /health SELECT 1 estourava 2s.
+    options: `-c statement_timeout=${statementTimeoutMs}`,
   });
 
   // Resiliencia: log mas nao crash em erros transientes do pool.
