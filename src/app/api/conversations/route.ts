@@ -9,7 +9,6 @@ import {
   buildInboxFilterConditions,
   findSessionExpiringConversationIds,
   getConversations,
-  getConversationsByContactLight,
   getTabCounts,
   INBOX_CATEGORY_TABS,
   INBOX_TAB_LIST,
@@ -207,14 +206,6 @@ export async function GET(request: Request) {
               return tabs.length > 0 ? [...tabs] : (["esperando", "respondidas"] as InboxCategoryTab[]);
             })()
           : undefined;
-
-      // Sales Hub / deal open: só precisa id/status/canal — pula hydrate inbox.
-      const viewLight =
-        searchParams.get("view") === "light" && !!contactId;
-      if (viewLight) {
-        const light = await getConversationsByContactLight(contactId!, perPage);
-        return NextResponse.json(light);
-      }
 
       const result = await getConversations({
         contactId,
