@@ -42,12 +42,12 @@ const BATCH_SIZE = 100;
 // Prefixamos "Timeout:" pra que o operador diferencie de falhas com
 // código real (formato `... (code 131047)`) que vêm via webhook.
 // Cenários conhecidos que caem aqui:
-//  - número WhatsApp Business pausado / flagged / RESTRICTED
-//  - quality rating rebaixado (throttle silencioso)
+//  - callback Meta inacessível / worker-meta-webhook parado (status não chega)
 //  - drop silencioso da Meta sem status=failed
+//  - número pausado / flagged / quality rebaixada (também possível, não único)
 //  - problema de roteamento no lado do destinatário
 const STALE_ERROR_MESSAGE =
-  "Timeout: a Meta não confirmou entrega (nenhum webhook recebido). O número WhatsApp Business pode estar pausado, flagged ou com qualidade rebaixada. Verifique o status do canal.";
+  "Timeout: a Meta não confirmou entrega (nenhum webhook de status recebido no CRM). Verifique se o callback do webhook está acessível na internet e se os eventos estão sendo processados. Se o número estiver ok no Manager, o cliente pode ter recebido a mensagem mesmo assim.";
 
 // Tipos de mensagem que NÃO passam pela Cloud API da Meta — são
 // eventos/artefatos gerados pelo próprio CRM (gravação de chamada feita
