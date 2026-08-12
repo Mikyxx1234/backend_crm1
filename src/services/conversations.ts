@@ -1,19 +1,25 @@
+import { createHash } from "crypto";
 import { Prisma, type ConversationStatus } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
+import { cache } from "@/lib/cache";
+import { inboxTabCountsKey } from "@/lib/cache/keys";
 import { userHasConversationAccess } from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { countAgentReplyAsAnswered } from "@/lib/conversation-reply-marking";
-import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getOrgIdOrNull, getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import {
   findContactIdsByPhoneDigits,
   SOURCE_NONE,
 } from "@/services/kanban-filters";
 import { normalizeHoursBeforeExpiry, WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
+
+/** TTL curto: badges podem ficar levemente stale; cold-load deixa de custar 4–7s. */
+const TAB_COUNTS_CACHE_TTL_SEC = 45;
 
 /** Int4 Postgres — ticket `number` não pode ultrapassar isso na query. */
 const PG_INT4_MAX = 2_147_483_647;
@@ -814,51 +820,94 @@ export async function getTabCounts(
   /** Busca textual — mesma regra da listagem, para badges casarem com a lista. */
   search?: string | null,
 ): Promise<Record<InboxTab, number>> {
+  const orgId = getOrgIdOrNull() ?? "noorg";
+  const scopeFp = createHash("sha1")
+    .update(
+      JSON.stringify({
+        v: visibilityWhere ?? null,
+        m: todosMemberCategoryTabs ?? null,
+        c: allowedChannelIds ?? null,
+        f: filterConditions ?? [],
+        s: search?.trim() || null,
+      }),
+    )
+    .digest("hex")
+    .slice(0, 20);
+
+  return cache.wrap(
+    inboxTabCountsKey(orgId, scopeFp),
+    TAB_COUNTS_CACHE_TTL_SEC,
+    () => computeTabCounts(
+      visibilityWhere,
+      todosMemberCategoryTabs,
+      allowedChannelIds,
+      filterConditions,
+      search,
+    ),
+  );
+}
+
+async function computeTabCounts(
+  visibilityWhere?: Prisma.ConversationWhereInput,
+  todosMemberCategoryTabs?: InboxCategoryTab[] | null,
+  allowedChannelIds?: string[] | null,
+  filterConditions?: Prisma.ConversationWhereInput[],
+  search?: string | null,
+): Promise<Record<InboxTab, number>> {
   const extra = filterConditions ?? [];
   const searchWhere = await buildConversationSearchWhere(search);
   const countAgentReply = await countAgentReplyAsAnswered();
-  const results = await Promise.all(
-    TAB_LIST.map(async (tab) => {
-      const conditions: Prisma.ConversationWhereInput[] = [];
-      if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
-        conditions.push(visibilityWhere);
-      }
-      conditions.push(tabToWhere(tab, countAgentReply));
-      if (allowedChannelIds) {
-        conditions.push({ channelId: { in: allowedChannelIds } });
-      }
-      if (extra.length > 0) conditions.push(...extra);
-      if (searchWhere) conditions.push(searchWhere);
-      const where: Prisma.ConversationWhereInput =
-        conditions.length > 0 ? { AND: conditions } : {};
-      const count = await prisma.conversation.count({ where });
-      return [tab, count] as const;
-    }),
-  );
-  const record = Object.fromEntries(results) as Record<InboxTab, number>;
-  record.todos = await countTodosTab(
-    visibilityWhere,
-    todosMemberCategoryTabs ?? null,
-    allowedChannelIds,
-    extra,
-    searchWhere,
-    countAgentReply,
-  );
-  // "abertas" = todas as conversas em aberto (status OPEN), independentemente
-  // da subcategoria. Contagem própria (não é uma categoria em TAB_LIST).
-  {
+
+  // Abas "leves" (OPEN + filtros estreitos) vs "pesadas" (RESOLVED / OR amplo).
+  // finalizados + todos ainda rodam no mesmo batch, mas o cache.wrap acima
+  // evita repetir o pacote inteiro a cada mount/SSE.
+  const lightTabs = TAB_LIST.filter((t) => t !== "finalizados");
+  const countTab = async (tab: InboxCategoryTab) => {
     const conditions: Prisma.ConversationWhereInput[] = [];
     if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
       conditions.push(visibilityWhere);
     }
-    conditions.push({ status: "OPEN" });
-    if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
+    conditions.push(tabToWhere(tab, countAgentReply));
+    if (allowedChannelIds) {
+      conditions.push({ channelId: { in: allowedChannelIds } });
+    }
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
-    record.abertas = await prisma.conversation.count({
-      where: conditions.length > 0 ? { AND: conditions } : {},
-    });
-  }
+    const where: Prisma.ConversationWhereInput =
+      conditions.length > 0 ? { AND: conditions } : {};
+    return prisma.conversation.count({ where });
+  };
+
+  const [lightResults, finalizados, todos, abertas] = await Promise.all([
+    Promise.all(lightTabs.map(async (tab) => [tab, await countTab(tab)] as const)),
+    countTab("finalizados"),
+    countTodosTab(
+      visibilityWhere,
+      todosMemberCategoryTabs ?? null,
+      allowedChannelIds,
+      extra,
+      searchWhere,
+      countAgentReply,
+    ),
+    (() => {
+      const conditions: Prisma.ConversationWhereInput[] = [];
+      if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
+        conditions.push(visibilityWhere);
+      }
+      conditions.push({ status: "OPEN" });
+      if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
+      if (extra.length > 0) conditions.push(...extra);
+      if (searchWhere) conditions.push(searchWhere);
+      return prisma.conversation.count({
+        where: conditions.length > 0 ? { AND: conditions } : {},
+      });
+    })(),
+  ]);
+
+  const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
+  record.finalizados = finalizados;
+  record.todos = todos;
+  record.abertas = abertas;
   return record;
 }
 
@@ -1112,6 +1161,8 @@ export async function getConversationLite(id: string) {
       id: true, externalId: true, contactId: true, status: true,
       channel: true, channelId: true, waJid: true, organizationId: true,
       number: true,
+      lastInboundAt: true,
+      pinnedNoteId: true,
       channelRef: {
         select: {
           id: true, provider: true, config: true, name: true,

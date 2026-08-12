@@ -81,6 +81,24 @@ export async function invalidateUser(id: string): Promise<void> {
   await cache.del(userKey(id));
 }
 
+// ── Inbox tab counts ────────────────────────────────────────────
+//
+// GET /api/conversations?counts=1 — COUNT por aba é caro em orgs
+// grandes (finalizados/todos). TTL curto cobre cold-load stampede;
+// abas quentes (esperando/entrada) aceitam stale ≤60s nos badges.
+
+export function inboxTabCountsKey(orgId: string, scopeFp: string): string {
+  return `inbox_tab_counts:${orgId}:${scopeFp}`;
+}
+
+export async function invalidateInboxTabCounts(orgId: string): Promise<void> {
+  try {
+    await cache.delPattern(`inbox_tab_counts:${orgId}:*`);
+  } catch {
+    /* best-effort */
+  }
+}
+
 // ── Pipelines / Stages (config raramente muda) ──────────────────
 //
 // Listagem completa por org. Invalidar em mudanca de pipeline/stage.

@@ -193,95 +193,91 @@ export async function GET(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "Conversa não encontrada." }, { status: 404 });
     }
 
-    let pinnedNoteId: string | null = null;
-    // Fixadas da conversa (banner estilo WhatsApp) — várias mensagens,
-    // resolvidas para o id de bolha (`externalId ?? id`) que o frontend usa.
-    let pinnedMessageIds: string[] = [];
-    try {
-      const convFull = await prisma.conversation.findUnique({
-        where: { id: conv.id },
-        select: { pinnedNoteId: true },
-      });
-      pinnedNoteId = convFull?.pinnedNoteId ?? null;
-
-      const pins = await prisma.pinnedMessage.findMany({
-        where: { conversationId: conv.id },
-        orderBy: { createdAt: "asc" },
-        select: {
-          id: true,
-          expiresAt: true,
-          message: { select: { id: true, externalId: true } },
-        },
-      });
-
-      // Prazo vencido (24h/7d/30d) — desafixa sozinho na 1ª leitura pós-prazo,
-      // sem cron dedicado. Remove as vencidas e mantém as válidas.
-      const now = new Date();
-      const expiredIds = pins.filter((p) => p.expiresAt && p.expiresAt < now).map((p) => p.id);
-      if (expiredIds.length > 0) {
-        await prisma.pinnedMessage.deleteMany({ where: { id: { in: expiredIds } } });
-      }
-      pinnedMessageIds = pins
-        .filter((p) => !(p.expiresAt && p.expiresAt < now))
-        .map((p) => p.message.externalId ?? p.message.id);
-    } catch { /* tabela pode não existir ainda em ambientes antigos */ }
-
-    // Janela de 24h e' do CONTATO (regra da Meta), nao do ticket. Com o
-    // modelo de ticket, um ticket recem-criado (reopen/resposta) nasce sem
-    // mensagens inbound — calcular so pelo ticket marcava a sessao como
-    // fechada mesmo com o cliente ativo minutos antes no ticket anterior.
-    // Busca o ultimo inbound em QUALQUER conversa do contato no canal.
-    const lastInMsg = await prisma.message.findFirst({
-      where: {
-        direction: "in",
-        conversation: conv.contactId
-          ? { contactId: conv.contactId, channel: conv.channel }
-          : { id: conv.id },
-      },
-      orderBy: { createdAt: "desc" },
-      select: { createdAt: true },
-    });
-    const lastInboundAt = lastInMsg?.createdAt ?? null;
-
-    const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
-    const now = Date.now();
-    const diffMs = lastInboundAt ? now - lastInboundAt.getTime() : null;
-    const sessionActive = diffMs !== null ? diffMs < SESSION_WINDOW_MS : false;
-    const sessionExpiresAt = lastInboundAt
-      ? new Date(lastInboundAt.getTime() + SESSION_WINDOW_MS).toISOString()
-      : null;
-
-    // Este GET é chamado a cada 5s por conversa aberta (refetchInterval do
-    // inbox). Logar por request gera spam/CPU em prod — gate por verbosidade.
-    debugLog(
-      `[session] conv=${conv.id} lastInbound=${lastInboundAt?.toISOString() ?? "NULL"} diffH=${diffMs !== null ? (diffMs / 3_600_000).toFixed(2) : "N/A"} active=${sessionActive}`
-    );
-
     const url = new URL(request.url);
     const limit = Math.min(100, Math.max(1, Number(url.searchParams.get("limit")) || 50));
     const before = url.searchParams.get("before");
     const includeHistory = url.searchParams.get("history") === "1" && !before;
 
-    const rows = await findMessagesSafe({
-      where: {
-        conversationId: conv.id,
-        ...(before ? { createdAt: { lt: new Date(before) } } : {}),
-      },
-      orderBy: { createdAt: "desc" },
-      take: limit,
-    });
+    // Hot path paralelo: pins + sessão + página atual (antes: awaits em série).
+    const [pinnedBundle, lastInboundAtResolved, rowsDesc] = await Promise.all([
+      (async (): Promise<{ pinnedNoteId: string | null; pinnedMessageIds: string[] }> => {
+        try {
+          const pins = await prisma.pinnedMessage.findMany({
+            where: { conversationId: conv.id },
+            orderBy: { createdAt: "asc" },
+            select: {
+              id: true,
+              expiresAt: true,
+              message: { select: { id: true, externalId: true } },
+            },
+          });
+          const now = new Date();
+          const expiredIds = pins
+            .filter((p) => p.expiresAt && p.expiresAt < now)
+            .map((p) => p.id);
+          if (expiredIds.length > 0) {
+            void prisma.pinnedMessage
+              .deleteMany({ where: { id: { in: expiredIds } } })
+              .catch(() => undefined);
+          }
+          return {
+            pinnedNoteId: conv.pinnedNoteId ?? null,
+            pinnedMessageIds: pins
+              .filter((p) => !(p.expiresAt && p.expiresAt < now))
+              .map((p) => p.message.externalId ?? p.message.id),
+          };
+        } catch {
+          return { pinnedNoteId: conv.pinnedNoteId ?? null, pinnedMessageIds: [] };
+        }
+      })(),
+      (async (): Promise<Date | null> => {
+        if (conv.lastInboundAt) return conv.lastInboundAt;
+        const lastInMsg = await prisma.message.findFirst({
+          where: {
+            direction: "in",
+            conversation: conv.contactId
+              ? { contactId: conv.contactId, channel: conv.channel }
+              : { id: conv.id },
+          },
+          orderBy: { createdAt: "desc" },
+          select: { createdAt: true },
+        });
+        return lastInMsg?.createdAt ?? null;
+      })(),
+      findMessagesSafe({
+        where: {
+          conversationId: conv.id,
+          ...(before ? { createdAt: { lt: new Date(before) } } : {}),
+        },
+        orderBy: { createdAt: "desc" },
+        take: limit,
+      }),
+    ]);
 
-    rows.reverse();
+    const pinnedNoteId = pinnedBundle.pinnedNoteId;
+    const pinnedMessageIds = pinnedBundle.pinnedMessageIds;
+    const lastInboundAt = lastInboundAtResolved;
+    const rows = [...rowsDesc].reverse();
 
-    // Tickets anteriores do mesmo contato+canal (history=1, sem paginação).
-    // Cada ticket RESOLVED recebe um separador visual antes das suas mensagens.
+    const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
+    const nowMs = Date.now();
+    const diffMs = lastInboundAt ? nowMs - lastInboundAt.getTime() : null;
+    const sessionActive = diffMs !== null ? diffMs < SESSION_WINDOW_MS : false;
+    const sessionExpiresAt = lastInboundAt
+      ? new Date(lastInboundAt.getTime() + SESSION_WINDOW_MS).toISOString()
+      : null;
+
+    debugLog(
+      `[session] conv=${conv.id} lastInbound=${lastInboundAt?.toISOString() ?? "NULL"} diffH=${diffMs !== null ? (diffMs / 3_600_000).toFixed(2) : "N/A"} active=${sessionActive}`
+    );
+
     type HistoryTicket = {
       id: string;
       number: number;
       closedAt: Date | null;
       rows: (typeof rows)[number][];
     };
-    const historyTickets: HistoryTicket[] = [];
+    let historyTickets: HistoryTicket[] = [];
     if (includeHistory && conv.contactId && conv.channel) {
       const prevConvs = await prisma.conversation.findMany({
         where: {
@@ -290,27 +286,29 @@ export async function GET(request: Request, context: RouteContext) {
           status: "RESOLVED",
           id: { not: conv.id },
         },
-        orderBy: { createdAt: "asc" },
+        orderBy: { createdAt: "desc" },
         select: { id: true, number: true, closedAt: true },
-        take: 15,
+        take: 5,
       });
-      for (const pc of prevConvs) {
-        const pRows = await findMessagesSafe({
-          where: { conversationId: pc.id },
-          orderBy: { createdAt: "asc" },
-          take: 100,
-        });
-        historyTickets.push({ id: pc.id, number: pc.number, closedAt: pc.closedAt, rows: pRows });
-      }
+      const loaded = await Promise.all(
+        prevConvs.map(async (pc) => {
+          const pRows = await findMessagesSafe({
+            where: { conversationId: pc.id },
+            orderBy: { createdAt: "desc" },
+            take: 40,
+          });
+          pRows.reverse();
+          return {
+            id: pc.id,
+            number: pc.number,
+            closedAt: pc.closedAt,
+            rows: pRows,
+          };
+        }),
+      );
+      historyTickets = loaded.reverse();
     }
 
-    // Resolve foto de perfil dos agentes que assinaram cada mensagem
-    // outbound. Sem FK `Message.senderId` no schema atual, a única
-    // chave que o Prisma persiste é o `senderName` (string). Buscamos
-    // todos os Users do workspace cujos nomes aparecem como sender em
-    // alguma mensagem out — UMA query agregada, depois indexamos no
-    // map abaixo. Match é case-insensitive pra resistir a variações
-    // mínimas de cadastro ("Marcelo Pinheiro" vs "Marcelo pinheiro").
     const outSenderNames = Array.from(
       new Set(
         rows
@@ -320,37 +318,58 @@ export async function GET(request: Request, context: RouteContext) {
       ),
     );
 
-    // Favoritos do agente LOGADO nesta página de mensagens — uma query
-    // agregada (IN) em vez de N+1. Escopo por userId: cada agente só vê
-    // as próprias marcações.
-    const favoritedIds = new Set<string>();
-    try {
-      const favRows = await prisma.favoriteMessage.findMany({
-        where: {
-          userId: (authResult.user as { id: string }).id,
-          messageId: { in: rows.map((r) => r.id) },
-        },
-        select: { messageId: true },
-      });
-      for (const f of favRows) favoritedIds.add(f.messageId);
-    } catch { /* tabela pode nao existir ainda em ambientes antigos */ }
+    const referencedChannelIds = Array.from(
+      new Set(
+        [conv.channelId, ...rows.map((r) => r.channelId)].filter(
+          (v): v is string => Boolean(v),
+        ),
+      ),
+    );
 
+    const [favRows, agents, channelRows, canReply] = await Promise.all([
+      prisma.favoriteMessage
+        .findMany({
+          where: {
+            userId: (authResult.user as { id: string }).id,
+            messageId: { in: rows.map((r) => r.id) },
+          },
+          select: { messageId: true },
+        })
+        .catch(() => [] as { messageId: string }[]),
+      outSenderNames.length > 0
+        ? prisma.user.findMany({
+            where: {
+              OR: outSenderNames.map((name) => ({
+                name: { equals: name, mode: "insensitive" as const },
+              })),
+              ...userOrgFilter({ user: authResult.user }),
+            },
+            select: { name: true, avatarUrl: true },
+          })
+        : Promise.resolve([] as { name: string; avatarUrl: string | null }[]),
+      referencedChannelIds.length > 0
+        ? prisma.channel.findMany({
+            where: {
+              id: { in: referencedChannelIds },
+              ...userOrgFilter({ user: authResult.user }),
+            },
+            select: { id: true, name: true, type: true, phoneNumber: true },
+          })
+        : Promise.resolve(
+            [] as {
+              id: string;
+              name: string;
+              type: string;
+              phoneNumber: string | null;
+            }[],
+          ),
+      canDoChannelAction(accessUser, "send", conv.channelId),
+    ]);
+
+    const favoritedIds = new Set(favRows.map((f) => f.messageId));
     const senderAvatarMap = new Map<string, string | null>();
-    if (outSenderNames.length > 0) {
-      // Match cross-org seria leak (avatar de agente de outra org com mesmo
-      // nome). Filtra pela org do caller via userOrgFilter — super-admin ve tudo.
-      const agents = await prisma.user.findMany({
-        where: {
-          OR: outSenderNames.map((name) => ({
-            name: { equals: name, mode: "insensitive" as const },
-          })),
-          ...userOrgFilter({ user: authResult.user }),
-        },
-        select: { name: true, avatarUrl: true },
-      });
-      for (const agent of agents) {
-        senderAvatarMap.set(agent.name.toLowerCase(), agent.avatarUrl ?? null);
-      }
+    for (const agent of agents) {
+      senderAvatarMap.set(agent.name.toLowerCase(), agent.avatarUrl ?? null);
     }
 
     const messages: InboxMessageDto[] = rows.map((r) => ({
@@ -378,43 +397,17 @@ export async function GET(request: Request, context: RouteContext) {
       favoritedByMe: favoritedIds.has(r.id) || undefined,
     }));
 
-    // Mapa de conexões referenciadas (canais das mensagens + canal atual da
-    // conversa). Permite ao frontend rotular cada mensagem e o header com o
-    // apelido + número da conexão sem N+1 queries no client.
-    const referencedChannelIds = Array.from(
-      new Set(
-        [
-          conv.channelId,
-          ...rows.map((r) => r.channelId),
-        ].filter((v): v is string => Boolean(v)),
-      ),
-    );
     const channelsMap: Record<string, ConnectionRefDto> = {};
-    if (referencedChannelIds.length > 0) {
-      const channelRows = await prisma.channel.findMany({
-        where: {
-          id: { in: referencedChannelIds },
-          ...userOrgFilter({ user: authResult.user }),
-        },
-        select: { id: true, name: true, type: true, phoneNumber: true },
-      });
-      for (const ch of channelRows) {
-        channelsMap[ch.id] = {
-          id: ch.id,
-          name: ch.name,
-          type: ch.type,
-          phoneNumber: ch.phoneNumber ?? null,
-        };
-      }
+    for (const ch of channelRows) {
+      channelsMap[ch.id] = {
+        id: ch.id,
+        name: ch.name,
+        type: ch.type,
+        phoneNumber: ch.phoneNumber ?? null,
+      };
     }
     const currentChannel: ConnectionRefDto | null =
       (conv.channelId && channelsMap[conv.channelId]) || null;
-
-    // Bloco C (25/jun/26): expõe `canReply` no payload pra o composer
-    // entrar em modo leitura quando o usuário não tem `channel.send` no
-    // canal. Derivado do mesmo enforcement do POST messages — fonte de
-    // verdade é o backend; client usa só pra UX (desabilitar input + aviso).
-    const canReply = await canDoChannelAction(accessUser, "send", conv.channelId);
 
     // Monta a linha do tempo completa: tickets anteriores (com separadores)
     // + mensagens do ticket atual.

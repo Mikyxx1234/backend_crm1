@@ -35,7 +35,9 @@ export async function GET(request: Request, context: RouteContext) {
       return NextResponse.json({ message: "ID inválido." }, { status: 400 });
     }
 
-    const contact = await getContactById(id);
+    const contact = await getContactById(id, {
+      view: new URL(request.url).searchParams.get("view") === "inbox" ? "inbox" : "full",
+    });
     if (!contact) {
       const exists = await contactExists(id).catch(() => false);
       if (!exists) {

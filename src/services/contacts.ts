@@ -724,7 +724,19 @@ export async function contactExists(id: string): Promise<boolean> {
  * individual. Se o core existe mas uma relação falha, a relação vira
  * array vazio e o contato ainda é renderizado.
  */
-export async function getContactById(id: string) {
+export type GetContactByIdOptions = {
+  /**
+   * Inbox aside: pula activities/notes/conversations (não usados no painel
+   * negócio no cold path). Mantém deals + panel fields.
+   */
+  view?: "full" | "inbox";
+};
+
+export async function getContactById(
+  id: string,
+  options: GetContactByIdOptions = {},
+) {
+  const view = options.view ?? "full";
   let core: Awaited<ReturnType<typeof prisma.contact.findUnique>> | null = null;
   try {
     core = await prisma.contact.findUnique({ where: { id } });
@@ -746,6 +758,42 @@ export async function getContactById(id: string) {
       return fallback;
     }
   };
+
+  const emptyActivities = [] as Awaited<
+    ReturnType<
+      typeof prisma.activity.findMany<{
+        include: {
+          user: { select: typeof assignedToSelect };
+          deal: { select: { id: true; title: true } };
+        };
+      }>
+    >
+  >;
+  const emptyNotes = [] as Awaited<
+    ReturnType<
+      typeof prisma.note.findMany<{
+        include: { user: { select: typeof assignedToSelect } };
+      }>
+    >
+  >;
+  const emptyConversations = [] as Awaited<
+    ReturnType<
+      typeof prisma.conversation.findMany<{
+        select: {
+          id: true;
+          externalId: true;
+          channel: true;
+          status: true;
+          inboxName: true;
+          createdAt: true;
+          updatedAt: true;
+          assignedToId: true;
+          assignedTo: { select: { id: true; name: true; email: true } };
+          channelRef: { select: { id: true; name: true; type: true; phoneNumber: true } };
+        };
+      }>
+    >
+  >;
 
   const [
     company,
@@ -788,29 +836,22 @@ export async function getContactById(id: string) {
         }),
       [] as Array<{ contactId: string; tagId: string; tag: { id: string; name: string; color: string | null } }>,
     ),
-    safe(
-      "activities",
-      () =>
-        prisma.activity.findMany({
-          where: { contactId: id },
-          take: 20,
-          orderBy: { createdAt: "desc" },
-          include: {
-            user: { select: assignedToSelect },
-            deal: { select: { id: true, title: true } },
-          },
-        }),
-      [] as Awaited<
-        ReturnType<
-          typeof prisma.activity.findMany<{
-            include: {
-              user: { select: typeof assignedToSelect };
-              deal: { select: { id: true; title: true } };
-            };
-          }>
-        >
-      >,
-    ),
+    view === "inbox"
+      ? Promise.resolve(emptyActivities)
+      : safe(
+          "activities",
+          () =>
+            prisma.activity.findMany({
+              where: { contactId: id },
+              take: 20,
+              orderBy: { createdAt: "desc" },
+              include: {
+                user: { select: assignedToSelect },
+                deal: { select: { id: true, title: true } },
+              },
+            }),
+          emptyActivities,
+        ),
     safe(
       "deals",
       () =>
@@ -838,62 +879,43 @@ export async function getContactById(id: string) {
         >
       >,
     ),
-    safe(
-      "notes",
-      () =>
-        prisma.note.findMany({
-          where: { contactId: id },
-          take: 30,
-          orderBy: { createdAt: "desc" },
-          include: { user: { select: assignedToSelect } },
-        }),
-      [] as Awaited<
-        ReturnType<
-          typeof prisma.note.findMany<{
-            include: { user: { select: typeof assignedToSelect } };
-          }>
-        >
-      >,
-    ),
-    safe(
-      "conversations",
-      () =>
-        prisma.conversation.findMany({
-          where: { contactId: id },
-          take: 50,
-          orderBy: { updatedAt: "desc" },
-          select: {
-            id: true,
-            externalId: true,
-            channel: true,
-            status: true,
-            inboxName: true,
-            createdAt: true,
-            updatedAt: true,
-            assignedToId: true,
-            assignedTo: { select: { id: true, name: true, email: true } },
-            channelRef: { select: { id: true, name: true, type: true, phoneNumber: true } },
-          },
-        }),
-      [] as Awaited<
-        ReturnType<
-          typeof prisma.conversation.findMany<{
-            select: {
-              id: true;
-              externalId: true;
-              channel: true;
-              status: true;
-              inboxName: true;
-              createdAt: true;
-              updatedAt: true;
-              assignedToId: true;
-              assignedTo: { select: { id: true; name: true; email: true } };
-              channelRef: { select: { id: true; name: true; type: true; phoneNumber: true } };
-            };
-          }>
-        >
-      >,
-    ),
+    view === "inbox"
+      ? Promise.resolve(emptyNotes)
+      : safe(
+          "notes",
+          () =>
+            prisma.note.findMany({
+              where: { contactId: id },
+              take: 30,
+              orderBy: { createdAt: "desc" },
+              include: { user: { select: assignedToSelect } },
+            }),
+          emptyNotes,
+        ),
+    view === "inbox"
+      ? Promise.resolve(emptyConversations)
+      : safe(
+          "conversations",
+          () =>
+            prisma.conversation.findMany({
+              where: { contactId: id },
+              take: 50,
+              orderBy: { updatedAt: "desc" },
+              select: {
+                id: true,
+                externalId: true,
+                channel: true,
+                status: true,
+                inboxName: true,
+                createdAt: true,
+                updatedAt: true,
+                assignedToId: true,
+                assignedTo: { select: { id: true, name: true, email: true } },
+                channelRef: { select: { id: true, name: true, type: true, phoneNumber: true } },
+              },
+            }),
+          emptyConversations,
+        ),
     safe("inboxLeadPanelFields", () => getInboxLeadPanelFieldsForContact(id), [] as InboxLeadPanelFieldRow[]),
   ]);
 
