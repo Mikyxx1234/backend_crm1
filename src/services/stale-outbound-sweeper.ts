@@ -1,61 +1,30 @@
 /**
- * Sweeper de mensagens outbound "stale".
+ * Sweeper de mensagens outbound "stale" — comportamento de timeout→failed
+ * DESATIVADO.
  *
- * Contexto: a Meta WhatsApp Cloud API aceita mensagens com 200 OK
- * (retornando `messages[].id`) mesmo quando, silenciosamente, não vai
- * entregá-las — casos típicos são número WhatsApp Business pausado,
- * rate-limit silencioso, quality rating baixo/flagged, ou o próprio
- * número do cliente num estado que a Meta não consegue rotear. Nessas
- * condições NÃO chega nenhum webhook de status (nem `delivered` nem
- * `failed`), e a mensagem fica eternamente com `sendStatus = "sent"`
- * no CRM enganando o operador com o check ✓.
+ * Histórico: a Meta pode aceitar o envio (200 + wamid) sem nunca emitir
+ * webhook de status; o sweeper marcava `sent` antigo como `failed` com
+ * sendError de timeout e ligava `hasError` na conversa.
  *
- * Esse sweeper roda periodicamente, localiza mensagens outbound que
- * estão em `sent` há mais tempo do que o razoável (default 30 min,
- * configurável via `STALE_OUTBOUND_TIMEOUT_MS`) e as marca como
- * `failed` com um `sendError` explícito. Também liga `hasError` na
- * conversa e publica SSE para que a UI reflita em tempo real.
+ * Decisão de produto: NÃO marcar timeout como erro. A mensagem permanece
+ * `sent` (1 ✓ na UI) até um webhook real (`delivered` / `read` / `failed`).
  *
- * A janela grande (30 min) evita falsos positivos — normalmente a
- * Meta entrega em segundos, no máximo alguns minutos mesmo quando
- * o destinatário está offline.
+ * O módulo continua existindo para:
+ *  - export estável (`startStaleOutboundSweeper` ainda é chamado no boot);
+ *  - one-shot de auto-heal de tipos internos marcados indevidamente no passado.
  */
 
-// Sweeper roda cross-tenant (varre mensagens "sent" stale de TODAS as
-// orgs). Usa prismaBase (sem org-scope) porque o worker nao tem
-// RequestContext e nao deve filtrar por organization — a seguranca ja
-// esta garantida pelo filtro de `direction=out` + `sendStatus=sent`.
+// Usa prismaBase (sem org-scope): o worker não tem RequestContext.
 import { prismaBase as prisma } from "@/lib/prisma-base";
 import { getLogger } from "@/lib/logger";
-import { sseBus } from "@/lib/sse-bus";
-import { refreshWhatsAppHealth } from "@/services/whatsapp-health";
 
 const log = getLogger("stale-outbound-sweeper");
 
-const DEFAULT_TIMEOUT_MS = 15 * 60 * 1_000;
-const DEFAULT_INTERVAL_MS = 30 * 1_000;
-const BATCH_SIZE = 100;
-
-// Mensagem explícita de TIMEOUT INTERNO — não é um erro retornado pela
-// Meta. A Cloud API aceitou (200 OK + wamid) mas nunca emitiu nenhum
-// webhook `sent`/`delivered`/`failed` dentro da janela do sweeper.
-// Prefixamos "Timeout:" pra que o operador diferencie de falhas com
-// código real (formato `... (code 131047)`) que vêm via webhook.
-// Cenários conhecidos que caem aqui:
-//  - callback Meta inacessível / worker-meta-webhook parado (status não chega)
-//  - drop silencioso da Meta sem status=failed
-//  - número pausado / flagged / quality rebaixada (também possível, não único)
-//  - problema de roteamento no lado do destinatário
+// Texto legado do sendError de timeout — só usado pelo auto-heal abaixo
+// (mensagens internas que o sweeper antigo marcou por engano).
 const STALE_ERROR_MESSAGE =
   "Timeout: a Meta não confirmou entrega (nenhum webhook de status recebido no CRM). Verifique se o callback do webhook está acessível na internet e se os eventos estão sendo processados. Se o número estiver ok no Manager, o cliente pode ter recebido a mensagem mesmo assim.";
 
-// Tipos de mensagem que NÃO passam pela Cloud API da Meta — são
-// eventos/artefatos gerados pelo próprio CRM (gravação de chamada feita
-// no browser do agente, evento de terminate da call, nota interna,
-// rascunho de IA). Elas recebem `externalId` interno (ex.:
-// `call_timeline:{callId}`) que não é wamid, e nunca terão webhook de
-// delivery. Incluí-las no sweep as marcava incorretamente como
-// "Timeout" depois de 15 min.
 const INTERNAL_MESSAGE_TYPES = [
   "whatsapp_call",
   "whatsapp_call_recording",
@@ -63,108 +32,24 @@ const INTERNAL_MESSAGE_TYPES = [
   "ai_draft",
 ];
 
+/**
+ * No-op: não marca mais outbound stale como `failed`.
+ * Mantido o export para callers/testes existentes.
+ */
 export async function sweepStaleOutbound(
-  timeoutMs = getTimeoutMs(),
+  _timeoutMs?: number,
 ): Promise<number> {
-  const cutoff = new Date(Date.now() - timeoutMs);
-
-  const stale = await prisma.message.findMany({
-    where: {
-      direction: "out",
-      sendStatus: "sent",
-      createdAt: { lt: cutoff },
-      // Só consideramos mensagens que passaram pela Meta (têm wamid).
-      // Uma nota interna sem externalId é legítimamente "sent" e não
-      // deve ser marcada como falha.
-      externalId: { not: null },
-      // Exclui tipos internos (gravação de chamada, evento de call,
-      // nota, rascunho de IA) que não são enviados pela Cloud API.
-      messageType: { notIn: INTERNAL_MESSAGE_TYPES },
-      // Mensagens privadas (notas internas) também ficam de fora
-      // mesmo que por algum motivo tenham recebido externalId.
-      isPrivate: false,
-    },
-    select: { id: true, conversationId: true, createdAt: true, organizationId: true },
-    // Ordenar por createdAt (e não pelo default id) permite ao planner usar
-    // o índice parcial messages_stale_outbound_idx (createdAt WHERE
-    // direction='out' AND sendStatus='sent') para filtro+ordenação. Com
-    // ORDER BY id o planner preferia varrer a PK e filtrar ~500k linhas
-    // por chamada (~470ms) — top-2 em tempo total no pg_stat_statements.
-    orderBy: { createdAt: "asc" },
-    take: BATCH_SIZE,
-  });
-
-  if (stale.length === 0) return 0;
-
-  let processed = 0;
-  for (const msg of stale) {
-    try {
-      await prisma.message.update({
-        where: { id: msg.id },
-        data: {
-          sendStatus: "failed",
-          sendError: STALE_ERROR_MESSAGE,
-        },
-      });
-
-      const { markConversationHasError } = await import(
-        "@/services/conversation-error-flag"
-      );
-      // Não recoloca em Erro se o cliente já respondeu depois do envio.
-      await markConversationHasError(msg.conversationId, prisma);
-
-      try {
-        sseBus.publish("message_status", {
-          organizationId: msg.organizationId,
-          conversationId: msg.conversationId,
-          messageId: msg.id,
-          status: "failed",
-          error: STALE_ERROR_MESSAGE,
-        });
-      } catch {
-        // SSE é best-effort, falha aqui não pode atrapalhar o sweep.
-      }
-
-      processed++;
-    } catch (err) {
-      log.warn(`Falha ao marcar mensagem ${msg.id} como stale:`, err);
-    }
-  }
-
-  if (processed > 0) {
-    log.warn(
-      `${processed} mensagem(ns) marcada(s) como falhas por ausência de confirmação da Meta.`,
-    );
-    // Quando aparece mensagem stale é indício forte de que o número
-    // Meta está com algum problema. Força revalidação do healthcheck
-    // pra que o banner global apareça no próximo refetch do dashboard
-    // sem esperar o TTL de 2 min.
-    refreshWhatsAppHealth();
-  }
-
-  return processed;
-}
-
-function getTimeoutMs(): number {
-  const raw = process.env.STALE_OUTBOUND_TIMEOUT_MS;
-  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_TIMEOUT_MS;
-}
-
-function getIntervalMs(): number {
-  const raw = process.env.STALE_OUTBOUND_SWEEP_INTERVAL_MS;
-  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_INTERVAL_MS;
+  return 0;
 }
 
 /**
  * Auto-healing one-shot: corrige mensagens internas (gravação de
  * chamada, evento de call, notas, rascunho de IA) que foram
- * erroneamente marcadas como `failed` pelo sweeper antes do fix que
- * adicionou o filtro `messageType notIn INTERNAL_MESSAGE_TYPES`.
+ * erroneamente marcadas como `failed` pelo sweeper antes do filtro
+ * `messageType notIn INTERNAL_MESSAGE_TYPES`.
  *
  * Roda no boot uma única vez. Idempotente — só toca linhas com o
- * `sendError` exato do sweeper.
+ * `sendError` exato do sweeper legado.
  */
 export async function healWronglyFailedInternalMessages(): Promise<number> {
   try {
@@ -191,31 +76,18 @@ export async function healWronglyFailedInternalMessages(): Promise<number> {
   }
 }
 
-let _interval: ReturnType<typeof setInterval> | null = null;
+let _started = false;
 
-export function startStaleOutboundSweeper(intervalMs = getIntervalMs()) {
-  if (_interval) return;
-  const timeoutMs = getTimeoutMs();
-  // One-shot no boot: corrige vítimas do filtro antigo (mensagens
-  // `whatsapp_call_recording` marcadas como falha mesmo sem terem
-  // passado pela Meta). Não bloqueia o start do sweeper.
+export function startStaleOutboundSweeper(_intervalMs?: number) {
+  if (_started) return;
+  _started = true;
+  // One-shot legado; não inicia intervalo — timeout não vira failed.
   healWronglyFailedInternalMessages().catch(() => {});
-  _interval = setInterval(() => {
-    sweepStaleOutbound(timeoutMs).catch((err) =>
-      log.error("Falha no sweeper de mensagens stale:", err),
-    );
-  }, intervalMs);
-  if (typeof _interval === "object" && "unref" in _interval) {
-    (_interval as NodeJS.Timeout).unref();
-  }
   log.info(
-    `Sweeper iniciado (a cada ${Math.round(intervalMs / 1000)}s, marca "sent" > ${Math.round(timeoutMs / 60_000)}min como falha).`,
+    "Sweeper de stale-outbound desativado (mensagens `sent` sem webhook da Meta permanecem `sent`).",
   );
 }
 
 export function stopStaleOutboundSweeper() {
-  if (_interval) {
-    clearInterval(_interval);
-    _interval = null;
-  }
+  _started = false;
 }
