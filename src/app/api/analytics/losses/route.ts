@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
 
-import { auth } from "@/lib/auth";
+import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { prisma } from "@/lib/prisma";
 
 function toNumber(v: unknown): number {
@@ -18,13 +18,15 @@ function toNumber(v: unknown): number {
 
 export async function GET(request: Request) {
   try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
+    // Aceita sessao (cockpit) e Bearer API token (integracoes/n8n) — mesmo
+    // helper de GET /api/deals.
+    const authResult = await authenticateApiRequest(request);
+    if (!authResult.ok) return authResult.response;
+
+    return await runWithApiUserContext(authResult.user, async () => {
     // Super-admin nao tem organizationId — ele acessa o painel /admin global
     // por outro caminho. Aqui exigimos org pra evitar agregado cross-tenant.
-    const orgId = session.user.organizationId;
+    const orgId = authResult.user.organizationId;
     if (!orgId) {
       return NextResponse.json(
         { message: "Sem organizacao no contexto." },
@@ -36,13 +38,18 @@ export async function GET(request: Request) {
     const fromS = searchParams.get("from");
     const toS = searchParams.get("to");
 
+    // from/to independentes — o caller pode informar so um lado do intervalo.
     let dateFilter = Prisma.sql`TRUE`;
-    if (fromS && toS) {
-      const from = new Date(fromS);
-      const to = new Date(toS);
-      if (!Number.isNaN(from.getTime()) && !Number.isNaN(to.getTime())) {
-        dateFilter = Prisma.sql`d."closedAt" >= ${from} AND d."closedAt" <= ${to}`;
-      }
+    const from = fromS ? new Date(fromS) : null;
+    const to = toS ? new Date(toS) : null;
+    const fromOk = from !== null && !Number.isNaN(from.getTime());
+    const toOk = to !== null && !Number.isNaN(to.getTime());
+    if (fromOk && toOk) {
+      dateFilter = Prisma.sql`d."closedAt" >= ${from} AND d."closedAt" <= ${to}`;
+    } else if (fromOk) {
+      dateFilter = Prisma.sql`d."closedAt" >= ${from}`;
+    } else if (toOk) {
+      dateFilter = Prisma.sql`d."closedAt" <= ${to}`;
     }
 
     const rows = await prisma.$queryRaw<
@@ -70,6 +77,7 @@ export async function GET(request: Request) {
     const totalValue = items.reduce((s, i) => s + i.totalValue, 0);
 
     return NextResponse.json({ items, totalLost, totalValue: Math.round(totalValue * 100) / 100 });
+    });
   } catch (e) {
     console.error(e);
     return NextResponse.json(
