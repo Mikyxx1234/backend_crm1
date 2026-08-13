@@ -779,6 +779,43 @@ export const INBOX_TAB_LIST: readonly InboxCategoryTab[] = INBOX_CATEGORY_TABS;
 /** @deprecated use INBOX_TAB_LIST */
 const TAB_LIST = INBOX_TAB_LIST;
 
+/**
+ * Contagem que ESPELHA a semântica da lista: `getConversations` colapsa os
+ * tickets por CONTATO (1 card por pessoa/canal — ver comentário do colapso
+ * lá), porque encerrar e receber nova mensagem cria um ticket NOVO. Contar
+ * linhas de `conversations` inflava o badge (ex.: 1 contato com 19
+ * encerramentos contava 19 — badge "Encerradas 20" para uma lista de 2
+ * cards). Contamos então CONTATOS distintos que possuem ≥1 conversa
+ * casando o `where`, via semi-join no Postgres (`contacts WHERE EXISTS
+ * (...)`) — um único COUNT escalar, sem trazer os grupos para memória
+ * (o org maior tem 28k grupos; `groupBy` custaria MBs por aba).
+ *
+ * Contato x contato+canal: a lista agrupa por `contactId::channel`, mas em
+ * produção `count(DISTINCT contactId) == count(DISTINCT (contactId, channel))`
+ * em TODAS as orgs (um contato não tem tickets em canais diferentes), logo
+ * contato distinto casa exatamente com a quantidade de cards.
+ *
+ * `collapseByContact = false` (filtro por `contactId`) espelha a lista quando
+ * ela NÃO colapsa: aí cada ticket é um card e contamos linhas.
+ */
+async function countConversationsLikeList(
+  conditions: Prisma.ConversationWhereInput[],
+  collapseByContact: boolean,
+): Promise<number> {
+  const where: Prisma.ConversationWhereInput =
+    conditions.length > 0 ? { AND: conditions } : {};
+  if (!collapseByContact) return prisma.conversation.count({ where });
+
+  // A extension de org injeta `organizationId` só na raiz (aqui, em
+  // `contacts`); replicamos no filtro aninhado para manter o escopo da
+  // contagem anterior (`prisma.conversation.count`) idêntico.
+  const orgId = getOrgIdOrNull();
+  const someWhere: Prisma.ConversationWhereInput = orgId
+    ? { AND: [...conditions, { organizationId: orgId }] }
+    : where;
+  return prisma.contact.count({ where: { conversations: { some: someWhere } } });
+}
+
 async function countTodosTab(
   visibilityWhere: Prisma.ConversationWhereInput | undefined,
   memberOrTabs: InboxCategoryTab[] | null,
@@ -786,6 +823,7 @@ async function countTodosTab(
   filterConditions?: Prisma.ConversationWhereInput[],
   searchWhere?: Prisma.ConversationWhereInput | null,
   countAgentReply = false,
+  collapseByContact = true,
 ): Promise<number> {
   const conditions: Prisma.ConversationWhereInput[] = [];
   if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
@@ -803,9 +841,7 @@ async function countTodosTab(
     conditions.push(...filterConditions);
   }
   if (searchWhere) conditions.push(searchWhere);
-  const where: Prisma.ConversationWhereInput =
-    conditions.length > 0 ? { AND: conditions } : {};
-  return prisma.conversation.count({ where });
+  return countConversationsLikeList(conditions, collapseByContact);
 }
 
 export async function getTabCounts(
@@ -819,6 +855,8 @@ export async function getTabCounts(
   filterConditions?: Prisma.ConversationWhereInput[],
   /** Busca textual — mesma regra da listagem, para badges casarem com a lista. */
   search?: string | null,
+  /** `false` quando a lista NÃO colapsa por contato (filtro por `contactId`). */
+  collapseByContact = true,
 ): Promise<Record<InboxTab, number>> {
   const orgId = getOrgIdOrNull() ?? "noorg";
   let scopeFp: string;
@@ -831,6 +869,7 @@ export async function getTabCounts(
           c: allowedChannelIds ?? null,
           f: filterConditions ?? [],
           s: search?.trim() || null,
+          g: collapseByContact,
         }),
       )
       .digest("hex")
@@ -842,6 +881,7 @@ export async function getTabCounts(
       allowedChannelIds,
       filterConditions,
       search,
+      collapseByContact,
     );
   }
 
@@ -854,6 +894,7 @@ export async function getTabCounts(
       allowedChannelIds,
       filterConditions,
       search,
+      collapseByContact,
     ),
   );
 }
@@ -864,6 +905,7 @@ async function computeTabCounts(
   allowedChannelIds?: string[] | null,
   filterConditions?: Prisma.ConversationWhereInput[],
   search?: string | null,
+  collapseByContact = true,
 ): Promise<Record<InboxTab, number>> {
   const extra = filterConditions ?? [];
   const searchWhere = await buildConversationSearchWhere(search);
@@ -884,9 +926,7 @@ async function computeTabCounts(
     }
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
-    const where: Prisma.ConversationWhereInput =
-      conditions.length > 0 ? { AND: conditions } : {};
-    return prisma.conversation.count({ where });
+    return countConversationsLikeList(conditions, collapseByContact);
   };
 
   // Sequencial de propósito: 8 COUNT em paralelo (cold load) esgotava o
@@ -903,6 +943,7 @@ async function computeTabCounts(
     extra,
     searchWhere,
     countAgentReply,
+    collapseByContact,
   );
   const abertas = await (() => {
     const conditions: Prisma.ConversationWhereInput[] = [];
@@ -913,9 +954,7 @@ async function computeTabCounts(
     if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
     if (extra.length > 0) conditions.push(...extra);
     if (searchWhere) conditions.push(searchWhere);
-    return prisma.conversation.count({
-      where: conditions.length > 0 ? { AND: conditions } : {},
-    });
+    return countConversationsLikeList(conditions, collapseByContact);
   })();
 
   const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
