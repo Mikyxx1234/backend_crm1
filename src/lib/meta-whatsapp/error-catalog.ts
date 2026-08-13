@@ -39,6 +39,31 @@ export function isMetaTransientServiceCode(
   return typeof code === "number" && META_TRANSIENT_SERVICE_CODES.has(code);
 }
 
+/**
+ * Códigos de NÃO-entrega por elegibilidade — não é falha que o operador
+ * consiga "resolver" na conversa, então NÃO devem levar o ticket para a
+ * fila Erro. A mensagem continua `failed` na thread (histórico), e o
+ * healthcheck do canal continua sendo atualizado separadamente.
+ *
+ * Diferente de `META_TRANSIENT_SERVICE_CODES`: aquele é sobre retry
+ * (downtime/overload); este é sobre "não é um problema acionável na
+ * conversa".
+ */
+export const META_NON_CONVERSATION_ERROR_CODES = new Set([
+  131047, // fora da janela 24h — só template reengaja; usuário humano já é
+          // bloqueado no composer, então quem gera isso é automação/campanha
+  131049, // Meta limitou marketing para preservar engajamento
+  131026, // mensagem não entregue ao destinatário (sem WhatsApp / não aceitou termos)
+  130472, // número faz parte de experimento da Meta (marketing)
+  133010, // conta não existe na Cloud API (número perdido/não registrado)
+]);
+
+export function isMetaNonConversationErrorCode(
+  code: number | null | undefined,
+): boolean {
+  return typeof code === "number" && META_NON_CONVERSATION_ERROR_CODES.has(code);
+}
+
 const CATALOG: Record<number, MetaErrorInfo> = {
   // ── Genéricos / infra ───────────────────────────────────────
   1: {
@@ -118,6 +143,11 @@ const CATALOG: Record<number, MetaErrorInfo> = {
   131047: {
     reason: "Fora da janela de 24h — só é possível reengajar com template aprovado.",
     action: "Use uma campanha de template (HSM) aprovado em vez de texto livre.",
+  },
+  133010: {
+    reason: "A conta/número não existe mais na Cloud API da Meta.",
+    action:
+      "Verifique o registro do número no Gerenciador de Negócios e o healthcheck do canal — este não é um problema da conversa em si.",
   },
   131049: {
     reason:
