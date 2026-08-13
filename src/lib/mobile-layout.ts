@@ -109,6 +109,8 @@ export const MOBILE_MODULES: MobileModuleDescriptor[] = [
     iconName: "Zap",
     description: "Salesbot, fluxos e gatilhos",
     category: "growth",
+    // Paridade com a sidebar desktop (nav:automations).
+    allowedRoles: ["ADMIN", "MANAGER"],
   },
   {
     id: "distribution",
@@ -174,10 +176,17 @@ export const DEFAULT_ENABLED: MobileModuleId[] = [
   "inbox",
   "companies",
   "tasks",
+  "automations",
   "settings",
   "profile",
   "distribution",
 ];
+
+/**
+ * Módulos que entram em "Mais" mesmo em layouts já salvos sem eles
+ * (onboard de feature — evita depender de re-salvar o Layout Builder).
+ */
+export const MORE_SHEET_ENSURE: MobileModuleId[] = ["automations"];
 
 /**
  * Limite de itens no bottom nav. Nao ha mais corte visual em N —
