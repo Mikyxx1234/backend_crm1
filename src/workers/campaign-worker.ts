@@ -395,6 +395,27 @@ async function handleSend(
     return;
   }
 
+  // Idempotência: retry/stall do BullMQ não pode chamar a Meta de novo
+  // depois que o destinatário já foi aceito (remat1308_pt1, ago/2026:
+  // 246 alunos receberam o HSM 2x ~5 min depois). SENDING não entra
+  // aqui — crash antes do POST ainda precisa reenviar.
+  const recipient = await prisma.campaignRecipient.findUnique({
+    where: { id: recipientId },
+    select: { status: true, metaMessageId: true },
+  });
+  if (!recipient) return;
+  if (
+    recipient.status === "SENT" ||
+    recipient.status === "DELIVERED" ||
+    recipient.status === "READ" ||
+    Boolean(recipient.metaMessageId)
+  ) {
+    console.info(
+      `[campaign-send] Recipient ${recipientId} já enviado (${recipient.status}), skipping`,
+    );
+    return;
+  }
+
   await prisma.campaignRecipient.update({
     where: { id: recipientId },
     data: { status: "SENDING" },
