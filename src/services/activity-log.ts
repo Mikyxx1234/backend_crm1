@@ -19,6 +19,7 @@
 
 import type { ActorType, EventEntityType, Prisma } from "@prisma/client";
 
+import { getAutomationOrigin } from "@/lib/automation-origin";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import {
@@ -128,6 +129,27 @@ function resolveActor(input: LogEventInput): {
   };
 }
 
+/**
+ * Anexa a origem de automacao (`automationId` + numero do card) ao `meta`
+ * do evento quando a escrita acontece dentro de um passo de automacao.
+ *
+ * Chave `automationOrigin` — lida pela timeline/feed para renderizar
+ * "via automação «X» · card #N". Nao sobrescreve um `automationOrigin`
+ * que o caller tenha passado explicitamente. Eventos gravados fora de
+ * automacao (acao manual, cron, webhook) seguem sem a chave, e a UI
+ * degrada omitindo a linha.
+ */
+export function withAutomationOriginMeta(
+  meta: Record<string, unknown> | undefined,
+): Prisma.InputJsonValue {
+  const base = meta ?? {};
+  const origin = getAutomationOrigin();
+  if (!origin || base.automationOrigin !== undefined) {
+    return base as Prisma.InputJsonValue;
+  }
+  return { ...base, automationOrigin: origin } as Prisma.InputJsonValue;
+}
+
 /// Helper principal. Fire-and-forget (retorna Promise mas catch interno
 /// evita propagar falhas para o caller). Use `await` se quiser garantir
 /// ordem com outras escritas — em geral, deixe sem await.
@@ -135,7 +157,7 @@ export async function logEvent(input: LogEventInput): Promise<void> {
   if (shouldSkipActivityLog()) return;
   try {
     const actor = resolveActor(input);
-    const metaJson = (input.meta ?? {}) as Prisma.InputJsonValue;
+    const metaJson = withAutomationOriginMeta(input.meta);
 
     await prisma.activityEvent.create({
       data: withOrgFromCtx({
