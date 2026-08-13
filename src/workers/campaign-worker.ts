@@ -634,7 +634,11 @@ async function persistCampaignOutboundMessage(input: {
   }
 
   const conversationId = ensured.conversationId;
-  const channelId = ensured.channelId ?? input.channelId;
+  // Canal da CAMPANHA (de onde o Meta realmente enviou). A conversa reusada
+  // pode estar num canal antigo/disconnected (ex.: CSV Atendimento); pintar a
+  // bolha com esse channelId faz o inbox mostrar "via … 4535" mesmo quando o
+  // disparo saiu pelo Acadêmico.
+  const channelId = input.channelId || ensured.channelId;
 
   const saved = await prisma.message.create({
     data: withOrgFromCtx({
