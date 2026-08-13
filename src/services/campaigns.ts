@@ -43,16 +43,49 @@ export async function getCampaigns(params: GetCampaignsParams = {}) {
   return { items, total, page, perPage, totalPages: Math.ceil(total / perPage) || 1 };
 }
 
+function tagIdsFromFilters(filters: unknown): string[] {
+  if (!filters || typeof filters !== "object") return [];
+  const ids = (filters as { tagIds?: unknown }).tagIds;
+  if (!Array.isArray(ids)) return [];
+  return [...new Set(ids.filter((id): id is string => typeof id === "string" && id.length > 0))];
+}
+
 export async function getCampaignById(id: string) {
-  return prisma.campaign.findUnique({
+  const campaign = await prisma.campaign.findUnique({
     where: { id },
     include: {
       channel: { select: { id: true, name: true, provider: true, type: true, config: true } },
-      segment: { select: { id: true, name: true } },
+      segment: { select: { id: true, name: true, filters: true } },
       automation: { select: { id: true, name: true } },
       createdBy: { select: { id: true, name: true } },
     },
   });
+  if (!campaign) return null;
+
+  // Mesma fonte do worker: segmento salvo tem prioridade sobre filtros ad-hoc.
+  const audienceFilters = campaign.segment
+    ? campaign.segment.filters
+    : campaign.filters;
+  const tagIds = tagIdsFromFilters(audienceFilters);
+  const tagRows =
+    tagIds.length > 0
+      ? await prisma.tag.findMany({
+          where: { id: { in: tagIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+  const tagNameById = new Map(tagRows.map((t) => [t.id, t.name]));
+  const audienceTags = tagIds.map((tagId) => ({
+    id: tagId,
+    name: tagNameById.get(tagId) ?? tagId,
+  }));
+
+  const { segment, ...rest } = campaign;
+  return {
+    ...rest,
+    segment: segment ? { id: segment.id, name: segment.name } : null,
+    audienceTags,
+  };
 }
 
 export type CreateCampaignInput = {
