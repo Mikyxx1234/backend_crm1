@@ -12,7 +12,11 @@ import { getMyCredentials } from "@/services/sip-extensions";
  *  - Autorização = ser o dono (session.userId). Sem permission key adicional.
  *  - NUNCA logar o corpo da resposta.
  *  - Não registrar o valor de authPassword em nenhum log.
- *  - Apenas usuários com ramal próprio recebem dados; 404 caso contrário.
+ *  - Apenas usuários com ramal próprio recebem dados; caso contrário
+ *    200 com `{ credentials: null }` (antes era 404, mas o browser loga
+ *    qualquer resposta de erro no console — o frontend consulta este
+ *    endpoint como "feature gate" em toda navegação, então o 404 virava
+ *    ruído permanente no console dos operadores sem telefonia).
  */
 export async function GET(request: Request) {
   const authResult = await authenticateApiRequest(request);
@@ -23,13 +27,6 @@ export async function GET(request: Request) {
       // Autorização: o caller SÓ pode ver as próprias credenciais.
       // A checagem é implícita: getMyCredentials usa session.userId.
       const credentials = await getMyCredentials(authResult.user.id);
-
-      if (!credentials) {
-        return NextResponse.json(
-          { message: "Nenhum ramal SIP configurado para este usuário." },
-          { status: 404 },
-        );
-      }
 
       // NUNCA logar credentials — contém authPassword em plaintext
       return NextResponse.json({ credentials });
