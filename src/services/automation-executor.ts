@@ -9,6 +9,10 @@ import {
 
 import { normalizeConditionConfig } from "@/lib/automation-condition";
 import {
+  runWithAutomationOrigin,
+  type AutomationOrigin,
+} from "@/lib/automation-origin";
+import {
   normalizeRoundRobinConfig,
   roundRobinOptionsSignature,
 } from "@/lib/automation-round-robin";
@@ -1654,6 +1658,32 @@ type StepResult = {
   note?: string;
 };
 
+/**
+ * Monta a origem gravada em `meta.automationOrigin` dos eventos de
+ * timeline produzidos pelo passo.
+ *
+ * `stepNumber` é o índice 1-based na lista ordenada por `position` — o
+ * MESMO número que o editor de automações mostra no badge do card
+ * (`workflow-canvas.tsx`, `stepIndex: index + 1`), então o operador
+ * consegue ir direto ao card citado na timeline.
+ */
+function buildStepOrigin(
+  rt: RuntimeContext,
+  automationName: string | null | undefined,
+  step: { id: string; type: string },
+  orderedSteps: { id: string }[],
+): AutomationOrigin {
+  const idx = orderedSteps.findIndex((s) => s.id === step.id);
+  return {
+    automationId: rt.automationId,
+    automationName: automationName ?? rt.automationName ?? null,
+    stepId: step.id,
+    stepType: step.type,
+    stepNumber: idx >= 0 ? idx + 1 : null,
+    stepLabel: STEP_TYPE_LABELS[step.type] ?? step.type,
+  };
+}
+
 async function executeStep(
   stepType: string,
   rawConfig: Prisma.JsonValue | Record<string, unknown>,
@@ -1856,6 +1886,20 @@ async function executeStep(
       const targetDealId = rt.dealId ?? readString(cfg, "dealId");
       const targetContactId = rt.contactId ?? readString(cfg, "contactId");
 
+      // Snapshot do responsável ANTES da troca — vira `meta.from` do
+      // OWNER_CHANGED. Sem isso a timeline não explicava atribuições
+      // feitas por automação (o passo não registrava nenhum evento).
+      const dealIdForEvent =
+        target === "deal" || target === "both" ? targetDealId : null;
+      const ownerBefore = dealIdForEvent
+        ? (
+            await prisma.deal.findUnique({
+              where: { id: dealIdForEvent },
+              select: { owner: { select: { id: true, name: true } } },
+            })
+          )?.owner ?? null
+        : null;
+
       if (target === "deal") {
         if (!targetDealId) throw new Error("assign_owner: dealId ausente");
         // Responsável único: muda o owner do deal e propaga para o
@@ -1892,6 +1936,36 @@ async function executeStep(
       } else {
         throw new Error(`assign_owner: target inválido "${target}"`);
       }
+
+      if (dealIdForEvent && (ownerBefore?.id ?? null) !== ownerId) {
+        const ownerAfter = ownerId
+          ? await prisma.user.findUnique({
+              where: { id: ownerId },
+              select: { id: true, name: true },
+            })
+          : null;
+        // O `automationOrigin` (automação + nº do card) entra no meta
+        // automaticamente via `withAutomationOriginMeta`.
+        createDealEvent(
+          dealIdForEvent,
+          null,
+          "OWNER_CHANGED",
+          {
+            from: ownerBefore
+              ? { id: ownerBefore.id, name: ownerBefore.name ?? ownerBefore.id }
+              : null,
+            to: ownerId
+              ? { id: ownerId, name: ownerAfter?.name ?? ownerId }
+              : null,
+          },
+          {
+            type: "AUTOMATION",
+            label: rt.automationName ? `Automação: ${rt.automationName}` : "Automação",
+            ref: rt.automationId,
+          },
+        ).catch(() => {});
+      }
+
       return {};
     }
 
@@ -4230,7 +4304,14 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
 
     let result: StepResult;
     try {
-      result = await executeStep(step.type, enrichedConfig, rt);
+      // A origem (automação + nº do card) viaja pelo ALS para que TODO
+      // evento de timeline escrito dentro do passo — inclusive os
+      // gravados por services indiretos, como o motor da Distribuição
+      // Inteligente — registre qual card causou a ação.
+      result = await runWithAutomationOrigin(
+        buildStepOrigin(rt, automation.name, step, automation.steps),
+        () => executeStep(step.type, enrichedConfig, rt),
+      );
       if (result.setVariable) {
         flowVariables = { ...flowVariables, [result.setVariable.name]: result.setVariable.value };
         rt.data = { ...rt.data, ...flowVariables };
@@ -4584,7 +4665,10 @@ export async function continueFromStep(
 
     let result: StepResult;
     try {
-      result = await executeStep(step.type, stepConfig, rt);
+      result = await runWithAutomationOrigin(
+        buildStepOrigin(rt, automation.name, step, automation.steps),
+        () => executeStep(step.type, stepConfig, rt),
+      );
       if (result.setVariable) {
         flowVariables = { ...flowVariables, [result.setVariable.name]: result.setVariable.value };
         rt.data = { ...rt.data, ...flowVariables };

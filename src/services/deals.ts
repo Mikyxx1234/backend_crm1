@@ -5,7 +5,7 @@ import { prisma, type ScopedTx } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow, type ContextActor } from "@/lib/request-context";
 import { getOrgSettingBool } from "@/lib/org-settings";
-import { logEvent } from "@/services/activity-log";
+import { logEvent, withAutomationOriginMeta } from "@/services/activity-log";
 import { getStageMetrics } from "@/services/analytics";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
 import { cache } from "@/lib/cache";
@@ -90,7 +90,10 @@ export function createDealEvent(
    */
   actorOverride?: ContextActor,
 ) {
-  const metaJson = meta as Prisma.InputJsonValue;
+  // Mesma origem de automacao gravada no log novo (ver
+  // `withAutomationOriginMeta`) — o endpoint da timeline cai no
+  // `deal_events` legado quando o deal nao tem activity_events.
+  const metaJson = withAutomationOriginMeta(meta);
 
   // Extrai field/old/new do meta (convencao herdada do log antigo).
   const field =
