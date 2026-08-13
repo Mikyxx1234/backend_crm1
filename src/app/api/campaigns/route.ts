@@ -16,6 +16,7 @@ export async function GET(request: Request) {
       const result = await getCampaigns({
         status: (searchParams.get("status") as never) ?? undefined,
         type: (searchParams.get("type") as never) ?? undefined,
+        search: searchParams.get("search")?.trim() || undefined,
         page: Number(searchParams.get("page")) || 1,
         perPage: Number(searchParams.get("perPage")) || 20,
       });
