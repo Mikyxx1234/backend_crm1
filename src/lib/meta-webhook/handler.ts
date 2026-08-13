@@ -61,7 +61,7 @@ const log = getLogger("meta-webhook");
 import { processMetaWhatsappCallsWebhook } from "@/services/meta-whatsapp-calls-webhook";
 import { processIncomingMessage as processSalesbotMessage } from "@/services/automation-context";
 import { logEvent, logMessageFailed, logMessageRead } from "@/services/activity-log";
-import { metaErrorReason } from "@/lib/meta-whatsapp/error-catalog";
+import { metaErrorReason, isMetaNonConversationErrorCode } from "@/lib/meta-whatsapp/error-catalog";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { markCampaignReplyByContact } from "@/services/campaigns";
@@ -1503,10 +1503,15 @@ async function processStatusUpdate(status: Record<string, unknown>) {
         });
 
         if (isFailure) {
-          const { markConversationHasError } = await import(
-            "@/services/conversation-error-flag"
-          );
-          await markConversationHasError(msg.conversationId);
+          // Erros de elegibilidade (fora da janela 24h, conta inexistente,
+          // marketing limitado) não são acionáveis na conversa — não levam
+          // o ticket para a fila Erro. A mensagem segue `failed` na thread.
+          if (!isMetaNonConversationErrorCode(errorInfo?.code)) {
+            const { markConversationHasError } = await import(
+              "@/services/conversation-error-flag"
+            );
+            await markConversationHasError(msg.conversationId);
+          }
           log.warn(
             `Mensagem ${wamid} falhou no envio: code=${errorInfo?.code ?? "?"} title="${errorInfo?.title ?? ""}" details="${errorInfo?.details ?? ""}" href=${errorInfo?.href ?? "-"}`,
           );
@@ -1580,6 +1585,20 @@ async function processStatusUpdate(status: Record<string, unknown>) {
                 })
                 .catch(() => {});
             }
+          } else {
+            // Regra de produto (ago/26): QUALQUER envio que a Meta confirma
+            // como entregue/lido depois de um erro tira a conversa da fila
+            // Erro — o problema foi resolvido (ex.: pagamento regularizado
+            // e reenvio entregue). Antes o count exigia zero `failed` na
+            // conversa, o que prendia tickets com falha ANTIGA já superada.
+            // Sem o count: um único UPDATE por delivered/read só roda quando
+            // a conversa está marcada, então o custo é ~zero no caminho feliz.
+            await prisma.conversation
+              .updateMany({
+                where: { id: msg.conversationId, hasError: true },
+                data: { hasError: false },
+              })
+              .catch(() => {});
           }
         }
 
