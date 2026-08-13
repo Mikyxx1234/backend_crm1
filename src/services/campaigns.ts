@@ -12,6 +12,7 @@ import type { SegmentFilters } from "./segments";
 export type GetCampaignsParams = {
   status?: CampaignStatus;
   type?: CampaignType;
+  search?: string;
   page?: number;
   perPage?: number;
 };
@@ -24,6 +25,16 @@ export async function getCampaigns(params: GetCampaignsParams = {}) {
   const where: Prisma.CampaignWhereInput = {};
   if (params.status) where.status = params.status;
   if (params.type) where.type = params.type;
+
+  // Busca por nome da campanha ou nome do segmento (mesma semântica que a
+  // listagem de /campaigns aplicava no cliente antes da paginação server-side).
+  const search = params.search?.trim();
+  if (search) {
+    where.OR = [
+      { name: { contains: search, mode: "insensitive" } },
+      { segment: { name: { contains: search, mode: "insensitive" } } },
+    ];
+  }
 
   const [items, total] = await Promise.all([
     prisma.campaign.findMany({
