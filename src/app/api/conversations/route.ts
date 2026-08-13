@@ -152,6 +152,9 @@ export async function GET(request: Request) {
           allowedChannelIds,
           filterConditions,
           countsSearch,
+          // A lista só colapsa tickets por contato quando NÃO há filtro de
+          // contactId (ver getConversations) — o badge segue a mesma regra.
+          !contactId,
         );
         if (user.role === "MEMBER") {
           const masked = { ...counts };
