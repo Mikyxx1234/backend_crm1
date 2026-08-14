@@ -11,7 +11,6 @@ import {
 } from "@/lib/human-actor-name";
 import {
   createConversationEvent,
-  queueWaitingConsultantText,
   type ConversationEventAction,
 } from "@/services/conversation-events";
 
@@ -147,13 +146,10 @@ function mapChatEvent(
         actor: /ia/i.test(actor) ? "Agente IA" : "Sistema",
       };
     }
-    case "LEAD_DISTRIBUTION_FAILED": {
-      return {
-        action: "distribuicao",
-        text: queueWaitingConsultantText(dept),
-        actor: /ia/i.test(actor) ? "Agente IA" : "Sistema",
-      };
-    }
+    case "LEAD_DISTRIBUTION_FAILED":
+      // Fila sem elegível: o sweeper reprocessa até alguém entrar.
+      // Não espelhar no chat — gerava o mesmo evento a cada ciclo.
+      return null;
     case "ASSIGNEE_CHANGED": {
       if (from && to) {
         const dest = dept ? `${to} (${dept})` : to;
