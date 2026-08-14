@@ -10,7 +10,7 @@ import { sseBus } from "@/lib/sse-bus";
 import { logEvent } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
 import { updateConversationStatusInDb } from "@/services/conversations";
-import { resolveAutoCloseTabulation } from "@/services/tabulations";
+import { resolveAutoCloseTabulation, tabulationLogMeta } from "@/services/tabulations";
 
 function normalize(s: string): string {
   return s
@@ -140,13 +140,16 @@ export async function closeAiOnlyConversation(args: {
       entityLabel: updated.externalId ?? null,
       conversationId: conv.id,
       contactId,
-      meta: {
-        tabulationId: autoTab.tabulationId,
-        ancestorIds: autoTab.ancestorIds,
-        departmentId: conv.departmentId,
-        source: "AI_AGENT",
-        auto: true,
-      },
+      meta: tabulationLogMeta(
+        {
+          tabulationId: autoTab.tabulationId,
+          ancestorIds: autoTab.ancestorIds,
+          departmentId: conv.departmentId,
+          name: autoTab.name,
+          number: autoTab.number,
+        },
+        { source: "AI_AGENT", auto: true },
+      ),
     }).catch(() => null);
   }
 

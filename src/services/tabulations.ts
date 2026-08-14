@@ -19,6 +19,8 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 
 export type TabulationNode = {
   id: string;
+  /** ID amigável sequencial por organização (não o CUID). */
+  number: number;
   parentId: string | null;
   name: string;
   color: string | null;
@@ -26,6 +28,64 @@ export type TabulationNode = {
   active: boolean;
   children: TabulationNode[];
 };
+
+/** Snapshot gravado em `CONVERSATION_TABULATED.meta` (timeline + analytics). */
+export type TabulationLogFields = {
+  tabulationId: string;
+  ancestorIds: string[];
+  departmentId: string | null;
+  tabulationName: string;
+  tabulationNumber: number;
+};
+
+export function tabulationLogMeta(
+  snap: {
+    tabulationId: string;
+    ancestorIds: string[];
+    departmentId?: string | null;
+    name: string;
+    number: number;
+  },
+  extra?: Record<string, unknown>,
+): TabulationLogFields & Record<string, unknown> {
+  return {
+    tabulationId: snap.tabulationId,
+    ancestorIds: snap.ancestorIds,
+    departmentId: snap.departmentId ?? null,
+    tabulationName: snap.name,
+    tabulationNumber: snap.number,
+    ...extra,
+  };
+}
+
+/**
+ * Próximo `Tabulation.number` da org corrente. Schema:
+ * `@@unique([organizationId, number])` sem default — Postgres sequences
+ * não particionam por coluna. A extension Prisma já escopa o aggregate.
+ * Em corrida o caller faz retry em P2002 (ver `createNode`).
+ */
+export async function nextTabulationNumber(): Promise<number> {
+  const r = await prisma.tabulation.aggregate({ _max: { number: true } });
+  return (r._max.number ?? 0) + 1;
+}
+
+function isTabulationNumberUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as {
+    code?: string;
+    message?: string;
+    meta?: { target?: string[] | string };
+  };
+  if (e.code !== "P2002") return false;
+  const target = e.meta?.target;
+  const hasNumber = (s: string) => s === "number" || s.includes("number");
+  if (Array.isArray(target)) return target.some((t) => hasNumber(String(t)));
+  if (typeof target === "string") return hasNumber(target);
+  const msg = typeof e.message === "string" ? e.message : "";
+  return /organizationId/i.test(msg) && /[`"']number[`"']/i.test(msg);
+}
+
+const TABULATION_NUMBER_MAX_RETRIES = 5;
 
 function orgIdOrThrow(): string {
   const ctx = getRequestContext();
@@ -48,6 +108,7 @@ export async function getTree(departmentId: string): Promise<TabulationNode[]> {
   rows.forEach((r) => {
     byId.set(r.id, {
       id: r.id,
+      number: r.number,
       parentId: r.parentId,
       name: r.name,
       color: r.color,
@@ -110,7 +171,12 @@ async function ancestorsInOrg(id: string, orgId: string): Promise<string[]> {
 export async function resolveAutoCloseTabulation(args: {
   organizationId: string;
   departmentId: string | null | undefined;
-}): Promise<{ tabulationId: string; ancestorIds: string[] } | null> {
+}): Promise<{
+  tabulationId: string;
+  ancestorIds: string[];
+  name: string;
+  number: number;
+} | null> {
   const { organizationId, departmentId } = args;
   if (!departmentId) return null;
 
@@ -123,12 +189,14 @@ export async function resolveAutoCloseTabulation(args: {
 
   const node = await prisma.tabulation.findFirst({
     where: { id: tabulationId, organizationId, departmentId, active: true },
-    select: { id: true, _count: { select: { children: true } } },
+    select: { id: true, name: true, number: true, _count: { select: { children: true } } },
   });
   if (!node || node._count.children > 0) return null;
 
   return {
     tabulationId,
+    name: node.name,
+    number: node.number,
     ancestorIds: await ancestorsInOrg(tabulationId, organizationId),
   };
 }
@@ -150,6 +218,8 @@ export async function resolveTabulationForStep(args: {
   tabulationId: string;
   ancestorIds: string[];
   departmentId: string;
+  name: string;
+  number: number;
 } | null> {
   const { organizationId, tabulationId } = args;
   if (!tabulationId) return null;
@@ -159,6 +229,8 @@ export async function resolveTabulationForStep(args: {
     select: {
       id: true,
       departmentId: true,
+      name: true,
+      number: true,
       _count: { select: { children: true } },
     },
   });
@@ -167,6 +239,8 @@ export async function resolveTabulationForStep(args: {
   return {
     tabulationId: node.id,
     departmentId: node.departmentId,
+    name: node.name,
+    number: node.number,
     ancestorIds: await ancestorsInOrg(node.id, organizationId),
   };
 }
@@ -178,11 +252,11 @@ export async function resolveTabulationForStep(args: {
 export async function assertLeafInDepartment(
   id: string,
   departmentId: string,
-): Promise<void> {
+): Promise<{ id: string; name: string; number: number }> {
   const orgId = orgIdOrThrow();
   const node = await prisma.tabulation.findFirst({
     where: { id, organizationId: orgId, departmentId, active: true },
-    select: { id: true, _count: { select: { children: true } } },
+    select: { id: true, name: true, number: true, _count: { select: { children: true } } },
   });
   if (!node) {
     const err = new Error("Tabulacao invalida para este departamento.");
@@ -194,6 +268,7 @@ export async function assertLeafInDepartment(
     (err as { code?: string }).code = "TABULATION_NOT_LEAF";
     throw err;
   }
+  return { id: node.id, name: node.name, number: node.number };
 }
 
 export async function createNode(input: {
@@ -228,15 +303,28 @@ export async function createNode(input: {
     _max: { position: true },
   });
   const position = (maxPos._max.position ?? -1) + 1;
-  return prisma.tabulation.create({
-    data: withOrgFromCtx({
-      departmentId: input.departmentId,
-      parentId: input.parentId ?? null,
-      name: input.name.trim(),
-      color: input.color ?? null,
-      position,
-    }),
-  });
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < TABULATION_NUMBER_MAX_RETRIES; attempt++) {
+    try {
+      const number = await nextTabulationNumber();
+      return await prisma.tabulation.create({
+        data: withOrgFromCtx({
+          departmentId: input.departmentId,
+          parentId: input.parentId ?? null,
+          name: input.name.trim(),
+          color: input.color ?? null,
+          position,
+          number,
+        }),
+      });
+    } catch (err) {
+      lastErr = err;
+      if (!isTabulationNumberUniqueViolation(err)) throw err;
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("Falha ao alocar number de tabulacao.");
 }
 
 export async function updateNode(

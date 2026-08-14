@@ -23,6 +23,7 @@ export type TabulationAnalyticsRow = {
   actorName: string | null;
   tabulationId: string | null;
   tabulationName: string | null;
+  tabulationNumber: number | null;
   tabulationPath: string | null;
   departmentId: string | null;
   departmentName: string | null;
@@ -31,6 +32,7 @@ export type TabulationAnalyticsRow = {
 export type TabulationTopItem = {
   tabulationId: string;
   name: string;
+  number: number | null;
   path: string;
   /**
    * O ranking agrupa por `tabulationId`, então a mesma folha criada em varios
@@ -78,12 +80,25 @@ function metaString(
   return typeof v === "string" && v.length > 0 ? v : null;
 }
 
+function metaNumber(
+  meta: Prisma.JsonValue | null | undefined,
+  key: string,
+): number | null {
+  if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+  const v = (meta as Record<string, unknown>)[key];
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && /^\d+$/.test(v)) return Number(v);
+  return null;
+}
+
 async function buildPathMap(
   tabulationIds: string[],
-): Promise<Map<string, { name: string; path: string; departmentId: string | null }>> {
+): Promise<
+  Map<string, { name: string; path: string; departmentId: string | null; number: number | null }>
+> {
   const map = new Map<
     string,
-    { name: string; path: string; departmentId: string | null }
+    { name: string; path: string; departmentId: string | null; number: number | null }
   >();
   if (tabulationIds.length === 0) return map;
 
@@ -93,6 +108,7 @@ async function buildPathMap(
     select: {
       id: true,
       name: true,
+      number: true,
       parentId: true,
       departmentId: true,
     },
@@ -111,7 +127,7 @@ async function buildPathMap(
   if (missingParents.size > 0) {
     const parents = await prisma.tabulation.findMany({
       where: { organizationId: orgId, id: { in: [...missingParents] } },
-      select: { id: true, name: true, parentId: true, departmentId: true },
+      select: { id: true, name: true, number: true, parentId: true, departmentId: true },
     });
     for (const p of parents) byId.set(p.id, p);
     // Uma passagem a mais costuma bastar; completa cadeia se necessário.
@@ -124,7 +140,7 @@ async function buildPathMap(
       if (more.size === 0) break;
       const extra = await prisma.tabulation.findMany({
         where: { organizationId: orgId, id: { in: [...more] } },
-        select: { id: true, name: true, parentId: true, departmentId: true },
+        select: { id: true, name: true, number: true, parentId: true, departmentId: true },
       });
       if (extra.length === 0) break;
       for (const e of extra) byId.set(e.id, e);
@@ -147,6 +163,7 @@ async function buildPathMap(
       name: leaf?.name ?? id,
       path: names.join(" › ") || id,
       departmentId: leaf?.departmentId ?? null,
+      number: leaf?.number ?? null,
     });
   }
   return map;
@@ -290,6 +307,7 @@ export async function getTabulationAnalytics(
     return {
       tabulationId: r.id,
       name: info?.name ?? r.id,
+      number: info?.number ?? null,
       path: info?.path ?? r.id,
       departmentId: deptId,
       departmentName: deptId ? (deptNameById.get(deptId) ?? null) : null,
@@ -318,7 +336,10 @@ export async function getTabulationAnalytics(
       actorUserId: e.actorUserId,
       actorName: e.actorUser?.name ?? null,
       tabulationId,
-      tabulationName: info?.name ?? null,
+      tabulationName:
+        info?.name ?? metaString(e.meta, "tabulationName") ?? null,
+      tabulationNumber:
+        info?.number ?? metaNumber(e.meta, "tabulationNumber"),
       tabulationPath: info?.path ?? null,
       departmentId,
       departmentName: departmentId
