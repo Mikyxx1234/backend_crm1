@@ -18,6 +18,7 @@ export const CONVERSATION_EVENT_ACTIONS = [
   "distribuicao",
   "transferencia",
   "status",
+  "tabulacao",
   "tag",
   "entrada",
   "saida",

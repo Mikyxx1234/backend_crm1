@@ -33,7 +33,10 @@ function activityMatchesMessage(
   const c = content.toLowerCase();
   switch (activityType) {
     case "CONVERSATION_TABULATED":
-      return action === "status" && c.includes("tabulad");
+      return (
+        (action === "tabulacao" || action === "status") &&
+        c.includes("tabulad")
+      );
     case "CONVERSATION_STATUS_CHANGED":
     case "CONVERSATION_CLOSED":
     case "CONVERSATION_REOPENED":
