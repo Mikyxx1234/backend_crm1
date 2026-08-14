@@ -327,7 +327,7 @@ export function withInboxQueueVisibility(
     extras.push({
       status: "OPEN",
       assignedTo: { is: { type: "AI" } },
-      lastMessageDirection: "in",
+      lastInboundAt: { not: null },
     });
   }
 
