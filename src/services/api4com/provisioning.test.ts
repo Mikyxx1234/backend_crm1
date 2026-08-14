@@ -28,11 +28,17 @@ vi.mock("@/lib/crypto/secrets", () => ({
   encryptSecret: (s: string) => `enc:${s}`,
 }));
 
+vi.mock("@/services/call-provider-configs", () => ({
+  getOrCreateApi4ComProviderConfig: vi.fn(),
+}));
+
 const mockClient = {
   findUsers: vi.fn(),
   createUser: vi.fn(),
   createNextExtension: vi.fn(),
   upsertIntegration: vi.fn(),
+  deleteExtension: vi.fn(),
+  deleteUser: vi.fn(),
 };
 vi.mock("./client", () => ({
   getApi4ComClient: () => mockClient,
@@ -41,7 +47,10 @@ vi.mock("./client", () => ({
 }));
 
 import { prisma } from "@/lib/prisma";
+import { getOrCreateApi4ComProviderConfig } from "@/services/call-provider-configs";
 import { Api4ComConflictError } from "./errors";
+
+const getOrCreateConfig = vi.mocked(getOrCreateApi4ComProviderConfig);
 
 const prismaMock = prisma as unknown as {
   sipExtension: {
@@ -90,12 +99,15 @@ describe("ProvisioningService", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.API4COM_GATEWAY = "test-gateway";
-    process.env.API4COM_WEBHOOK_VERSION = "v1.4";
+    process.env.API4COM_WEBHOOK_VERSION = "1.8";
     process.env.NEXT_PUBLIC_APP_URL = "https://crm.test";
 
     prismaMock.sipExtension.update.mockImplementation(({ data }) => {
       return Promise.resolve(makeExt(data));
     });
+    getOrCreateConfig.mockResolvedValue({
+      webhookUrl: "/api/webhooks/calls/api4com?token=wh-tok-123",
+    } as Awaited<ReturnType<typeof getOrCreateApi4ComProviderConfig>>);
   });
 
   it("provisiona novo usuário end-to-end", async () => {
@@ -105,9 +117,7 @@ describe("ProvisioningService", () => {
     prismaMock.user.findUniqueOrThrow.mockResolvedValue({
       email: "test@example.com",
       name: "Test User",
-    });
-    prismaMock.callProviderConfig.findFirst.mockResolvedValue({
-      webhookToken: "wh-tok-123",
+      phone: "48999998888",
     });
 
     mockClient.findUsers.mockResolvedValue([]);
@@ -125,13 +135,19 @@ describe("ProvisioningService", () => {
 
     expect(result.success).toBe(true);
     expect(result.step).toBe("ACTIVE");
-    expect(mockClient.createUser).toHaveBeenCalledOnce();
+    expect(mockClient.createUser).toHaveBeenCalledWith(
+      expect.objectContaining({
+        email: "test@example.com",
+        phone: "48999998888",
+      }),
+    );
     expect(mockClient.createNextExtension).toHaveBeenCalledOnce();
     expect(mockClient.upsertIntegration).toHaveBeenCalledWith(
       expect.objectContaining({
         gateway: "test-gateway",
         metadata: expect.objectContaining({
           webhookUrl: "https://crm.test/api/webhooks/calls/api4com?token=wh-tok-123",
+          webhookVersion: "1.8",
         }),
       }),
     );
@@ -144,8 +160,8 @@ describe("ProvisioningService", () => {
     prismaMock.user.findUniqueOrThrow.mockResolvedValue({
       email: "dup@test.com",
       name: "Dup User",
+      phone: null,
     });
-    prismaMock.callProviderConfig.findFirst.mockResolvedValue(null);
 
     mockClient.findUsers
       .mockResolvedValueOnce([])
@@ -164,7 +180,9 @@ describe("ProvisioningService", () => {
     const result = await enableTelephony("user-1", "org-1");
 
     expect(result.success).toBe(true);
-    expect(mockClient.createUser).toHaveBeenCalledOnce();
+    expect(mockClient.createUser).toHaveBeenCalledWith(
+      expect.objectContaining({ phone: "4800000000" }),
+    );
     expect(mockClient.createNextExtension).toHaveBeenCalledOnce();
   });
 
@@ -175,6 +193,7 @@ describe("ProvisioningService", () => {
     prismaMock.user.findUniqueOrThrow.mockResolvedValue({
       email: "test@ex.com",
       name: "Fail User",
+      phone: null,
     });
 
     mockClient.findUsers.mockResolvedValue([]);
@@ -199,19 +218,59 @@ describe("ProvisioningService", () => {
     expect(mockClient.createUser).not.toHaveBeenCalled();
   });
 
-  it("disableTelephony marca DISABLED + INACTIVE", async () => {
+  it("disableTelephony apaga ramal e usuário remotos e limpa credenciais", async () => {
     prismaMock.sipExtension.findUnique.mockResolvedValue(
-      makeExt({ provisioningStep: "ACTIVE", telephonyEnabled: true }),
+      makeExt({
+        provisioningStep: "ACTIVE",
+        telephonyEnabled: true,
+        api4comUserId: "api4-user-1",
+        providerMeta: { extensionId: "ext-remote-1", ramal: "1001" },
+      }),
     );
+    mockClient.deleteExtension.mockResolvedValue(undefined);
+    mockClient.deleteUser.mockResolvedValue({ deleted: true });
 
-    await disableTelephony("user-1", "org-1");
+    const result = await disableTelephony("user-1", "org-1");
 
+    expect(result.success).toBe(true);
+    expect(result.step).toBe("DISABLED");
+    expect(mockClient.deleteExtension).toHaveBeenCalledWith("ext-remote-1");
+    expect(mockClient.deleteUser).toHaveBeenCalledWith("api4-user-1");
     expect(prismaMock.sipExtension.update).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           telephonyEnabled: false,
           status: "INACTIVE",
           provisioningStep: "DISABLED",
+          api4comUserId: null,
+          sipUri: "",
+          authUser: "",
+        }),
+      }),
+    );
+  });
+
+  it("disableTelephony marca FAILED se o DELETE remoto falhar", async () => {
+    prismaMock.sipExtension.findUnique.mockResolvedValue(
+      makeExt({
+        provisioningStep: "ACTIVE",
+        telephonyEnabled: true,
+        api4comUserId: "api4-user-1",
+        providerMeta: { extensionId: "ext-remote-1" },
+      }),
+    );
+    mockClient.deleteExtension.mockRejectedValue(new Error("API4Comm down"));
+
+    const result = await disableTelephony("user-1", "org-1");
+
+    expect(result.success).toBe(false);
+    expect(result.step).toBe("FAILED");
+    expect(result.error).toContain("API4Comm down");
+    expect(prismaMock.sipExtension.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          provisioningStep: "FAILED",
+          provisioningError: expect.stringContaining("API4Comm down"),
         }),
       }),
     );

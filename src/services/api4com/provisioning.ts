@@ -5,7 +5,8 @@
  * Invariantes:
  *   - Cada passo concluído persiste provisioningStep ANTES de avançar.
  *   - 409 em POST /users = "já existe" → pula para CREATE_EXTENSION.
- *   - Toggle OFF: telephonyEnabled=false, status=INACTIVE. Não apaga histórico.
+ *   - Toggle OFF: apaga ramal + tenta apagar usuário remoto, depois limpa
+ *     credenciais locais. Histórico de chamadas permanece.
  *   - Retomada: ao chamar enableTelephony com step != IDLE, resume do ponto.
  *
  * Ver docs/PLAN-api4com.md §4 para diagrama de estados.
@@ -15,6 +16,7 @@ import type { SipExtension, TelephonyProvisioningStep } from "@prisma/client";
 import { encryptSecret } from "@/lib/crypto/secrets";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
+import { getOrCreateApi4ComProviderConfig } from "@/services/call-provider-configs";
 
 import { resolveApi4ComGateway } from "@/services/telephony-providers/api4com";
 
@@ -55,7 +57,7 @@ export async function enableTelephony(
 ): Promise<ProvisionResult> {
   const client = getApi4ComClient();
   const gateway = resolveApi4ComGateway(organizationId);
-  const webhookVersion = process.env.API4COM_WEBHOOK_VERSION ?? "v1.4";
+  const webhookVersion = process.env.API4COM_WEBHOOK_VERSION ?? "1.8";
 
   let ext = await findOrCreateExtensionRecord(userId, organizationId);
 
@@ -99,26 +101,63 @@ export async function enableTelephony(
 }
 
 /**
- * Desativa telefonia (toggle OFF). Não exclui dados remotos nem histórico.
+ * Desativa telefonia (toggle OFF): apaga ramal e tenta apagar o usuário
+ * remoto. Histórico de chamadas no CRM permanece.
  */
 export async function disableTelephony(
   userId: string,
   organizationId: string,
-): Promise<void> {
+): Promise<ProvisionResult> {
   const ext = await prisma.sipExtension.findUnique({
     where: { organizationId_userId: { organizationId, userId } },
   });
-  if (!ext) return;
+  if (!ext) {
+    return { success: true, step: "DISABLED" };
+  }
 
-  await prisma.sipExtension.update({
-    where: { id: ext.id },
-    data: {
-      telephonyEnabled: false,
-      status: "INACTIVE",
-      provisioningStep: "DISABLED",
-    },
-  });
-  log.info(`[prov] Telefonia desativada para ${userId}.`);
+  try {
+    const extensionId = readProviderExtensionId(ext.providerMeta);
+    if (extensionId || ext.api4comUserId) {
+      const client = getApi4ComClient();
+      if (extensionId) {
+        await client.deleteExtension(extensionId);
+      }
+      if (ext.api4comUserId) {
+        await client.deleteUser(ext.api4comUserId);
+      }
+    }
+
+    await prisma.sipExtension.update({
+      where: { id: ext.id },
+      data: {
+        telephonyEnabled: false,
+        status: "INACTIVE",
+        provisioningStep: "DISABLED",
+        provisioningError: null,
+        provisionedAt: null,
+        api4comUserId: null,
+        api4comGateway: null,
+        sipUri: "",
+        authUser: "",
+        authPasswordEncrypted: "",
+        wsServer: "",
+        providerMeta: {},
+      },
+    });
+    log.info(`[prov] Telefonia desativada e recursos remotos removidos para ${userId}.`);
+    return { success: true, step: "DISABLED", sipExtensionId: ext.id };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    log.error(`[prov] Falha ao desprovisionar ${userId}: ${msg}`);
+    await prisma.sipExtension.update({
+      where: { id: ext.id },
+      data: {
+        provisioningStep: "FAILED",
+        provisioningError: msg.slice(0, 2000),
+      },
+    });
+    return { success: false, step: "FAILED", error: msg, sipExtensionId: ext.id };
+  }
 }
 
 /**
@@ -212,7 +251,7 @@ async function findUserOnCrm(ctx: ProvisionContext): Promise<{ id: string } | nu
 async function createRemoteUser(ctx: ProvisionContext): Promise<string> {
   const crmUser = await prisma.user.findUniqueOrThrow({
     where: { id: ctx.userId },
-    select: { email: true, name: true },
+    select: { email: true, name: true, phone: true },
   });
 
   const password = generatePassword();
@@ -222,6 +261,7 @@ async function createRemoteUser(ctx: ProvisionContext): Promise<string> {
       name: crmUser.name ?? crmUser.email,
       email: crmUser.email,
       password,
+      phone: resolveApi4ComPhone(crmUser.phone),
       role: "USER",
     });
     return created.id;
@@ -249,15 +289,14 @@ async function configureWebhook(
   gateway: string,
   webhookVersion: string,
 ): Promise<void> {
-  const config = await prisma.callProviderConfig.findFirst({
-    where: { organizationId: ctx.organizationId, providerKey: "api4com" },
-    select: { webhookToken: true },
-  });
-
-  const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? process.env.APP_URL ?? "";
-  const webhookUrl = config
-    ? `${baseUrl}/api/webhooks/calls/api4com?token=${config.webhookToken}`
-    : `${baseUrl}/api/webhooks/calls/api4com`;
+  const config = await getOrCreateApi4ComProviderConfig(ctx.organizationId);
+  const baseUrl = (process.env.NEXT_PUBLIC_APP_URL ?? process.env.APP_URL ?? "").replace(
+    /\/$/,
+    "",
+  );
+  const webhookUrl = config.webhookUrl.startsWith("http")
+    ? config.webhookUrl
+    : `${baseUrl}${config.webhookUrl.startsWith("/") ? "" : "/"}${config.webhookUrl}`;
 
   await ctx.client.upsertIntegration({
     gateway,
@@ -349,4 +388,19 @@ function generatePassword(): string {
     pw += chars[Math.floor(Math.random() * chars.length)];
   }
   return pw;
+}
+
+/** Docs exigem telefone válido. Usa o do CRM ou um placeholder numérico estável. */
+function resolveApi4ComPhone(phone: string | null | undefined): string {
+  const digits = (phone ?? "").replace(/\D/g, "");
+  if (digits.length >= 8) return digits;
+  return "4800000000";
+}
+
+function readProviderExtensionId(meta: unknown): string | null {
+  if (!meta || typeof meta !== "object") return null;
+  const id = (meta as { extensionId?: unknown }).extensionId;
+  if (typeof id === "string" && id.length > 0) return id;
+  if (typeof id === "number" && Number.isFinite(id)) return String(id);
+  return null;
 }

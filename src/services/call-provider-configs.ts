@@ -261,11 +261,11 @@ export function decryptWebhookSecret(config: { webhookSecretEncrypted: string })
  * armazenamos cifrado por convenção do schema, mas a validação real no
  * `processWebhookEvent` é feita por `findConfigByWebhookToken`.
  */
-export async function getOrCreateApi4ComProviderConfig(): Promise<ProviderConfigPublic> {
-  const organizationId = getOrgIdOrThrow();
-
+export async function getOrCreateApi4ComProviderConfig(
+  organizationId = getOrgIdOrThrow(),
+): Promise<ProviderConfigPublic> {
   const existing = await prisma.callProviderConfig.findFirst({
-    where: { providerKey: "api4com" },
+    where: { organizationId, providerKey: "api4com" },
     select: SELECT_DB,
   });
   if (existing) return toPublic(existing);

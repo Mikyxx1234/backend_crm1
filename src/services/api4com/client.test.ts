@@ -126,6 +126,54 @@ describe("Api4ComClient", () => {
     expect(users[0].id).toBe("u1");
   });
 
+  it("findUsers aceita uuid no lugar de id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, [{ uuid: "616f411f-61e2-4f25-b3f6-75c872771818", email: "a@b.com" }]),
+    );
+    const client = makeClient(fetchMock);
+
+    const users = await client.findUsers({ email: "a@b.com" });
+    expect(users).toHaveLength(1);
+    expect(users[0].id).toBe("616f411f-61e2-4f25-b3f6-75c872771818");
+  });
+
+  it("deleteExtension chama DELETE /extensions/:id", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { count: 1 }));
+    const client = makeClient(fetchMock);
+
+    await client.deleteExtension("ext-9");
+
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.api4com.com/api/v1/extensions/ext-9");
+    expect(init.method).toBe("DELETE");
+  });
+
+  it("deleteExtension trata 404 como sucesso", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(textResponse(404, "not found"));
+    const client = makeClient(fetchMock);
+
+    await expect(client.deleteExtension("gone")).resolves.toBeUndefined();
+  });
+
+  it("deleteUser trata 404/405 como best-effort", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(textResponse(405, "not allowed"));
+    const client = makeClient(fetchMock);
+
+    const result = await client.deleteUser("u-1");
+    expect(result.deleted).toBe(false);
+  });
+
+  it("deleteUser sucesso retorna deleted: true", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(200, { count: 1 }));
+    const client = makeClient(fetchMock);
+
+    const result = await client.deleteUser("u-1");
+    expect(result.deleted).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://api.api4com.com/api/v1/users/u-1");
+    expect(init.method).toBe("DELETE");
+  });
+
   it("findUsers aceita { items: [] }", async () => {
     const fetchMock = vi
       .fn()
