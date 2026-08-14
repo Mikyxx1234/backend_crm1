@@ -30,6 +30,7 @@ const hhmm = z
 const bodySchema = z
   .object({
     participates: z.boolean().optional(),
+    visibleInCoverage: z.boolean().optional(),
     paused: z.boolean().optional(),
     queueLimit: z.number().int().min(0).max(100_000).optional(),
     volume: z.number().int().min(1).max(100_000).optional(),
@@ -254,6 +255,7 @@ export async function PATCH(request: Request, context: RouteContext) {
       let responsible = null as null | {
         userId: string;
         participates: boolean;
+        visibleInCoverage: boolean;
         queueLimit: number;
         volume: number;
         type: string | null;
@@ -286,6 +288,7 @@ export async function PATCH(request: Request, context: RouteContext) {
           select: {
             userId: true,
             participates: true,
+            visibleInCoverage: true,
             queueLimit: true,
             volume: true,
             type: true,
