@@ -19,6 +19,7 @@ export async function GET() {
             id: true,
             name: true,
             slug: true,
+            number: true,
             stages: {
               orderBy: { position: "asc" },
               select: { id: true, name: true, slug: true, color: true, position: true },
