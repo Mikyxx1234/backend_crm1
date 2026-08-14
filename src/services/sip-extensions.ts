@@ -48,6 +48,11 @@ export type SipExtensionPublic = {
   stunServers: unknown;
   turnServer: unknown;
   status: SipExtensionStatus;
+  telephonyEnabled: boolean;
+  provisioningStep: string;
+  provisioningError: string | null;
+  provisionedAt: Date | null;
+  user: { id: string; name: string; email: string } | null;
   createdAt: Date;
   updatedAt: Date;
 };
@@ -64,6 +69,11 @@ const SELECT_PUBLIC = {
   stunServers: true,
   turnServer: true,
   status: true,
+  telephonyEnabled: true,
+  provisioningStep: true,
+  provisioningError: true,
+  provisionedAt: true,
+  user: { select: { id: true, name: true, email: true } },
   createdAt: true,
   updatedAt: true,
 } as const;
