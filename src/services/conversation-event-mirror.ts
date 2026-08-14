@@ -11,6 +11,7 @@ import {
 } from "@/lib/human-actor-name";
 import {
   createConversationEvent,
+  queueWaitingConsultantText,
   type ConversationEventAction,
 } from "@/services/conversation-events";
 
@@ -96,6 +97,33 @@ function conversationIdOf(input: MirrorInput): string | null {
   return null;
 }
 
+function sameHumanName(actor: string, person: string): boolean {
+  if (!actor || !person) return false;
+  const a = actor.toLowerCase();
+  const p = person.toLowerCase();
+  if (a === p) return true;
+  const actorShort = formatHumanActorDisplayName(actor).toLowerCase();
+  const personShort = formatHumanActorDisplayName(person).toLowerCase();
+  if (actorShort && personShort && actorShort === personShort) return true;
+  if (actorShort && actorShort === p) return true;
+  if (personShort && a === personShort) return true;
+  return false;
+}
+
+/** Ação do próprio agente (entrou/saiu) vs. terceiro (distribuiu/removeu). */
+function isSelfAssigneeAction(
+  input: MirrorInput,
+  actor: string,
+  personName: string,
+  personUserIdKey: "fromUserId" | "toUserId",
+): boolean {
+  const personId = input.meta?.[personUserIdKey];
+  if (input.actorUserId && typeof personId === "string" && personId) {
+    return input.actorUserId === personId;
+  }
+  return sameHumanName(actor, personName);
+}
+
 function mapChatEvent(
   input: MirrorInput,
   actor: string,
@@ -122,9 +150,7 @@ function mapChatEvent(
     case "LEAD_DISTRIBUTION_FAILED": {
       return {
         action: "distribuicao",
-        text: dept
-          ? `Enfileirada em ${dept} — sem consultor elegível`
-          : "Aguardando consultor elegível",
+        text: queueWaitingConsultantText(dept),
         actor: /ia/i.test(actor) ? "Agente IA" : "Sistema",
       };
     }
@@ -138,16 +164,12 @@ function mapChatEvent(
         };
       }
       if (!from && to) {
-        const toShort = formatHumanActorDisplayName(to);
-        if (
-          actor === to ||
-          actor.toLowerCase() === to.toLowerCase() ||
-          (toShort && actor.toLowerCase() === toShort.toLowerCase())
-        ) {
+        const toShort = formatHumanActorDisplayName(to) || to;
+        if (isSelfAssigneeAction(input, actor, to, "toUserId")) {
           return {
             action: "entrada",
-            text: `${to} entrou na conversa`,
-            actor: toShort || actor,
+            text: `${toShort} entrou na conversa`,
+            actor: toShort,
           };
         }
         return {
@@ -157,7 +179,19 @@ function mapChatEvent(
         };
       }
       if (from && !to) {
-        return { action: "saida", text: `${from} saiu da conversa`, actor: from };
+        const fromShort = formatHumanActorDisplayName(from) || from;
+        if (isSelfAssigneeAction(input, actor, from, "fromUserId")) {
+          return {
+            action: "saida",
+            text: `${fromShort} saiu da conversa`,
+            actor: fromShort,
+          };
+        }
+        return {
+          action: "saida",
+          text: `${fromShort} removida da conversa`,
+          actor,
+        };
       }
       return null;
     }
@@ -232,6 +266,7 @@ export function mirrorConversationChatEvent(input: MirrorInput): void {
             "Conversa distribuída",
             "Conversa enfileirada",
             "Enfileirada em",
+            "Enfileirada —",
             "Aguardando consultor",
           ]
         : mapped.action === "ia"
