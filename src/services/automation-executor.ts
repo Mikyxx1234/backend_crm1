@@ -26,9 +26,17 @@ import {
   type MetaWhatsAppClient,
 } from "@/lib/meta-whatsapp/client";
 import {
+  renderTemplatePreview,
+  templateVariablesFromSendComponents,
+} from "@/lib/meta-whatsapp/build-template-components";
+import {
   enrichTemplateComponentsForFlowSend,
   resolveTemplateHeaderMediaFormat,
 } from "@/lib/meta-whatsapp/enrich-template-flow";
+import {
+  buildOutboundTemplateMessageContent,
+  buttonLabelsFromConfig,
+} from "@/lib/whatsapp-outbound-template-label";
 import { isMetaFlowEnrichError } from "@/lib/meta-whatsapp/meta-flow-enrich-error";
 import { toAbsolutePublicMediaUrl } from "@/lib/meta-whatsapp/to-absolute-public-media-url";
 import { prisma } from "@/lib/prisma";
@@ -2656,31 +2664,57 @@ async function executeStep(
         );
       }
 
-      const tplContentFallback = `[Template: ${templateName}]`;
       let enrichFlowToken: string | null = null;
       let tplExternalId: string | null = null;
       let tplSavedMessageId: string | null = null;
+      let tplConfigId: string | null = null;
+      let tplCategory: string | null = null;
+      let tplBodyFromDb: string | null = null;
+      let templateGraphId: string | null = null;
+
+      const rawComponents = Array.isArray(cfg["components"])
+        ? (cfg["components"] as unknown[])
+        : undefined;
 
       try {
-        const rawComponents = Array.isArray(cfg["components"])
-          ? (cfg["components"] as unknown[])
-          : undefined;
+        const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
+          where: { metaTemplateName: templateName },
+          select: { id: true, metaTemplateId: true, bodyPreview: true, category: true },
+        });
+        templateGraphId = gidRow?.metaTemplateId?.trim() || null;
+        tplConfigId = gidRow?.id ?? null;
+        tplCategory = gidRow?.category ?? null;
+        tplBodyFromDb = gidRow?.bodyPreview?.trim() || null;
+      } catch {
+        /* ignore */
+      }
+
+      const cfgBody = readString(cfg, "bodyPreview")?.trim() || null;
+      const rawBody = cfgBody || tplBodyFromDb;
+      const renderedBody = rawBody
+        ? renderTemplatePreview(rawBody, templateVariablesFromSendComponents(rawComponents)) || rawBody
+        : null;
+      const flowVars = asRecord(cfg["__variables"]);
+      const resolvedBody =
+        renderedBody && flowVars ? interpolateVariables(renderedBody, flowVars) : renderedBody;
+      const tplContent = buildOutboundTemplateMessageContent(
+        templateName,
+        "generic",
+        tplCategory,
+        resolvedBody,
+        {
+          bodyText: resolvedBody,
+          buttons: buttonLabelsFromConfig(cfg.buttons),
+        },
+      );
+
+      try {
         const flowToken = readString(cfg, "flowToken") ?? null;
         const fad = cfg["flowActionData"];
         const flowActionData =
           fad && typeof fad === "object" && !Array.isArray(fad)
             ? (fad as Record<string, unknown>)
             : null;
-        let templateGraphId: string | null = null;
-        try {
-          const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
-            where: { metaTemplateName: templateName },
-            select: { metaTemplateId: true },
-          });
-          templateGraphId = gidRow?.metaTemplateId?.trim() || null;
-        } catch {
-          /* ignore */
-        }
         const enrichTpl = await enrichTemplateComponentsForFlowSend(tplMetaClient, {
           templateName,
           languageCode: langCode,
@@ -2722,7 +2756,7 @@ async function executeStep(
         log.error(`Envio template falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`);
         await persistFailedAutomationOutbound({
           conversationId: tplConversationId,
-          content: tplContentFallback,
+          content: tplContent,
           messageType: "template",
           senderName: rt.automationName ?? "Automação",
           triggeredByName: rt.triggeredByName,
@@ -2733,23 +2767,6 @@ async function executeStep(
       }
 
       if (tplConversationId) {
-        let tplBodyPreview: string | null = null;
-        // CRÍTICO: capturar `id` aqui é o que permite ao resolver de Flow
-        // inbound identificar corretamente qual flow foi disparado pela
-        // automação quando a resposta voltar pelo webhook.
-        let tplConfigId: string | null = null;
-        try {
-          const tplCfg = await prisma.whatsAppTemplateConfig.findFirst({
-            where: { metaTemplateName: templateName },
-            select: { id: true, bodyPreview: true, category: true },
-          });
-          tplBodyPreview = tplCfg?.bodyPreview ?? null;
-          tplConfigId = tplCfg?.id ?? null;
-        } catch {}
-        const tplContent = tplBodyPreview
-          ? `📋 *${templateName}*\n\n${tplBodyPreview}`
-          : tplContentFallback;
-
         const saved = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: tplConversationId,

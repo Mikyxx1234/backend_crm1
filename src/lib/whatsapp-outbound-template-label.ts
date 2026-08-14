@@ -65,13 +65,15 @@ export function buildOutboundTemplateMessageContent(
     ].filter(Boolean).join("\n");
   }
 
-  if (bodyPreview) {
-    return [
-      `📋 *${safe}*`,
-      catLabel ? `_${catLabel}_` : null,
-      "",
-      bodyPreview,
-    ].filter(Boolean).join("\n");
+  // Corpo aberto (header + texto + botões) — o que o cliente vê no WhatsApp.
+  // Nome/categoria ficam no TemplateBadge da bolha; não repetir no texto.
+  if (body || buttons.length > 0) {
+    const headerLine = header ? `*${header}*` : null;
+    const footerLine = footer ? `_${footer}_` : null;
+    const buttonMarker = buttons.length > 0 ? `[Botões: ${buttons.join(", ")}]` : null;
+    return [headerLine, body || null, footerLine, buttonMarker]
+      .filter((x): x is string => typeof x === "string" && x.length > 0)
+      .join("\n\n");
   }
 
   return [
@@ -80,6 +82,30 @@ export function buildOutboundTemplateMessageContent(
     `Nome: ${safe}`,
     catLabel ? `Categoria: ${catLabel}` : null,
   ].filter(Boolean).join("\n");
+}
+
+/** Extrai o nome de mensagens gravadas como `[Template: x]`. */
+export function extractLegacyBracketTemplateName(content: string): string | null {
+  const m = content.trim().match(/^\[Template:\s*(.+?)\]\s*$/i);
+  const name = m?.[1]?.trim() ?? "";
+  return name || null;
+}
+
+/** Rótulos de botões do config da automação / campanha. */
+export function buttonLabelsFromConfig(buttons: unknown): string[] {
+  if (!Array.isArray(buttons)) return [];
+  return buttons
+    .map((b) => {
+      if (typeof b === "string") return b.trim();
+      if (!b || typeof b !== "object") return "";
+      const o = b as Record<string, unknown>;
+      for (const k of ["title", "text", "label"]) {
+        const v = o[k];
+        if (typeof v === "string" && v.trim()) return v.trim();
+      }
+      return "";
+    })
+    .filter(Boolean);
 }
 
 export function parseTemplateMeta(content: string): { name: string; category: string | null } | null {

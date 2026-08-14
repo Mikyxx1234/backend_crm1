@@ -118,6 +118,40 @@ export function buildTemplateComponents(
  * Placeholders sem valor correspondente ficam intactos (`{{2}}`), sinalizando
  * visualmente o que falta preencher.
  */
+/** Extrai variáveis de `components` no formato Cloud API (envio). */
+export function templateVariablesFromSendComponents(
+  components: unknown[] | undefined,
+): TemplateVariableInput[] {
+  const out: TemplateVariableInput[] = [];
+  if (!Array.isArray(components)) return out;
+  for (const c of components) {
+    const o = c && typeof c === "object" ? (c as Record<string, unknown>) : null;
+    if (!o) continue;
+    const type = String(o.type ?? "").toLowerCase();
+    if (type !== "body" && type !== "header") continue;
+    const params = Array.isArray(o.parameters) ? o.parameters : [];
+    let i = 1;
+    for (const p of params) {
+      const pr = p && typeof p === "object" ? (p as Record<string, unknown>) : null;
+      if (!pr) continue;
+      const text = typeof pr.text === "string" ? pr.text : "";
+      const named =
+        typeof pr.parameter_name === "string"
+          ? pr.parameter_name.trim()
+          : typeof pr.parameterName === "string"
+            ? pr.parameterName.trim()
+            : "";
+      out.push({
+        component: type === "header" ? "header" : "body",
+        key: named || String(i),
+        value: text,
+      });
+      i += 1;
+    }
+  }
+  return out;
+}
+
 export function renderTemplatePreview(
   text: string | null | undefined,
   vars: TemplateVariableInput[] | null | undefined,

@@ -20,6 +20,7 @@ import {
   enqueueAutomationJob,
   enqueueBaileysOutbound,
 } from "@/lib/queue";
+import { analyzeTemplateComponents } from "@/lib/meta-whatsapp/analyze-template-components";
 import { metaClientFromConfig, formatMetaSendError } from "@/lib/meta-whatsapp/client";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
 import { getDecryptedChannelConfig } from "@/lib/channels/config";
@@ -87,6 +88,7 @@ type PreparedTemplate = {
   templateConfigId: string | null;
   bodyPreview: string | null;
   category: string | null;
+  buttonLabels: string[];
   /** Componentes base SEM o botão flow (undefined = sem componentes). */
   baseComponents: unknown[] | undefined;
   /** Índice do botão flow na definição; null = template sem flow. */
@@ -148,6 +150,7 @@ async function prepareTemplateForCampaign(
   let templateConfigId: string | null = null;
   let bodyPreview: string | null = null;
   let category: string | null = null;
+  let buttonLabels: string[] = [];
   try {
     const row = await prisma.whatsAppTemplateConfig.findFirst({
       where: { metaTemplateName: campaign.templateName },
@@ -155,10 +158,26 @@ async function prepareTemplateForCampaign(
     });
     templateGraphId = row?.metaTemplateId?.trim() || null;
     templateConfigId = row?.id ?? null;
-    bodyPreview = row?.bodyPreview ?? null;
+    bodyPreview = row?.bodyPreview?.trim() || null;
     category = row?.category ?? null;
   } catch {
     /* ignore */
+  }
+
+  if ((!bodyPreview || buttonLabels.length === 0) && templateGraphId) {
+    try {
+      const raw = await client.getMessageTemplateByGraphId(templateGraphId);
+      const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+      const comps = Array.isArray(o?.components) ? (o.components as unknown[]) : [];
+      const analysis = analyzeTemplateComponents(comps, {
+        parameterFormat: typeof o?.parameter_format === "string" ? o.parameter_format : null,
+      });
+      if (!bodyPreview) bodyPreview = analysis.bodyText?.trim() || null;
+      if (!category && typeof o?.category === "string") category = o.category;
+      buttonLabels = analysis.buttons.map((b) => b.text).filter(Boolean);
+    } catch {
+      /* ignore */
+    }
   }
 
   const probe = await enrichTemplateComponentsForFlowSend(client, {
@@ -177,6 +196,7 @@ async function prepareTemplateForCampaign(
       templateConfigId,
       bodyPreview,
       category,
+      buttonLabels,
       baseComponents: base.length ? base : undefined,
       flowIndex,
     };
@@ -185,6 +205,7 @@ async function prepareTemplateForCampaign(
       templateConfigId,
       bodyPreview,
       category,
+      buttonLabels,
       baseComponents: probe.components,
       flowIndex: null,
     };
@@ -573,6 +594,10 @@ async function sendViaMetaCloudApi(
       "generic",
       prepared.category,
       prepared.bodyPreview,
+      {
+        bodyText: prepared.bodyPreview,
+        buttons: prepared.buttonLabels,
+      },
     );
   } else if (campaign.type === "TEXT") {
     if (!campaign.textContent) throw new Error("Conteúdo de texto não definido na campanha.");

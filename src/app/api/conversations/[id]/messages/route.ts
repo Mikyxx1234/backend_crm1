@@ -29,6 +29,10 @@ import { cancelActiveContextsForContact } from "@/services/automation-context";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { logEvent } from "@/services/activity-log";
+import {
+  buildOutboundTemplateMessageContent,
+  extractLegacyBracketTemplateName,
+} from "@/lib/whatsapp-outbound-template-label";
 
 /** Após humano enviar: mata salesbot ativo do contato (best-effort). */
 async function stopAutomationsAfterHumanReply(
@@ -137,6 +141,37 @@ function mapSendStatus(s: string | null | undefined): InboxMessageDto["status"] 
     default:
       return undefined; // "draft" e outros — sem ticks.
   }
+}
+
+/** Abre `[Template: nome]` com o corpo salvo no config local (mensagens antigas). */
+async function expandLegacyTemplateContents(contents: string[]): Promise<Map<string, string>> {
+  const names = new Set<string>();
+  for (const c of contents) {
+    const n = extractLegacyBracketTemplateName(c);
+    if (n) names.add(n);
+  }
+  if (names.size === 0) return new Map();
+  const rows = await prisma.whatsAppTemplateConfig.findMany({
+    where: { metaTemplateName: { in: [...names] } },
+    select: { metaTemplateName: true, bodyPreview: true, category: true },
+  });
+  const byName = new Map(rows.map((r) => [r.metaTemplateName, r]));
+  const out = new Map<string, string>();
+  for (const c of contents) {
+    const n = extractLegacyBracketTemplateName(c);
+    if (!n) continue;
+    const hit = byName.get(n);
+    out.set(
+      c,
+      buildOutboundTemplateMessageContent(
+        n,
+        /call_permission/i.test(n) ? "call_permission" : "generic",
+        hit?.category,
+        hit?.bodyPreview?.trim() || null,
+      ),
+    );
+  }
+  return out;
 }
 
 const MSG_SELECT = {
@@ -373,9 +408,15 @@ export async function GET(request: Request, context: RouteContext) {
       senderAvatarMap.set(agent.name.toLowerCase(), agent.avatarUrl ?? null);
     }
 
+    const templateContentMap = await expandLegacyTemplateContents([
+      ...rows.map((r) => r.content),
+      ...historyTickets.flatMap((t) => t.rows.map((r) => r.content)),
+    ]);
+    const openedContent = (raw: string) => templateContentMap.get(raw) ?? raw;
+
     const messages: InboxMessageDto[] = rows.map((r) => ({
       id: r.externalId ?? r.id,
-      content: r.content,
+      content: openedContent(r.content),
       createdAt: r.createdAt.toISOString(),
       direction: r.direction as InboxMessageDto["direction"],
       messageType: r.messageType,
@@ -417,7 +458,7 @@ export async function GET(request: Request, context: RouteContext) {
       const mapRows = (rr: typeof rows): InboxMessageDto[] =>
         rr.map((r) => ({
           id: r.externalId ?? r.id,
-          content: r.content,
+          content: openedContent(r.content),
           createdAt: r.createdAt.toISOString(),
           direction: r.direction as InboxMessageDto["direction"],
           messageType: r.messageType,

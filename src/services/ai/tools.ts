@@ -16,8 +16,13 @@
 import { tool, type ToolSet } from "ai";
 import { z } from "zod";
 
+import {
+  renderTemplatePreview,
+  templateVariablesFromSendComponents,
+} from "@/lib/meta-whatsapp/build-template-components";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
+import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
@@ -371,13 +376,17 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
         // — assim o resolver de Flow inbound identifica corretamente o flow
         // disparado pelo Agente IA quando o cliente responder.
         let tplConfigId: string | null = null;
+        let tplBodyPreview: string | null = null;
+        let tplCategory: string | null = null;
         try {
           const gidRow = await prisma.whatsAppTemplateConfig.findFirst({
             where: { metaTemplateName: templateName },
-            select: { id: true, metaTemplateId: true },
+            select: { id: true, metaTemplateId: true, bodyPreview: true, category: true },
           });
           templateGraphId = gidRow?.metaTemplateId?.trim() || null;
           tplConfigId = gidRow?.id ?? null;
+          tplBodyPreview = gidRow?.bodyPreview?.trim() || null;
+          tplCategory = gidRow?.category ?? null;
         } catch {
           /* ignore */
         }
@@ -393,6 +402,18 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
                 },
               ]
             : undefined;
+        const renderedTplBody = tplBodyPreview
+          ? renderTemplatePreview(
+              tplBodyPreview,
+              templateVariablesFromSendComponents(baseComponents),
+            ) || tplBodyPreview
+          : null;
+        const tplChatContent = buildOutboundTemplateMessageContent(
+          templateName,
+          "generic",
+          tplCategory,
+          renderedTplBody,
+        );
         const enrichSend = await enrichTemplateComponentsForFlowSend(metaClient, {
           templateName,
           languageCode: lc,
@@ -409,7 +430,7 @@ function sendWhatsappTemplateTool(ctx: RunContext) {
         const saved = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: ctx.conversationId,
-            content: `[Template: ${templateName}]`,
+            content: tplChatContent,
             direction: "out",
             messageType: "template",
             senderName: "Agente IA",
