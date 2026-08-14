@@ -190,7 +190,7 @@ function mapChatEvent(
       const name =
         (typeof meta.tabulationName === "string" && meta.tabulationName) || to;
       return {
-        action: "status",
+        action: "tabulacao",
         text: name ? `Conversa tabulada: ${name}` : "Conversa tabulada",
         actor,
       };
