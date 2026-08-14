@@ -309,7 +309,7 @@ const detailInclude = {
       id: true, name: true, slug: true, position: true, color: true,
       pipeline: {
         select: {
-          id: true, name: true, slug: true,
+          id: true, name: true, slug: true, number: true,
           stages: {
             orderBy: { position: "asc" as const },
             select: { id: true, name: true, slug: true, color: true, position: true },

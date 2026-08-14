@@ -1338,8 +1338,12 @@ model Pipeline {
   organizationId       String
   organization         Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name                 String
-  /// Identificador público estável pra URL (?pipeline=vendas). Único por org.
+  /// Identificador legado (único por org). URLs públicas usam `number`.
   slug                 String
+  /// Número sequencial por organização (1, 2, 3…). Mesmo padrão de
+  /// Deal.number / Contact.number / Tabulation.number. PK continua CUID
+  /// (FKs); este campo é o ID amigável na URL (`?pipeline=12`).
+  number               Int
   isDefault            Boolean              @default(false)
   /// Se true, marcar negócio como perdido neste funil exige motivo.
   lossReasonRequired   Boolean              @default(false)
@@ -1358,6 +1362,7 @@ model Pipeline {
   archivedAt           DateTime?
 
   @@unique([organizationId, slug])
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, isDefault])
   @@index([organizationId, archivedAt])

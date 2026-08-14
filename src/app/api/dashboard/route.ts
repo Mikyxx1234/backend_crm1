@@ -6,6 +6,7 @@ import {
   getDashboard,
   type DashboardResult,
 } from "@/services/dashboard";
+import { resolvePipelineByPublicRef } from "@/services/pipelines";
 
 /**
  * GET /api/dashboard
@@ -13,7 +14,8 @@ import {
  * Dashboard comercial (Fase 1). Aceita:
  *   - period: today | yesterday | last_7 | last_30 | this_month | last_month | custom
  *   - startDate, endDate: YYYY-MM-DD (usados quando period=custom)
- *   - pipelineId: string (default = pipeline padrão da org)
+ *   - pipeline: number da org (`?pipeline=12`); também aceita slug legado
+ *   - pipelineId: CUID interno (compat); se for só dígitos, trata como number
  *   - stages, tags, owners, sources: listas separadas por vírgula
  *
  * Todas as agregações respeitam esses filtros e o escopo da organização.
@@ -119,6 +121,14 @@ export async function GET(request: Request) {
       );
 
       let pipelineId = searchParams.get("pipelineId") || "";
+      const pipelineRef = searchParams.get("pipeline");
+      if (pipelineRef && (!pipelineId || /^\d+$/.test(pipelineId))) {
+        const resolved = await resolvePipelineByPublicRef(pipelineRef);
+        if (resolved) pipelineId = resolved.id;
+      } else if (pipelineId && /^\d+$/.test(pipelineId)) {
+        const resolved = await resolvePipelineByPublicRef(pipelineId);
+        if (resolved) pipelineId = resolved.id;
+      }
       if (!pipelineId) {
         const def =
           (await prisma.pipeline.findFirst({

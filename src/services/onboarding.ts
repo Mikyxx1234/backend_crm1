@@ -8,7 +8,7 @@ import {
 } from "@/lib/authz/sync-user-role";
 import { prismaBase } from "@/lib/prisma-base";
 import { logAudit } from "@/lib/audit/log";
-import { TERMINAL_STAGES } from "@/services/pipelines";
+import { nextPipelineNumber, TERMINAL_STAGES } from "@/services/pipelines";
 import {
   PIPELINE_TEMPLATES,
   type PipelineTemplateId,
@@ -213,11 +213,13 @@ export async function applyPipelineTemplate(
     });
     if (existingDefault) return existingDefault;
 
+    const number = await nextPipelineNumber(organizationId, tx);
     const pipeline = await tx.pipeline.create({
       data: {
         organizationId,
         name: template.pipelineName,
         slug: slugify(template.pipelineName) || "pipeline",
+        number,
         isDefault: true,
         stages: {
           create: [

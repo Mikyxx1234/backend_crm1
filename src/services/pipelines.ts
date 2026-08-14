@@ -71,6 +71,94 @@ async function allocatePipelineSlug(
   });
 }
 
+const PIPELINE_NUMBER_MAX_RETRIES = 5;
+
+/**
+ * Próximo `Pipeline.number` da org. Schema: `@@unique([organizationId, number])`
+ * sem default — Postgres sequences não particionam por coluna. Em corrida o
+ * caller faz retry em P2002 (ver `createPipeline` / `ensureDefaultPipeline`).
+ */
+export async function nextPipelineNumber(
+  organizationId: string,
+  db?: Prisma.TransactionClient,
+): Promise<number> {
+  const client = db ?? prisma;
+  const r = await client.pipeline.aggregate({
+    where: { organizationId },
+    _max: { number: true },
+  });
+  return (r._max.number ?? 0) + 1;
+}
+
+function isPipelineNumberUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as {
+    code?: string;
+    message?: string;
+    meta?: { target?: string[] | string };
+  };
+  if (e.code !== "P2002") return false;
+  const target = e.meta?.target;
+  const hasNumber = (s: string) => s === "number" || s.includes("number");
+  if (Array.isArray(target)) return target.some((t) => hasNumber(String(t)));
+  if (typeof target === "string") return hasNumber(target);
+  const msg = typeof e.message === "string" ? e.message : "";
+  return /organizationId/i.test(msg) && /[`"']number[`"']/i.test(msg);
+}
+
+async function withPipelineNumberRetry<T>(
+  organizationId: string,
+  fn: (number: number) => Promise<T>,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < PIPELINE_NUMBER_MAX_RETRIES; attempt++) {
+    try {
+      const number = await nextPipelineNumber(organizationId);
+      return await fn(number);
+    } catch (err) {
+      lastErr = err;
+      if (!isPipelineNumberUniqueViolation(err)) throw err;
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("Falha ao alocar number de pipeline.");
+}
+
+const CUID_RE = /^c[a-z0-9]{20,}$/i;
+
+/**
+ * Resolve ref público de pipeline na org corrente:
+ * dígitos → `number`; CUID → `id`; senão slug, depois nome (compat bookmarks).
+ */
+export async function resolvePipelineByPublicRef(raw: string) {
+  const key = raw.trim();
+  if (!key) return null;
+  const select = { id: true, number: true, slug: true, name: true } as const;
+  if (/^\d+$/.test(key)) {
+    return prisma.pipeline.findFirst({
+      where: { number: Number(key), archivedAt: null },
+      select,
+    });
+  }
+  if (CUID_RE.test(key)) {
+    return prisma.pipeline.findFirst({
+      where: { id: key, archivedAt: null },
+      select,
+    });
+  }
+  return (
+    (await prisma.pipeline.findFirst({
+      where: { slug: key, archivedAt: null },
+      select,
+    })) ??
+    prisma.pipeline.findFirst({
+      where: { name: { equals: key, mode: "insensitive" }, archivedAt: null },
+      select,
+    })
+  );
+}
+
 export async function allocateStageSlug(
   pipelineId: string,
   name: string,
@@ -114,17 +202,20 @@ export async function ensureDefaultPipeline() {
   if (count > 0) return;
   const organizationId = getOrgIdOrThrow();
   const slug = await allocatePipelineSlug(organizationId, "Pipeline Principal");
-  await prisma.pipeline.create({
-    data: {
-      name: "Pipeline Principal",
-      slug,
-      isDefault: true,
-      organizationId,
-      stages: {
-        create: buildDefaultStageCreates(organizationId),
+  await withPipelineNumberRetry(organizationId, (number) =>
+    prisma.pipeline.create({
+      data: {
+        name: "Pipeline Principal",
+        slug,
+        number,
+        isDefault: true,
+        organizationId,
+        stages: {
+          create: buildDefaultStageCreates(organizationId),
+        },
       },
-    },
-  });
+    }),
+  );
 }
 
 export async function getPipelines(options?: { allowedPipelineIds?: string[] | null }) {
@@ -147,6 +238,7 @@ export async function getPipelines(options?: { allowedPipelineIds?: string[] | n
       id: true,
       name: true,
       slug: true,
+      number: true,
       isDefault: true,
       createdAt: true,
       updatedAt: true,
@@ -175,7 +267,7 @@ const dealListInclude = {
 export async function getPipelineMeta(id: string) {
   return prisma.pipeline.findFirst({
     where: { id, archivedAt: null },
-    select: { id: true, name: true, slug: true, isDefault: true },
+    select: { id: true, name: true, slug: true, number: true, isDefault: true },
   });
 }
 
@@ -205,29 +297,33 @@ export async function createPipeline(data: { name: string }) {
 
   const organizationId = getOrgIdOrThrow();
   const slug = await allocatePipelineSlug(organizationId, name);
-  return prisma.pipeline.create({
-    data: {
-      name,
-      slug,
-      organizationId,
-      stages: {
-        create: buildDefaultStageCreates(organizationId),
+  return withPipelineNumberRetry(organizationId, (number) =>
+    prisma.pipeline.create({
+      data: {
+        name,
+        slug,
+        number,
+        organizationId,
+        stages: {
+          create: buildDefaultStageCreates(organizationId),
+        },
       },
-    },
-    select: {
-      id: true,
-      name: true,
-      slug: true,
-      isDefault: true,
-      createdAt: true,
-      updatedAt: true,
-      organizationId: true,
-      stages: {
-        orderBy: { position: "asc" },
-        select: stageWithCountSelect,
+      select: {
+        id: true,
+        name: true,
+        slug: true,
+        number: true,
+        isDefault: true,
+        createdAt: true,
+        updatedAt: true,
+        organizationId: true,
+        stages: {
+          orderBy: { position: "asc" },
+          select: stageWithCountSelect,
+        },
       },
-    },
-  });
+    }),
+  );
 }
 
 export type UpdatePipelineInput = {

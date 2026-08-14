@@ -77,6 +77,12 @@ async function main() {
     where: { organizationId: EDUIT_ORG_ID, isDefault: true },
     select: { id: true, name: true },
   });
+  const maxPipelineNumber = existingDefault
+    ? null
+    : await prisma.pipeline.aggregate({
+        where: { organizationId: EDUIT_ORG_ID },
+        _max: { number: true },
+      });
   const defaultPipeline =
     existingDefault ??
     (await prisma.pipeline.create({
@@ -84,6 +90,7 @@ async function main() {
         organizationId: EDUIT_ORG_ID,
         name: "Pipeline Principal",
         slug: "pipeline-principal",
+        number: (maxPipelineNumber?._max.number ?? 0) + 1,
         isDefault: true,
         stages: {
           create: [
