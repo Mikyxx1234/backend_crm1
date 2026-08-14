@@ -18,6 +18,7 @@ import {
 import {
   enterRequestContext,
   runWithContext,
+  type ContextActor,
   type RequestContext,
 } from "./request-context";
 
@@ -52,6 +53,16 @@ type Session = {
     image?: string | null;
   };
 };
+
+function sessionHumanActor(session: Session): ContextActor {
+  return {
+    type: "HUMAN",
+    label:
+      session.user.name?.trim() ||
+      session.user.email?.trim() ||
+      session.user.id,
+  };
+}
 
 /**
  * Exige sessão autenticada. Use no topo de qualquer route handler
@@ -107,6 +118,7 @@ export async function requireAuth(): Promise<AuthResult<Session>> {
     organizationId: session.user.organizationId,
     userId: session.user.id,
     isSuperAdmin: session.user.isSuperAdmin,
+    actor: sessionHumanActor(session),
   });
 
   return { ok: true, session };
@@ -256,6 +268,7 @@ export async function withOrgContext<T>(
     organizationId: r.session.user.organizationId,
     userId: r.session.user.id,
     isSuperAdmin: r.session.user.isSuperAdmin,
+    actor: sessionHumanActor(r.session),
   };
   const meta = await readApiAccessHeaders();
   const method = meta.method ?? "GET";

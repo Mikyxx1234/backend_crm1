@@ -192,6 +192,7 @@ export async function logEvent(input: LogEventInput): Promise<void> {
         type: actor.actorType,
         label: actor.actorLabel,
       },
+      actorUserId: actor.actorUserId,
     });
   } catch (err) {
     // ATENCAO: logEvent jamais deve derrubar a request principal.

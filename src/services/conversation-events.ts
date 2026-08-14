@@ -58,6 +58,8 @@ export async function createConversationEvent(args: {
   action: ConversationEventAction;
   text: string;
   actor: string;
+  /** User.id do agente humano — vai no SSE; o nome já vai em senderName. */
+  actorUserId?: string | null;
   authorType?: "bot" | "system";
   /** Se houver mensagem recente com um destes prefixos, não duplica. */
   dedupeStartsWith?: string[];
@@ -125,6 +127,8 @@ export async function createConversationEvent(args: {
     messageType: saved.messageType,
     content: text,
     timestamp: saved.createdAt,
+    senderName: actor,
+    senderUserId: args.actorUserId ?? null,
   });
 
   return { id: saved.id };

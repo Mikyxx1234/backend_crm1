@@ -3,6 +3,12 @@
  * Textos curtos — sem prefixo "Evento do sistema".
  */
 
+import { prisma } from "@/lib/prisma";
+import {
+  formatHumanActorDisplayName,
+  isGenericHumanEventActor,
+  isReservedEventActorLabel,
+} from "@/lib/human-actor-name";
 import {
   createConversationEvent,
   type ConversationEventAction,
@@ -17,6 +23,7 @@ type MirrorInput = {
   newValue?: string | null;
   meta?: Record<string, unknown>;
   actor?: { type?: string; label?: string | null } | null;
+  actorUserId?: string | null;
 };
 
 function statusLabel(raw: string | null | undefined): string {
@@ -34,13 +41,53 @@ function statusLabel(raw: string | null | undefined): string {
   }
 }
 
-function actorName(input: MirrorInput): string {
-  const label = input.actor?.label?.trim();
-  if (label) return label.replace(/\s*·\s*Distribuição.*$/i, "").trim() || label;
-  const t = (input.actor?.type ?? "").toUpperCase();
-  if (t === "HUMAN") return "Agente";
-  if (t === "AUTOMATION") return "Agente IA";
-  return "Sistema";
+function stripDistributionSuffix(label: string): string {
+  return label.replace(/\s*·\s*Distribuição.*$/i, "").trim() || label;
+}
+
+function actorTypeOf(input: MirrorInput): string {
+  return (input.actor?.type ?? "").toUpperCase();
+}
+
+function isHumanActor(input: MirrorInput): boolean {
+  const t = actorTypeOf(input);
+  if (t === "HUMAN") return true;
+  if (t === "AUTOMATION" || t === "AI" || t === "SYSTEM" || t === "INTEGRATION") {
+    return false;
+  }
+  return Boolean(input.actorUserId);
+}
+
+async function resolveChatEventActor(input: MirrorInput): Promise<string> {
+  const t = actorTypeOf(input);
+  const rawLabel = stripDistributionSuffix(input.actor?.label?.trim() ?? "");
+
+  if (t === "AUTOMATION" || t === "AI") {
+    if (rawLabel && /ia/i.test(rawLabel)) return "Agente IA";
+    return rawLabel || "Agente IA";
+  }
+  if (t === "SYSTEM" || t === "INTEGRATION") {
+    if (rawLabel && !isGenericHumanEventActor(rawLabel)) return rawLabel;
+    return "Sistema";
+  }
+
+  if (rawLabel && !isGenericHumanEventActor(rawLabel) && !isReservedEventActorLabel(rawLabel)) {
+    const formatted = formatHumanActorDisplayName(rawLabel);
+    if (formatted) return formatted;
+  }
+
+  if (input.actorUserId) {
+    const user = await prisma.user.findUnique({
+      where: { id: input.actorUserId },
+      select: { name: true, email: true, type: true },
+    });
+    if (user?.type === "AI") return "Agente IA";
+    const formatted = formatHumanActorDisplayName(user?.name, user?.email);
+    if (formatted) return formatted;
+  }
+
+  if (rawLabel && !isGenericHumanEventActor(rawLabel)) return rawLabel;
+  return "Agente";
 }
 
 function conversationIdOf(input: MirrorInput): string | null {
@@ -51,9 +98,9 @@ function conversationIdOf(input: MirrorInput): string | null {
 
 function mapChatEvent(
   input: MirrorInput,
+  actor: string,
 ): { action: ConversationEventAction; text: string; actor: string } | null {
   const type = input.type;
-  const actor = actorName(input);
   const from = (input.oldValue ?? "").trim();
   const to = (input.newValue ?? "").trim();
   const meta = (input.meta ?? {}) as Record<string, unknown>;
@@ -91,8 +138,17 @@ function mapChatEvent(
         };
       }
       if (!from && to) {
-        if (actor === to || actor.toLowerCase() === to.toLowerCase()) {
-          return { action: "entrada", text: `${to} entrou na conversa`, actor: to };
+        const toShort = formatHumanActorDisplayName(to);
+        if (
+          actor === to ||
+          actor.toLowerCase() === to.toLowerCase() ||
+          (toShort && actor.toLowerCase() === toShort.toLowerCase())
+        ) {
+          return {
+            action: "entrada",
+            text: `${to} entrou na conversa`,
+            actor: toShort || actor,
+          };
         }
         return {
           action: "distribuicao",
@@ -164,28 +220,33 @@ function mapChatEvent(
 export function mirrorConversationChatEvent(input: MirrorInput): void {
   const conversationId = conversationIdOf(input);
   if (!conversationId) return;
-  const mapped = mapChatEvent(input);
-  if (!mapped) return;
 
-  const dedupeStartsWith =
-    mapped.action === "distribuicao"
-      ? [
-          "Conversa distribuída",
-          "Conversa enfileirada",
-          "Enfileirada em",
-          "Aguardando consultor",
-        ]
-      : mapped.action === "ia"
-        ? ["Agente IA sugeriu", "Agente IA transferiu", mapped.text.slice(0, 40)]
-        : [mapped.text.slice(0, 40)];
+  void (async () => {
+    const actor = await resolveChatEventActor(input);
+    const mapped = mapChatEvent(input, actor);
+    if (!mapped) return;
 
-  void createConversationEvent({
-    conversationId,
-    action: mapped.action,
-    text: mapped.text,
-    actor: mapped.actor,
-    authorType: mapped.actor === "Agente IA" ? "bot" : "system",
-    dedupeStartsWith,
-    dedupeWindowMs: mapped.action === "distribuicao" ? 120_000 : 20_000,
-  }).catch(() => {});
+    const dedupeStartsWith =
+      mapped.action === "distribuicao"
+        ? [
+            "Conversa distribuída",
+            "Conversa enfileirada",
+            "Enfileirada em",
+            "Aguardando consultor",
+          ]
+        : mapped.action === "ia"
+          ? ["Agente IA sugeriu", "Agente IA transferiu", mapped.text.slice(0, 40)]
+          : [mapped.text.slice(0, 40)];
+
+    await createConversationEvent({
+      conversationId,
+      action: mapped.action,
+      text: mapped.text,
+      actor: mapped.actor,
+      actorUserId: isHumanActor(input) ? input.actorUserId ?? null : null,
+      authorType: mapped.actor === "Agente IA" ? "bot" : "system",
+      dedupeStartsWith,
+      dedupeWindowMs: mapped.action === "distribuicao" ? 120_000 : 20_000,
+    });
+  })().catch(() => {});
 }

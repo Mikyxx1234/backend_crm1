@@ -29,6 +29,7 @@ import { cancelActiveContextsForContact } from "@/services/automation-context";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { logEvent } from "@/services/activity-log";
+import { enrichEventMessageActors } from "@/services/conversation-event-actors";
 import {
   buildOutboundTemplateMessageContent,
   extractLegacyBracketTemplateName,
@@ -68,6 +69,8 @@ export type InboxMessageDto = {
   messageType: string | number | undefined;
   isPrivate?: boolean;
   senderName?: string | null;
+  /** User.id do agente humano no EVENT (legado "Agente" resolve por este id). */
+  senderUserId?: string | null;
   /**
    * Autoria explícita da mensagem (`human` | `bot` | `system`). Setado
    * pelos serviços que criam mensagens (automation-executor, AI handler,
@@ -414,19 +417,43 @@ export async function GET(request: Request, context: RouteContext) {
     ]);
     const openedContent = (raw: string) => templateContentMap.get(raw) ?? raw;
 
-    const messages: InboxMessageDto[] = rows.map((r) => ({
+    const eventActors = await enrichEventMessageActors([
+      {
+        conversationId: conv.id,
+        rows,
+        contents: rows.map((r) => r.content),
+      },
+      ...historyTickets.map((t) => ({
+        conversationId: t.id,
+        rows: t.rows,
+        contents: t.rows.map((r) => r.content),
+      })),
+    ]).catch(() => new Map<string, { senderName: string; senderUserId: string | null }>());
+
+    const eventActorOf = (id: string, fallbackName: string | null) => {
+      const hit = eventActors.get(id);
+      return {
+        senderName: hit?.senderName ?? fallbackName,
+        senderUserId: hit?.senderUserId ?? null,
+      };
+    };
+
+    const messages: InboxMessageDto[] = rows.map((r) => {
+      const ev = eventActorOf(r.id, r.senderName);
+      return {
       id: r.externalId ?? r.id,
       content: openedContent(r.content),
       createdAt: r.createdAt.toISOString(),
       direction: r.direction as InboxMessageDto["direction"],
       messageType: r.messageType,
       isPrivate: r.isPrivate || undefined,
-      senderName: r.senderName,
+      senderName: ev.senderName,
+      senderUserId: ev.senderUserId,
       authorType: r.authorType as "human" | "bot" | "system",
       triggeredByName: r.triggeredByName ?? undefined,
       senderImageUrl:
-        r.direction === "out" && r.senderName
-          ? senderAvatarMap.get(r.senderName.trim().toLowerCase()) ?? null
+        r.direction === "out" && ev.senderName
+          ? senderAvatarMap.get(ev.senderName.trim().toLowerCase()) ?? null
           : null,
       mediaUrl: r.mediaUrl,
       replyToId: r.replyToId,
@@ -437,7 +464,8 @@ export async function GET(request: Request, context: RouteContext) {
       status: r.direction === "out" ? mapSendStatus(r.sendStatus) : undefined,
       channelId: r.channelId ?? null,
       favoritedByMe: favoritedIds.has(r.id) || undefined,
-    }));
+    };
+    });
 
     const channelsMap: Record<string, ConnectionRefDto> = {};
     for (const ch of channelRows) {
@@ -463,7 +491,8 @@ export async function GET(request: Request, context: RouteContext) {
           direction: r.direction as InboxMessageDto["direction"],
           messageType: r.messageType,
           isPrivate: r.isPrivate || undefined,
-          senderName: r.senderName,
+          senderName: eventActorOf(r.id, r.senderName).senderName,
+          senderUserId: eventActorOf(r.id, r.senderName).senderUserId,
           authorType: r.authorType as "human" | "bot" | "system",
           triggeredByName: r.triggeredByName ?? undefined,
           mediaUrl: r.mediaUrl,
