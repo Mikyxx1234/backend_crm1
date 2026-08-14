@@ -15,6 +15,12 @@ export async function GET() {
       role: true,
       avatarUrl: true,
       schedule: true,
+      // Opt-in administrativo da distribuição (`participates`). Sem registro
+      // = default true (mesmo default do model DistributionResponsible).
+      distributionResponsibles: {
+        select: { participates: true },
+        take: 1,
+      },
       // Presença ao vivo (ONLINE/AWAY/OFFLINE) — refletida na grade de
       // cobertura (/settings/coverage) como dot no avatar + filtro.
       agentStatus: {
@@ -32,9 +38,10 @@ export async function GET() {
   });
 
   return NextResponse.json(
-    users.map(({ departmentMemberships, ...u }) => ({
+    users.map(({ departmentMemberships, distributionResponsibles, ...u }) => ({
       ...u,
       departments: departmentMemberships.map((m) => m.department),
+      participates: distributionResponsibles[0]?.participates ?? true,
     })),
   );
 }

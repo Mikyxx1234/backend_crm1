@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { scheduleProcessPendingDistributionQueue } from "@/services/distribution";
 
 type Ctx = { params: Promise<{ id: string }> };
 
@@ -28,7 +29,7 @@ export async function GET(_req: Request, ctx: Ctx) {
 }
 
 export async function PUT(req: Request, ctx: Ctx) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
     const { id } = await ctx.params;
     const body = await req.json();
 
@@ -47,6 +48,26 @@ export async function PUT(req: Request, ctx: Ctx) {
       update: data,
     });
 
-    return NextResponse.json(schedule);
+    let participates: boolean | undefined;
+    if (typeof body.participates === "boolean") {
+      const orgId = session.user.organizationId;
+      if (orgId) {
+        const row = await prisma.distributionResponsible.upsert({
+          where: { organizationId_userId: { organizationId: orgId, userId: id } },
+          update: { participates: body.participates },
+          create: withOrgFromCtx({ userId: id, participates: body.participates }),
+        });
+        participates = row.participates;
+        if (body.participates) {
+          scheduleProcessPendingDistributionQueue({
+            trigger: "agent_eligible",
+            delayMs: 300,
+            userId: id,
+          });
+        }
+      }
+    }
+
+    return NextResponse.json({ ...schedule, participates });
   });
 }
