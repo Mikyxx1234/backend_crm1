@@ -30,6 +30,8 @@ vi.mock("@/lib/crypto/secrets", () => ({
 
 vi.mock("@/services/call-provider-configs", () => ({
   getOrCreateApi4ComProviderConfig: vi.fn(),
+  resolveApi4ComServiceToken: vi.fn(),
+  resolveOrgApi4ComGateway: vi.fn(),
 }));
 
 const mockClient = {
@@ -42,15 +44,23 @@ const mockClient = {
 };
 vi.mock("./client", () => ({
   getApi4ComClient: () => mockClient,
-  Api4ComClient: vi.fn(),
+  Api4ComClient: vi.fn(function MockApi4ComClient() {
+    return mockClient;
+  }),
   resetApi4ComClient: vi.fn(),
 }));
 
 import { prisma } from "@/lib/prisma";
-import { getOrCreateApi4ComProviderConfig } from "@/services/call-provider-configs";
+import {
+  getOrCreateApi4ComProviderConfig,
+  resolveApi4ComServiceToken,
+  resolveOrgApi4ComGateway,
+} from "@/services/call-provider-configs";
 import { Api4ComConflictError } from "./errors";
 
 const getOrCreateConfig = vi.mocked(getOrCreateApi4ComProviderConfig);
+const resolveToken = vi.mocked(resolveApi4ComServiceToken);
+const resolveGateway = vi.mocked(resolveOrgApi4ComGateway);
 
 const prismaMock = prisma as unknown as {
   sipExtension: {
@@ -108,6 +118,8 @@ describe("ProvisioningService", () => {
     getOrCreateConfig.mockResolvedValue({
       webhookUrl: "/api/webhooks/calls/api4com?token=wh-tok-123",
     } as Awaited<ReturnType<typeof getOrCreateApi4ComProviderConfig>>);
+    resolveToken.mockResolvedValue("tok-test");
+    resolveGateway.mockResolvedValue("test-gateway");
   });
 
   it("provisiona novo usuário end-to-end", async () => {

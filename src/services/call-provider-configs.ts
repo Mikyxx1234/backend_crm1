@@ -7,13 +7,15 @@
  *  - fieldMappings (config do adapter)
  */
 import { randomBytes } from "node:crypto";
-import type { RecordingDelivery, WebhookAuthMode } from "@prisma/client";
+import { Prisma, type RecordingDelivery, type WebhookAuthMode } from "@prisma/client";
 
 import { decryptSecret, encryptSecret } from "@/lib/crypto/secrets";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
 import { withOrg } from "@/lib/prisma-helpers";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { Api4ComClient } from "@/services/api4com/client";
+import { resolveApi4ComGateway } from "@/services/telephony-providers/api4com";
 import { listProviders } from "./call-adapters";
 
 // ── Tipos ─────────────────────────────────────────────────────────────────
@@ -292,4 +294,135 @@ export async function getOrCreateApi4ComProviderConfig(
   });
 
   return toPublic(row);
+}
+
+const API4COM_TOKEN_KEY = "__api4comServiceTokenEncrypted";
+const API4COM_GATEWAY_KEY = "__api4comGateway";
+
+export type Api4ComIntegrationPublic = {
+  webhookUrl: string;
+  hasServiceToken: boolean;
+  hasEnvToken: boolean;
+  gateway: string;
+  isActive: boolean;
+  webhookRegistered: boolean | null;
+  webhookError: string | null;
+};
+
+function readMappings(raw: unknown): Record<string, unknown> {
+  return raw && typeof raw === "object" && !Array.isArray(raw)
+    ? { ...(raw as Record<string, unknown>) }
+    : {};
+}
+
+function absoluteWebhookUrl(path: string): string {
+  const base = (process.env.NEXT_PUBLIC_APP_URL ?? process.env.APP_URL ?? "").replace(/\/$/, "");
+  if (path.startsWith("http")) return path;
+  return `${base}${path.startsWith("/") ? "" : "/"}${path}`;
+}
+
+function tokenFromMappings(mappings: Record<string, unknown>): string | null {
+  const enc = mappings[API4COM_TOKEN_KEY];
+  if (typeof enc !== "string" || !enc) return null;
+  try {
+    const token = decryptSecret(enc).trim();
+    return token || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveOrgApi4ComGateway(organizationId: string): Promise<string> {
+  const row = await prisma.callProviderConfig.findFirst({
+    where: { organizationId, providerKey: "api4com" },
+    select: { fieldMappings: true },
+  });
+  const mappings = readMappings(row?.fieldMappings);
+  const saved = mappings[API4COM_GATEWAY_KEY];
+  if (typeof saved === "string" && saved.trim()) return saved.trim();
+  return resolveApi4ComGateway(organizationId);
+}
+
+/** Token da org (UI) com fallback para `API4COM_SERVICE_TOKEN` do env. */
+export async function resolveApi4ComServiceToken(
+  organizationId: string,
+): Promise<string | null> {
+  const row = await prisma.callProviderConfig.findFirst({
+    where: { organizationId, providerKey: "api4com" },
+    select: { fieldMappings: true },
+  });
+  const fromOrg = tokenFromMappings(readMappings(row?.fieldMappings));
+  if (fromOrg) return fromOrg;
+  return process.env.API4COM_SERVICE_TOKEN?.trim() || null;
+}
+
+export async function getApi4ComIntegration(
+  organizationId = getOrgIdOrThrow(),
+): Promise<Api4ComIntegrationPublic> {
+  const config = await getOrCreateApi4ComProviderConfig(organizationId);
+  const mappings = readMappings(config.fieldMappings);
+  const gateway =
+    typeof mappings[API4COM_GATEWAY_KEY] === "string" && String(mappings[API4COM_GATEWAY_KEY]).trim()
+      ? String(mappings[API4COM_GATEWAY_KEY]).trim()
+      : resolveApi4ComGateway(organizationId);
+
+  return {
+    webhookUrl: absoluteWebhookUrl(config.webhookUrl),
+    hasServiceToken: Boolean(tokenFromMappings(mappings)),
+    hasEnvToken: Boolean(process.env.API4COM_SERVICE_TOKEN?.trim()),
+    gateway,
+    isActive: config.isActive,
+    webhookRegistered: null,
+    webhookError: null,
+  };
+}
+
+export async function updateApi4ComIntegration(
+  input: { serviceToken?: string | null; gateway?: string },
+  organizationId = getOrgIdOrThrow(),
+): Promise<Api4ComIntegrationPublic> {
+  const config = await getOrCreateApi4ComProviderConfig(organizationId);
+  const mappings = readMappings(config.fieldMappings);
+
+  if (input.serviceToken !== undefined) {
+    const trimmed = input.serviceToken?.trim() ?? "";
+    if (trimmed) {
+      mappings[API4COM_TOKEN_KEY] = encryptSecret(trimmed);
+    } else if (input.serviceToken === null || input.serviceToken === "") {
+      delete mappings[API4COM_TOKEN_KEY];
+    }
+  }
+  if (input.gateway !== undefined) {
+    mappings[API4COM_GATEWAY_KEY] = input.gateway.trim();
+  }
+
+  await prisma.callProviderConfig.update({
+    where: { id: config.id },
+    data: { fieldMappings: mappings as Prisma.InputJsonValue },
+  });
+
+  const result = await getApi4ComIntegration(organizationId);
+  const token = await resolveApi4ComServiceToken(organizationId);
+  if (!token) {
+    return { ...result, webhookRegistered: false, webhookError: null };
+  }
+
+  try {
+    const client = new Api4ComClient({ token });
+    const webhookVersion = process.env.API4COM_WEBHOOK_VERSION ?? "1.8";
+    await client.upsertIntegration({
+      gateway: result.gateway,
+      webhook: true,
+      webhookConstraint: { metadata: { gateway: result.gateway } },
+      metadata: {
+        webhookUrl: result.webhookUrl,
+        webhookVersion,
+        webhookTypes: ["channel-answer", "channel-hangup"],
+      },
+    });
+    return { ...result, webhookRegistered: true, webhookError: null };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ...result, webhookRegistered: false, webhookError: msg.slice(0, 500) };
+  }
 }

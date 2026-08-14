@@ -16,11 +16,13 @@ import type { SipExtension, TelephonyProvisioningStep } from "@prisma/client";
 import { encryptSecret } from "@/lib/crypto/secrets";
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
-import { getOrCreateApi4ComProviderConfig } from "@/services/call-provider-configs";
+import {
+  getOrCreateApi4ComProviderConfig,
+  resolveApi4ComServiceToken,
+  resolveOrgApi4ComGateway,
+} from "@/services/call-provider-configs";
 
-import { resolveApi4ComGateway } from "@/services/telephony-providers/api4com";
-
-import { Api4ComClient, getApi4ComClient } from "./client";
+import { Api4ComClient } from "./client";
 import { Api4ComConflictError } from "./errors";
 import type { Api4ComExtensionResponse } from "./types";
 
@@ -55,8 +57,17 @@ export async function enableTelephony(
   userId: string,
   organizationId: string,
 ): Promise<ProvisionResult> {
-  const client = getApi4ComClient();
-  const gateway = resolveApi4ComGateway(organizationId);
+  const token = await resolveApi4ComServiceToken(organizationId);
+  if (!token) {
+    return {
+      success: false,
+      step: "FAILED",
+      error:
+        "Token Api4Com ausente. Configure o token ADMIN em Widgets → Telefonia IP → Integração.",
+    };
+  }
+  const client = new Api4ComClient({ token });
+  const gateway = await resolveOrgApi4ComGateway(organizationId);
   const webhookVersion = process.env.API4COM_WEBHOOK_VERSION ?? "1.8";
 
   let ext = await findOrCreateExtensionRecord(userId, organizationId);
@@ -118,7 +129,13 @@ export async function disableTelephony(
   try {
     const extensionId = readProviderExtensionId(ext.providerMeta);
     if (extensionId || ext.api4comUserId) {
-      const client = getApi4ComClient();
+      const token = await resolveApi4ComServiceToken(organizationId);
+      if (!token) {
+        throw new Error(
+          "Token Api4Com ausente. Configure o token ADMIN em Widgets → Telefonia IP → Integração.",
+        );
+      }
+      const client = new Api4ComClient({ token });
       if (extensionId) {
         await client.deleteExtension(extensionId);
       }
