@@ -293,8 +293,8 @@ function permissionsAllowKey(
  * `includeUnassigned` vem de `getVisibilityFilter` e recorta o que estas
  * filas injetam: as duas trazem conversa SEM responsável, então sem esse
  * gate o pool livre reaparecia na Inbox mesmo com o eixo desligado nas
- * permissões — a aba Entrada furava a regra. Conversa com assignee IA
- * continua aparecendo: ela TEM responsável, ainda que não humano.
+ * permissões — a aba Entrada furava a regra. Assignee IA + inbound do
+ * aluno entra no pool da Entrada (a IA em Lead de Entrada não responde).
  */
 export function withInboxQueueVisibility(
   base: Prisma.ConversationWhereInput,
@@ -324,6 +324,11 @@ export function withInboxQueueVisibility(
     permissionsAllowKey(perms, "conversation:claim")
   ) {
     extras.push({ assignedToId: null, status: "OPEN" });
+    extras.push({
+      status: "OPEN",
+      assignedTo: { is: { type: "AI" } },
+      lastMessageDirection: "in",
+    });
   }
 
   if (tabs.includes("automacao") && permissionsAllowKey(perms, "inbox:tab:automacao")) {

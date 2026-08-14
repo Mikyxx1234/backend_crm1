@@ -336,6 +336,13 @@ function tabToWhere(
                 ],
               },
               { assignedTo: { is: { type: "HUMAN" } } },
+              // IA assignee + aluno falou por último: a IA em Lead de
+              // Entrada não responde (entry_lead_stage). Sem isto o card
+              // ficava preso em Automação e o consultor não via.
+              {
+                assignedTo: { is: { type: "AI" } },
+                lastMessageDirection: "in",
+              },
             ],
           },
           {
@@ -367,10 +374,11 @@ function tabToWhere(
       };
     case "automacao":
       // Robô ativo (RUNNING ou PAUSED aguardando cliente) sem dono humano
-      // e sem inbound pendente, OU assignee IA. Cliente que já respondeu
-      // (lastMessageDirection=in) vai para Entrada — o consultor precisa
-      // ver. Quem já tem consultor humano vai para Entrada/Aguardando
-      // mesmo se o PIPE ainda não encerrou.
+      // e sem inbound pendente, OU assignee IA ainda no disparo (último
+      // out). Cliente que já respondeu (lastMessageDirection=in) vai para
+      // Entrada — o consultor precisa ver, inclusive com IA no card
+      // (Lead de Entrada bloqueia a IA). Quem já tem consultor humano
+      // vai para Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
       return {
         status: "OPEN",
         OR: [
@@ -383,7 +391,10 @@ function tabToWhere(
               },
             },
           },
-          { assignedTo: { is: { type: "AI" } } },
+          {
+            assignedTo: { is: { type: "AI" } },
+            AND: [LAST_MSG_NOT_INBOUND],
+          },
         ],
       };
     case "finalizados":
