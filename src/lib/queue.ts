@@ -184,8 +184,9 @@ export type BulkMoveStagePayload = LeadsBulkBasePayload & {
  *
  * A rota `POST /api/conversations/bulk` já aplicou o filtro de visibilidade,
  * removeu os ids de departamentos que exigem tabulação ao encerrar (`skipped`)
- * e leu as org settings — o handler recebe apenas ids efetivos + flags saneadas
- * e roda o `updateMany` em chunks (sem reler settings fora de RequestContext).
+ * quando o operador não é ADMIN, e leu as org settings — o handler recebe
+ * apenas ids efetivos + flags saneadas e roda o `updateMany` em chunks
+ * (sem reler settings fora de RequestContext).
  */
 export type BulkResolveConversationsPayload = LeadsBulkBasePayload & {
   /** IDs das conversas a encerrar (já filtradas por visibilidade + tabulação). */

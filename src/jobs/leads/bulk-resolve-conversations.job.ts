@@ -32,7 +32,8 @@ const CHUNK_SIZE = 50;
  *
  * A rota produtora (`POST /api/conversations/bulk`) já:
  *   - aplicou o filtro de visibilidade do usuário nos ids;
- *   - removeu ids de departamentos que exigem tabulação ao encerrar;
+ *   - removeu ids de departamentos que exigem tabulação (não-admin);
+ *     ADMIN / super-admin entram no payload mesmo sem tabular;
  *   - leu as org settings keepAgent/keepDepartment.
  * Aqui confiamos no payload saneado — não relemos settings (evita acesso a
  * org-settings fora de RequestContext no worker).

@@ -64,6 +64,10 @@ export async function GET(request: Request) {
       // abas reflitam o filtro ativo (bug: contadores não atualizavam).
       const contactId = searchParams.get("contactId") ?? undefined;
       const channel = searchParams.get("channel") ?? undefined;
+      const channelIdsRaw = searchParams.get("channelIds") ?? "";
+      const channelIds = channelIdsRaw
+        ? channelIdsRaw.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
       const ownerId = searchParams.get("ownerId") ?? undefined;
       const ownerIdsRaw = searchParams.get("ownerIds") ?? "";
       const ownerIds = ownerIdsRaw
@@ -110,6 +114,7 @@ export async function GET(request: Request) {
       const filterConditions = buildInboxFilterConditions({
         contactId,
         channel,
+        channelIds,
         ownerId,
         ownerIds,
         withoutOwner,
@@ -214,6 +219,7 @@ export async function GET(request: Request) {
         contactId,
         status,
         channel,
+        channelIds,
         tab,
         todosCategoryTabs: memberTodosCategories,
         search,

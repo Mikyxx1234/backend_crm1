@@ -12,6 +12,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { countAgentReplyAsAnswered } from "@/lib/conversation-reply-marking";
 import { getOrgIdOrNull, getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
+import { parseInboxFilterChannelIds } from "@/services/channels";
 import {
   findContactIdsByPhoneDigits,
   SOURCE_NONE,
@@ -46,6 +47,8 @@ export type GetConversationsParams = {
   contactId?: string;
   status?: ConversationStatus;
   channel?: string;
+  /** IDs de instância de Channel (e sentinelas `__missing__:` / `__deleted__`). */
+  channelIds?: string[];
   tab?: InboxTab;
   /**
    * Com `tab: "todos"` e papel MEMBER: OR destas categorias (só o que o
@@ -278,6 +281,11 @@ const ACTIVE_AUTOMATION_CTX: Prisma.EnumAutomationCtxStatusFilter = {
   in: ["RUNNING", "PAUSED"],
 };
 
+/** lastMessageDirection ainda não é inbound (null ou out). Inclui NULL no SQL. */
+const LAST_MSG_NOT_INBOUND: Prisma.ConversationWhereInput = {
+  OR: [{ lastMessageDirection: null }, { lastMessageDirection: { not: "in" } }],
+};
+
 function tabToWhere(
   tab: InboxCategoryTab,
   countAgentReply = false,
@@ -286,10 +294,14 @@ function tabToWhere(
     case "entrada":
       // Entrada = (1) sem dono e fora do robô, OU (2) já com consultor
       // humano aguardando a 1ª msg dele, OU (3) sem dono após redistribuição
-      // manual com fila cheia (hasHumanReply=true — antes sumia das abas).
+      // manual com fila cheia (hasHumanReply=true — antes sumia das abas),
+      // OU (4) sem dono, cliente falou por último — mesmo com robô ainda
+      // RUNNING/PAUSED (campanha/salesbot). Aguardando exige assignee +
+      // reply humano; aqui o último inbound é do cliente e o consultor
+      // precisa ver. Com countAgentReplyAsAnswered, “já houve reply”
+      // também inclui hasAgentReply.
       // Em (2) NÃO exigimos “sem RUNNING”: no handoff “Falar com equipe” o
       // contexto PIPE pode ainda estar RUNNING por um instante.
-      // Com countAgentReplyAsAnswered, “já houve reply” também inclui hasAgentReply.
       return {
         status: "OPEN",
         hasError: false,
@@ -302,11 +314,16 @@ function tabToWhere(
                 // quando o aluno responder e lastInboundAt for setado).
                 assignedToId: null,
                 lastInboundAt: { not: null },
-                contact: {
-                  automationContexts: {
-                    none: { status: ACTIVE_AUTOMATION_CTX },
+                OR: [
+                  {
+                    contact: {
+                      automationContexts: {
+                        none: { status: ACTIVE_AUTOMATION_CTX },
+                      },
+                    },
                   },
-                },
+                  { lastMessageDirection: "in" },
+                ],
               },
               { assignedTo: { is: { type: "HUMAN" } } },
             ],
@@ -339,14 +356,17 @@ function tabToWhere(
         hasError: false,
       };
     case "automacao":
-      // Robô ativo (RUNNING ou PAUSED aguardando cliente) sem dono humano,
-      // OU assignee IA. Quem já tem consultor humano vai para
-      // Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
+      // Robô ativo (RUNNING ou PAUSED aguardando cliente) sem dono humano
+      // e sem inbound pendente, OU assignee IA. Cliente que já respondeu
+      // (lastMessageDirection=in) vai para Entrada — o consultor precisa
+      // ver. Quem já tem consultor humano vai para Entrada/Aguardando
+      // mesmo se o PIPE ainda não encerrou.
       return {
         status: "OPEN",
         OR: [
           {
             assignedToId: null,
+            AND: [LAST_MSG_NOT_INBOUND],
             contact: {
               automationContexts: {
                 some: { status: ACTIVE_AUTOMATION_CTX },
@@ -486,6 +506,49 @@ export async function buildConversationListWhere(
   return conditions.length > 0 ? { AND: conditions } : {};
 }
 
+const CONVERSATION_CHANNEL_TYPES = new Set([
+  "whatsapp",
+  "instagram",
+  "meta",
+  "facebook",
+  "telegram",
+  "email",
+  "webchat",
+  "messaging",
+  "whatsapp_meta",
+  "meta_whatsapp",
+]);
+
+function isConversationChannelType(value: string): boolean {
+  return CONVERSATION_CHANNEL_TYPES.has(value.toLowerCase());
+}
+
+function buildChannelInstanceFilter(
+  channelIds: string[] | undefined,
+): Prisma.ConversationWhereInput | null {
+  if (!channelIds?.length) return null;
+  const parsed = parseInboxFilterChannelIds(channelIds);
+  const branches: Prisma.ConversationWhereInput[] = [];
+  if (parsed.channelIds.length > 0) {
+    branches.push({ channelId: { in: parsed.channelIds } });
+  }
+  if (parsed.missingInboxNames.length > 0) {
+    branches.push({
+      channelId: null,
+      inboxName: { in: parsed.missingInboxNames },
+    });
+  }
+  if (parsed.includeUnnamedDeleted) {
+    branches.push({
+      channelId: null,
+      OR: [{ inboxName: null }, { inboxName: "" }],
+    });
+  }
+  if (branches.length === 0) return null;
+  if (branches.length === 1) return branches[0] ?? null;
+  return { OR: branches };
+}
+
 /**
  * Condições dos FILTROS do inbox (funil): responsável, estágio, tags, origem,
  * canal e contato. NÃO inclui aba/busca/visibilidade — isso permite reaproveitar
@@ -497,7 +560,16 @@ export function buildInboxFilterConditions(
 ): Prisma.ConversationWhereInput[] {
   const conditions: Prisma.ConversationWhereInput[] = [];
   if (params.contactId) conditions.push({ contactId: params.contactId });
-  if (params.channel) conditions.push({ channel: params.channel });
+  if (params.channel) {
+    if (isConversationChannelType(params.channel)) {
+      conditions.push({ channel: params.channel });
+    } else {
+      const asInstance = buildChannelInstanceFilter([params.channel]);
+      if (asInstance) conditions.push(asInstance);
+    }
+  }
+  const channelIdFilter = buildChannelInstanceFilter(params.channelIds);
+  if (channelIdFilter) conditions.push(channelIdFilter);
   if (params.sessionExpiresWithinHours !== undefined) {
     conditions.push({ id: { in: params.sessionExpiringConversationIds ?? [] } });
   }
@@ -612,10 +684,14 @@ async function withResolvedSessionFilter(
  * lista, mas restringe a `status != RESOLVED` (já resolvidas são no-op) e
  * separa as que estão em departamento com tabulação obrigatória no
  * encerramento (`requireTabulationOnClose`), que NÃO podem ser encerradas em
- * massa (precisam de tabulação individual).
+ * massa por não-admin (precisam de tabulação individual).
+ *
+ * ADMIN / super-admin: `allowCloseWithoutTabulation` inclui essas conversas
+ * nos ids (override de tabulação só no bulk).
  */
 export async function getResolvableConversationIds(
   params: GetConversationsParams,
+  opts?: { allowCloseWithoutTabulation?: boolean },
 ): Promise<{ ids: string[]; skippedIds: string[] }> {
   const baseWhere = await buildConversationListWhere(
     await withResolvedSessionFilter(params),
@@ -634,9 +710,13 @@ export async function getResolvableConversationIds(
 
   const ids: string[] = [];
   const skippedIds: string[] = [];
+  const skipTabulationFilter = opts?.allowCloseWithoutTabulation === true;
   for (const r of rows) {
-    if (r.department?.requireTabulationOnClose) skippedIds.push(r.id);
-    else ids.push(r.id);
+    if (!skipTabulationFilter && r.department?.requireTabulationOnClose) {
+      skippedIds.push(r.id);
+    } else {
+      ids.push(r.id);
+    }
   }
   return { ids, skippedIds };
 }
