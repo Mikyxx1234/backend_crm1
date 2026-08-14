@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 
 import type { Prisma } from "@prisma/client";
 
-import { withOrgContext } from "@/lib/auth-helpers";
+import { isAdmin, isSuperAdmin, withOrgContext } from "@/lib/auth-helpers";
 import { getVisibilityFilter } from "@/lib/visibility";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
@@ -33,7 +33,8 @@ const FILTER_TABS = new Set<InboxTab>([
  * `resolve` (Encerrar): processado de forma ASSÍNCRONA pelo `leads-worker`
  * (fila `leads-bulk`, mesma infra dos bulk de Deals). A rota:
  *   1. aplica o filtro de visibilidade do usuário;
- *   2. remove ids de departamentos que exigem tabulação ao encerrar (`skipped`);
+ *   2. remove ids de departamentos que exigem tabulação ao encerrar (`skipped`)
+ *      — ADMIN / super-admin podem encerrar em massa sem tabular;
  *   3. lê as org settings keepAgent/keepDepartment;
  *   4. cria um `BulkOperation` (PENDING) e enfileira o job;
  *   5. responde 202 com `operationId` — o frontend pollar via
@@ -75,6 +76,7 @@ export async function POST(request: Request) {
           ownerIds?: string[];
           withoutOwner?: boolean;
           channel?: string;
+          channelIds?: string[];
           stageId?: string;
           stageIds?: string[];
           tagIds?: string[];
@@ -108,6 +110,10 @@ export async function POST(request: Request) {
 
           let targetIds: string[];
           let skippedIds: string[];
+          // Override de tabulação só no bulk: ADMIN (e super-admin) encerram
+          // sem tabular. Não-admin continua pulando esses depts.
+          const allowCloseWithoutTabulation =
+            isAdmin(session) || isSuperAdmin(session);
 
           if (allInFilter) {
             // "Todas do filtro": resolve os alvos server-side com o MESMO where
@@ -123,39 +129,47 @@ export async function POST(request: Request) {
               organizationId: user.organizationId,
             });
             const f = body.filters ?? {};
-            const resolved = await getResolvableConversationIds({
-              tab,
-              search: body.search,
-              visibilityWhere: conversationWhere ?? undefined,
-              allowedChannelIds,
-              ownerId: f.ownerId,
-              ownerIds: f.ownerIds,
-              withoutOwner: f.withoutOwner,
-              channel: f.channel,
-              stageId: f.stageId,
-              stageIds: f.stageIds,
-              tagIds: f.tagIds,
-              sources: f.sources,
-              withoutSource: f.withoutSource,
-              sessionExpiresWithinHours: f.sessionExpiresWithinHours,
-            });
+            const resolved = await getResolvableConversationIds(
+              {
+                tab,
+                search: body.search,
+                visibilityWhere: conversationWhere ?? undefined,
+                allowedChannelIds,
+                ownerId: f.ownerId,
+                ownerIds: f.ownerIds,
+                withoutOwner: f.withoutOwner,
+                channel: f.channel,
+                channelIds: f.channelIds,
+                stageId: f.stageId,
+                stageIds: f.stageIds,
+                tagIds: f.tagIds,
+                sources: f.sources,
+                withoutSource: f.withoutSource,
+                sessionExpiresWithinHours: f.sessionExpiresWithinHours,
+              },
+              { allowCloseWithoutTabulation },
+            );
             targetIds = resolved.ids;
             skippedIds = resolved.skippedIds;
           } else {
             const selectedIds = ids as string[];
-            // Departamentos que exigem tabulação ao encerrar NÃO entram no bulk
+            // Não-admin: departamentos que exigem tabulação NÃO entram no bulk
             // (o encerramento individual colhe a tabulação). Devolvemos a lista
             // pra UI avisar "encerre individualmente".
-            const skippedRows = await prisma.conversation.findMany({
-              where: scopedWhere(selectedIds, {
-                status: { not: "RESOLVED" },
-                department: { is: { requireTabulationOnClose: true } },
-              }),
-              select: { id: true },
-            });
-            skippedIds = skippedRows.map((c) => c.id);
-            const skippedSet = new Set(skippedIds);
-            const candidateIds = selectedIds.filter((i) => !skippedSet.has(i));
+            skippedIds = [];
+            let candidateIds = selectedIds;
+            if (!allowCloseWithoutTabulation) {
+              const skippedRows = await prisma.conversation.findMany({
+                where: scopedWhere(selectedIds, {
+                  status: { not: "RESOLVED" },
+                  department: { is: { requireTabulationOnClose: true } },
+                }),
+                select: { id: true },
+              });
+              skippedIds = skippedRows.map((c) => c.id);
+              const skippedSet = new Set(skippedIds);
+              candidateIds = selectedIds.filter((i) => !skippedSet.has(i));
+            }
 
             // Resolve os ids REAIS a encerrar já com visibilidade aplicada.
             const targets = candidateIds.length

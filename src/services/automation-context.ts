@@ -393,7 +393,12 @@ export async function processIncomingMessage(
 
   for (const ctx of activeContexts) {
     if (!ctx.currentStepId) {
-      log.debug(`ctx ${ctx.id} (auto=${ctx.automation.name}) sem currentStepId — skip`);
+      // Ponteiro morto: cliente falou e o robô não estava esperando nada.
+      // Encerra para a conversa sair de Automação (handoff → Entrada).
+      log.info(
+        `processIncomingMessage handoff — ctx ${ctx.id} (auto=${ctx.automation.name}) sem currentStepId`,
+      );
+      await cancelContext(ctx.id);
       continue;
     }
 
@@ -408,9 +413,14 @@ export async function processIncomingMessage(
       continue;
     }
     if (!PAUSING_STEP_TYPES.has(currentStep.type)) {
-      log.debug(
-        `ctx ${ctx.id} (auto=${ctx.automation.name}) currentStep=${currentStep.type} não é interativo — skip`,
+      // Delay / step vazado RUNNING: o robô não estava à espera desta
+      // mensagem. Encerrar evita a conversa ficar presa em Automação
+      // depois do inbound (e o timeout do delay disparar por cima do
+      // consultor). wait_for_reply / menu / template seguem abaixo.
+      log.info(
+        `processIncomingMessage handoff — ctx ${ctx.id} (auto=${ctx.automation.name}) currentStep=${currentStep.type} não espera resposta`,
       );
+      await cancelContext(ctx.id);
       continue;
     }
 
@@ -507,14 +517,14 @@ export async function processIncomingMessage(
             `nenhum botão matched ("${messageContent}") — auto=${ctx.automation.name} → fallback elseGotoStepId step=${nextStepId}`,
           );
         } else if (hasExplicitEdges(config)) {
-          // Menu desenhado no canvas, cliente digitou texto livre e a saída
-          // "nenhuma opção" não foi conectada. Avançar pela array pularia
-          // pro ramo vizinho e fechar o contexto deixaria o cliente órfão:
-          // mantemos o fluxo parado NESTE passo, aguardando um clique
-          // válido (ou o timeout configurado).
-          log.warn(
-            `nenhum botão matched ("${messageContent}") e sem elseGotoStepId — auto=${ctx.automation.name} step=${currentStep.id} → mantendo no mesmo passo (conecte a saída "nenhuma opção" no canvas)`,
+          // Menu/template com botões: cliente digitou texto livre em vez
+          // de clicar. Antes o fluxo ficava parado no mesmo passo e a
+          // conversa permanecia em Automação (ex.: "Bom dia, tudo bem?").
+          // Handoff: encerra o robô para o ticket cair em Entrada.
+          log.info(
+            `processIncomingMessage handoff — texto livre sem match de botão ("${messageContent.slice(0, 40)}") auto=${ctx.automation.name} step=${currentStep.id}`,
           );
+          await cancelContext(ctx.id);
           return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
         } else {
           nextStepId = linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
@@ -630,6 +640,14 @@ export async function processIncomingMessage(
   }
 
   log.debug(`nenhum contexto interativo encontrado pra contato=${contactId}`);
+  // Qualquer RUNNING/PAUSED que o loop não consumiu (já cancelados no
+  // corpo, ou recém-criados em corrida): garante saída de Automação.
+  const leftover = await cancelActiveContextsForContact(contactId);
+  if (leftover > 0) {
+    log.info(
+      `processIncomingMessage handoff leftover — contact=${contactId} cancelled=${leftover}`,
+    );
+  }
   return { handled: false };
 }
 

@@ -81,6 +81,145 @@ export async function getChannels(): Promise<ChannelWithOrgSlug[]> {
   return channels.map(attachOrgSlug);
 }
 
+/** Prefixo de id sintético: conversas cujo Channel foi hard-deleted (channelId SetNull). */
+export const INBOX_FILTER_MISSING_PREFIX = "__missing__:";
+/** Conversas sem channelId e sem inboxName (canal excluído sem nome gravado). */
+export const INBOX_FILTER_DELETED_ID = "__deleted__";
+
+export type InboxFilterChannel = {
+  id: string;
+  name: string;
+  type: string;
+  status: string;
+  phoneNumber: string | null;
+  deleted: boolean;
+};
+
+export function inboxFilterMissingId(inboxName: string): string {
+  return `${INBOX_FILTER_MISSING_PREFIX}${encodeURIComponent(inboxName)}`;
+}
+
+export function parseInboxFilterChannelIds(ids: string[]): {
+  channelIds: string[];
+  missingInboxNames: string[];
+  includeUnnamedDeleted: boolean;
+} {
+  const channelIds: string[] = [];
+  const missingInboxNames: string[] = [];
+  let includeUnnamedDeleted = false;
+  for (const raw of ids) {
+    const id = raw.trim();
+    if (!id) continue;
+    if (id === INBOX_FILTER_DELETED_ID) {
+      includeUnnamedDeleted = true;
+      continue;
+    }
+    if (id.startsWith(INBOX_FILTER_MISSING_PREFIX)) {
+      try {
+        missingInboxNames.push(
+          decodeURIComponent(id.slice(INBOX_FILTER_MISSING_PREFIX.length)),
+        );
+      } catch {
+        missingInboxNames.push(id.slice(INBOX_FILTER_MISSING_PREFIX.length));
+      }
+      continue;
+    }
+    channelIds.push(id);
+  }
+  return { channelIds, missingInboxNames, includeUnnamedDeleted };
+}
+
+/**
+ * Instâncias de canal da org para o filtro do inbox: todos os status
+ * (conectado, desconectado, falha…) + canais que ainda aparecem em
+ * conversas mesmo após exclusão (órfãos / inboxName residual).
+ *
+ * Não altera `getChannels()` — settings/composer continuam na lista
+ * de rows existentes, sem sintéticos.
+ */
+export async function getChannelsForInboxFilter(): Promise<InboxFilterChannel[]> {
+  const channels = await prisma.channel.findMany({
+    select: {
+      id: true,
+      name: true,
+      type: true,
+      status: true,
+      phoneNumber: true,
+    },
+    orderBy: { name: "asc" },
+  });
+  const knownIds = new Set(channels.map((c) => c.id));
+
+  const result: InboxFilterChannel[] = channels.map((c) => ({
+    id: c.id,
+    name: c.name,
+    type: c.type,
+    status: c.status,
+    phoneNumber: c.phoneNumber,
+    deleted: false,
+  }));
+
+  const leftover = await prisma.conversation.findMany({
+    where: { channelId: { not: null } },
+    select: { channelId: true, inboxName: true },
+    distinct: ["channelId", "inboxName"],
+  });
+  for (const row of leftover) {
+    if (!row.channelId || knownIds.has(row.channelId)) continue;
+    const stored = row.inboxName?.trim();
+    result.push({
+      id: row.channelId,
+      name: stored || "Canal excluído",
+      type: "",
+      status: "DELETED",
+      phoneNumber: null,
+      deleted: true,
+    });
+    knownIds.add(row.channelId);
+  }
+
+  const detached = await prisma.conversation.findMany({
+    where: { channelId: null },
+    select: { inboxName: true },
+    distinct: ["inboxName"],
+  });
+  const seenNames = new Set<string>();
+  let hasUnnamed = false;
+  for (const row of detached) {
+    const stored = row.inboxName?.trim() ?? "";
+    if (!stored) {
+      hasUnnamed = true;
+      continue;
+    }
+    if (seenNames.has(stored)) continue;
+    seenNames.add(stored);
+    result.push({
+      id: inboxFilterMissingId(stored),
+      name: stored,
+      type: "",
+      status: "DELETED",
+      phoneNumber: null,
+      deleted: true,
+    });
+  }
+  if (hasUnnamed) {
+    result.push({
+      id: INBOX_FILTER_DELETED_ID,
+      name: "Canal excluído",
+      type: "",
+      status: "DELETED",
+      phoneNumber: null,
+      deleted: true,
+    });
+  }
+
+  result.sort((a, b) => {
+    if (a.deleted !== b.deleted) return a.deleted ? 1 : -1;
+    return a.name.localeCompare(b.name, "pt-BR");
+  });
+  return result;
+}
+
 export async function getChannelById(
   id: string,
 ): Promise<ChannelWithOrgSlug | null> {
