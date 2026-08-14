@@ -25,7 +25,23 @@ function isP2002(e: unknown): boolean {
   return typeof e === "object" && e !== null && "code" in e && (e as { code: string }).code === "P2002";
 }
 
-const userSelect = { id: true, name: true, email: true, role: true } as const;
+const userSelect = {
+  id: true,
+  name: true,
+  email: true,
+  role: true,
+  phone: true,
+  avatarUrl: true,
+} as const;
+
+/** Trim + "" → null, alinhado com PUT /api/profile. */
+function nullableString(value: unknown): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length === 0 ? null : trimmed;
+}
 
 export async function PUT(request: Request, context: RouteContext) {
   try {
@@ -70,6 +86,8 @@ export async function PUT(request: Request, context: RouteContext) {
       email?: string;
       role?: UserRole;
       hashedPassword?: string;
+      phone?: string | null;
+      avatarUrl?: string | null;
     } = {};
 
     if (b.name !== undefined) {
@@ -84,6 +102,26 @@ export async function PUT(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "E-mail inválido." }, { status: 400 });
       }
       data.email = b.email.trim().toLowerCase();
+    }
+
+    if (b.phone !== undefined) {
+      if (b.phone !== null && typeof b.phone !== "string") {
+        return NextResponse.json({ message: "Telefone inválido." }, { status: 400 });
+      }
+      if (typeof b.phone === "string" && b.phone.trim().length > 80) {
+        return NextResponse.json({ message: "Telefone inválido." }, { status: 400 });
+      }
+      data.phone = nullableString(b.phone) ?? null;
+    }
+
+    if (b.avatarUrl !== undefined) {
+      if (b.avatarUrl !== null && typeof b.avatarUrl !== "string") {
+        return NextResponse.json({ message: "Avatar inválido." }, { status: 400 });
+      }
+      if (typeof b.avatarUrl === "string" && b.avatarUrl.trim().length > 2000) {
+        return NextResponse.json({ message: "Avatar inválido." }, { status: 400 });
+      }
+      data.avatarUrl = nullableString(b.avatarUrl) ?? null;
     }
 
     if (b.role !== undefined) {

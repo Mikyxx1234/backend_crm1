@@ -41,6 +41,7 @@ export async function GET(request: Request) {
         role: true,
         type: true,
         avatarUrl: true,
+        phone: true,
         // Roles RBAC atribuídas (modelo novo). Usado pela tela de Equipe
         // para exibir a "função" como role customizada (mantendo só ADMIN
         // como preset). NÃO substitui `role` legado — coexistem.
