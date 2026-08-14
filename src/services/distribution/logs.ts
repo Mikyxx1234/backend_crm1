@@ -24,6 +24,7 @@ export interface DistributionLogView {
   contactName: string | null;
   contactPhone: string | null;
   conversationId: string | null;
+  conversationNumber: number | null;
   departmentId: string | null;
   departmentName: string | null;
 }
@@ -278,8 +279,11 @@ export async function getDistributionLogs(opts: {
   const contactIds = [
     ...new Set(items.map((r) => r.contactId).filter(Boolean) as string[]),
   ];
+  const conversationIds = [
+    ...new Set(items.map((r) => r.conversationId).filter(Boolean) as string[]),
+  ];
 
-  const [users, contacts, deptResolved] = await Promise.all([
+  const [users, contacts, deptResolved, conversations] = await Promise.all([
     userIds.length
       ? prisma.user.findMany({
           where: { id: { in: userIds }, organizationId: orgId },
@@ -293,10 +297,17 @@ export async function getDistributionLogs(opts: {
         })
       : Promise.resolve([]),
     resolveDepartmentsForLogs(items, orgId),
+    conversationIds.length
+      ? prisma.conversation.findMany({
+          where: { id: { in: conversationIds } },
+          select: { id: true, number: true },
+        })
+      : Promise.resolve([]),
   ]);
 
   const userName = new Map(users.map((u) => [u.id, u.name]));
   const contactById = new Map(contacts.map((c) => [c.id, c]));
+  const convNumberById = new Map(conversations.map((c) => [c.id, c.number]));
 
   const last = items[items.length - 1];
   const nextCursor =
@@ -320,6 +331,9 @@ export async function getDistributionLogs(opts: {
         contactName: contact?.name ?? null,
         contactPhone: contact?.phone ?? null,
         conversationId: r.conversationId,
+        conversationNumber: r.conversationId
+          ? convNumberById.get(r.conversationId) ?? null
+          : null,
         departmentId: dept?.departmentId ?? null,
         departmentName: dept?.departmentName ?? null,
       };

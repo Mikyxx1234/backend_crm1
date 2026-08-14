@@ -35,6 +35,8 @@ import { getDistributionResponsibles } from "./responsibles";
 
 export interface PendingDistributionView {
   id: string;
+  /** Ticket sequencial da org — usado em `/inbox?c=<number>`. */
+  number: number | null;
   dealId: string | null;
   contactId: string | null;
   /** Nome amigável: título do negócio, nome do contato, ou fallback. */
@@ -107,6 +109,7 @@ export async function getPendingDistributions(): Promise<
     orderBy: { createdAt: "asc" },
     select: {
       id: true,
+      number: true,
       channel: true,
       contactId: true,
       departmentId: true,
@@ -165,6 +168,7 @@ export async function getPendingDistributions(): Promise<
       null;
     return {
       id: c.id,
+      number: c.number ?? null,
       dealId: meta?.dealId ?? null,
       contactId: c.contactId,
       label: c.contact?.phone || c.contact?.name || "Atendimento",

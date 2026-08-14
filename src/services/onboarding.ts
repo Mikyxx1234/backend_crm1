@@ -223,10 +223,11 @@ export async function applyPipelineTemplate(
         isDefault: true,
         stages: {
           create: [
-            ...template.stages.map((s) => ({
+            ...template.stages.map((s, i) => ({
               organizationId,
               name: s.name,
               slug: slugify(s.name) || `stage-${s.position}`,
+              number: i + 1,
               position: s.position,
               color: s.color,
               winProbability: s.winProbability,
@@ -237,6 +238,7 @@ export async function applyPipelineTemplate(
             ...TERMINAL_STAGES.map((s, i) => ({
               ...s,
               organizationId,
+              number: template.stages.length + i + 1,
               position: template.stages.length + i,
             })),
           ],

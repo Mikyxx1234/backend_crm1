@@ -42,6 +42,7 @@ async function getBoardStagesOnly(pipelineId: string) {
       id: true,
       name: true,
       slug: true,
+      number: true,
       color: true,
       position: true,
       winProbability: true,

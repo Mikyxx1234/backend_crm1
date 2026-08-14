@@ -168,6 +168,7 @@ export async function notifyInboundMessage(params: {
       select: {
         assignedToId: true,
         organizationId: true,
+        number: true,
         contact: { select: { assignedToId: true } },
       },
     });
@@ -208,7 +209,10 @@ export async function notifyInboundMessage(params: {
     await sendPushToUsers(Array.from(targets), {
       title: `${params.contactName}${channelLabel}`,
       body: params.preview.slice(0, 140) || "Nova mensagem",
-      url: `/inbox?conversationId=${params.conversationId}`,
+      url:
+        conversation?.number != null
+          ? `/inbox?c=${conversation.number}`
+          : `/inbox?c=${params.conversationId}`,
       tag: `conv:${params.conversationId}`,
       renotify: false,
       data: {

@@ -37,7 +37,7 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
 import { fireTrigger } from "@/services/automation-triggers";
 import { nextDealNumber } from "@/services/deals";
 import { getNextOwner } from "@/services/lead-distribution";
-import { allocateStageSlug } from "@/services/pipelines";
+import { allocateStageSlug, isStageNumberUniqueViolation, nextStageNumber } from "@/services/pipelines";
 
 type EnsureOpenDealSource = "auto_whatsapp" | "auto_whatsapp_qr" | string;
 
@@ -184,19 +184,35 @@ export async function ensureOpenDealForContact(
     const newPosition = (minPos._min.position ?? 0) - 1;
 
     const stageName = "Lead de Entrada";
-    incomingStage = await prisma.stage.create({
-      data: {
-        organizationId: getOrgIdOrThrow(),
-        name: stageName,
-        slug: await allocateStageSlug(pipeline.id, stageName),
-        pipelineId: pipeline.id,
-        position: newPosition,
-        color: "#f59e0b",
-        winProbability: 0,
-        rottingDays: 7,
-        isIncoming: true,
-      },
-    });
+    let lastStageErr: unknown;
+    for (let attempt = 0; attempt < 5; attempt++) {
+      try {
+        incomingStage = await prisma.stage.create({
+          data: {
+            organizationId: getOrgIdOrThrow(),
+            name: stageName,
+            slug: await allocateStageSlug(pipeline.id, stageName),
+            number: await nextStageNumber(pipeline.id),
+            pipelineId: pipeline.id,
+            position: newPosition,
+            color: "#f59e0b",
+            winProbability: 0,
+            rottingDays: 7,
+            isIncoming: true,
+          },
+        });
+        lastStageErr = undefined;
+        break;
+      } catch (err) {
+        lastStageErr = err;
+        if (!isStageNumberUniqueViolation(err)) throw err;
+      }
+    }
+    if (!incomingStage) {
+      throw lastStageErr instanceof Error
+        ? lastStageErr
+        : new Error("Falha ao alocar number de estágio.");
+    }
   }
 
   const maxPos = await prisma.deal.aggregate({

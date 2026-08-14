@@ -4,7 +4,10 @@ import { Prisma, type ConversationStatus } from "@prisma/client";
 import type { AppUserRole } from "@/lib/auth-types";
 import { cache } from "@/lib/cache";
 import { inboxTabCountsKey, invalidateInboxTabCounts } from "@/lib/cache/keys";
-import { userHasConversationAccess } from "@/lib/conversation-access";
+import {
+  resolveConversationId,
+  userHasConversationAccess,
+} from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
 import { prisma } from "@/lib/prisma";
@@ -1080,27 +1083,43 @@ export async function linkContactToConversation(conversationId: string, contactI
   });
 }
 
+/** Dígitos → `number` da org; senão CUID/`id`. Null se o número for inválido. */
+function conversationLookupWhere(idOrNumber: string, orgId: string) {
+  if (/^\d+$/.test(idOrNumber)) {
+    const n = Number(idOrNumber);
+    if (!Number.isInteger(n) || n < 1 || n > PG_INT4_MAX) return null;
+    return { organizationId_number: { organizationId: orgId, number: n } };
+  }
+  return { id: idOrNumber };
+}
+
 /**
  * Detalhe de uma conversa no shape da lista (deep-link / GET :id).
  * Usa `listSelect` (não `include` de todos os escalares) — mesmo padrão do
  * assign: evita 500 por drift de coluna e devolve department/tags/preview
  * iguais ao card da inbox.
+ *
+ * Deep-link `?c=`: dígitos resolvem pelo `number` da org; CUID legado por `id`.
  */
-export async function getConversationById(id: string) {
+export async function getConversationById(idOrNumber: string) {
+  const orgId = getOrgIdOrThrow();
+  const where = conversationLookupWhere(idOrNumber, orgId);
+  if (!where) return null;
   const row = await prisma.conversation.findUnique({
-    where: { id },
+    where,
     select: {
       organizationId: true,
       ...listSelect,
     },
   });
   if (!row) return null;
+  const convId = row.id;
   if (row.contact) {
     await enrichContactsWithUserAvatarFallback([row.contact]);
   }
   const [previewMap, lastInboundMap] = await Promise.all([
-    lastMessagePreviewsBatch([id]),
-    lastInboundBatch([id]),
+    lastMessagePreviewsBatch([convId]),
+    lastInboundBatch([convId]),
   ]);
   const tagMap = new Map<string, ConversationTag>();
   for (const t of row.contact?.tags ?? []) {
@@ -1108,9 +1127,9 @@ export async function getConversationById(id: string) {
   }
   return {
     ...row,
-    lastInboundAt: lastInboundMap.get(id) ?? null,
-    lastMessagePreview: previewMap.get(id)?.preview ?? null,
-    lastMessageAt: previewMap.get(id)?.createdAt ?? null,
+    lastInboundAt: lastInboundMap.get(convId) ?? null,
+    lastMessagePreview: previewMap.get(convId)?.preview ?? null,
+    lastMessageAt: previewMap.get(convId)?.createdAt ?? null,
     tags: Array.from(tagMap.values()),
   };
 }
@@ -1315,7 +1334,9 @@ export async function reopenResolvedAsNewTicket(sourceId: string): Promise<{
   }
 }
 
-export async function getConversationLite(id: string) {
+export async function getConversationLite(idOrNumber: string) {
+  const id = await resolveConversationId(idOrNumber);
+  if (!id) return null;
   return prisma.conversation.findUnique({
     where: { id },
     select: {

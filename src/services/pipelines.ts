@@ -4,7 +4,10 @@ import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import { slugify } from "@/lib/utils";
 
-const DEFAULT_STAGES: Omit<Prisma.StageCreateWithoutPipelineInput, "pipeline" | "organization">[] = [
+const DEFAULT_STAGES: Omit<
+  Prisma.StageCreateWithoutPipelineInput,
+  "pipeline" | "organization" | "number"
+>[] = [
   { name: "Novo", position: 0, color: "#6366f1", winProbability: 10, rottingDays: 30, slug: "novo" },
   { name: "Qualificado", position: 1, color: "#8b5cf6", winProbability: 25, rottingDays: 30, slug: "qualificado" },
   { name: "Proposta", position: 2, color: "#ec4899", winProbability: 50, rottingDays: 14, slug: "proposta" },
@@ -19,18 +22,22 @@ const DEFAULT_STAGES: Omit<Prisma.StageCreateWithoutPipelineInput, "pipeline" | 
  * delete e reorder; estágios novos sempre entram ANTES deles.
  * `rottingDays` alto evita marcar deals fechados como "apodrecendo".
  */
-export const TERMINAL_STAGES: Omit<Prisma.StageCreateWithoutPipelineInput, "pipeline" | "organization" | "position">[] = [
+export const TERMINAL_STAGES: Omit<
+  Prisma.StageCreateWithoutPipelineInput,
+  "pipeline" | "organization" | "position" | "number"
+>[] = [
   { name: "Ganho", color: "#16a34a", winProbability: 100, rottingDays: 3650, isWon: true, slug: "ganho" },
   { name: "Perdido", color: "#ef4444", winProbability: 0, rottingDays: 3650, isLost: true, slug: "perdido" },
 ];
 
-/** Stages default + terminais com positions sequenciais, prontos pro create. */
+/** Stages default + terminais com position e number sequenciais, prontos pro create. */
 function buildDefaultStageCreates(organizationId: string) {
-  const base = DEFAULT_STAGES.map((s) => ({ ...s, organizationId }));
+  const base = DEFAULT_STAGES.map((s, i) => ({ ...s, organizationId, number: i + 1 }));
   const terminals = TERMINAL_STAGES.map((s, i) => ({
     ...s,
     position: DEFAULT_STAGES.length + i,
     organizationId,
+    number: DEFAULT_STAGES.length + i + 1,
   }));
   return [...base, ...terminals];
 }
@@ -125,6 +132,55 @@ async function withPipelineNumberRetry<T>(
     : new Error("Falha ao alocar number de pipeline.");
 }
 
+const STAGE_NUMBER_MAX_RETRIES = 5;
+
+/**
+ * Próximo `Stage.number` do funil. Schema: `@@unique([pipelineId, number])`
+ * sem default. Em corrida o caller faz retry em P2002.
+ */
+export async function nextStageNumber(
+  pipelineId: string,
+  db?: Prisma.TransactionClient,
+): Promise<number> {
+  const client = db ?? prisma;
+  const r = await client.stage.aggregate({
+    where: { pipelineId },
+    _max: { number: true },
+  });
+  return (r._max.number ?? 0) + 1;
+}
+
+export function isStageNumberUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as {
+    code?: string;
+    message?: string;
+    meta?: { target?: string[] | string };
+  };
+  if (e.code !== "P2002") return false;
+  const target = e.meta?.target;
+  const hasNumber = (s: string) => s === "number" || s.includes("number");
+  if (Array.isArray(target)) return target.some((t) => hasNumber(String(t)));
+  if (typeof target === "string") return hasNumber(target);
+  const msg = typeof e.message === "string" ? e.message : "";
+  return /pipelineId/i.test(msg) && /[`"']number[`"']/i.test(msg);
+}
+
+async function withStageCreateRetry<T>(fn: () => Promise<T>): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < STAGE_NUMBER_MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (!isStageNumberUniqueViolation(err)) throw err;
+    }
+  }
+  throw lastErr instanceof Error
+    ? lastErr
+    : new Error("Falha ao alocar number de estágio.");
+}
+
 const CUID_RE = /^c[a-z0-9]{20,}$/i;
 
 /**
@@ -186,6 +242,7 @@ const stageWithCountSelect = {
   id: true,
   name: true,
   slug: true,
+  number: true,
   position: true,
   color: true,
   winProbability: true,
@@ -432,53 +489,57 @@ export async function createStage(pipelineId: string, data: CreateStageInput) {
   const name = data.name.trim();
   if (!name) throw new Error("INVALID_NAME");
 
-  return prisma.$transaction(async (tx) => {
-    const max = await tx.stage.aggregate({
-      where: { pipelineId },
-      _max: { position: true },
-    });
-    const maxPos = max._max.position ?? -1;
-    // Estágios novos NUNCA entram depois dos terminais fixos (Ganho/
-    // Perdido) — o default é "antes do primeiro terminal" e posições
-    // explícitas são clampadas pra esse limite.
-    const firstTerminal = await tx.stage.findFirst({
-      where: { pipelineId, OR: [{ isWon: true }, { isLost: true }] },
-      orderBy: { position: "asc" },
-      select: { position: true },
-    });
-    const next = firstTerminal ? firstTerminal.position : maxPos + 1;
-    const position =
-      data.position !== undefined ? Math.min(data.position, next) : next;
-
-    if (position <= maxPos) {
-      // Shift em 2 passos (offset alto) pra não violar a unique
-      // (pipelineId, position) durante o updateMany — mesmo truque
-      // do reorderStages.
-      await tx.stage.updateMany({
-        where: { pipelineId, position: { gte: position } },
-        data: { position: { increment: 10_000 } },
+  return withStageCreateRetry(() =>
+    prisma.$transaction(async (tx) => {
+      const max = await tx.stage.aggregate({
+        where: { pipelineId },
+        _max: { position: true },
       });
-      await tx.stage.updateMany({
-        where: { pipelineId, position: { gte: 10_000 } },
-        data: { position: { decrement: 9_999 } },
+      const maxPos = max._max.position ?? -1;
+      // Estágios novos NUNCA entram depois dos terminais fixos (Ganho/
+      // Perdido) — o default é "antes do primeiro terminal" e posições
+      // explícitas são clampadas pra esse limite.
+      const firstTerminal = await tx.stage.findFirst({
+        where: { pipelineId, OR: [{ isWon: true }, { isLost: true }] },
+        orderBy: { position: "asc" },
+        select: { position: true },
       });
-    }
+      const next = firstTerminal ? firstTerminal.position : maxPos + 1;
+      const position =
+        data.position !== undefined ? Math.min(data.position, next) : next;
 
-    const slug = await allocateStageSlug(pipelineId, name, undefined, tx);
+      if (position <= maxPos) {
+        // Shift em 2 passos (offset alto) pra não violar a unique
+        // (pipelineId, position) durante o updateMany — mesmo truque
+        // do reorderStages.
+        await tx.stage.updateMany({
+          where: { pipelineId, position: { gte: position } },
+          data: { position: { increment: 10_000 } },
+        });
+        await tx.stage.updateMany({
+          where: { pipelineId, position: { gte: 10_000 } },
+          data: { position: { decrement: 9_999 } },
+        });
+      }
 
-    return tx.stage.create({
-      data: {
-        name,
-        slug,
-        position,
-        pipelineId,
-        organizationId: getOrgIdOrThrow(),
-        color: data.color ?? "#6366f1",
-        winProbability: data.winProbability ?? 0,
-        rottingDays: data.rottingDays ?? 30,
-      },
-    });
-  });
+      const slug = await allocateStageSlug(pipelineId, name, undefined, tx);
+      const number = await nextStageNumber(pipelineId, tx);
+
+      return tx.stage.create({
+        data: {
+          name,
+          slug,
+          number,
+          position,
+          pipelineId,
+          organizationId: getOrgIdOrThrow(),
+          color: data.color ?? "#6366f1",
+          winProbability: data.winProbability ?? 0,
+          rottingDays: data.rottingDays ?? 30,
+        },
+      });
+    }),
+  );
 }
 
 export type UpdateStageInput = {

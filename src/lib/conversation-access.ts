@@ -10,6 +10,26 @@ import { getVisibilityFilter, withInboxQueueVisibility } from "@/lib/visibility"
 
 type SessionUser = { id: string; role: AppUserRole; organizationId?: string };
 
+const PG_INT4_MAX = 2_147_483_647;
+
+/**
+ * Dígitos → CUID da conversa na org; senão devolve o próprio id.
+ * Bookmarks `?c=<number>` e o 1º frame do inbox (antes de normalizar).
+ */
+export async function resolveConversationId(
+  idOrNumber: string,
+): Promise<string | null> {
+  if (!/^\d+$/.test(idOrNumber)) return idOrNumber;
+  const n = Number(idOrNumber);
+  if (!Number.isInteger(n) || n < 1 || n > PG_INT4_MAX) return null;
+  const orgId = getOrgIdOrThrow();
+  const row = await prisma.conversation.findUnique({
+    where: { organizationId_number: { organizationId: orgId, number: n } },
+    select: { id: true },
+  });
+  return row?.id ?? null;
+}
+
 /** Verifica se o usuário pode listar/ver esta conversa (mesma regra da API GET /conversations). */
 export async function userHasConversationAccess(
   user: SessionUser,
@@ -65,7 +85,14 @@ export async function requireConversationAccess(
     return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
   }
   const user = { id: session.user.id, role };
-  const ok = await userHasConversationAccess(user, conversationId);
+  const resolvedId = await resolveConversationId(conversationId);
+  if (!resolvedId) {
+    return NextResponse.json(
+      { message: "Conversa não encontrada ou sem permissão." },
+      { status: 404 }
+    );
+  }
+  const ok = await userHasConversationAccess(user, resolvedId);
   if (!ok) {
     return NextResponse.json(
       { message: "Conversa não encontrada ou sem permissão." },
