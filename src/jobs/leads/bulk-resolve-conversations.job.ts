@@ -2,6 +2,7 @@ import type { Job } from "bullmq";
 
 import { getLogger } from "@/lib/logger";
 import { prisma } from "@/lib/prisma";
+import { invalidateInboxTabCounts } from "@/lib/cache/keys";
 import { logEvent } from "@/services/activity-log";
 import type { BulkResolveConversationsPayload } from "@/lib/queue";
 
@@ -110,6 +111,7 @@ export async function processBulkResolveConversations(
           data: {
             status: "RESOLVED",
             closedAt: new Date(),
+            hasError: false,
             ...(keepAgent ? {} : { assignedToId: null }),
             ...(keepDepartment ? {} : { departmentId: null }),
           },
@@ -168,8 +170,10 @@ export async function processBulkResolveConversations(
       },
       chunkErrors.length > 0 ? chunkErrors : undefined,
     );
+    await invalidateInboxTabCounts(organizationId);
   }
 
   await markOperationFinished(operationId, organizationId);
+  await invalidateInboxTabCounts(organizationId);
   ctx.info("bulk-resolve-conversations finalizado");
 }

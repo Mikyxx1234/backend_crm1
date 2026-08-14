@@ -3,7 +3,7 @@ import { Prisma, type ConversationStatus } from "@prisma/client";
 
 import type { AppUserRole } from "@/lib/auth-types";
 import { cache } from "@/lib/cache";
-import { inboxTabCountsKey } from "@/lib/cache/keys";
+import { inboxTabCountsKey, invalidateInboxTabCounts } from "@/lib/cache/keys";
 import { userHasConversationAccess } from "@/lib/conversation-access";
 import { canRoleSelfAssign } from "@/lib/self-assign";
 import { prettifyChatMessageBody } from "@/lib/whatsapp-outbound-template-label";
@@ -85,6 +85,12 @@ export type GetConversationsParams = {
   sessionExpiresWithinHours?: number;
   /** IDs resolvidos pelo agregador contato+canal antes de montar o where. */
   sessionExpiringConversationIds?: string[];
+  /**
+   * Filtro de status da UI (Aberta/Fechada). Tem de ir no mesmo `where`
+   * da lista, dos badges e do bulk — se ficar só no cliente, Erro mostra
+   * lista vazia com badge 233.
+   */
+  windowState?: "open" | "closed";
 };
 
 const listSelect = {
@@ -379,11 +385,22 @@ function tabToWhere(
     case "finalizados":
       return { status: "RESOLVED" };
     case "erro":
-      // Só tickets ABERTOS com falha de envio/webhook. RESOLVED com
-      // hasError sticky (ex.: timeout do sweeper depois entregue) poluía
-      // a fila — 1.2k+ Encerrada em Erro na Cruzeiro (ago/26).
-      return { status: "OPEN", hasError: true };
+      return erroTabWhere();
   }
+}
+
+/**
+ * Predicado único da aba Erro — lista, badges e bulk-resolve.
+ * Só OPEN + hasError. Encerrar (individual ou massa) zera a flag;
+ * RESOLVED com hasError sticky não entra.
+ *
+ * Códigos Meta de elegibilidade (131047, 131049, 131026, 130472, 133010)
+ * deixam de marcar hasError em envios novos, mas NÃO são excluídos
+ * daqui: tickets já flagados continuam visíveis até encerrar. Excluir
+ * só do badge (e não da lista) recria o 233 zumbi.
+ */
+export function erroTabWhere(): Prisma.ConversationWhereInput {
+  return { status: "OPEN", hasError: true };
 }
 
 /**
@@ -616,6 +633,11 @@ export function buildInboxFilterConditions(
     params.withoutSource,
   );
   if (sourceCond) conditions.push(sourceCond);
+  if (params.windowState === "open") {
+    conditions.push({ status: { not: "RESOLVED" } });
+  } else if (params.windowState === "closed") {
+    conditions.push({ status: "RESOLVED" });
+  }
   return conditions;
 }
 
@@ -799,17 +821,19 @@ export async function getConversations(
   }
 
   const pageIds = repIds.slice(skip, skip + perPage);
-  // Se esgotamos o scan, total exato = reps unicos. Caso contrario ha mais
-  // grupos alem da pagina — reporta pelo menos skip+perPage+1 (e soma o
-  // que ja vimos) pra o infinite scroll continuar pedindo.
-  const total = exhausted
-    ? repIds.length
-    : Math.max(repIds.length, skip + perPage + 1);
-
-  const hydrated = await prisma.conversation.findMany({
-    where: { id: { in: pageIds } },
-    select: listSelect,
-  });
+  // Total EXATO — o mesmo COUNT das badges (`countConversationsLikeList`).
+  // O sentinela `skip+perPage+1` fazia a 1ª página (25) reportar total=26
+  // enquanto o badge Erro mostrava 233: "25 de 25" + "selecionar todas as 26".
+  const [total, hydrated] = await Promise.all([
+    countConversationsLikeList(
+      Object.keys(where).length > 0 ? [where] : [],
+      collapse,
+    ),
+    prisma.conversation.findMany({
+      where: { id: { in: pageIds } },
+      select: listSelect,
+    }),
+  ]);
   // Reordena para preservar a ordem paginada de `pageIds` (o `in` nao
   // garante ordem). Evita cards "pulando" de posicao entre paginas.
   const byIdRow = new Map(hydrated.map((r) => [r.id, r]));
@@ -944,6 +968,7 @@ export async function getTabCounts(
     scopeFp = createHash("sha1")
       .update(
         JSON.stringify({
+          k: 2,
           v: visibilityWhere ?? null,
           m: todosMemberCategoryTabs ?? null,
           c: allowedChannelIds ?? null,
@@ -1359,6 +1384,13 @@ export async function updateConversationStatusInDb(
     },
     include: { contact: { select: { id: true, number: true, name: true, email: true, phone: true, avatarUrl: true } } },
   });
+
+  // Badges Redis (TTL 45s) sem invalidação sobreviviam ao F5 — Erro 233
+  // com lista já vazia. Encerrou/reabriu → zera o cache da org.
+  if (status === "RESOLVED" || status === "OPEN") {
+    const orgId = getOrgIdOrNull();
+    if (orgId) void invalidateInboxTabCounts(orgId);
+  }
 
   // Encerrou atendimento → liberou capacidade na fila do responsável.
   // Agenda drenagem da Distribuição (best-effort, sem ciclo de import).

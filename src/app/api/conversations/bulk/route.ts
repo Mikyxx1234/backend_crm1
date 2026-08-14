@@ -83,6 +83,7 @@ export async function POST(request: Request) {
           sources?: string[];
           withoutSource?: boolean;
           sessionExpiresWithinHours?: number;
+          windowState?: "open" | "closed";
         };
       };
       const { ids, action, allInFilter } = body;
@@ -146,6 +147,7 @@ export async function POST(request: Request) {
                 sources: f.sources,
                 withoutSource: f.withoutSource,
                 sessionExpiresWithinHours: f.sessionExpiresWithinHours,
+                windowState: f.windowState,
               },
               { allowCloseWithoutTabulation },
             );
