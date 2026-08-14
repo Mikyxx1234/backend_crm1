@@ -586,8 +586,7 @@ export async function executeAcademicDepartmentHandoff(args: {
   const eventText = selectedIsHuman
     ? `Conversa distribuída para ${deptLabel}` +
       (selectedUser?.name ? ` → ${selectedUser.name}` : "")
-    : `Conversa enfileirada para ${deptLabel} — aguardando consultor elegível` +
-      (distribution?.reason ? ` (${distribution.reason})` : "");
+    : `Enfileirada em ${deptLabel} — sem consultor elegível`;
   await createConversationEvent({
     conversationId: args.conversationId,
     action: "distribuicao",
@@ -596,7 +595,8 @@ export async function executeAcademicDepartmentHandoff(args: {
     authorType: "bot",
     dedupeStartsWith: [
       "Conversa distribuída para",
-      "Conversa enfileirada para",
+      "Conversa enfileirada",
+      "Enfileirada em",
     ],
     dedupeWindowMs: 2 * 60 * 1000,
   }).catch(() => null);

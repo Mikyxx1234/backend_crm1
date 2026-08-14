@@ -43,6 +43,16 @@ export function isEventMessageType(
   );
 }
 
+/** Remove códigos SCREAMING_SNAKE do texto do chat. Motivo fica no meta/logs. */
+function stripReasonCodesFromChatText(text: string): string {
+  return text
+    .replace(/\s*\([A-Z][A-Z0-9]*(_[A-Z0-9]+)+\)/g, "")
+    .replace(/\s+[A-Z][A-Z0-9]*(_[A-Z0-9]+)+(?=\s|$)/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/\s+[—–-]\s*$/g, "")
+    .trim();
+}
+
 export async function createConversationEvent(args: {
   conversationId: string;
   action: ConversationEventAction;
@@ -53,7 +63,7 @@ export async function createConversationEvent(args: {
   dedupeStartsWith?: string[];
   dedupeWindowMs?: number;
 }): Promise<{ id: string } | null> {
-  const text = args.text.trim();
+  const text = stripReasonCodesFromChatText(args.text);
   if (!text) return null;
 
   const authorType = args.authorType ?? "system";

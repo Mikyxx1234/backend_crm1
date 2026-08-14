@@ -72,6 +72,15 @@ function mapChatEvent(
         actor: /ia/i.test(actor) ? "Agente IA" : "Sistema",
       };
     }
+    case "LEAD_DISTRIBUTION_FAILED": {
+      return {
+        action: "distribuicao",
+        text: dept
+          ? `Enfileirada em ${dept} — sem consultor elegível`
+          : "Aguardando consultor elegível",
+        actor: /ia/i.test(actor) ? "Agente IA" : "Sistema",
+      };
+    }
     case "ASSIGNEE_CHANGED": {
       if (from && to) {
         const dest = dept ? `${to} (${dept})` : to;
@@ -160,7 +169,12 @@ export function mirrorConversationChatEvent(input: MirrorInput): void {
 
   const dedupeStartsWith =
     mapped.action === "distribuicao"
-      ? ["Conversa distribuída", "Conversa enfileirada"]
+      ? [
+          "Conversa distribuída",
+          "Conversa enfileirada",
+          "Enfileirada em",
+          "Aguardando consultor",
+        ]
       : mapped.action === "ia"
         ? ["Agente IA sugeriu", "Agente IA transferiu", mapped.text.slice(0, 40)]
         : [mapped.text.slice(0, 40)];
