@@ -76,11 +76,17 @@ export async function PATCH(request: Request, context: RouteContext) {
 
     if (parsed.data.enabled) {
       const result = await enableTelephony(userId, target.organizationId);
-      return NextResponse.json(result, { status: result.success ? 200 : 500 });
+      return NextResponse.json(
+        { ...result, message: result.error },
+        { status: result.success ? 200 : 500 },
+      );
     }
 
-    await disableTelephony(userId, target.organizationId);
-    return NextResponse.json({ success: true, step: "DISABLED" });
+    const result = await disableTelephony(userId, target.organizationId);
+    return NextResponse.json(
+      { ...result, message: result.error },
+      { status: result.success ? 200 : 500 },
+    );
   });
 }
 

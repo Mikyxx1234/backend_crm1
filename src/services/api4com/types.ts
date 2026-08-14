@@ -5,7 +5,9 @@
  *   POST /users/accessTokens
  *   POST /users
  *   GET  /users
+ *   DELETE /users/:id   (não documentado — best-effort)
  *   POST /extensions/nextAvailable
+ *   DELETE /extensions/:id
  *   PATCH /integrations
  *   POST /dialer
  *   DELETE /dialer/:id  (hangup)
@@ -35,12 +37,23 @@ export const CreateUserRequestSchema = z.object({
 });
 export type CreateUserRequest = z.infer<typeof CreateUserRequestSchema>;
 
-export const Api4ComUserSchema = z.object({
-  id: z.string(),
-  name: z.string().optional(),
-  email: z.string().email().optional(),
-  role: Api4ComUserRoleSchema.optional(),
-});
+/** Docs oficiais devolvem `uuid`; algumas respostas usam `id`. */
+export const Api4ComUserSchema = z
+  .object({
+    id: z.string().optional(),
+    uuid: z.string().optional(),
+    name: z.string().optional(),
+    email: z.string().email().optional(),
+    role: Api4ComUserRoleSchema.optional(),
+  })
+  .transform((raw, ctx) => {
+    const id = raw.id ?? raw.uuid;
+    if (!id) {
+      ctx.addIssue({ code: "custom", message: "User id/uuid ausente" });
+      return z.NEVER;
+    }
+    return { id, name: raw.name, email: raw.email, role: raw.role };
+  });
 export type Api4ComUser = z.infer<typeof Api4ComUserSchema>;
 
 // ── Extensions ────────────────────────────────────────────────────────────

@@ -153,6 +153,49 @@ export class Api4ComClient {
     });
   }
 
+  /** DELETE /extensions/{id} — 404 = já inexistente (idempotente). */
+  async deleteExtension(extensionId: string): Promise<void> {
+    try {
+      await this.request({
+        method: "DELETE",
+        path: `/extensions/${encodeURIComponent(extensionId)}`,
+        schema: z.unknown(),
+      });
+    } catch (err) {
+      if (err instanceof Api4ComValidationError && err.status === 404) {
+        log.warn(`[api4com] ramal ${extensionId} já inexistente (404).`);
+        return;
+      }
+      throw err;
+    }
+  }
+
+  /**
+   * DELETE /users/{id} — endpoint não documentado.
+   * 404/405 = já inexistente ou não suportado (best-effort).
+   */
+  async deleteUser(userId: string): Promise<{ deleted: boolean }> {
+    try {
+      await this.request({
+        method: "DELETE",
+        path: `/users/${encodeURIComponent(userId)}`,
+        schema: z.unknown(),
+      });
+      return { deleted: true };
+    } catch (err) {
+      if (
+        err instanceof Api4ComValidationError &&
+        (err.status === 404 || err.status === 405)
+      ) {
+        log.warn(
+          `[api4com] DELETE /users/${userId} retornou ${err.status} — ignorando.`,
+        );
+        return { deleted: false };
+      }
+      throw err;
+    }
+  }
+
   /** PATCH /integrations — configura webhook + gateway. */
   async upsertIntegration(input: IntegrationPatch): Promise<void> {
     const parsed = IntegrationPatchSchema.parse(input);

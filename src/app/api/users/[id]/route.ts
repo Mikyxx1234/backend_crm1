@@ -6,6 +6,7 @@ import { UserRole } from "@prisma/client";
 import { requireAdmin, userOrgFilter } from "@/lib/auth-helpers";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
+import { disableTelephony } from "@/services/api4com/provisioning";
 
 const MIN_PASSWORD_LENGTH = 6;
 
@@ -243,7 +244,7 @@ export async function DELETE(_request: Request, context: RouteContext) {
 
     const target = await prisma.user.findFirst({
       where: { id, type: "HUMAN", ...userOrgFilter(r.session) },
-      select: { id: true, role: true },
+      select: { id: true, role: true, organizationId: true },
     });
     if (!target) {
       return NextResponse.json({ message: "Usuário não encontrado." }, { status: 404 });
@@ -259,6 +260,20 @@ export async function DELETE(_request: Request, context: RouteContext) {
         return NextResponse.json(
           { message: "Não é possível excluir o último administrador da organização." },
           { status: 400 },
+        );
+      }
+    }
+
+    if (target.organizationId) {
+      const deprov = await disableTelephony(target.id, target.organizationId);
+      if (!deprov.success) {
+        return NextResponse.json(
+          {
+            message:
+              deprov.error ??
+              "Falha ao remover ramal/usuário na API4Comm. Tente novamente antes de excluir o usuário.",
+          },
+          { status: 500 },
         );
       }
     }
