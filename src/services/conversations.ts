@@ -291,9 +291,9 @@ const ACTIVE_AUTOMATION_CTX: Prisma.EnumAutomationCtxStatusFilter = {
   in: ["RUNNING", "PAUSED"],
 };
 
-/** lastMessageDirection ainda não é inbound (null ou out). Inclui NULL no SQL. */
-const LAST_MSG_NOT_INBOUND: Prisma.ConversationWhereInput = {
-  OR: [{ lastMessageDirection: null }, { lastMessageDirection: { not: "in" } }],
+/** Cliente ainda não falou — template/campanha depois do inbound não conta. */
+const NEVER_REPLIED: Prisma.ConversationWhereInput = {
+  lastInboundAt: null,
 };
 
 function tabToWhere(
@@ -324,24 +324,15 @@ function tabToWhere(
                 // quando o aluno responder e lastInboundAt for setado).
                 assignedToId: null,
                 lastInboundAt: { not: null },
-                OR: [
-                  {
-                    contact: {
-                      automationContexts: {
-                        none: { status: ACTIVE_AUTOMATION_CTX },
-                      },
-                    },
-                  },
-                  { lastMessageDirection: "in" },
-                ],
               },
               { assignedTo: { is: { type: "HUMAN" } } },
-              // IA assignee + aluno falou por último: a IA em Lead de
-              // Entrada não responde (entry_lead_stage). Sem isto o card
-              // ficava preso em Automação e o consultor não via.
+              // IA assignee + aluno já falou: a IA em Lead de Entrada
+              // não responde (entry_lead_stage). lastInboundAt (não a
+              // última direção) — campanha/template depois do inbound
+              // não devolve o card pra Automação.
               {
                 assignedTo: { is: { type: "AI" } },
-                lastMessageDirection: "in",
+                lastInboundAt: { not: null },
               },
             ],
           },
@@ -373,18 +364,17 @@ function tabToWhere(
         hasError: false,
       };
     case "automacao":
-      // Robô ativo (RUNNING ou PAUSED aguardando cliente) sem dono humano
-      // e sem inbound pendente, OU assignee IA ainda no disparo (último
-      // out). Cliente que já respondeu (lastMessageDirection=in) vai para
-      // Entrada — o consultor precisa ver, inclusive com IA no card
-      // (Lead de Entrada bloqueia a IA). Quem já tem consultor humano
-      // vai para Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
+      // Robô ativo (RUNNING ou PAUSED) sem dono humano e sem nenhuma
+      // resposta do cliente, OU assignee IA ainda no disparo. Quem já
+      // falou (lastInboundAt) vai para Entrada — campanha/template
+      // posterior não devolve o card pra cá. Consultor humano vai para
+      // Entrada/Aguardando mesmo se o PIPE ainda não encerrou.
       return {
         status: "OPEN",
         OR: [
           {
             assignedToId: null,
-            AND: [LAST_MSG_NOT_INBOUND],
+            AND: [NEVER_REPLIED],
             contact: {
               automationContexts: {
                 some: { status: ACTIVE_AUTOMATION_CTX },
@@ -393,7 +383,7 @@ function tabToWhere(
           },
           {
             assignedTo: { is: { type: "AI" } },
-            AND: [LAST_MSG_NOT_INBOUND],
+            AND: [NEVER_REPLIED],
           },
         ],
       };
