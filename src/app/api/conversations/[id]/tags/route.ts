@@ -25,6 +25,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 import { notifyTagAdded } from "@/services/automation-triggers";
+import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -155,6 +156,20 @@ export async function POST(request: Request, ctx: Ctx) {
 
       const uid = (session.user as { id: string }).id;
       const result = await applyTagToTargets(uid, tagId, targets, action);
+      const tag = await prisma.tag.findUnique({
+        where: { id: tagId },
+        select: { name: true },
+      });
+      void logEvent({
+        type: action === "remove" ? "TAG_REMOVED" : "TAG_ADDED",
+        entityType: "CONVERSATION",
+        entityId: id,
+        conversationId: id,
+        contactId: targets.contactId,
+        dealId: targets.dealId,
+        newValue: tag?.name ?? tagId,
+        meta: { tagName: tag?.name ?? tagId, tagId },
+      });
 
       return NextResponse.json({ ok: true, action, ...result });
     } catch (e) {
@@ -183,6 +198,20 @@ export async function DELETE(request: Request, ctx: Ctx) {
 
       const uid = (session.user as { id: string }).id;
       const result = await applyTagToTargets(uid, tagId, targets, "remove");
+      const tag = await prisma.tag.findUnique({
+        where: { id: tagId },
+        select: { name: true },
+      });
+      void logEvent({
+        type: "TAG_REMOVED",
+        entityType: "CONVERSATION",
+        entityId: id,
+        conversationId: id,
+        contactId: targets.contactId,
+        dealId: targets.dealId,
+        newValue: tag?.name ?? tagId,
+        meta: { tagName: tag?.name ?? tagId, tagId },
+      });
 
       return NextResponse.json({ ok: true, action: "remove", ...result });
     } catch (e) {

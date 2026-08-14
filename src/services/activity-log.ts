@@ -27,6 +27,7 @@ import {
   getRequestContext,
   type ContextActor,
 } from "@/lib/request-context";
+import { mirrorConversationChatEvent } from "@/services/conversation-event-mirror";
 
 /**
  * M7/M8 — quando `IMPORT_SKIP_ACTIVITY_LOG` está setado (truthy), suprime a
@@ -178,6 +179,19 @@ export async function logEvent(input: LogEventInput): Promise<void> {
         newValue: input.newValue ?? null,
         meta: metaJson,
       }),
+    });
+    mirrorConversationChatEvent({
+      type: input.type,
+      entityType: input.entityType,
+      entityId: input.entityId,
+      conversationId: input.conversationId,
+      oldValue: input.oldValue,
+      newValue: input.newValue,
+      meta: input.meta,
+      actor: {
+        type: actor.actorType,
+        label: actor.actorLabel,
+      },
     });
   } catch (err) {
     // ATENCAO: logEvent jamais deve derrubar a request principal.

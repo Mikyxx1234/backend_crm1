@@ -41,6 +41,7 @@ import { prisma } from "@/lib/prisma";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
+import { createConversationEvent } from "@/services/conversation-events";
 import {
   hasAgentGreetedInCurrentAssignment,
   markAgentGreetedNow,
@@ -1542,6 +1543,15 @@ async function saveDraft(
     messageType: "ai_draft",
     content: text,
     timestamp: saved.createdAt,
+  });
+  void createConversationEvent({
+    conversationId,
+    action: "ia",
+    text: "Agente IA sugeriu resposta automática",
+    actor: "Agente IA",
+    authorType: "bot",
+    dedupeStartsWith: ["Agente IA sugeriu"],
+    dedupeWindowMs: 60_000,
   });
 }
 

@@ -343,18 +343,46 @@ async function emitDistributionEvent(
   const entityId =
     assignedDealId ?? input.contactId ?? input.conversationId ?? null;
   if (!entityId) return;
+  let conversationId = input.conversationId ?? null;
+  if (!conversationId && input.contactId) {
+    const openConv = await prisma.conversation.findFirst({
+      where: { contactId: input.contactId, status: { not: "RESOLVED" } },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true },
+    });
+    conversationId = openConv?.id ?? null;
+  }
+  let departmentName: string | null = null;
+  if (conversationId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { department: { select: { name: true } } },
+    });
+    departmentName = conv?.department?.name ?? null;
+  } else if (input.departmentId) {
+    const dept = await prisma.department.findUnique({
+      where: { id: input.departmentId },
+      select: { name: true },
+    });
+    departmentName = dept?.name ?? null;
+  }
   try {
     await logEvent({
       type: success ? "LEAD_DISTRIBUTED" : "LEAD_DISTRIBUTION_FAILED",
-      entityType: assignedDealId ? "DEAL" : "CONTACT",
-      entityId,
+      entityType: assignedDealId ? "DEAL" : conversationId ? "CONVERSATION" : "CONTACT",
+      entityId: assignedDealId ?? conversationId ?? entityId,
       entityLabel: selectedUserName ?? null,
       dealId: assignedDealId,
       contactId: input.contactId ?? null,
-      conversationId: input.conversationId ?? null,
+      conversationId,
       field: "owner",
       newValue: selectedUserName ?? null,
-      meta: { reason, triggerSource: input.triggerSource, selectedUserId },
+      meta: {
+        reason,
+        triggerSource: input.triggerSource,
+        selectedUserId,
+        ...(departmentName ? { departmentName } : {}),
+      },
       actor: {
         type:
           input.triggerSource === "AUTOMATION" ||

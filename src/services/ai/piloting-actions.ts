@@ -29,7 +29,9 @@ import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import { createActivity } from "@/services/activities";
+import { logEvent } from "@/services/activity-log";
 import { createDealEvent } from "@/services/deals";
+import { createConversationEvent } from "@/services/conversation-events";
 
 /**
  * Busca o wamid (externalId) da mensagem INBOUND mais recente da
@@ -391,6 +393,15 @@ async function saveDraft(
     content: text,
     timestamp: saved.createdAt,
   });
+  void createConversationEvent({
+    conversationId,
+    action: "ia",
+    text: "Agente IA sugeriu resposta automática",
+    actor: "Agente IA",
+    authorType: "bot",
+    dedupeStartsWith: ["Agente IA sugeriu"],
+    dedupeWindowMs: 60_000,
+  });
   return { status: "draft", messageId: saved.id };
 }
 
@@ -705,6 +716,17 @@ export async function executeAgentHandoff(
     contactId: args.contactId,
     assignedToId: newAssignee,
     reason: args.reason,
+  });
+
+  void logEvent({
+    type: "AI_AGENT_HANDOFF",
+    entityType: "CONVERSATION",
+    entityId: args.conversationId,
+    conversationId: args.conversationId,
+    contactId: args.contactId ?? null,
+    dealId: args.dealId ?? null,
+    meta: { mode: args.mode, assignedToId: newAssignee, reason: args.reason },
+    actor: { type: "AUTOMATION", label: "Agente IA" },
   });
 
   return { assignedToId: newAssignee };
