@@ -65,6 +65,12 @@ import {
   userWantsAiConversationClose,
 } from "@/services/ai/academic-closure";
 import {
+  buildSoftCloseAfterNudgeReply,
+  contactHasEntryLeadDeal,
+  isIdleNudgeContent,
+  userWantsSoftAiClose,
+} from "@/services/ai/idle-followup";
+import {
   parseAgentConfidence,
   shouldHandoffOnLowConfidence,
 } from "@/services/ai/confidence";
@@ -245,6 +251,20 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     } catch (e) {
       console.error("[ai] phone allowlist in maybeReply — blocking", e);
+      return;
+    }
+
+    try {
+      if (await contactHasEntryLeadDeal(args.contactId)) {
+        logAi("blocked", {
+          conversationId: args.conversationId,
+          contactId: args.contactId,
+          reason: "entry_lead_stage",
+        });
+        return;
+      }
+    } catch (e) {
+      console.error("[ai] entry-stage check in maybeReply — blocking", e);
       return;
     }
 
@@ -791,7 +811,22 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
     }
 
     // ── 1c. Encerramento pedido pelo aluno (somente atendimento IA) ──
-    if (userWantsAiConversationClose(args.userMessage)) {
+    const lastAiOut = await prisma.message.findFirst({
+      where: {
+        conversationId: args.conversationId,
+        direction: "out",
+        authorType: "bot",
+        isPrivate: false,
+        messageType: { not: "note" },
+      },
+      orderBy: { createdAt: "desc" },
+      select: { content: true },
+    });
+    const afterIdleNudge = isIdleNudgeContent(lastAiOut?.content);
+    const wantsClose =
+      userWantsAiConversationClose(args.userMessage) ||
+      (afterIdleNudge && userWantsSoftAiClose(args.userMessage));
+    if (wantsClose) {
       const closeGate = await prisma.conversation.findUnique({
         where: { id: args.conversationId },
         select: {
@@ -805,12 +840,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         closeGate?.hasHumanReply === false &&
         closeGate?.assignedTo?.type === "AI";
       if (canAiClose) {
+        const closeText = afterIdleNudge
+          ? buildSoftCloseAfterNudgeReply()
+          : "Combinado! Estou encerrando seu atendimento por aqui. Se precisar de algo depois, é só chamar, tá? 🙂";
         await sendAgentMessage({
           conversationId: args.conversationId,
           contactId: args.contactId,
           agentUserId: assignee.id,
           autonomyMode: cfg.autonomyMode,
-          text: "Combinado! Estou encerrando seu atendimento por aqui. Se precisar de algo depois, é só chamar, tá? 🙂",
+          text: closeText,
           channel: args.channel,
           kind: "text",
           humanBehavior,
@@ -819,13 +857,15 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         const closed = await closeAiOnlyConversation({
           conversationId: args.conversationId,
           contactId: args.contactId,
-          reason: "Aluno pediu encerramento (detector IA)",
+          reason: afterIdleNudge
+            ? "Aluno encerrou após check-in de 30 min"
+            : "Aluno pediu encerramento (detector IA)",
         });
         if (closed.closed) {
           cancelAiReplyDebounce(args.conversationId);
           logAi("closed", {
             conversationId: args.conversationId,
-            reason: "ai_only_close",
+            reason: afterIdleNudge ? "idle_nudge_soft_close" : "ai_only_close",
           });
           return;
         }

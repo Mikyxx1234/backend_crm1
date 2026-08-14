@@ -18,6 +18,7 @@ import {
   contactHasCalouros1008Tag,
   isInauguralLinkWindow,
 } from "@/services/ai/inaugural-class-link";
+import { contactHasEntryLeadDeal } from "@/services/ai/idle-followup";
 import { isContactAllowedForAi } from "@/services/ai/phone-allowlist";
 
 function logAi(event: string, payload: Record<string, unknown>) {
@@ -243,6 +244,20 @@ export async function tryAssignFirstAttendanceAi(args: {
     }
   } catch (e) {
     console.error("[ai] first_attendance allowlist failed — skipping", e);
+    return null;
+  }
+
+  // BV calouros / salesbot atende Lead de Entrada — a IA não assume.
+  try {
+    if (await contactHasEntryLeadDeal(args.contactId)) {
+      logAi("first_attendance_skip_entry_stage", {
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+      });
+      return null;
+    }
+  } catch (e) {
+    console.error("[ai] first_attendance entry-stage check failed — skipping", e);
     return null;
   }
 

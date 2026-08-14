@@ -1,11 +1,11 @@
 /**
  * AI Agent Inactivity Worker.
  *
- * 1) Encerramento por silêncio (atendimento só da IA):
- *    última mensagem da IA, aluno 1h sem responder, ninguém humano falou
- *    → `closeAiOnlyConversation` (tabulação + Encerramento). Sem novo
- *    WhatsApp — a janela 24h pode já ter caído. Default 1h; override
- *    `AI_AGENT_IDLE_CLOSE_MS`. Opt-out: `AI_AGENT_IDLE_CLOSE_MS=0`.
+ * 1) Follow-up só-IA (não atende Lead de Entrada):
+ *    30 min sem retorno → check-in empático (se janela 24h aberta).
+ *    +30 min sem resposta ao check-in (ou 30 min e janela já fechada)
+ *    → `closeAiOnlyConversation`. Overrides: `AI_AGENT_IDLE_NUDGE_MS`,
+ *    `AI_AGENT_IDLE_CLOSE_AFTER_NUDGE_MS`. 0 no nudge desliga o par.
  *
  * 2) Handoff por inatividade (`inactivityTimerMs > 0`), só se já houve
  *    reply humano. IA-only não vai pra fila de consultor.
@@ -25,20 +25,24 @@ import {
 } from "@/lib/ai-agents/piloting";
 import { closeAiOnlyConversation } from "@/services/ai/academic-closure";
 import {
+  IDLE_CLOSE_AFTER_NUDGE_MS,
+  IDLE_NUDGE_MS,
+  buildIdleNudgeMessage,
+  isIdleNudgeContent,
+} from "@/services/ai/idle-followup";
+import {
   executeAgentHandoff,
   sendAgentMessage,
 } from "@/services/ai/piloting-actions";
 
 const INTERVAL_MS = Number(process.env.AI_AGENT_INACTIVITY_INTERVAL_MS) || 60_000;
 const BATCH_SIZE = 50;
-/** 1 hora sem retorno do aluno → encerra ticket só-IA. */
-const DEFAULT_IDLE_CLOSE_MS = 60 * 60 * 1000;
 
-function idleCloseMs(): number {
-  const raw = process.env.AI_AGENT_IDLE_CLOSE_MS;
-  if (raw === undefined || raw === "") return DEFAULT_IDLE_CLOSE_MS;
+function envMs(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === "") return fallback;
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_IDLE_CLOSE_MS;
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : fallback;
 }
 
 let started = false;
@@ -69,7 +73,7 @@ export function startAIAgentInactivityWorker() {
   }, 20_000);
 
   console.info(
-    `[ai-inactivity] worker iniciado (tick=${INTERVAL_MS}ms, idleCloseMs=${idleCloseMs()})`,
+    `[ai-inactivity] worker iniciado (tick=${INTERVAL_MS}ms, nudgeMs=${envMs("AI_AGENT_IDLE_NUDGE_MS", IDLE_NUDGE_MS)}, closeAfterNudgeMs=${envMs("AI_AGENT_IDLE_CLOSE_AFTER_NUDGE_MS", IDLE_CLOSE_AFTER_NUDGE_MS)})`,
   );
 }
 
@@ -88,61 +92,133 @@ type ExpiredRow = {
   organization_id: string;
 };
 
-type IdleCloseRow = {
+type IdleRow = {
   conversation_id: string;
   contact_id: string | null;
   organization_id: string;
+  assigned_to_id: string;
+  autonomy_mode: "AUTONOMOUS" | "DRAFT";
+  last_out_content: string | null;
+  last_out_at: Date;
+  last_inbound_at: Date | null;
 };
 
-async function closeIdleAiOnly(now: Date): Promise<number> {
-  const ms = idleCloseMs();
-  if (ms <= 0) return 0;
-
-  const rows = await prismaBase.$queryRaw<IdleCloseRow[]>`
+async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
+  if (idleMs <= 0) return [];
+  return prismaBase.$queryRaw<IdleRow[]>`
     SELECT
       c.id AS conversation_id,
       c."contactId" AS contact_id,
-      c."organizationId" AS organization_id
+      c."organizationId" AS organization_id,
+      c."assignedToId" AS assigned_to_id,
+      a."autonomyMode" AS autonomy_mode,
+      last_out.content AS last_out_content,
+      last_out."createdAt" AS last_out_at,
+      c."lastInboundAt" AS last_inbound_at
     FROM "conversations" c
     JOIN "users" u ON u.id = c."assignedToId"
     JOIN "ai_agent_configs" a ON a."userId" = u.id
+    JOIN LATERAL (
+      SELECT m.content, m."createdAt"
+      FROM messages m
+      WHERE m."conversationId" = c.id
+        AND m.direction = 'out'
+        AND COALESCE(m."isPrivate", false) = false
+        AND m."messageType" <> 'note'
+      ORDER BY m."createdAt" DESC
+      LIMIT 1
+    ) last_out ON true
     WHERE u.type = 'AI'
       AND a.active = true
       AND c.status = 'OPEN'
       AND c."hasHumanReply" = false
       AND c."lastMessageDirection" = 'out'
       AND c."hasAgentReply" = true
-      AND c."updatedAt" < (${now}::timestamptz - ((${ms})::text || ' milliseconds')::interval)
-    ORDER BY c."updatedAt" ASC
+      AND last_out."createdAt" < (${now}::timestamptz - ((${idleMs})::text || ' milliseconds')::interval)
+      AND NOT EXISTS (
+        SELECT 1 FROM deals d
+        JOIN stages s ON s.id = d."stageId"
+        WHERE d."contactId" = c."contactId"
+          AND d.status = 'OPEN'
+          AND (s.slug = 'lead-de-entrada' OR lower(s.name) = 'lead de entrada')
+      )
+    ORDER BY last_out."createdAt" ASC
     LIMIT ${BATCH_SIZE};
   `;
+}
 
+function windowOpen(lastInboundAt: Date | null, now: Date): boolean {
+  if (!lastInboundAt) return false;
+  return now.getTime() - lastInboundAt.getTime() < 24 * 60 * 60 * 1000;
+}
+
+async function processIdleAiOnly(
+  now: Date,
+): Promise<{ closed: number; nudged: number }> {
+  const nudgeMs = envMs("AI_AGENT_IDLE_NUDGE_MS", IDLE_NUDGE_MS);
+  const closeMs = envMs(
+    "AI_AGENT_IDLE_CLOSE_AFTER_NUDGE_MS",
+    IDLE_CLOSE_AFTER_NUDGE_MS,
+  );
+  if (nudgeMs <= 0) return { closed: 0, nudged: 0 };
+
+  const rows = await listIdleAiOnly(now, Math.min(nudgeMs, closeMs || nudgeMs));
   let closed = 0;
+  let nudged = 0;
+
   for (const row of rows) {
+    const isNudge = isIdleNudgeContent(row.last_out_content);
+    const ageMs = now.getTime() - new Date(row.last_out_at).getTime();
+    const canText = windowOpen(row.last_inbound_at, now);
+
+    const shouldClose =
+      (isNudge && ageMs >= closeMs) || (!isNudge && !canText && ageMs >= nudgeMs);
+    const shouldNudge = !isNudge && canText && ageMs >= nudgeMs;
+
     try {
-      const result = await withSystemContext(row.organization_id, () =>
-        closeAiOnlyConversation({
-          conversationId: row.conversation_id,
-          contactId: row.contact_id,
-          reason: `IA: aluno ${Math.round(ms / 60_000)} min sem responder`,
-        }),
-      );
-      if (result.closed) closed++;
+      if (shouldClose) {
+        const result = await withSystemContext(row.organization_id, () =>
+          closeAiOnlyConversation({
+            conversationId: row.conversation_id,
+            contactId: row.contact_id,
+            reason: isNudge
+              ? "IA: sem resposta ao check-in de 30 min"
+              : "IA: 30 min sem retorno e janela 24h fechada",
+          }),
+        );
+        if (result.closed) closed++;
+        continue;
+      }
+      if (shouldNudge && row.contact_id && row.assigned_to_id) {
+        const sent = await withSystemContext(row.organization_id, () =>
+          sendAgentMessage({
+            conversationId: row.conversation_id,
+            contactId: row.contact_id!,
+            agentUserId: row.assigned_to_id,
+            autonomyMode: row.autonomy_mode,
+            text: buildIdleNudgeMessage(),
+            kind: "text",
+          }),
+        );
+        if (sent.status === "sent") nudged++;
+      }
     } catch (err) {
       console.error(
-        `[ai-inactivity] falha encerrando conv=${row.conversation_id}:`,
+        `[ai-inactivity] falha idle conv=${row.conversation_id}:`,
         err instanceof Error ? err.message : err,
       );
     }
   }
-  if (closed > 0) {
-    console.info(`[ai-inactivity] tick — encerradas por silêncio=${closed}`);
+  if (closed > 0 || nudged > 0) {
+    console.info(
+      `[ai-inactivity] tick — check-ins=${nudged} encerradas=${closed}`,
+    );
   }
-  return closed;
+  return { closed, nudged };
 }
 
 export async function tickOnce(now: Date = new Date()) {
-  const closed = await closeIdleAiOnly(now);
+  const { closed } = await processIdleAiOnly(now);
 
   // Worker cross-tenant: varre TODAS as orgs. Usa prismaBase para que
   // o extension nao tente escopar ou exigir RequestContext. O JOIN
