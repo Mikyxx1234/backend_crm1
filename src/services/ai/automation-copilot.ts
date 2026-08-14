@@ -135,6 +135,7 @@ Handles de conexão por tipo de step:
   • question / send_whatsapp_interactive: "button:<index>" (para cada botão), "else", "timeout", "next" (após envio linear) e "failure"
   • send_whatsapp_message / send_whatsapp_template / send_whatsapp_media: "next" e "failure" (rejeição síncrona Meta)
   • business_hours: "next" (dentro do horário) e "else" (fora do horário)
+  • check_agent_status: "next" (agente ONLINE) e "else" (offline / sem responsável)
 
 Campos disponíveis em conditions (lado esquerdo das rules — use sempre um destes):
   • Contato: contact.name, contact.email, contact.phone, contact.leadScore (num),

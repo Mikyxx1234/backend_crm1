@@ -955,6 +955,28 @@ function interpolateContextVariables(
 }
 
 /**
+ * Responsável da conversa atual — sem fallback para dono do negócio.
+ * Se o runtime já tem snapshot, usa `assignedToId` dele (null = sem dono).
+ * Sem snapshot (gatilho de deal/contato), busca a conversa aberta mais recente.
+ */
+async function resolveConversationAssigneeId(
+  rt: RuntimeContext,
+): Promise<string | null> {
+  if (rt.conversation) return rt.conversation.assignedToId ?? null;
+  if (!rt.contactId) return null;
+  const conv = await prisma.conversation.findFirst({
+    where: {
+      contactId: rt.contactId,
+      status: { not: "RESOLVED" },
+      assignedToId: { not: null },
+    },
+    orderBy: { updatedAt: "desc" },
+    select: { assignedToId: true },
+  });
+  return conv?.assignedToId ?? null;
+}
+
+/**
  * Responsável do lead para os tokens `{{assignee.*}}` / `{{responsavel.*}}`.
  * Prioridade: consultor da conversa (quem está atendendo) → dono do negócio.
  * Sem responsável, os tokens resolvem para string vazia como qualquer outro.
@@ -3984,6 +4006,26 @@ async function executeStep(
       return {};
     }
 
+    case "check_agent_status": {
+      // Disponível = AgentStatus.ONLINE do responsável da conversa.
+      // Sem responsável, AWAY, OFFLINE ou sem registro → ramo Offline.
+      const userId = await resolveConversationAssigneeId(rt);
+      let online = false;
+      if (userId) {
+        const st = await prisma.agentStatus.findUnique({
+          where: { userId },
+          select: { status: true },
+        });
+        online = st?.status === "ONLINE";
+      }
+      if (!online) {
+        const elseStepId = readString(cfg, "elseStepId");
+        if (elseStepId) return { skipRemaining: true, gotoStepId: elseStepId };
+        return { skipRemaining: true };
+      }
+      return {};
+    }
+
     case "inventory.adjust":
     case "inventory_adjust": {
       // Ajuste de alocação via ledger novo (InventoryPool). Reusa o service
@@ -4538,6 +4580,7 @@ const STEP_TYPE_LABELS: Record<string, string> = {
   finish_conversation: "Encerrar conversa",
   tabulate_conversation: "Tabular conversa",
   business_hours: "Horário comercial",
+  check_agent_status: "Status do agente",
   execute_distribution: "Executar distribuição",
 };
 

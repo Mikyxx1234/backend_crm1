@@ -39,6 +39,7 @@ const STEP_LABELS: Record<string, string> = {
   finish_conversation: "Encerrando conversa",
   tabulate_conversation: "Tabulando conversa",
   business_hours: "Verificando horário",
+  check_agent_status: "Verificando status do agente",
   execute_distribution: "Distribuindo lead",
 };
 

@@ -5,6 +5,33 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-14 — Step `check_agent_status` (Disponível / Offline)
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Novo passo de automação binário, espelhando `business_hours`:
+saída `nextStepId` = responsável ONLINE; saída `elseStepId` = offline.
+Consulta só `conversation.assignedToId` (sem fallback no dono do negócio).
+Disponível = `AgentStatus.status === "ONLINE"` (toggle da Equipe). AWAY,
+OFFLINE, sem registro ou sem responsável → Offline.
+
+**Contexto.** Operador precisa ramificar o fluxo para transferir a conversa
+a um user online quando o dono atual está indisponível. Sem este nó, a
+única opção era `execute_distribution` (atribui) ou `condition` genérica
+(sem acesso ao toggle de presença).
+
+**Alternativas descartadas.**
+- Reusar `condition` com campo novo: mistura presença com regras de lead.
+- Checar heartbeat/aba aberta (`SystemUsageSession`): conceito diferente
+  do toggle "Disponível" da Equipe.
+- `isAgentAvailable` (ONLINE + expediente): expediente já é o nó de
+  horário comercial; o operador pediu só o toggle.
+
+**Impacto.** BE: workflow, executor, auditor, layout, copilot, labels.
+FE: palette, canvas, node dedicado com handles `true`/`false`.
+
+---
+
 ### 2026-08-11 — Step `delay` longo vira espera persistida (não `setTimeout`)
 
 **Modelo usado.** Cursor Kimi K3.
