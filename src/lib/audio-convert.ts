@@ -50,19 +50,33 @@ export function isValidOgg(buf: Buffer): boolean {
 
 /**
  * Build FFmpeg argument strategies in priority order:
- * 1. Remux (codec copy) — fast, works when input already has Opus codec (webm/opus)
- * 2. Transcode with libopus — high quality, requires libopus linked in FFmpeg
- * 3. Transcode with built-in opus encoder — fallback
+ * 1. Transcode com libopus (mono 48kHz) — reencoda de fato, gerando um Ogg
+ *    com OpusHead/pre-skip e granule positions corretos.
+ * 2. Transcode com o encoder opus interno (experimental) — fallback quando
+ *    o build do ffmpeg não tem libopus.
+ * 3. Remux (codec copy) — último recurso.
+ *
+ * O remux era a primeira estratégia, mas copiar Opus de WebM (MediaRecorder,
+ * timestamps em ms, sem Cues/Duration) pra Ogg gera granule positions
+ * inconsistentes. O arquivo toca no Chrome/VLC e a Meta até extrai duração,
+ * mas o WhatsApp iOS recusa o PTT ("Este áudio não está mais disponível").
+ * Reencodar é ~100ms pra áudio de voz e elimina a classe do problema.
  */
 function getConversionStrategies(inputExt: string): { label: string; args: string[] }[] {
-  const strategies: { label: string; args: string[] }[] = [];
+  const strategies: { label: string; args: string[] }[] = [
+    {
+      label: "transcode libopus",
+      args: ["-c:a", "libopus", "-ac", "1", "-ar", "48000", "-b:a", "32k", "-application", "voip", "-map_metadata", "-1"],
+    },
+    {
+      label: "transcode opus (experimental)",
+      args: ["-strict", "-2", "-c:a", "opus", "-ac", "1", "-ar", "48000", "-b:a", "32k", "-map_metadata", "-1"],
+    },
+  ];
 
   if (inputExt === "webm" || inputExt === "ogg") {
     strategies.push({ label: "remux (codec copy)", args: ["-c:a", "copy"] });
   }
-
-  strategies.push({ label: "transcode libopus", args: ["-c:a", "libopus", "-b:a", "48k", "-application", "voip"] });
-  strategies.push({ label: "transcode opus", args: ["-c:a", "opus", "-b:a", "48k"] });
 
   return strategies;
 }
