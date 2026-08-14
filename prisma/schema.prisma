@@ -1374,8 +1374,11 @@ model Stage {
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   name           String
-  /// Identificador público estável pra URL (?stage=negociacao). Único no funil.
+  /// Identificador legado (único no funil). URLs públicas usam `number`.
   slug           String
+  /// Número sequencial no funil (1, 2, 3…). PK continua CUID (FKs);
+  /// este campo é o ID amigável na URL (`?stage=3`). Não muda no reorder.
+  number         Int
   position       Int
   color          String       @default("#6366f1")
   winProbability Int          @default(0)
@@ -1393,6 +1396,7 @@ model Stage {
 
   @@unique([pipelineId, position])
   @@unique([pipelineId, slug])
+  @@unique([pipelineId, number])
   @@index([organizationId])
   @@map("stages")
 }

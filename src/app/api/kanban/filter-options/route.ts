@@ -22,7 +22,7 @@ export async function GET() {
             number: true,
             stages: {
               orderBy: { position: "asc" },
-              select: { id: true, name: true, slug: true, color: true, position: true },
+              select: { id: true, name: true, slug: true, number: true, color: true, position: true },
             },
           },
         }),
