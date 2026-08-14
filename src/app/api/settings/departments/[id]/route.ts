@@ -5,6 +5,14 @@ import { prisma } from "@/lib/prisma";
 import { assertLeafInDepartment } from "@/services/tabulations";
 import { z } from "zod";
 
+const hhmm = z.string().regex(/^\d{1,2}:\d{2}$/, "Horário inválido (use HH:MM).");
+
+const OperatingHoursSchema = z.object({
+  start: hhmm,
+  end: hhmm,
+  weekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+});
+
 const UpdateSchema = z.object({
   name: z.string().min(1).max(100).optional(),
   color: z
@@ -17,6 +25,7 @@ const UpdateSchema = z.object({
   autoCloseTabulationId: z.string().min(1).nullable().optional(),
   isSupport: z.boolean().optional(),
   distributionEnabled: z.boolean().optional(),
+  operatingHours: OperatingHoursSchema.nullable().optional(),
 });
 
 export async function PUT(
@@ -24,7 +33,8 @@ export async function PUT(
   { params }: { params: Promise<{ id: string }> },
 ) {
   return withOrgContext(async (session) => {
-    if (session.user.role !== "ADMIN") {
+    const role = session.user.role;
+    if (role !== "ADMIN" && role !== "MANAGER") {
       return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
     }
     const { id } = await params;
@@ -41,6 +51,13 @@ export async function PUT(
     const parsed = UpdateSchema.safeParse(body);
     if (!parsed.success) {
       return NextResponse.json({ message: "Dados inválidos." }, { status: 400 });
+    }
+    // Manager só edita a janela operacional (cobertura). Demais campos = admin.
+    if (role === "MANAGER") {
+      const keys = Object.keys(parsed.data);
+      if (keys.length === 0 || keys.some((k) => k !== "operatingHours")) {
+        return NextResponse.json({ message: "Acesso negado." }, { status: 403 });
+      }
     }
     // A tabulação de encerramento automático precisa ser folha DESTE
     // departamento — senão o bot gravaria um motivo de outra árvore.

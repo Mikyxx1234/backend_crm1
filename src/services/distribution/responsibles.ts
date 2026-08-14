@@ -90,6 +90,7 @@ async function loadSchedules(userIds: string[]): Promise<ScheduleRow[]> {
 /** Defaults de config quando o usuário ainda não tem `DistributionResponsible`. */
 const DEFAULT_RESPONSIBLE = {
   participates: true,
+  visibleInCoverage: true,
   queueLimit: 0,
   volume: 1,
   type: null as string | null,
@@ -118,6 +119,8 @@ export interface DistributionResponsibleView {
   role: UserRole;
   /** Config administrativa. */
   participates: boolean;
+  /** false = some da grade de cobertura. Default true. */
+  visibleInCoverage: boolean;
   queueLimit: number;
   volume: number;
   type: string | null;
@@ -222,6 +225,7 @@ export async function getDistributionResponsibles(
       select: {
         userId: true,
         participates: true,
+        visibleInCoverage: true,
         queueLimit: true,
         volume: true,
         type: true,
@@ -310,6 +314,7 @@ export async function getDistributionResponsibles(
       avatarUrl: u.avatarUrl,
       role: u.role,
       participates: cfg.participates,
+      visibleInCoverage: cfg.visibleInCoverage ?? true,
       queueLimit: cfg.queueLimit,
       volume: cfg.volume,
       type: cfg.type,

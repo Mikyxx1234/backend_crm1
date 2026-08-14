@@ -49,16 +49,27 @@ export async function PUT(req: Request, ctx: Ctx) {
     });
 
     let participates: boolean | undefined;
-    if (typeof body.participates === "boolean") {
+    let visibleInCoverage: boolean | undefined;
+    const patchParticipates = typeof body.participates === "boolean";
+    const patchVisible = typeof body.visibleInCoverage === "boolean";
+    if (patchParticipates || patchVisible) {
       const orgId = session.user.organizationId;
       if (orgId) {
         const row = await prisma.distributionResponsible.upsert({
           where: { organizationId_userId: { organizationId: orgId, userId: id } },
-          update: { participates: body.participates },
-          create: withOrgFromCtx({ userId: id, participates: body.participates }),
+          update: {
+            ...(patchParticipates ? { participates: body.participates } : {}),
+            ...(patchVisible ? { visibleInCoverage: body.visibleInCoverage } : {}),
+          },
+          create: withOrgFromCtx({
+            userId: id,
+            participates: patchParticipates ? body.participates : true,
+            visibleInCoverage: patchVisible ? body.visibleInCoverage : true,
+          }),
         });
         participates = row.participates;
-        if (body.participates) {
+        visibleInCoverage = row.visibleInCoverage;
+        if (patchParticipates && body.participates) {
           scheduleProcessPendingDistributionQueue({
             trigger: "agent_eligible",
             delayMs: 300,
@@ -68,6 +79,6 @@ export async function PUT(req: Request, ctx: Ctx) {
       }
     }
 
-    return NextResponse.json({ ...schedule, participates });
+    return NextResponse.json({ ...schedule, participates, visibleInCoverage });
   });
 }

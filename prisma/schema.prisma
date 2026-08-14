@@ -3204,6 +3204,9 @@ model Department {
   /// (o lead fica na fila). Quando NENHUM depto da org tem isso true, o motor
   /// mantém o comportamento org-wide (retrocompatível).
   distributionEnabled      Boolean      @default(false)
+  /// Janela operacional do departamento (cobertura). Null = Seg–Sex 09:00–18:00.
+  /// Formato: { start: "09:00", end: "18:00", weekdays: [1,2,3,4,5] }.
+  operatingHours           Json?
   createdAt                DateTime     @default(now())
   updatedAt                DateTime     @updatedAt
 
@@ -3637,6 +3640,8 @@ model DistributionResponsible {
   user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
   /// Estado administrativo: false = INATIVO (bloqueado pelo admin).
   participates    Boolean      @default(true)
+  /// Se false, some da grade de cobertura (útil para admins que não atendem).
+  visibleInCoverage Boolean    @default(true)
   /// 0 = SEM limite de fila. >0 bloqueia quando filaAtual >= queueLimit.
   queueLimit      Int          @default(0)
   /// Peso/volume exibido na v2 (default 1). Nao altera a selecao v1.
