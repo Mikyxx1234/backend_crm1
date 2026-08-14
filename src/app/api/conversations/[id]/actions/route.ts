@@ -1,7 +1,7 @@
 import type { ConversationStatus } from "@prisma/client";
 import { NextResponse } from "next/server";
 
-import { withOrgContext } from "@/lib/auth-helpers";
+import { isAdmin, isSuperAdmin, withOrgContext } from "@/lib/auth-helpers";
 import { checkPermission } from "@/lib/authz";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { getOrgSettingBool } from "@/lib/org-settings";
@@ -654,6 +654,14 @@ export async function POST(request: Request, context: RouteContext) {
       const rawStatus = typeof b.status === "string" ? b.status : undefined;
       const dbStatus = actionToDbStatus(action, rawStatus);
 
+      // Encerrar sem automações: só ADMIN (ou super-admin da plataforma).
+      // Outros roles: o flag é ignorado — a conversa encerra e os triggers
+      // de `conversation_tabulated` continuam disparando normalmente.
+      const skipAutomationsRequested = b.skipAutomations === true;
+      const skipAutomations =
+        skipAutomationsRequested &&
+        (isAdmin(session) || isSuperAdmin(session));
+
       if (!dbStatus) {
         return NextResponse.json(
           { message: "status inválido (OPEN, RESOLVED, PENDING, SNOOZED)." },
@@ -765,6 +773,7 @@ export async function POST(request: Request, context: RouteContext) {
           from: conv.status,
           to: updated.status,
           action,
+          ...(skipAutomations ? { skipAutomations: true } : {}),
         };
 
         // Grava no log de cada deal aberto do contato com o tipo correto.
@@ -786,7 +795,11 @@ export async function POST(request: Request, context: RouteContext) {
           field: "status",
           oldValue: conv.status,
           newValue: updated.status,
-          meta: { action, ...(tabulationId ? { tabulationId } : {}) },
+          meta: {
+            action,
+            ...(tabulationId ? { tabulationId } : {}),
+            ...(skipAutomations ? { skipAutomations: true } : {}),
+          },
         });
 
         // Empurra o evento pro chatter em tempo real (mesma via do
@@ -837,7 +850,12 @@ export async function POST(request: Request, context: RouteContext) {
       // automações configuradas como "Qualquer tabulação". Automações que
       // filtram tabulação específica continuam sem match quando tabulationId
       // é null (ver matchesTriggerConfig). Só no primeiro encerramento.
-      if (dbStatus === "RESOLVED" && conv.status !== "RESOLVED") {
+      // Admin pode pular via `skipAutomations: true` (outros eventos intactos).
+      if (
+        dbStatus === "RESOLVED" &&
+        conv.status !== "RESOLVED" &&
+        !skipAutomations
+      ) {
         // Resolve dealId (primeiro deal aberto do contato) para automacoes
         // que dependem de contexto de negocio (mover card, mudar funil).
         let dealId: string | undefined;
