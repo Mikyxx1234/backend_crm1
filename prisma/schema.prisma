@@ -1,4 +1,4 @@
-generator client {
+﻿generator client {
   provider = "prisma-client-js"
 }
 
@@ -487,6 +487,9 @@ model User {
   /// deveria passar no login).
   organizationId String?
   organization   Organization? @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por organização (URL/filtros `?owner=3`).
+  /// Null em super-admin sem org.
+  number         Int?
   /// Super-admin da EduIT — acessa `/admin/organizations`, cria/suspende
   /// orgs e pode impersonar (fase 2). Bypassa RLS via GUC `app.is_super_admin`.
   isSuperAdmin   Boolean       @default(false)
@@ -553,6 +556,7 @@ model User {
   @@index([organizationId, role])
   @@index([organizationId, type])
   @@index([isSuperAdmin])
+  @@unique([organizationId, number])
   @@map("users")
 }
 
@@ -1166,6 +1170,8 @@ model Company {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org. PK continua CUID; URL usa `number` (`/companies/4`).
+  number         Int
   name           String
   domain         String?
   industry       String?
@@ -1188,6 +1194,7 @@ model Company {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, name])
   @@index([organizationId, parentId])
@@ -1200,12 +1207,15 @@ model Tag {
   id             String         @id @default(cuid())
   organizationId String
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org. URL/filtros usam `?tag=3`.
+  number         Int
   name           String
   color          String         @default("#6366f1")
   contacts       TagOnContact[]
   deals          TagOnDeal[]
 
   @@unique([organizationId, name])
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@map("tags")
 }
@@ -1236,6 +1246,8 @@ model CustomField {
   id                   String          @id @default(cuid())
   organizationId       String
   organization         Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org.
+  number               Int
   name                 String
   label                String
   type                 CustomFieldType
@@ -1260,6 +1272,7 @@ model CustomField {
   flowFieldMappings WhatsappFlowFieldMapping[]
 
   @@unique([organizationId, name, entity])
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, entity])
   @@map("custom_fields")
@@ -1272,6 +1285,8 @@ model SavedFilter {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org. Atalho `/pipeline/filter/3`.
+  number         Int
   entityType     String       @map("entityType")
   name           String
   filterConfig   Json         @default("{}") @map("filterConfig")
@@ -1282,6 +1297,7 @@ model SavedFilter {
   createdAt      DateTime     @default(now()) @map("createdAt")
   updatedAt      DateTime     @updatedAt @map("updatedAt")
 
+  @@unique([organizationId, number])
   @@index([organizationId, entityType])
   @@index([userId])
   @@map("saved_filters")
@@ -1494,6 +1510,8 @@ model Product {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org.
+  number         Int
   name           String
   description    String?
   sku            String?
@@ -1543,6 +1561,7 @@ model Product {
   updatedAt DateTime @updatedAt
 
   @@unique([organizationId, sku])
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, isActive])
   @@index([organizationId, name])
@@ -1658,6 +1677,8 @@ model OrgUnit {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org.
+  number         Int
   name           String
   legalName      String?
   /// CNPJ (ou outro identificador fiscal). Texto livre, sem validação no schema.
@@ -1680,6 +1701,7 @@ model OrgUnit {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, parentId])
   @@map("org_units")
@@ -1868,6 +1890,8 @@ model JobOpening {
   id                  String           @id @default(cuid())
   organizationId      String
   organization        Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org.
+  number              Int
   productId           String?
   product             Product?         @relation(fields: [productId], references: [id])
   clientCompanyId     String
@@ -1890,6 +1914,7 @@ model JobOpening {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, status])
   @@index([clientCompanyId])
@@ -1970,6 +1995,8 @@ model Catalog {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org.
+  number         Int
   name           String
   description    String?
   /// Catálogo default da org (recebe os produtos legados no backfill).
@@ -1986,6 +2013,7 @@ model Catalog {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, isDefault])
   @@index([organizationId, isTemplate])
@@ -2864,6 +2892,8 @@ model Automation {
   id             String              @id @default(cuid())
   organizationId String
   organization   Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org. URL: `/automations/7`.
+  number         Int
   name           String
   description    String?
   triggerType    String
@@ -2883,6 +2913,7 @@ model Automation {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, active])
   @@index([organizationId, active, triggerType])
@@ -3026,6 +3057,8 @@ model Channel {
   id                String          @id @default(cuid())
   organizationId    String
   organization      Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org. Filtro inbox: `?channel=2`.
+  number            Int
   name              String
   type              ChannelType
   provider          ChannelProvider
@@ -3049,6 +3082,7 @@ model Channel {
   campaigns         Campaign[]
   metaWebhookEvents MetaWebhookEvent[]
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, status])
   @@index([organizationId, type, status])
@@ -3111,6 +3145,8 @@ model QuickReply {
   id              String           @id @default(cuid())
   organizationId  String
   organization    Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org.
+  number          Int
   title           String
   content         String
   category        String?
@@ -3123,6 +3159,7 @@ model QuickReply {
   createdAt       DateTime         @default(now())
   updatedAt       DateTime         @updatedAt
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, category])
   @@index([organizationId, groupId])
@@ -3137,6 +3174,8 @@ model Department {
   id                       String       @id @default(cuid())
   organizationId           String
   organization             Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org.
+  number                   Int
   name                     String
   color                    String       @default("#6366f1")
   icon                     String       @default("🏢")
@@ -3175,6 +3214,7 @@ model Department {
   supportTickets   SupportTicket[]
   distributionLogs DistributionLog[]
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@map("departments")
 }
@@ -3380,6 +3420,8 @@ model MessageTemplate {
   id             String         @id @default(cuid())
   organizationId String
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org.
+  number         Int
   name           String
   content        String
   category       String?
@@ -3397,6 +3439,7 @@ model MessageTemplate {
   createdAt      DateTime       @default(now())
   updatedAt      DateTime       @updatedAt
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, status])
   @@map("message_templates")
@@ -3448,6 +3491,8 @@ model WhatsappFlowDefinition {
   shortId          String?              @unique @map("short_id")
   organizationId   String
   organization     Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org. URL: `/settings/message-models/flows/3`.
+  number           Int
   name             String
   status           WhatsappFlowStatus   @default(DRAFT)
   /// ID Graph retornado por POST /{waba-id}/flows após publicação.
@@ -3464,6 +3509,7 @@ model WhatsappFlowDefinition {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, status])
   @@map("whatsapp_flow_definitions")
@@ -3540,6 +3586,8 @@ model DistributionRule {
   id             String               @id @default(cuid())
   organizationId String
   organization   Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org.
+  number         Int
   name           String
   mode           DistributionMode     @default(ROUND_ROBIN)
   pipelineId     String?
@@ -3551,6 +3599,7 @@ model DistributionRule {
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, isActive])
   @@map("distribution_rules")
@@ -3938,6 +3987,8 @@ model Segment {
   id             String       @id @default(cuid())
   organizationId String
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org.
+  number         Int
   name           String
   filters        Json
   createdAt      DateTime     @default(now())
@@ -3945,6 +3996,7 @@ model Segment {
 
   campaigns Campaign[]
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@map("segments")
 }
@@ -3953,6 +4005,8 @@ model Campaign {
   id             String         @id @default(cuid())
   organizationId String
   organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// Número sequencial por org. URL: `/campaigns/8`.
+  number         Int
   name           String
   status         CampaignStatus @default(DRAFT)
   type           CampaignType
@@ -4001,6 +4055,7 @@ model Campaign {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@unique([organizationId, number])
   @@index([organizationId])
   @@index([organizationId, status])
   @@index([organizationId, type])

@@ -297,6 +297,7 @@ export async function getContacts(params: GetContactsParams = {}) {
       orderBy,
       select: {
         id: true,
+        number: true,
         name: true,
         email: true,
         phone: true,
@@ -307,7 +308,7 @@ export async function getContacts(params: GetContactsParams = {}) {
         createdAt: true,
         updatedAt: true,
         assignedTo: { select: { id: true, name: true, avatarUrl: true } },
-        company: { select: { id: true, name: true, domain: true } },
+        company: { select: { id: true, number: true, name: true, domain: true } },
         tags: {
           select: { tag: { select: { id: true, name: true, color: true } } },
         },
@@ -811,7 +812,7 @@ export async function getContactById(
           () =>
             prisma.company.findUnique({
               where: { id: core!.companyId! },
-              select: { id: true, name: true, domain: true },
+              select: { id: true, number: true, name: true, domain: true },
             }),
           null,
         )
@@ -1101,7 +1102,7 @@ export async function createContact(data: CreateContactInput) {
             assignedToId: data.assignedToId ?? undefined,
           }),
           include: {
-            company: { select: { id: true, name: true, domain: true } },
+            company: { select: { id: true, number: true, name: true, domain: true } },
             tags: { include: { tag: { select: { id: true, name: true, color: true } } } },
             assignedTo: { select: assignedToSelect },
           },
@@ -1208,7 +1209,7 @@ export async function updateContact(id: string, data: UpdateContactInput) {
     where: { id },
     data: updateData,
     include: {
-      company: { select: { id: true, name: true, domain: true } },
+      company: { select: { id: true, number: true, name: true, domain: true } },
       tags: { include: { tag: { select: { id: true, name: true, color: true } } } },
       assignedTo: { select: assignedToSelect },
     },

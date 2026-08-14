@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { requireAdmin, requireAuth, userOrgFilter } from "@/lib/auth-helpers";
 import { syncUserRoleAssignment } from "@/lib/authz/sync-user-role";
 import { prisma } from "@/lib/prisma";
+import { nextUserNumber } from "@/lib/public-id";
 import { getSystemPresenceMap } from "@/services/system-presence";
 
 const VALID_ROLES = ["ADMIN", "MANAGER", "MEMBER"] as const;
@@ -34,6 +35,7 @@ export async function GET(request: Request) {
       orderBy: { name: "asc" },
       select: {
         id: true,
+        number: true,
         name: true,
         email: true,
         role: true,
@@ -139,6 +141,7 @@ export async function POST(request: Request) {
             email: normalizedEmail,
             hashedPassword,
             role: validRole,
+            number: await nextUserNumber(orgId, tx),
             organization: { connect: { id: orgId } },
           },
           select: { id: true, name: true, email: true, role: true },

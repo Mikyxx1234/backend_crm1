@@ -7,6 +7,7 @@ import {
   syncUserRoleAssignment,
 } from "@/lib/authz/sync-user-role";
 import { prismaBase } from "@/lib/prisma-base";
+import { nextUserNumber } from "@/lib/public-id";
 import { logAudit } from "@/lib/audit/log";
 import { nextPipelineNumber, TERMINAL_STAGES } from "@/services/pipelines";
 import {
@@ -156,6 +157,7 @@ export async function createAdminFromInvite(
         hashedPassword,
         role: UserRole.ADMIN,
         organizationId: organization.id,
+        number: await nextUserNumber(organization.id, tx),
       },
       select: { id: true },
     });
@@ -415,6 +417,7 @@ export async function signupOrganizationWithAdmin(input: {
           hashedPassword,
           role: UserRole.ADMIN,
           organizationId: org.id,
+          number: await nextUserNumber(org.id, tx),
         },
         select: { id: true },
       });
@@ -504,6 +507,7 @@ export async function acceptMemberInvite(input: {
         hashedPassword,
         role: invite.role,
         organizationId: organization.id,
+        number: await nextUserNumber(organization.id, tx),
       },
       select: { id: true },
     });

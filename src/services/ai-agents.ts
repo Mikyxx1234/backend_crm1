@@ -14,6 +14,8 @@ import type { AIAgentArchetype, AIAgentAutonomy } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { nextUserNumber } from "@/lib/public-id";
+import { getOrgIdOrThrow } from "@/lib/request-context";
 import { getArchetype } from "@/lib/ai-agents/archetypes";
 import {
   HANDOFF_MODES,
@@ -255,6 +257,7 @@ export async function createAIAgent(input: CreateAIAgentInput) {
   const enabledTools = input.enabledTools ?? archetype.defaultTools;
 
   return prisma.$transaction(async (tx) => {
+    const orgId = getOrgIdOrThrow();
     const user = await tx.user.create({
       data: {
         name: input.name,
@@ -263,6 +266,8 @@ export async function createAIAgent(input: CreateAIAgentInput) {
         role: "MEMBER",
         hashedPassword: null,
         avatarUrl: input.avatarUrl ?? null,
+        organizationId: orgId,
+        number: await nextUserNumber(orgId, tx),
       },
     });
 

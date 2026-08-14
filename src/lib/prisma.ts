@@ -6,6 +6,10 @@ import {
   mergeWhere,
 } from "@/lib/prisma-tenant-helpers";
 import {
+  NUMBERED_ORG_MODELS,
+  rewriteNumericIdWhere,
+} from "@/lib/public-id";
+import {
   enterRequestContext,
   getRequestContext,
   type RequestContext,
@@ -252,6 +256,37 @@ async function resolveCtxFromNextCookie(): Promise<RequestContext | null> {
   }
 }
 
+function modelDelegateName(model: string): string {
+  return model.charAt(0).toLowerCase() + model.slice(1);
+}
+
+async function allocateNextNumber(
+  model: Prisma.ModelName,
+  orgId: string,
+): Promise<number> {
+  const key = modelDelegateName(model) as keyof typeof prismaBase;
+  const delegate = prismaBase[key] as {
+    aggregate: (args: {
+      where: { organizationId: string };
+      _max: { number: true };
+    }) => Promise<{ _max: { number: number | null } }>;
+  };
+  const r = await delegate.aggregate({
+    where: { organizationId: orgId },
+    _max: { number: true },
+  });
+  return (r._max.number ?? 0) + 1;
+}
+
+function isNumberUniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: string; meta?: { target?: string[] | string } };
+  if (e.code !== "P2002") return false;
+  const t = e.meta?.target;
+  if (Array.isArray(t)) return t.some((x) => String(x).includes("number"));
+  return typeof t === "string" && t.includes("number");
+}
+
 function extend(base: typeof prismaBase = prismaBase) {
   return base.$extends({
     name: "organization-scope",
@@ -296,6 +331,8 @@ function extend(base: typeof prismaBase = prismaBase) {
           const orgId = ctx.organizationId;
           const a = (args ?? {}) as AnyArgs;
 
+          const numbered = NUMBERED_ORG_MODELS.has(model as Prisma.ModelName);
+
           switch (operation) {
             case "findUnique":
             case "findUniqueOrThrow":
@@ -310,6 +347,20 @@ function extend(base: typeof prismaBase = prismaBase) {
             case "update":
             case "delete": {
               a.where = mergeWhere(a.where, orgId);
+              if (
+                numbered &&
+                (operation === "findUnique" ||
+                  operation === "findUniqueOrThrow" ||
+                  operation === "findFirst" ||
+                  operation === "findFirstOrThrow" ||
+                  operation === "update" ||
+                  operation === "delete")
+              ) {
+                a.where = rewriteNumericIdWhere(
+                  a.where as Record<string, unknown> | undefined,
+                  orgId,
+                );
+              }
               if (operation === "update" && a.data) {
                 a.data = deepInjectOrgId(a.data, orgId) as Record<
                   string,
@@ -323,30 +374,64 @@ function extend(base: typeof prismaBase = prismaBase) {
                 string,
                 unknown
               >;
+              if (
+                numbered &&
+                a.data &&
+                typeof a.data === "object" &&
+                (a.data as { number?: unknown }).number == null
+              ) {
+                (a.data as { number: number }).number =
+                  await allocateNextNumber(model as Prisma.ModelName, orgId);
+              }
               break;
             }
             case "createMany":
             case "createManyAndReturn": {
               const raw = a.data;
+              const inject = (d: unknown) =>
+                deepInjectOrgId(d, orgId) as Record<string, unknown>;
               if (Array.isArray(raw)) {
-                a.data = raw.map(
-                  (d) => deepInjectOrgId(d, orgId) as Record<string, unknown>,
-                );
+                a.data = raw.map(inject);
               } else if (raw && typeof raw === "object") {
-                a.data = deepInjectOrgId(raw, orgId) as Record<
-                  string,
-                  unknown
-                >;
+                a.data = inject(raw);
+              }
+              if (numbered) {
+                const rows = Array.isArray(a.data) ? a.data : [a.data];
+                const missing = rows.filter(
+                  (d) => d && typeof d === "object" && d.number == null,
+                );
+                if (missing.length > 0) {
+                  let n = await allocateNextNumber(
+                    model as Prisma.ModelName,
+                    orgId,
+                  );
+                  for (const d of missing) {
+                    d.number = n++;
+                  }
+                }
               }
               break;
             }
             case "upsert": {
               a.where = mergeWhere(a.where, orgId);
+              if (numbered) {
+                a.where = rewriteNumericIdWhere(
+                  a.where as Record<string, unknown> | undefined,
+                  orgId,
+                );
+              }
               if (a.create) {
                 a.create = deepInjectOrgId(a.create, orgId) as Record<
                   string,
                   unknown
                 >;
+                if (
+                  numbered &&
+                  (a.create as { number?: unknown }).number == null
+                ) {
+                  (a.create as { number: number }).number =
+                    await allocateNextNumber(model as Prisma.ModelName, orgId);
+                }
               }
               if (a.update) {
                 a.update = deepInjectOrgId(a.update, orgId) as Record<
@@ -359,6 +444,35 @@ function extend(base: typeof prismaBase = prismaBase) {
             default:
               break;
           }
+
+          if (
+            numbered &&
+            (operation === "create" ||
+              operation === "createMany" ||
+              operation === "createManyAndReturn" ||
+              operation === "upsert")
+          ) {
+            let lastErr: unknown;
+            for (let attempt = 0; attempt < 5; attempt++) {
+              try {
+                return await query(a);
+              } catch (err) {
+                lastErr = err;
+                if (!isNumberUniqueViolation(err)) throw err;
+                if (operation === "create" && a.data) {
+                  (a.data as { number: number }).number =
+                    await allocateNextNumber(model as Prisma.ModelName, orgId);
+                } else if (operation === "upsert" && a.create) {
+                  (a.create as { number: number }).number =
+                    await allocateNextNumber(model as Prisma.ModelName, orgId);
+                } else {
+                  throw err;
+                }
+              }
+            }
+            throw lastErr;
+          }
+
           return query(a);
         },
       },
