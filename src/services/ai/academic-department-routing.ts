@@ -4,8 +4,8 @@
  */
 
 import { executeDistribution } from "@/services/distribution";
+import { createConversationEvent } from "@/services/conversation-events";
 import { prisma } from "@/lib/prisma";
-import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { ACADEMIC_DEPARTMENT_ALIASES } from "@/lib/ai-agents/academic-atendimento-prompt";
 import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
 
@@ -570,7 +570,7 @@ export async function executeAcademicDepartmentHandoff(args: {
     reassign: true,
   });
 
-  // Nota interna: distingue atribuído de verdade vs só enfileirado.
+  // Evento de timeline (não é nota): distingue atribuído vs enfileirado.
   const selectedUserId =
     distribution?.success && distribution.selectedUserId
       ? distribution.selectedUserId
@@ -583,41 +583,23 @@ export async function executeAcademicDepartmentHandoff(args: {
     : null;
   const selectedIsHuman = selectedUser?.type === "HUMAN";
   const deptLabel = dept?.name ?? "atendimento";
-  const noteContent = selectedIsHuman
+  const eventText = selectedIsHuman
     ? `Conversa distribuída para ${deptLabel}` +
       (selectedUser?.name ? ` → ${selectedUser.name}` : "")
     : `Conversa enfileirada para ${deptLabel} — aguardando consultor elegível` +
       (distribution?.reason ? ` (${distribution.reason})` : "");
-  const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000);
-  const existingNote = await prisma.message.findFirst({
-    where: {
-      conversationId: args.conversationId,
-      messageType: "note",
-      isPrivate: true,
-      OR: [
-        { content: { startsWith: "Conversa distribuída para" } },
-        { content: { startsWith: "Conversa enfileirada para" } },
-      ],
-      createdAt: { gte: twoMinutesAgo },
-    },
-    select: { id: true },
-  });
-  if (!existingNote) {
-    await prisma.message
-      .create({
-        data: withOrgFromCtx({
-          conversationId: args.conversationId,
-          content: noteContent,
-          messageType: "note",
-          isPrivate: true,
-          authorType: "bot",
-          direction: "out",
-          senderName: "Agente IA",
-          sendStatus: "sent",
-        }),
-      })
-      .catch(() => null);
-  }
+  await createConversationEvent({
+    conversationId: args.conversationId,
+    action: "distribuicao",
+    text: eventText,
+    actor: "Agente IA",
+    authorType: "bot",
+    dedupeStartsWith: [
+      "Conversa distribuída para",
+      "Conversa enfileirada para",
+    ],
+    dedupeWindowMs: 2 * 60 * 1000,
+  }).catch(() => null);
 
   // Consultor humano atribuído → funil operacional "Em Atendimento".
   if (selectedIsHuman) {

@@ -62,7 +62,7 @@ function normalizeDeptName(name: string): string {
  * Resolve departamento do log com prioridade:
  * 1) snapshot no próprio DistributionLog
  * 2) Conversation.departmentId atual
- * 3) nota interna "Conversa distribuída para {Dept}"
+ * 3) log de handoff "Conversa distribuída para {Dept}" (nota legada ou event)
  * 4) (sucesso) único departamento acadêmico do consultor selecionado
  */
 async function resolveDepartmentsForLogs(
@@ -152,9 +152,13 @@ async function resolveDepartmentsForLogs(
       ? await prisma.message.findMany({
           where: {
             conversationId: { in: noteConvIds },
-            messageType: "note",
             isPrivate: true,
             content: { startsWith: NOTE_DEPT_PREFIX },
+            OR: [
+              { messageType: "note" },
+              { messageType: "event" },
+              { messageType: { startsWith: "event:" } },
+            ],
           },
           orderBy: { createdAt: "desc" },
           select: { conversationId: true, content: true },

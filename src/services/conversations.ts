@@ -220,6 +220,7 @@ async function lastMessagePreviewsBatch(
         'whatsapp_call',
         'whatsapp_call_recording'
       )
+      AND "messageType" NOT LIKE 'event%'
       AND direction IN ('in', 'out')
     ORDER BY "conversationId", "createdAt" DESC
   `;

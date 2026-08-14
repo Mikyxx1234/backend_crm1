@@ -1796,6 +1796,7 @@ async function computeBoardData(
                 'whatsapp_call',
                 'whatsapp_call_recording'
               )
+              AND m."messageType" NOT LIKE 'event%'
               AND m.direction IN ('in', 'out')
             ORDER BY c."contactId", m."createdAt" DESC
           )
