@@ -22,6 +22,7 @@ export const CONVERSATION_EVENT_ACTIONS = [
   "entrada",
   "saida",
   "ia",
+  "template",
 ] as const;
 
 export type ConversationEventAction =
