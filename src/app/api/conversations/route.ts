@@ -110,6 +110,11 @@ export async function GET(request: Request) {
         sessionExpiresWithinHours !== undefined
           ? await findSessionExpiringConversationIds(sessionExpiresWithinHours)
           : undefined;
+      const windowStateRaw = searchParams.get("windowState");
+      const windowState =
+        windowStateRaw === "open" || windowStateRaw === "closed"
+          ? windowStateRaw
+          : undefined;
 
       const filterConditions = buildInboxFilterConditions({
         contactId,
@@ -125,6 +130,7 @@ export async function GET(request: Request) {
         withoutSource,
         sessionExpiresWithinHours,
         sessionExpiringConversationIds,
+        windowState,
       });
 
       if (searchParams.get("counts") === "1") {
@@ -239,6 +245,7 @@ export async function GET(request: Request) {
         allowedChannelIds,
         sessionExpiresWithinHours,
         sessionExpiringConversationIds,
+        windowState,
       });
 
       return NextResponse.json(result);
