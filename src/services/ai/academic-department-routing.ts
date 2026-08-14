@@ -4,10 +4,7 @@
  */
 
 import { executeDistribution } from "@/services/distribution";
-import {
-  createConversationEvent,
-  queueWaitingConsultantText,
-} from "@/services/conversation-events";
+import { createConversationEvent } from "@/services/conversation-events";
 import { prisma } from "@/lib/prisma";
 import { ACADEMIC_DEPARTMENT_ALIASES } from "@/lib/ai-agents/academic-atendimento-prompt";
 import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
@@ -573,7 +570,8 @@ export async function executeAcademicDepartmentHandoff(args: {
     reassign: true,
   });
 
-  // Evento de timeline (não é nota): distingue atribuído vs enfileirado.
+  // Evento de timeline só na atribuição. Fila sem elegível não gera
+  // evento — o sweeper reprocessa e spamava o chat.
   const selectedUserId =
     distribution?.success && distribution.selectedUserId
       ? distribution.selectedUserId
@@ -586,24 +584,19 @@ export async function executeAcademicDepartmentHandoff(args: {
     : null;
   const selectedIsHuman = selectedUser?.type === "HUMAN";
   const deptLabel = dept?.name ?? "atendimento";
-  const eventText = selectedIsHuman
-    ? `Conversa distribuída para ${deptLabel}` +
-      (selectedUser?.name ? ` → ${selectedUser.name}` : "")
-    : queueWaitingConsultantText(dept?.name);
-  await createConversationEvent({
-    conversationId: args.conversationId,
-    action: "distribuicao",
-    text: eventText,
-    actor: "Agente IA",
-    authorType: "bot",
-    dedupeStartsWith: [
-      "Conversa distribuída para",
-      "Conversa enfileirada",
-      "Enfileirada em",
-      "Enfileirada —",
-    ],
-    dedupeWindowMs: 2 * 60 * 1000,
-  }).catch(() => null);
+  if (selectedIsHuman) {
+    await createConversationEvent({
+      conversationId: args.conversationId,
+      action: "distribuicao",
+      text:
+        `Conversa distribuída para ${deptLabel}` +
+        (selectedUser?.name ? ` → ${selectedUser.name}` : ""),
+      actor: "Agente IA",
+      authorType: "bot",
+      dedupeStartsWith: ["Conversa distribuída para"],
+      dedupeWindowMs: 2 * 60 * 1000,
+    }).catch(() => null);
+  }
 
   // Consultor humano atribuído → funil operacional "Em Atendimento".
   if (selectedIsHuman) {
