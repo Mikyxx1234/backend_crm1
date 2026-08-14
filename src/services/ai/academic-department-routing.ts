@@ -4,7 +4,10 @@
  */
 
 import { executeDistribution } from "@/services/distribution";
-import { createConversationEvent } from "@/services/conversation-events";
+import {
+  createConversationEvent,
+  queueWaitingConsultantText,
+} from "@/services/conversation-events";
 import { prisma } from "@/lib/prisma";
 import { ACADEMIC_DEPARTMENT_ALIASES } from "@/lib/ai-agents/academic-atendimento-prompt";
 import { userWantsHumanDistribution } from "@/services/ai/human-queue-policy";
@@ -586,7 +589,7 @@ export async function executeAcademicDepartmentHandoff(args: {
   const eventText = selectedIsHuman
     ? `Conversa distribuída para ${deptLabel}` +
       (selectedUser?.name ? ` → ${selectedUser.name}` : "")
-    : `Enfileirada em ${deptLabel} — sem consultor elegível`;
+    : queueWaitingConsultantText(dept?.name);
   await createConversationEvent({
     conversationId: args.conversationId,
     action: "distribuicao",
@@ -597,6 +600,7 @@ export async function executeAcademicDepartmentHandoff(args: {
       "Conversa distribuída para",
       "Conversa enfileirada",
       "Enfileirada em",
+      "Enfileirada —",
     ],
     dedupeWindowMs: 2 * 60 * 1000,
   }).catch(() => null);

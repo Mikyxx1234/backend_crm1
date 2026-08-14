@@ -45,14 +45,30 @@ export function isEventMessageType(
   );
 }
 
-/** Remove códigos SCREAMING_SNAKE do texto do chat. Motivo fica no meta/logs. */
+/** Texto curto do evento de fila. Motivo técnico fica no meta/logs. */
+export function queueWaitingConsultantText(
+  departmentName?: string | null,
+): string {
+  const dept = (departmentName ?? "").trim();
+  return dept
+    ? `Enfileirada em ${dept} — sem consultor elegível`
+    : "Enfileirada — sem consultor elegível";
+}
+
+/** Remove códigos SCREAMING_SNAKE e encurta copy legado de fila. */
 function stripReasonCodesFromChatText(text: string): string {
-  return text
+  let t = text
     .replace(/\s*\([A-Z][A-Z0-9]*(_[A-Z0-9]+)+\)/g, "")
     .replace(/\s+[A-Z][A-Z0-9]*(_[A-Z0-9]+)+(?=\s|$)/g, "")
+    .replace(/^Conversa enfileirada para\s+/i, "Enfileirada em ")
+    .replace(/aguardando consultor elegível/gi, "sem consultor elegível")
     .replace(/\s{2,}/g, " ")
     .replace(/\s+[—–-]\s*$/g, "")
     .trim();
+  if (/^aguardando consultor/i.test(t) || /^sem consultor elegível$/i.test(t)) {
+    return "Enfileirada — sem consultor elegível";
+  }
+  return t;
 }
 
 export async function createConversationEvent(args: {
