@@ -750,6 +750,7 @@ export async function getConversations(
   total: number;
   page: number;
   perPage: number;
+  hasMore: boolean;
 }> {
   params = await withResolvedSessionFilter(params);
   const page = Math.max(1, params.page ?? 1);
@@ -821,9 +822,11 @@ export async function getConversations(
   }
 
   const pageIds = repIds.slice(skip, skip + perPage);
-  // Total EXATO — o mesmo COUNT das badges (`countConversationsLikeList`).
-  // O sentinela `skip+perPage+1` fazia a 1ª página (25) reportar total=26
-  // enquanto o badge Erro mostrava 233: "25 de 25" + "selecionar todas as 26".
+  // hasMore vem do scan +1 — NÃO do total. O sentinela `skip+perPage+1`
+  // nunca pode ser o total exibido (1ª página = 26 vs badge 421).
+  const hasMore = repIds.length > skip + perPage || (!exhausted && scanned >= HARD_CAP);
+  // Total EXATO — o mesmo COUNT das badges (`countConversationsLikeList`),
+  // em TODAS as abas (Entrada, Automação, Erro, …).
   const [total, hydrated] = await Promise.all([
     countConversationsLikeList(
       Object.keys(where).length > 0 ? [where] : [],
@@ -874,7 +877,7 @@ export async function getConversations(
     };
   });
 
-  return { items, total, page, perPage };
+  return { items, total, page, perPage, hasMore };
 }
 
 /** Lista só categorias (exclui "todos") — contagens por aba e grants. */
