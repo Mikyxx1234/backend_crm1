@@ -909,6 +909,13 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
   const listReply = obj(inter.list_reply);
   let interactiveButtonId = str(btnReply.id) || str(listReply.id) || null;
   let interactiveButtonTitle = str(btnReply.title) || str(listReply.title) || null;
+  // list_reply traz title + description; o WhatsApp mostra os dois. Sem a
+  // description o CRM gravava só o título (ex.: "Operador de Loja").
+  const listReplyDescription = str(listReply.description);
+  const interactiveDisplay =
+    interactiveButtonTitle && listReplyDescription
+      ? `${interactiveButtonTitle}\n${listReplyDescription}`
+      : interactiveButtonTitle || listReplyDescription || null;
 
   let cpr = obj(inter.call_permission_reply);
   if (Object.keys(cpr).length === 0) cpr = obj(inter.call_permission);
@@ -1041,7 +1048,7 @@ function parseInteractiveBlock(inter: Record<string, unknown>): {
   }
 
   let text =
-    interactiveButtonTitle ||
+    interactiveDisplay ||
     fromCallPermission ||
     fromNfm ||
     fromFlow ||

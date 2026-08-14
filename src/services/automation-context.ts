@@ -146,6 +146,7 @@ export function matchInteractiveOption(
   interactiveId?: string | null,
 ): InteractiveOption | undefined {
   const normalized = messageContent.trim().toLowerCase();
+  const firstLine = normalized.split(/\r?\n/, 1)[0]?.trim() ?? normalized;
   const idNorm = (interactiveId ?? "").trim().toLowerCase();
   return options.find((b, idx) => {
     const label = (b.title || b.text || "").trim().toLowerCase();
@@ -154,7 +155,7 @@ export function matchInteractiveOption(
     const effectiveRowId = (btnId || `row_${idx}`).toLowerCase();
     const effectiveBtnId = (btnId || `btn_${idx}`).toLowerCase();
     return (
-      (label && label === normalized) ||
+      (label && (label === normalized || label === firstLine)) ||
       (btnId && btnId === normalized) ||
       (idNorm && btnId && btnId === idNorm) ||
       (idNorm && (idNorm === effectiveRowId || idNorm === effectiveBtnId)) ||
