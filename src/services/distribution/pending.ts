@@ -6,8 +6,10 @@
  * critério da aba Entrada do inbox. A drenagem automática passa por
  * `processPendingDistributionQueue` (gatilhos: novo item, agente online,
  * elegibilidade, capacidade liberada, botão manual, cron de segurança).
- * A drenagem é **por departamento**: quem fica elegível só abre a fila
- * dos seus depts (FIFO + capacidade livre); outros depts permanecem na espera.
+ * A drenagem é **por departamento** (FIFO + capacidade). Quem fica
+ * elegível abre a fila dos seus depts; o reprocesso manual/cron também
+ * tenta os depts que já têm gente na espera — o motor decide se o
+ * pool é o depto ou org-wide (`respectDepartment`).
  *
  * Import unidirecional: pending → engine (evita ciclo de import).
  * O engine agenda drenagem via import dinâmico.
@@ -15,6 +17,7 @@
 
 import { Prisma } from "@prisma/client";
 
+import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import {
   getOrgIdOrNull,
@@ -28,10 +31,11 @@ import {
   isAssigneeCurrentlyEligible,
 } from "@/services/distribution/assignee-eligibility";
 
-import { WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
-
 import { executeDistribution } from "./engine";
-import { getDistributionResponsibles } from "./responsibles";
+import {
+  getDistributionResponsibles,
+  type DistributionResponsibleView,
+} from "./responsibles";
 
 export interface PendingDistributionView {
   id: string;
@@ -189,6 +193,10 @@ export interface RetryResult {
   cancelled: number;
   pending: number;
   trigger?: PendingQueueTrigger;
+  /** Código estável para o toast (ex.: NO_ELIGIBLE_IN_DEPARTMENT). */
+  skipReason?: string | null;
+  /** Mensagem pronta para o operador — por que a fila não andou. */
+  skipMessage?: string | null;
 }
 
 export type PendingQueueTrigger =
@@ -284,6 +292,105 @@ function hasRemainingCapacityInScope(
   return eligibleInDeptScope(eligible, deptId).some(
     (r) => liveFreeCapacityForUser(r, assignedDeltaByUser) > 0,
   );
+}
+
+function uniqueDeptNames(names: string[]): string {
+  const uniq = Array.from(new Set(names.filter(Boolean)));
+  if (uniq.length === 0) return "";
+  if (uniq.length === 1) return uniq[0]!;
+  if (uniq.length === 2) return `${uniq[0]} e ${uniq[1]}`;
+  return `${uniq.slice(0, 2).join(", ")} e mais ${uniq.length - 2}`;
+}
+
+/**
+ * Por que o reprocesso não atribuiu ninguém, mesmo com elegíveis no KPI.
+ * O KPI é org-wide; a fila pode ser de um depto sem nenhum desses elegíveis.
+ */
+async function explainEmptyDrain(opts: {
+  eligible: DistributionResponsibleView[];
+  pendingCount: number;
+}): Promise<{ skipReason: string; skipMessage: string }> {
+  const n = opts.eligible.length;
+  if (n === 0) {
+    return {
+      skipReason: "NO_ELIGIBLE_RESPONSIBLE",
+      skipMessage: "Ainda não há responsável elegível para a fila.",
+    };
+  }
+  if (opts.pendingCount <= 0) {
+    return {
+      skipReason: "EMPTY_QUEUE",
+      skipMessage: "Fila de espera vazia.",
+    };
+  }
+
+  const waiting = await prisma.conversation.findMany({
+    where: ABERTA_SEM_RESPONSAVEL,
+    select: {
+      departmentId: true,
+      department: { select: { name: true, distributionEnabled: true } },
+    },
+    take: 500,
+  });
+
+  const byDept = new Map<
+    string,
+    { name: string; enabled: boolean | null }
+  >();
+  for (const c of waiting) {
+    if (!c.departmentId) continue;
+    if (byDept.has(c.departmentId)) continue;
+    byDept.set(c.departmentId, {
+      name: c.department?.name ?? "Departamento",
+      enabled: c.department?.distributionEnabled ?? null,
+    });
+  }
+
+  const unmatchedNames: string[] = [];
+  const disabledNames: string[] = [];
+  for (const [deptId, info] of byDept) {
+    const inDept = opts.eligible.some((r) =>
+      r.departments.some((d) => d.id === deptId),
+    );
+    if (!inDept) unmatchedNames.push(info.name);
+    if (info.enabled === false) disabledNames.push(info.name);
+  }
+
+  const respectDepartment = await getOrgSettingBool(
+    "distribution.respectDepartment",
+    false,
+  );
+
+  if (respectDepartment && unmatchedNames.length > 0) {
+    const label = uniqueDeptNames(unmatchedNames);
+    return {
+      skipReason: "NO_ELIGIBLE_IN_DEPARTMENT",
+      skipMessage: `Há ${n} elegíveis, mas nenhum no departamento ${label}.`,
+    };
+  }
+
+  if (respectDepartment && disabledNames.length > 0) {
+    const label = uniqueDeptNames(disabledNames);
+    return {
+      skipReason: "NO_DEPARTMENT",
+      skipMessage: `O departamento ${label} não está com distribuição automática habilitada.`,
+    };
+  }
+
+  const anyCap = opts.eligible.some(
+    (r) => liveFreeCapacityForUser(r, new Map()) > 0,
+  );
+  if (!anyCap) {
+    return {
+      skipReason: "QUEUE_LIMIT_REACHED",
+      skipMessage: `Há ${n} elegíveis, mas todos estão no limite da fila.`,
+    };
+  }
+
+  return {
+    skipReason: "NO_MATCH",
+    skipMessage: `Há ${n} elegíveis, mas nenhum pode receber os atendimentos da fila (departamento, capacidade ou horário).`,
+  };
 }
 
 /**
@@ -615,12 +722,15 @@ export async function maybeDistributeNewInboundTicket(input: {
  *
  * Regra: drena **por departamento** — nunca mistura filas de depts diferentes
  * num lote global. Com `userId` (agent_online / agent_eligible), só os depts
- * dessa pessoa; sem `userId` (cron / manual / capacity), todos os depts que
- * tenham pelo menos 1 humano elegível agora.
+ * dessa pessoa. Sem `userId` (cron / manual / capacity), todos os depts da
+ * fila de espera + os depts dos elegíveis — o motor aplica a fronteira
+ * (`respectDepartment`). Sem isso, tickets de Acolhimento ficavam presos
+ * enquanto o KPI mostrava elegíveis de outros depts.
  *
  * Dentro de cada dept: FIFO (mais antigos primeiro) com teto = capacidade
- * livre agregada dos elegíveis daquele dept. Capacidade é **global por
- * consultor** (não multiplica por dept); atribuições desta passagem entram
+ * livre. Se o depto não tem membro elegível, usa a capacidade org-wide só
+ * para puxar o lote; `executeDistribution` decide se atribui.
+ * Capacidade é **global por consultor**; atribuições desta passagem entram
  * no delta antes de abrir o próximo bucket.
  */
 export async function processPendingDistributionQueue(opts: {
@@ -635,6 +745,21 @@ export async function processPendingDistributionQueue(opts: {
 
   const state = getDrainState(orgId);
   if (state.running) {
+    const pending = await prisma.conversation.count({
+      where: ABERTA_SEM_RESPONSAVEL,
+    });
+    // Manual: não mente "ninguém elegível" — a drenagem já está no ar.
+    if (opts.trigger === "manual") {
+      return {
+        resolved: 0,
+        cancelled: 0,
+        pending,
+        trigger: opts.trigger,
+        skipReason: "ALREADY_RUNNING",
+        skipMessage:
+          "A fila já está sendo reprocessada. Tente de novo em instantes.",
+      };
+    }
     // Coalesca: marca para re-rodar ao terminar.
     // 2º evento enquanto roda → amplia (todos os depts com elegível),
     // para não perder o dept de outro consultor que ficou elegível.
@@ -644,9 +769,6 @@ export async function processPendingDistributionQueue(opts: {
       state.queuedUserId = opts.userId ?? null;
     }
     state.queuedTrigger = opts.trigger;
-    const pending = await prisma.conversation.count({
-      where: ABERTA_SEM_RESPONSAVEL,
-    });
     return { resolved: 0, cancelled: 0, pending, trigger: opts.trigger };
   }
 
@@ -711,6 +833,8 @@ export async function processPendingDistributionQueue(opts: {
         cancelled: cancelledOrphans,
         pending,
         trigger: opts.trigger,
+        skipReason: "NO_ELIGIBLE_RESPONSIBLE",
+        skipMessage: "Ainda não há responsável elegível para a fila.",
       };
     }
 
@@ -750,6 +874,15 @@ export async function processPendingDistributionQueue(opts: {
       for (const r of eligible) {
         for (const d of r.departments) deptSet.add(d.id);
       }
+      // Também drena depts que JÁ têm gente na espera — senão Acolhimento
+      // (ou qualquer depto sem membro no KPI) nunca é tentado.
+      const waitingDepts = await prisma.conversation.findMany({
+        where: ABERTA_SEM_RESPONSAVEL,
+        select: { departmentId: true },
+      });
+      for (const w of waitingDepts) {
+        if (w.departmentId) deptSet.add(w.departmentId);
+      }
       targetDeptIds = Array.from(deptSet);
       includeOrgWide = true;
     }
@@ -760,10 +893,15 @@ export async function processPendingDistributionQueue(opts: {
     const assignedDeltaByUser = new Map<string, number>();
 
     const drainBucket = async (departmentId: string | null) => {
+      // Sem membro elegível neste depto: ainda puxa o lote com capacidade
+      // org-wide. O motor aplica respectDepartment (atribui ou recusa).
+      const inDept = eligibleInDeptScope(eligible, departmentId);
+      const capDeptId = inDept.length > 0 ? departmentId : null;
+
       if (
         !hasRemainingCapacityInScope(
           eligible,
-          departmentId,
+          capDeptId,
           assignedDeltaByUser,
         )
       ) {
@@ -772,7 +910,7 @@ export async function processPendingDistributionQueue(opts: {
 
       let take = takeLimitForDept(
         eligible,
-        departmentId,
+        capDeptId,
         assignedDeltaByUser,
       );
 
@@ -781,6 +919,7 @@ export async function processPendingDistributionQueue(opts: {
       // Também drena conversas ainda na IA com DistributionPending PENDING
       // (handoff noturno: a IA reassumiu para continuar o atendimento, mas
       // o lead precisa ir ao humano quando alguém ficar elegível).
+      // Tag "Agente IA" / assignee AI NÃO bloqueia reprocesso humano.
       const pendingOwnedByAi = await prisma.distributionPending.findMany({
         where: {
           organizationId: orgId,
@@ -794,13 +933,12 @@ export async function processPendingDistributionQueue(opts: {
         .map((p) => p.conversationId)
         .filter((id): id is string => Boolean(id));
 
-      // Só drena quem ainda tem janela Meta aberta. Ticket com inbound antigo
-      // (ex.: após HSM de campanha zerar dono) não deve redistribuir + saudar.
-      const sessionOpenSince = new Date(Date.now() - WHATSAPP_SESSION_WINDOW_MS);
+      // Mesmo critério da aba Fila: inbound real do aluno. A janela Meta 24h
+      // só barra a saudação no motor — não pode esconder o ticket da drenagem.
       const items = await prisma.conversation.findMany({
         where: {
           status: "OPEN",
-          lastInboundAt: { gte: sessionOpenSince },
+          lastInboundAt: { not: null },
           departmentId: departmentId === null ? null : departmentId,
           OR: [
             { assignedToId: null },
@@ -922,6 +1060,17 @@ export async function processPendingDistributionQueue(opts: {
       where: ABERTA_SEM_RESPONSAVEL,
     });
 
+    let skipReason: string | null = null;
+    let skipMessage: string | null = null;
+    if (resolved === 0 && pending > 0) {
+      const explained = await explainEmptyDrain({
+        eligible,
+        pendingCount: pending,
+      });
+      skipReason = explained.skipReason;
+      skipMessage = explained.skipMessage;
+    }
+
     if (
       resolved > 0 ||
       cancelledOrphans > 0 ||
@@ -940,6 +1089,7 @@ export async function processPendingDistributionQueue(opts: {
           cancelledOrphans,
           pending,
           scanned,
+          skipReason,
         }),
       );
     }
@@ -949,6 +1099,8 @@ export async function processPendingDistributionQueue(opts: {
       cancelled: cancelledOrphans,
       pending,
       trigger: opts.trigger,
+      skipReason,
+      skipMessage,
     };
   } finally {
     state.running = false;

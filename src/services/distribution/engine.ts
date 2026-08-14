@@ -676,13 +676,19 @@ export async function executeDistribution(
     }
   }
 
-  // Pool explícito da automação (1+ departamentos no card) — força escopo
-  // mesmo com respectDepartment=false na org.
+  // Pool explícito da automação (departmentIds) — força escopo mesmo com
+  // respectDepartment=false. `departmentId` singular é contexto da conversa
+  // (log / estágio / hint do resolveDepartmentScope). Em SYSTEM (drenagem
+  // / reprocesso) NÃO força o pool: senão tickets de Acolhimento recusavam
+  // os elegíveis do KPI quando a org está em modo org-wide.
+  // Handoff AI_AGENT / MANUAL / AUTOMATION ainda força o depto pedido.
   const requestedDeptIds = Array.from(
     new Set(
       [
         ...(input.departmentIds ?? []),
-        ...(input.departmentId ? [input.departmentId] : []),
+        ...(input.departmentId && input.triggerSource !== "SYSTEM"
+          ? [input.departmentId]
+          : []),
       ].filter((id): id is string => typeof id === "string" && id.length > 0),
     ),
   );
