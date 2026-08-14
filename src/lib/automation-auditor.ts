@@ -107,6 +107,7 @@ function strOrEmpty(v: unknown): string {
  *  - nextStepId linear
  *  - condition.branches[].nextStepId + condition.elseStepId
  *  - business_hours.elseStepId (fora do horário)
+ *  - check_agent_status.elseStepId (agente offline)
  *  - wait_for_reply.receivedGotoStepId + timeoutGotoStepId
  *  - question/send_whatsapp_interactive.buttons[].gotoStepId + elseGotoStepId + timeoutGotoStepId
  *  - failureGotoStepId (saída "Falha ao enviar" dos passos Meta)
@@ -151,6 +152,11 @@ export function getStepOutgoing(step: StepLike): StepOutgoing {
     case "business_hours": {
       push("fora do horário", c.elseStepId);
       push("dentro do horário", c.nextStepId);
+      break;
+    }
+    case "check_agent_status": {
+      push("offline", c.elseStepId);
+      push("disponível", c.nextStepId);
       break;
     }
     case "wait_for_reply": {
@@ -350,7 +356,7 @@ export function auditAutomation(automation: AutomationLike): AuditReport {
     const isTerminal = TERMINAL_TYPES.has(step.type);
     const hasExplicitEdges = cfg.__hasExplicitEdges === true;
     const hasAnyOut = local.length > 0 || crossAutomation.length > 0;
-    const isLinearStep = !["condition", "wait_for_reply", "question", "send_whatsapp_interactive", "send_whatsapp_list", "business_hours", "goto"].includes(step.type);
+    const isLinearStep = !["condition", "wait_for_reply", "question", "send_whatsapp_interactive", "send_whatsapp_list", "business_hours", "check_agent_status", "goto"].includes(step.type);
     const nextId = strOrEmpty(cfg.nextStepId);
     const isDeadEndLinear = isLinearStep && hasExplicitEdges && !hasAnyOut && nextId !== NONE_ID && !isTerminal;
     if (isDeadEndLinear) {
@@ -531,6 +537,18 @@ export function auditAutomation(automation: AutomationLike): AuditReport {
           message: "Horário comercial sem ramo 'fora do horário' conectado.",
           stepId: step.id,
           hint: "Conecte o handle 'fora do horário' ou contatos que chegarem fora do expediente vão ter fluxo encerrado sem resposta.",
+        });
+      }
+    }
+
+    if (step.type === "check_agent_status") {
+      if (!strOrEmpty(cfg.elseStepId)) {
+        issues.push({
+          code: "check_agent_status_no_offline_branch",
+          severity: "warning",
+          message: "Status do agente sem ramo 'offline' conectado.",
+          stepId: step.id,
+          hint: "Conecte o handle 'offline' ou o fluxo encerra quando o responsável não estiver ONLINE.",
         });
       }
     }

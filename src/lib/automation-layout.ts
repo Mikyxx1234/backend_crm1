@@ -20,6 +20,7 @@ function estStepWidth(type: string): number {
     case "condition":
       return 300;
     case "business_hours":
+    case "check_agent_status":
       return 340;
     case "execute_distribution":
       return 300;
@@ -66,7 +67,7 @@ function outgoingTargets(step: AutomationStep, stepIds: Set<string>): string[] {
     return out;
   }
 
-  if (step.type === "business_hours") {
+  if (step.type === "business_hours" || step.type === "check_agent_status") {
     push(cfg.elseStepId);
   }
 

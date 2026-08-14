@@ -53,8 +53,8 @@ function setHandleTarget(
     return;
   }
   if (handle === "else") {
-    // business_hours usa elseStepId; demais usam elseGotoStepId
-    if (step.type === "business_hours") {
+    // business_hours / check_agent_status usam elseStepId; demais usam elseGotoStepId
+    if (step.type === "business_hours" || step.type === "check_agent_status") {
       cfg.elseStepId = targetStepId;
     } else if (step.type === "condition") {
       const cond = normalizeConditionConfig(step.config);
