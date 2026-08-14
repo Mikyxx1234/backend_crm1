@@ -27,8 +27,8 @@ name: Build & Deploy
 #
 # Setup no Easypanel (por serviço):
 #   Source: Docker Image
-#   Image:  ghcr.io/mikyxx1234/backend_crm1:latest   (prod)
-#           ghcr.io/mikyxx1234/backend_crm1:dev      (dev)
+#   Image:  ghcr.io/caiovpinheiro/backend_crm1:latest   (prod)
+#           ghcr.io/caiovpinheiro/backend_crm1:dev      (dev)
 #   Registry credentials: crie um GitHub PAT com escopo `read:packages` e
 #     cadastre em Easypanel -> Registries. (Se o pacote estiver public,
 #     nao precisa autenticar.)
@@ -51,7 +51,7 @@ concurrency:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: mikyxx1234/backend_crm1
+  IMAGE_NAME: caiovpinheiro/backend_crm1
 
 jobs:
   build-and-push:
