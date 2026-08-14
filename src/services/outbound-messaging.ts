@@ -32,8 +32,10 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { isBaileysChannel, sendWhatsAppText } from "@/lib/send-whatsapp";
 import { sseBus } from "@/lib/sse-bus";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
+import { formatHumanActorDisplayName } from "@/lib/human-actor-name";
 import { logEvent } from "@/services/activity-log";
 import { cancelActiveContextsForContact } from "@/services/automation-context";
+import { createConversationEvent } from "@/services/conversation-events";
 import { fireTrigger } from "@/services/automation-triggers";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
@@ -1234,6 +1236,29 @@ export async function sendTemplateToConversation(
   });
 
   publishNewMessage(conv, content, saved.createdAt);
+
+  const priorPublic = await prisma.message.count({
+    where: {
+      conversationId: conv.id,
+      isPrivate: false,
+      id: { not: saved.id },
+      NOT: [
+        { messageType: "note" },
+        { messageType: "event" },
+        { messageType: { startsWith: "event:" } },
+      ],
+    },
+  });
+  if (priorPublic === 0) {
+    const actor = formatHumanActorDisplayName(args.actor.name, args.actor.email) || "Agente";
+    void createConversationEvent({
+      conversationId: conv.id,
+      action: "template",
+      text: "Conversa iniciada por template",
+      actor,
+      actorUserId: args.actor.id,
+    });
+  }
 
   cancelPendingForConversation(conv.id, "agent_reply", args.actor.id).catch((err) =>
     console.warn("[scheduled-messages] falha ao cancelar apos envio de template:", err),
