@@ -50,6 +50,7 @@ import { fireTrigger, notifyDealStageChanged } from "@/services/automation-trigg
 import { updateContactScore } from "@/services/lead-scoring";
 import { executeDistribution } from "@/services/distribution";
 import { logEvent } from "@/services/activity-log";
+import { tabulationLogMeta } from "@/services/tabulations";
 import {
   createContext,
   advanceContext,
@@ -404,6 +405,8 @@ type ResolvedTabulation = {
   tabulationId: string;
   ancestorIds: string[];
   departmentId: string;
+  name: string;
+  number: number;
 };
 
 /**
@@ -427,13 +430,7 @@ function logTabulated(
     entityLabel: conv.externalId ?? null,
     conversationId: conv.id,
     contactId,
-    meta: {
-      tabulationId: tab.tabulationId,
-      ancestorIds: tab.ancestorIds,
-      departmentId: tab.departmentId,
-      source: "automation",
-      ...extraMeta,
-    },
+    meta: tabulationLogMeta(tab, { source: "automation", ...extraMeta }),
   });
 }
 
@@ -501,6 +498,8 @@ async function finishConversationsForContact(
         {
           tabulationId: autoTab.tabulationId,
           ancestorIds: autoTab.ancestorIds,
+          name: autoTab.name,
+          number: autoTab.number,
           // Sem escolha explícita, `autoTab` veio da árvore do próprio
           // departamento da conversa — os dois valores coincidem.
           departmentId: chosen ? chosen.departmentId : c.departmentId,

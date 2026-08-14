@@ -18,7 +18,7 @@ import { createDealEvent } from "@/services/deals";
 import { logEvent } from "@/services/activity-log";
 import { sseBus } from "@/lib/sse-bus";
 import { executeDistribution } from "@/services/distribution";
-import { assertLeafInDepartment, getAncestors } from "@/services/tabulations";
+import { assertLeafInDepartment, getAncestors, tabulationLogMeta } from "@/services/tabulations";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 
 async function resolveConversationAssignFlags(user: {
@@ -685,6 +685,8 @@ export async function POST(request: Request, context: RouteContext) {
       // arvore do dept) -> 400 (defesa; UI ja bloqueia o botao).
       let tabulationId: string | null = null;
       let tabulationAncestors: string[] = [];
+      let tabulationName: string | null = null;
+      let tabulationNumber: number | null = null;
       /** Departamento no momento do encerramento (antes do clearDepartment). */
       let resolvedDepartmentId: string | null = null;
       /** Tabulação gravada ANTES deste encerramento (detecta re-tabulação). */
@@ -724,7 +726,10 @@ export async function POST(request: Request, context: RouteContext) {
             );
           }
           try {
-            await assertLeafInDepartment(rawTab, dept.departmentId);
+            const leaf = await assertLeafInDepartment(rawTab, dept.departmentId);
+            tabulationId = leaf.id;
+            tabulationName = leaf.name;
+            tabulationNumber = leaf.number;
           } catch (e) {
             const code = (e as { code?: string }).code ?? "TABULATION_INVALID";
             return NextResponse.json(
@@ -732,7 +737,6 @@ export async function POST(request: Request, context: RouteContext) {
               { status: 400 },
             );
           }
-          tabulationId = rawTab;
           tabulationAncestors = await getAncestors(rawTab);
         }
       }
@@ -834,12 +838,24 @@ export async function POST(request: Request, context: RouteContext) {
             entityLabel: updated.externalId ?? null,
             conversationId: id,
             contactId: conv.contact?.id ?? null,
-            meta: {
-              tabulationId,
-              ancestorIds: tabulationAncestors,
-              departmentId: resolvedDepartmentId,
-              ...(retabulated ? { retabulated: true } : {}),
-            },
+            meta:
+              tabulationName != null && tabulationNumber != null
+                ? tabulationLogMeta(
+                    {
+                      tabulationId,
+                      ancestorIds: tabulationAncestors,
+                      departmentId: resolvedDepartmentId,
+                      name: tabulationName,
+                      number: tabulationNumber,
+                    },
+                    retabulated ? { retabulated: true } : undefined,
+                  )
+                : {
+                    tabulationId,
+                    ancestorIds: tabulationAncestors,
+                    departmentId: resolvedDepartmentId,
+                    ...(retabulated ? { retabulated: true } : {}),
+                  },
           });
         }
       }
