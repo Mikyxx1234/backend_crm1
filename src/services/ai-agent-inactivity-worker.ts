@@ -1,25 +1,16 @@
 /**
- * AI Agent Inactivity Worker — varre conversas atribuídas a agentes
- * de IA em que o cliente parou de responder por mais tempo do que
- * a config permite (`AIAgentConfig.inactivityTimerMs`). Quando o
- * limite estoura, o worker:
+ * AI Agent Inactivity Worker.
  *
- *   1. Envia a `inactivityFarewellMessage` (se houver).
- *   2. Executa o handoff conforme `inactivityHandoffMode`
- *      (KEEP_OWNER / SPECIFIC_USER / UNASSIGN).
+ * 1) Encerramento por silêncio (atendimento só da IA):
+ *    última mensagem da IA, aluno 1h sem responder, ninguém humano falou
+ *    → `closeAiOnlyConversation` (tabulação + Encerramento). Sem novo
+ *    WhatsApp — a janela 24h pode já ter caído. Default 1h; override
+ *    `AI_AGENT_IDLE_CLOSE_MS`. Opt-out: `AI_AGENT_IDLE_CLOSE_MS=0`.
  *
- * Critérios de elegibilidade (raw SQL pra ser barato):
- *   - `users.type = 'AI'`
- *   - `ai_agent_configs.active = true` e `inactivityTimerMs > 0`
- *   - `conversations.assignedToId = users.id`
- *   - `conversations.status = 'OPEN'`
- *   - `conversations.lastMessageDirection = 'out'` (agente falou por último)
- *   - `conversations.hasAgentReply = true`
- *   - `conversations.updatedAt < now() - inactivityTimerMs`
+ * 2) Handoff por inatividade (`inactivityTimerMs > 0`), só se já houve
+ *    reply humano. IA-only não vai pra fila de consultor.
  *
- * Mesmo padrão de bootstrap do `scheduled-messages-worker`: in-process,
- * opt-out via env `AI_AGENT_INACTIVITY_WORKER=0`. Intervalo default
- * de 60s (mais barato e o timer é em minutos de qualquer forma).
+ * Opt-out do worker inteiro: `AI_AGENT_INACTIVITY_WORKER=0`.
  */
 
 import { prisma } from "@/lib/prisma";
@@ -32,6 +23,7 @@ import {
   renderTemplate,
   type HandoffMode,
 } from "@/lib/ai-agents/piloting";
+import { closeAiOnlyConversation } from "@/services/ai/academic-closure";
 import {
   executeAgentHandoff,
   sendAgentMessage,
@@ -39,6 +31,15 @@ import {
 
 const INTERVAL_MS = Number(process.env.AI_AGENT_INACTIVITY_INTERVAL_MS) || 60_000;
 const BATCH_SIZE = 50;
+/** 1 hora sem retorno do aluno → encerra ticket só-IA. */
+const DEFAULT_IDLE_CLOSE_MS = 60 * 60 * 1000;
+
+function idleCloseMs(): number {
+  const raw = process.env.AI_AGENT_IDLE_CLOSE_MS;
+  if (raw === undefined || raw === "") return DEFAULT_IDLE_CLOSE_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT_IDLE_CLOSE_MS;
+}
 
 let started = false;
 
@@ -68,7 +69,7 @@ export function startAIAgentInactivityWorker() {
   }, 20_000);
 
   console.info(
-    `[ai-inactivity] worker iniciado (tick=${INTERVAL_MS}ms)`,
+    `[ai-inactivity] worker iniciado (tick=${INTERVAL_MS}ms, idleCloseMs=${idleCloseMs()})`,
   );
 }
 
@@ -87,7 +88,62 @@ type ExpiredRow = {
   organization_id: string;
 };
 
+type IdleCloseRow = {
+  conversation_id: string;
+  contact_id: string | null;
+  organization_id: string;
+};
+
+async function closeIdleAiOnly(now: Date): Promise<number> {
+  const ms = idleCloseMs();
+  if (ms <= 0) return 0;
+
+  const rows = await prismaBase.$queryRaw<IdleCloseRow[]>`
+    SELECT
+      c.id AS conversation_id,
+      c."contactId" AS contact_id,
+      c."organizationId" AS organization_id
+    FROM "conversations" c
+    JOIN "users" u ON u.id = c."assignedToId"
+    JOIN "ai_agent_configs" a ON a."userId" = u.id
+    WHERE u.type = 'AI'
+      AND a.active = true
+      AND c.status = 'OPEN'
+      AND c."hasHumanReply" = false
+      AND c."lastMessageDirection" = 'out'
+      AND c."hasAgentReply" = true
+      AND c."updatedAt" < (${now}::timestamptz - ((${ms})::text || ' milliseconds')::interval)
+    ORDER BY c."updatedAt" ASC
+    LIMIT ${BATCH_SIZE};
+  `;
+
+  let closed = 0;
+  for (const row of rows) {
+    try {
+      const result = await withSystemContext(row.organization_id, () =>
+        closeAiOnlyConversation({
+          conversationId: row.conversation_id,
+          contactId: row.contact_id,
+          reason: `IA: aluno ${Math.round(ms / 60_000)} min sem responder`,
+        }),
+      );
+      if (result.closed) closed++;
+    } catch (err) {
+      console.error(
+        `[ai-inactivity] falha encerrando conv=${row.conversation_id}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  }
+  if (closed > 0) {
+    console.info(`[ai-inactivity] tick — encerradas por silêncio=${closed}`);
+  }
+  return closed;
+}
+
 export async function tickOnce(now: Date = new Date()) {
+  const closed = await closeIdleAiOnly(now);
+
   // Worker cross-tenant: varre TODAS as orgs. Usa prismaBase para que
   // o extension nao tente escopar ou exigir RequestContext. O JOIN
   // traz conversations.organizationId para montar withSystemContext
@@ -113,14 +169,13 @@ export async function tickOnce(now: Date = new Date()) {
       AND a.active = true
       AND a."inactivityTimerMs" > 0
       AND c.status = 'OPEN'
+      AND c."hasHumanReply" = true
       AND c."lastMessageDirection" = 'out'
       AND c."hasAgentReply" = true
       AND c."updatedAt" < (${now}::timestamptz - (a."inactivityTimerMs" || ' ms')::interval)
     ORDER BY c."updatedAt" ASC
     LIMIT ${BATCH_SIZE};
   `;
-
-  if (rows.length === 0) return { processed: 0 };
 
   let handed = 0;
   for (const row of rows) {
@@ -137,7 +192,7 @@ export async function tickOnce(now: Date = new Date()) {
   if (handed > 0) {
     console.info(`[ai-inactivity] tick concluído — transferidas=${handed}`);
   }
-  return { processed: rows.length, handed };
+  return { processed: rows.length, handed, closed };
 }
 
 async function dispatchOne(row: ExpiredRow) {
