@@ -520,6 +520,21 @@ export async function GET(request: Request, context: RouteContext) {
         });
         historical.push(...mapRows(ticket.rows));
       }
+      // Quem abriu o ticket atual (CONVERSATION_CREATED). Sem ator
+      // humano no log, cai no assignedTo humano — não inventa "Agente".
+      const createdEv = await prisma.activityEvent
+        .findFirst({
+          where: { conversationId: conv.id, type: "CONVERSATION_CREATED" },
+          orderBy: { occurredAt: "asc" },
+          select: { actorUserId: true, actorLabel: true },
+        })
+        .catch(() => null);
+      const assignedHuman =
+        conv.assignedTo?.type === "HUMAN" ? conv.assignedTo : null;
+      const openedByName =
+        (createdEv?.actorLabel ?? "").trim() || assignedHuman?.name || null;
+      const openedByUserId = createdEv?.actorUserId ?? assignedHuman?.id ?? null;
+
       // Separador do ticket atual (só se houver histórico).
       historical.push({
         id: `__ticket_sep_${conv.id}`,
@@ -527,6 +542,9 @@ export async function GET(request: Request, context: RouteContext) {
           number: conv.number,
           closedAt: null,
           isCurrent: true,
+          openedAt: conv.createdAt?.toISOString?.() ?? null,
+          openedByName,
+          openedByUserId,
         }),
         createdAt: null,
         direction: "system",

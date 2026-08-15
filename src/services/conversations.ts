@@ -1345,7 +1345,10 @@ export async function getConversationLite(idOrNumber: string) {
       id: true, externalId: true, contactId: true, status: true,
       channel: true, channelId: true, waJid: true, organizationId: true,
       number: true,
+      createdAt: true,
       lastInboundAt: true,
+      assignedToId: true,
+      assignedTo: { select: { id: true, name: true, type: true } },
       pinnedNoteId: true,
       channelRef: {
         select: {
