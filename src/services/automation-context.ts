@@ -166,6 +166,65 @@ export function matchInteractiveOption(
   });
 }
 
+const GENERIC_BTN_ID = /^(btn|row)_\d+$/i;
+
+function optionLabel(b: InteractiveOption): string {
+  return (b.title || b.text || "").trim().toLowerCase();
+}
+
+/** Meta corta título de botão interativo em 20 chars — compara nessa janela. */
+function titlesEquivalent(a: string, b: string): boolean {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  return a.slice(0, 20) === b.slice(0, 20);
+}
+
+export function buttonsFromStepConfig(config: unknown): InteractiveOption[] {
+  if (!config || typeof config !== "object") return [];
+  const cfg = config as Record<string, unknown>;
+  const fromButtons = Array.isArray(cfg.buttons) ? (cfg.buttons as InteractiveOption[]) : [];
+  const fromRows = Array.isArray(cfg.rows) ? (cfg.rows as InteractiveOption[]) : [];
+  return fromButtons.length > 0 ? fromButtons : fromRows;
+}
+
+/**
+ * WhatsApp não desativa botões de mensagens anteriores. O aluno clica
+ * "Receber dados de acesso" do welcome enquanto o robô espera o menu do
+ * curso — o passo atual não casa e o else pede "clique numa opção".
+ *
+ * Procura o botão no resto da automação: id explícito (não btn_N genérico)
+ * ou título único. Título repetido sem id distintivo não adivinha.
+ */
+export function matchStaleInteractiveOption(
+  steps: { id: string; config: unknown }[],
+  currentStepId: string,
+  messageContent: string,
+  interactiveId?: string | null,
+): InteractiveOption | undefined {
+  const catalog: InteractiveOption[] = [];
+  for (const step of steps) {
+    if (step.id === currentStepId) continue;
+    catalog.push(...buttonsFromStepConfig(step.config));
+  }
+  if (catalog.length === 0) return undefined;
+
+  const idNorm = (interactiveId ?? "").trim().toLowerCase();
+  if (idNorm && !GENERIC_BTN_ID.test(idNorm)) {
+    const byId = catalog.filter((b) => (b.id || "").trim().toLowerCase() === idNorm);
+    if (byId.length === 1) return byId[0];
+  }
+
+  const needle = messageContent.trim().toLowerCase().split(/\r?\n/, 1)[0] ?? "";
+  if (!needle) return undefined;
+  const byTitle = catalog.filter((b) => titlesEquivalent(optionLabel(b), needle));
+  if (byTitle.length === 1) return byTitle[0];
+  if (byTitle.length > 1 && idNorm) {
+    const byTitleAndId = byTitle.filter((b) => (b.id || "").trim().toLowerCase() === idNorm);
+    if (byTitleAndId.length === 1) return byTitleAndId[0];
+  }
+  return undefined;
+}
+
 export async function getActiveContext(automationId: string, contactId: string) {
   return prisma.automationContext.findFirst({
     where: {
@@ -512,26 +571,41 @@ export async function processIncomingMessage(
               `botão "${btnLabel}" matched mas sem nenhum destino — auto=${ctx.automation.name} step=${currentStep.id} → encerrando ramo (conecte esse botão no canvas)`,
             );
           }
-        } else if (elseGoto) {
-          nextStepId = elseGoto;
-          log.info(
-            `nenhum botão matched ("${messageContent}") — auto=${ctx.automation.name} → fallback elseGotoStepId step=${nextStepId}`,
-          );
-        } else if (hasExplicitEdges(config)) {
-          // Menu/template com botões: cliente digitou texto livre em vez
-          // de clicar. Antes o fluxo ficava parado no mesmo passo e a
-          // conversa permanecia em Automação (ex.: "Bom dia, tudo bem?").
-          // Handoff: encerra o robô para o ticket cair em Entrada.
-          log.info(
-            `processIncomingMessage handoff — texto livre sem match de botão ("${messageContent.slice(0, 40)}") auto=${ctx.automation.name} step=${currentStep.id}`,
-          );
-          await cancelContext(ctx.id);
-          return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
         } else {
-          nextStepId = linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
-          log.info(
-            `nenhum botão matched ("${messageContent}") + sem elseGotoStepId — auto=${ctx.automation.name} → fallback linear step=${nextStepId ?? "(fim)"}`,
+          const staleBtn = matchStaleInteractiveOption(
+            ctx.automation.steps,
+            currentStep.id,
+            messageContent,
+            opts?.interactiveId,
           );
+          const staleGoto = staleBtn ? readStepRef(staleBtn, "gotoStepId") : null;
+          if (staleGoto) {
+            nextStepId = staleGoto;
+            const btnLabel = staleBtn?.title || staleBtn?.text || staleBtn?.id;
+            log.info(
+              `botão stale "${btnLabel}" matched — auto=${ctx.automation.name} step=${currentStep.id} → step=${nextStepId} (clique em menu anterior)`,
+            );
+          } else if (elseGoto) {
+            nextStepId = elseGoto;
+            log.info(
+              `nenhum botão matched ("${messageContent}") — auto=${ctx.automation.name} → fallback elseGotoStepId step=${nextStepId}`,
+            );
+          } else if (hasExplicitEdges(config)) {
+            // Menu/template com botões: cliente digitou texto livre em vez
+            // de clicar. Antes o fluxo ficava parado no mesmo passo e a
+            // conversa permanecia em Automação (ex.: "Bom dia, tudo bem?").
+            // Handoff: encerra o robô para o ticket cair em Entrada.
+            log.info(
+              `processIncomingMessage handoff — texto livre sem match de botão ("${messageContent.slice(0, 40)}") auto=${ctx.automation.name} step=${currentStep.id}`,
+            );
+            await cancelContext(ctx.id);
+            return { handled: true, automationId: ctx.automationId, contextId: ctx.id };
+          } else {
+            nextStepId = linearFallbackStepId(ctx.automation.steps, ctx.currentStepId);
+            log.info(
+              `nenhum botão matched ("${messageContent}") + sem elseGotoStepId — auto=${ctx.automation.name} → fallback linear step=${nextStepId ?? "(fim)"}`,
+            );
+          }
         }
       } else {
         // `question` de resposta aberta: a saída é única, então a aresta
