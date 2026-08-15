@@ -244,6 +244,34 @@ describe("Api4ComClient", () => {
     expect(body.senha).toHaveLength(16);
   });
 
+  it("createNextExtension reutiliza ramal existente do mesmo e-mail", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(textResponse(404, '{"error":"not found"}'))
+      .mockResolvedValueOnce(
+        jsonResponse(200, [
+          {
+            id: 79,
+            ramal: "1079",
+            domain: "cruzeiroead.api4com.com",
+            senha: "kept-pw",
+            email_address: "teste@eduit.com.br",
+          },
+        ]),
+      );
+    const client = makeClient(fetchMock);
+
+    const ext = await client.createNextExtension({
+      firstName: "Pinha",
+      lastName: "Dev",
+      email: "teste@eduit.com.br",
+    });
+
+    expect(ext.ramal).toBe("1079");
+    expect(ext.senha).toBe("kept-pw");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("createUser rejeita senha < 8 chars (Zod)", async () => {
     const fetchMock = vi.fn();
     const client = makeClient(fetchMock);

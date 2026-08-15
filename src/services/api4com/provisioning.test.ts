@@ -225,6 +225,34 @@ describe("ProvisioningService", () => {
     expect(result.error).toContain("Network exploded");
   });
 
+  it("retoma FAILED com ramal já persistido sem recriar extensão", async () => {
+    const existing = makeExt({
+      provisioningStep: "FAILED",
+      authUser: "1079",
+      authPasswordEncrypted: "enc:kept",
+      sipUri: "1079@cruzeiroead.api4com.com",
+      api4comUserId: "api4-user-1",
+      providerMeta: { extensionId: "ext-1079", ramal: "1079" },
+    });
+    prismaMock.sipExtension.findUnique.mockResolvedValue(existing);
+    prismaMock.sipExtension.update.mockImplementation(({ data }) =>
+      Promise.resolve({ ...existing, ...data }),
+    );
+    prismaMock.user.findUnique.mockResolvedValue({
+      email: "teste@eduit.com.br",
+      name: "Pinha Dev",
+    });
+    mockClient.findUsers.mockResolvedValue([{ id: "api4-user-1" }]);
+    mockClient.upsertIntegration.mockRejectedValue(new Error("422 webhook"));
+
+    const result = await enableTelephony("user-1", "org-1");
+
+    expect(result.success).toBe(true);
+    expect(result.step).toBe("ACTIVE");
+    expect(mockClient.createUser).not.toHaveBeenCalled();
+    expect(mockClient.createNextExtension).not.toHaveBeenCalled();
+  });
+
   it("retorno noop se já está ACTIVE", async () => {
     prismaMock.sipExtension.findUnique.mockResolvedValue(
       makeExt({ provisioningStep: "ACTIVE" }),

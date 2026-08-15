@@ -241,8 +241,13 @@ async function runFromStep(
         break;
       }
       case "CREATE_EXTENSION": {
-        const extResp = await createRemoteExtension(ctx);
-        await persistExtensionData(ctx.ext.id, extResp, gateway);
+        const existingId = readProviderExtensionId(ctx.ext.providerMeta);
+        if (existingId && ctx.ext.authUser && ctx.ext.authPasswordEncrypted) {
+          log.info(`[prov] Ramal ${ctx.ext.authUser} já persistido — pulando CREATE_EXTENSION.`);
+        } else {
+          const extResp = await createRemoteExtension(ctx);
+          await persistExtensionData(ctx.ext.id, extResp, gateway);
+        }
         await updateStep(ctx.ext.id, "CONFIG_WEBHOOK");
         break;
       }
@@ -325,16 +330,35 @@ async function configureWebhook(
     ? config.webhookUrl
     : `${baseUrl}${config.webhookUrl.startsWith("/") ? "" : "/"}${config.webhookUrl}`;
 
-  await ctx.client.upsertIntegration({
-    gateway,
-    webhook: true,
-    webhookConstraint: { metadata: { gateway } },
-    metadata: {
-      webhookUrl,
-      webhookVersion,
-      webhookTypes: ["channel-answer", "channel-hangup"],
-    },
-  });
+  const versions = Array.from(new Set([webhookVersion, "1.8", "v1.4"]));
+  let lastErr: unknown;
+  for (const version of versions) {
+    try {
+      await ctx.client.upsertIntegration({
+        gateway,
+        webhook: true,
+        webhookConstraint: { metadata: { gateway } },
+        metadata: {
+          webhookUrl,
+          webhookVersion: version,
+          webhookTypes: ["channel-answer", "channel-hangup"],
+        },
+      });
+      return;
+    } catch (err) {
+      lastErr = err;
+      log.warn(
+        `[prov] PATCH /integrations falhou com webhookVersion=${version}: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+  log.warn(
+    `[prov] Webhook da org não registrado — ramal segue válido. ${
+      lastErr instanceof Error ? lastErr.message : String(lastErr)
+    }`,
+  );
 }
 
 // ── Helpers de persistência ─────────────────────────────────────────────────
