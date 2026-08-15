@@ -43,7 +43,7 @@ export const Api4ComUserSchema = z
     id: z.string().optional(),
     uuid: z.string().optional(),
     name: z.string().optional(),
-    email: z.string().email().optional(),
+    email: z.string().email().optional().nullable(),
     role: Api4ComUserRoleSchema.optional(),
   })
   .transform((raw, ctx) => {
