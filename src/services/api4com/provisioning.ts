@@ -451,7 +451,7 @@ async function persistExtensionData(
   await prisma.sipExtension.update({
     where: { id: extId },
     data: {
-      sipUri: `${resp.ramal}@${domain}`,
+      sipUri: `sip:${resp.ramal}@${domain}`,
       authUser: resp.ramal,
       authPasswordEncrypted: encryptSecret(resp.senha),
       wsServer: `wss://${domain}:6443`,
