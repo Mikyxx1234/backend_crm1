@@ -202,6 +202,48 @@ describe("Api4ComClient", () => {
     expect(ext.senha).toBe("xyz");
   });
 
+  it("createNextExtension cai em POST /extensions quando nextAvailable retorna 404", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(textResponse(404, '{"error":"not found"}'))
+      .mockResolvedValueOnce(
+        jsonResponse(200, [
+          { id: 1, ramal: "1008", domain: "pbx.api4com.com", senha: "old" },
+        ]),
+      )
+      .mockResolvedValueOnce(
+        jsonResponse(200, {
+          id: 99,
+          ramal: "1009",
+          senha: "new-pw",
+          domain: "pbx.api4com.com",
+        }),
+      );
+    const client = makeClient(fetchMock);
+
+    const ext = await client.createNextExtension({
+      firstName: "Admin",
+      lastName: "Teste",
+      email: "admin@cruzeiroead.com.br",
+    });
+
+    expect(ext.ramal).toBe("1009");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [nextUrl] = fetchMock.mock.calls[0];
+    const [listUrl] = fetchMock.mock.calls[1];
+    const [createUrl, createInit] = fetchMock.mock.calls[2];
+    expect(nextUrl).toBe("https://api.api4com.com/api/v1/extensions/nextAvailable");
+    expect(listUrl).toBe("https://api.api4com.com/api/v1/extensions");
+    expect(createUrl).toBe("https://api.api4com.com/api/v1/extensions");
+    expect(createInit.method).toBe("POST");
+    const body = JSON.parse(createInit.body as string);
+    expect(body.ramal).toBe("1009");
+    expect(body.first_name).toBe("Admin");
+    expect(body.last_name).toBe("Teste");
+    expect(body.email_address).toBe("admin@cruzeiroead.com.br");
+    expect(body.senha).toHaveLength(16);
+  });
+
   it("createUser rejeita senha < 8 chars (Zod)", async () => {
     const fetchMock = vi.fn();
     const client = makeClient(fetchMock);
