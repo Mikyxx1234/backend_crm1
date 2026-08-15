@@ -77,6 +77,10 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   "nav:dashboard", "nav:pipeline", "nav:contacts", "nav:companies",
   "nav:inbox", "nav:activities", "nav:automations", "nav:campaigns",
   "nav:distribution", "nav:logs", "nav:widgets", "nav:calls",
+  "nav:demands", "nav:team-chat",
+  "demand:view", "demand:create", "demand:edit", "demand:move",
+  "demand:comment", "demand:vote", "demand:manage_board",
+  "team_chat:view", "team_chat:send", "team_chat:create_room",
 ];
 
 export const MEMBER_PERMISSIONS: readonly string[] = [
@@ -111,6 +115,10 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   // (restrição que antes ficava hardcoded em `allowedRoles` no catálogo do front).
   "nav:dashboard", "nav:pipeline", "nav:contacts", "nav:companies",
   "nav:inbox", "nav:activities", "nav:campaigns", "nav:widgets", "nav:calls",
+  "nav:demands", "nav:team-chat",
+  "demand:view", "demand:create", "demand:edit", "demand:move",
+  "demand:comment", "demand:vote",
+  "team_chat:view", "team_chat:send", "team_chat:create_room",
 ];
 
 export const PRESET_PERMISSIONS: Record<UserRole, readonly string[]> = {
