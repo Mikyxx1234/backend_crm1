@@ -18,6 +18,7 @@ import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
+import { handleMessagingWebhookPost } from "@/lib/meta-webhook/messaging-handler";
 import { enqueueMetaWebhookEvent } from "@/lib/queue";
 
 /**
@@ -1905,6 +1906,8 @@ async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
   // collector abaixo — o verifier testa multiplos secrets ate encontrar um
   // que valide (any-match).
   if (CRM_META_APP_SECRET) secrets.add(CRM_META_APP_SECRET);
+  const igSecret = process.env.INSTAGRAM_APP_SECRET?.trim();
+  if (igSecret) secrets.add(igSecret);
 
   try {
     // Usa prismaBase sempre: no path scoped filtramos por organizationId
@@ -2102,6 +2105,17 @@ async function executePostBody(
   });
 
   const object = str(body.object);
+  if (object === "page" || object === "instagram") {
+    // Callback do produto Instagram/Messenger colada por engano na URL
+    // do WhatsApp (/api/webhooks/meta). Encaminha em vez de ignorar.
+    return handleMessagingWebhookPost(
+      new Request(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: rawBody,
+      }),
+    );
+  }
   if (object !== "whatsapp_business_account") {
     if (metaWebhookEventId) {
       await markWebhookEventProcessed(metaWebhookEventId, "object_ignored");

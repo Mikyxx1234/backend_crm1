@@ -39,6 +39,18 @@ import { getLogger } from "@/lib/logger";
 const log = getLogger("meta-messaging-webhook");
 const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN?.trim() || "";
 const REQUIRE_SIGNATURE = process.env.NODE_ENV === "production";
+const IG_APP_SECRET = process.env.INSTAGRAM_APP_SECRET?.trim() || "";
+
+/** Secrets que a Meta usa no X-Hub-Signature-256 deste endpoint. */
+function messagingWebhookSecrets(): string[] {
+  return [...new Set([CRM_META_APP_SECRET, IG_APP_SECRET].filter(Boolean))];
+}
+
+function asMetaId(v: unknown): string {
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "number" && Number.isFinite(v)) return String(Math.trunc(v));
+  return "";
+}
 
 const GRAPH_API_VERSION = "v21.0";
 const GRAPH_BASE = `https://graph.facebook.com/${GRAPH_API_VERSION}`;
@@ -77,21 +89,26 @@ export async function handleMessagingWebhookPost(request: Request): Promise<Resp
   const rawBody = await request.text();
   const signature = request.headers.get("x-hub-signature-256");
 
+  const secrets = messagingWebhookSecrets();
   let signatureValid = false;
-  if (CRM_META_APP_SECRET) {
-    signatureValid = verifyMetaWebhookSignature(rawBody, signature, CRM_META_APP_SECRET);
+  if (secrets.length > 0) {
+    signatureValid = secrets.some((s) =>
+      verifyMetaWebhookSignature(rawBody, signature, s),
+    );
     if (!signatureValid) {
-      log.warn("Assinatura invalida — recusando POST messaging");
+      log.warn(
+        `Assinatura invalida (${secrets.length} secret(s)) — recusando POST messaging`,
+      );
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
   } else if (REQUIRE_SIGNATURE) {
-    log.error("PROD sem META_APP_SECRET — recusando POST messaging");
+    log.error("PROD sem META_APP_SECRET/INSTAGRAM_APP_SECRET — recusando POST messaging");
     return NextResponse.json(
       { error: "Webhook signature verification not configured" },
       { status: 503 },
     );
   } else {
-    log.debug("Sem CRM_META_APP_SECRET — assinatura nao verificada (dev)");
+    log.debug("Sem App Secret — assinatura nao verificada (dev)");
   }
 
   let body: WebhookBody;
@@ -130,9 +147,10 @@ type WebhookBody = {
 };
 
 type WebhookEntry = {
-  id?: string;
+  id?: string | number;
   time?: number;
   messaging?: MessagingEvent[];
+  changes?: Array<{ field?: string; value?: MessagingEvent }>;
 };
 
 type MessagingEvent = {
@@ -233,14 +251,39 @@ function safeDecrypt(v: string): string {
 
 // ── Processa uma entry ─────────────────────────────────────
 
-async function processEntry(entry: WebhookEntry, platform: Platform): Promise<void> {
-  const entryId = typeof entry.id === "string" ? entry.id : "";
-  const events = Array.isArray(entry.messaging) ? entry.messaging : [];
-  if (!entryId || events.length === 0) return;
+function extractMessagingEvents(entry: WebhookEntry): MessagingEvent[] {
+  const fromMessaging = Array.isArray(entry.messaging) ? entry.messaging : [];
+  if (fromMessaging.length > 0) return fromMessaging;
+  const fromChanges: MessagingEvent[] = [];
+  if (Array.isArray(entry.changes)) {
+    for (const ch of entry.changes) {
+      const field = typeof ch.field === "string" ? ch.field : "";
+      if (field !== "messages" && field !== "messaging_postbacks") continue;
+      if (ch.value && typeof ch.value === "object") fromChanges.push(ch.value);
+    }
+  }
+  return fromChanges;
+}
 
-  const hit = await findChannelByEntryId(entryId, platform);
+async function processEntry(entry: WebhookEntry, platform: Platform): Promise<void> {
+  const entryId = asMetaId(entry.id);
+  const events = extractMessagingEvents(entry);
+  if (!entryId || events.length === 0) {
+    log.warn(
+      `entry ignorada (id=${entryId || "vazio"} events=${events.length} platform=${platform})`,
+    );
+    return;
+  }
+
+  let hit = await findChannelByEntryId(entryId, platform);
   if (!hit) {
-    log.debug(`entry.id=${entryId} (${platform}) nao mapeado a canal — ignorando`);
+    const recipientId = asMetaId(events[0]?.recipient?.id);
+    if (recipientId && recipientId !== entryId) {
+      hit = await findChannelByEntryId(recipientId, platform);
+    }
+  }
+  if (!hit) {
+    log.warn(`entry.id=${entryId} (${platform}) nao mapeado a canal — ignorando`);
     return;
   }
 
@@ -264,7 +307,12 @@ async function processEvent(
   if (!senderId) return;
 
   // Ignora echo do proprio negocio (nossa mensagem enviada volta como evento)
-  if (ev.message?.is_echo) return;
+  if (ev.message?.is_echo) {
+    log.info(
+      `echo ignorado mid=${ev.message.mid ?? ""} channel=${hit.channelId}`,
+    );
+    return;
+  }
 
   // Ignora acks (read/delivery) por enquanto — foco no MVP e' new_message.
   if (ev.read || ev.delivery) return;
