@@ -181,6 +181,25 @@ export type SipCredentials = {
  * DEVE ser chamado SOMENTE pelo próprio dono (verificação no route handler).
  * NUNCA logar o retorno desta função.
  */
+function normalizeSipUri(raw: string): string {
+  const uri = raw.trim();
+  if (!uri) return "";
+  if (/^sip:/i.test(uri)) return uri;
+  if (uri.includes("@")) return `sip:${uri}`;
+  return uri;
+}
+
+/** Ramal só é usável no JsSIP com WSS + URI + usuário. Linha vazia (toggle off / provision incompleto) não conta. */
+function isSipReady(ext: {
+  telephonyEnabled?: boolean;
+  sipUri: string;
+  authUser: string;
+  wsServer: string;
+}): boolean {
+  if (ext.telephonyEnabled === false) return false;
+  return Boolean(ext.wsServer.trim() && ext.authUser.trim() && ext.sipUri.trim());
+}
+
 export async function getMyCredentials(userId: string): Promise<SipCredentials | null> {
   const organizationId = getOrgIdOrThrow();
 
@@ -196,13 +215,14 @@ export async function getMyCredentials(userId: string): Promise<SipCredentials |
       stunServers: true,
       turnServer: true,
       providerMeta: true,
+      telephonyEnabled: true,
     },
   });
 
-  if (!ext) return null;
+  if (!ext || !isSipReady(ext)) return null;
 
   return {
-    sipUri: ext.sipUri,
+    sipUri: normalizeSipUri(ext.sipUri),
     authUser: ext.authUser,
     authPassword: decryptSecret(ext.authPasswordEncrypted),
     wsServer: ext.wsServer,
