@@ -411,7 +411,7 @@ function generatePassword(): string {
 function resolveApi4ComPhone(phone: string | null | undefined): string {
   const digits = (phone ?? "").replace(/\D/g, "");
   if (digits.length >= 8) return digits;
-  return "4800000000";
+  return "11999999999";
 }
 
 function readProviderExtensionId(meta: unknown): string | null {

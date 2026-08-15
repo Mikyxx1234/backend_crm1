@@ -126,22 +126,35 @@ export class Api4ComClient {
   /** POST /users — cria usuário. 409/validação "já existe" → Api4ComConflictError. */
   async createUser(input: CreateUserRequest): Promise<Api4ComUser> {
     const parsed = CreateUserRequestSchema.parse(input);
-    return this.request({
+    const raw = await this.request({
       method: "POST",
       path: "/users",
       body: parsed,
-      schema: Api4ComUserSchema,
+      schema: z.unknown(),
     });
+    const user = Api4ComUserSchema.safeParse(raw);
+    if (user.success) return user.data;
+    const found = await this.findUsers({ email: parsed.email });
+    if (found[0]) return found[0];
+    throw new Api4ComError(
+      "Usuário criado na Api4com, mas a resposta não trouxe id/uuid.",
+      { endpoint: "/users", responseBody: JSON.stringify(raw).slice(0, 500) },
+    );
   }
 
-  /** GET /users?email=... — checa existência antes de criar. */
+  /** GET /users — filtra por e-mail (LoopBack where + filtro local). */
   async findUsers(filter?: { email?: string }): Promise<Api4ComUser[]> {
-    const qs = filter?.email ? `?email=${encodeURIComponent(filter.email)}` : "";
-    return this.request({
+    const qs = filter?.email
+      ? `?filter=${encodeURIComponent(JSON.stringify({ where: { email: filter.email } }))}`
+      : "";
+    const users = await this.request({
       method: "GET",
       path: `/users${qs}`,
       schema: parseUsersListSchema,
     });
+    if (!filter?.email) return users;
+    const email = filter.email.toLowerCase();
+    return users.filter((u) => u.email?.toLowerCase() === email);
   }
 
   /** POST /extensions/nextAvailable — cria/aloca um ramal disponível. */
