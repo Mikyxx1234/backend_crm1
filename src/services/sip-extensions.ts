@@ -18,6 +18,7 @@ import {
   resolveDialProvider,
   buildApi4ComProviderMeta,
 } from "@/services/sip-extension-provider-meta";
+import { resolveApi4ComServiceToken } from "@/services/call-provider-configs";
 import { loginApi4Com } from "@/services/telephony-providers/api4com";
 
 // ── Tipos públicos ────────────────────────────────────────────────────────
@@ -304,7 +305,7 @@ export async function resolveApi4ComDialToken(
     },
   });
 
-  if (!ext) return null;
+  if (!ext?.authUser) return null;
 
   const account = getApi4ComAccountFromProviderMeta(ext.providerMeta);
   if (account) {
@@ -325,9 +326,14 @@ export async function resolveApi4ComDialToken(
     return { extension: ext.authUser, apiToken: login.token, organizationId };
   }
 
-  const apiToken = getApi4ComTokenFromProviderMeta(ext.providerMeta);
-  if (!apiToken) return null;
-  return { extension: ext.authUser, apiToken, organizationId };
+  const storedToken = getApi4ComTokenFromProviderMeta(ext.providerMeta);
+  if (storedToken) {
+    return { extension: ext.authUser, apiToken: storedToken, organizationId };
+  }
+
+  const orgToken = await resolveApi4ComServiceToken(organizationId);
+  if (!orgToken) return null;
+  return { extension: ext.authUser, apiToken: orgToken, organizationId };
 }
 
 /**

@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
-import { requirePermissionForUser } from "@/lib/authz/resource-policy";
 import { prisma } from "@/lib/prisma";
 import { resolveApi4ComDialToken } from "@/services/sip-extensions";
 import { dialApi4ComCall } from "@/services/telephony-providers/api4com";
@@ -25,16 +24,14 @@ import { dialApi4ComCall } from "@/services/telephony-providers/api4com";
  * — Todos esses campos voltam no webhook channel-hangup, permitindo correlação
  * call ↔ deal ↔ contato (ver services/calls.ts e adapter api4com).
  *
- * RBAC: sip_extension:manage
+ * RBAC: autenticado + ramal próprio (igual GET /me/credentials).
+ * sip_extension:manage é só para configurar ramais de outros.
  */
 export async function POST(request: Request) {
   const authResult = await authenticateApiRequest(request);
   if (!authResult.ok) return authResult.response;
 
   return runWithApiUserContext(authResult.user, async () => {
-    const denied = await requirePermissionForUser(authResult.user, "sip_extension:manage");
-    if (denied) return denied;
-
     let body: Record<string, unknown>;
     try {
       body = (await request.json()) as Record<string, unknown>;
@@ -80,7 +77,7 @@ export async function POST(request: Request) {
           ok: false,
           field: "email",
           message:
-            "Credenciais Api4Com ausentes ou inválidas. Reconecte em Configurações → Softphone → Api4Com.",
+            "Ramal ou token Api4Com ausente. Ative a telefonia em Widgets → Telefonia IP → Usuários.",
         },
         { status: 400 },
       );
