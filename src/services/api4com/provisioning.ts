@@ -233,9 +233,22 @@ async function runFromStep(
         break;
       }
       case "CREATE_USER": {
-        if (!api4comUserId) {
-          api4comUserId = await createRemoteUser(ctx);
-          await persistApi4comUserId(ctx.ext.id, api4comUserId);
+        const hasRamal = Boolean(
+          readProviderExtensionId(ctx.ext.providerMeta) &&
+            ctx.ext.authUser &&
+            ctx.ext.authPasswordEncrypted,
+        );
+        if (!api4comUserId && !hasRamal) {
+          try {
+            api4comUserId = await createRemoteUser(ctx);
+            await persistApi4comUserId(ctx.ext.id, api4comUserId);
+          } catch (err) {
+            log.warn(
+              `[prov] CREATE_USER falhou — seguindo para o ramal: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
         }
         await updateStep(ctx.ext.id, "CREATE_EXTENSION");
         break;
