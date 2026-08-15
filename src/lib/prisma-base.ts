@@ -97,6 +97,23 @@ function createPrismaClient() {
   //
   // Tunar via env. Defaults ja servem dev e prod pequena (1-2 replicas).
   const mode = appMode();
+  const prismaLog =
+    process.env.NODE_ENV === "development"
+      ? ([{ emit: "stdout", level: "warn" }, { emit: "stdout", level: "error" }] as const)
+      : (["error"] as const);
+
+  // Engine `binary` (Windows ARM64 / PRISMA_CLIENT_ENGINE_TYPE=binary) não
+  // aceita driver adapter. Sem este bypass o client quebra no constructor
+  // ("Cannot use a driver adapter with the binary Query Engine").
+  const engineType = (process.env.PRISMA_CLIENT_ENGINE_TYPE ?? "").toLowerCase();
+  const winArm64 = process.platform === "win32" && process.arch === "arm64";
+  if (engineType === "binary" || winArm64) {
+    console.info(
+      `[prisma-base] engine=${engineType || "library"} arch=${process.arch} sem adapter APP_MODE=${mode}`,
+    );
+    return new PrismaClient({ log: [...prismaLog] });
+  }
+
   const max = envInt("DB_POOL_MAX", defaultPoolMax());
   const idleTimeoutMillis = envInt("DB_POOL_IDLE_TIMEOUT_MS", 30_000);
   const connectionTimeoutMillis = envInt("DB_POOL_CONN_TIMEOUT_MS", 8_000);
@@ -141,10 +158,7 @@ function createPrismaClient() {
   const adapter = new PrismaPg(pool);
   return new PrismaClient({
     adapter,
-    log:
-      process.env.NODE_ENV === "development"
-        ? [{ emit: "stdout", level: "warn" }, { emit: "stdout", level: "error" }]
-        : ["error"],
+    log: [...prismaLog],
   });
 }
 
