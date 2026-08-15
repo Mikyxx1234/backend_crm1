@@ -200,7 +200,7 @@ describe("ProvisioningService", () => {
 
     expect(result.success).toBe(true);
     expect(mockClient.createUser).toHaveBeenCalledWith(
-      expect.objectContaining({ phone: "11999999999" }),
+      expect.objectContaining({ phone: "4833328530" }),
     );
     expect(mockClient.createNextExtension).toHaveBeenCalledOnce();
   });
