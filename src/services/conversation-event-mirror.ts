@@ -123,9 +123,25 @@ function isSelfAssigneeAction(
   return sameHumanName(actor, personName);
 }
 
+/** Ator de abrir/encerrar: nome humano, Sistema ou Automação — nunca aba/fila. */
+function lifecycleActor(input: MirrorInput, actor: string): string {
+  const t = actorTypeOf(input);
+  if (t === "AUTOMATION" || t === "AI") return "Automação";
+  if (t === "SYSTEM" || t === "INTEGRATION") return "Sistema";
+  if (isGenericHumanEventActor(actor)) return "Sistema";
+  const n = actor.trim().toLowerCase();
+  if (n === "agente ia") return "Automação";
+  return actor.trim() || "Sistema";
+}
+
+function conversationLabel(number: number | null | undefined): string {
+  return typeof number === "number" && number > 0 ? `Conversa #${number}` : "Conversa";
+}
+
 function mapChatEvent(
   input: MirrorInput,
   actor: string,
+  conversationNumber?: number | null,
 ): { action: ConversationEventAction; text: string; actor: string } | null {
   const type = input.type;
   const from = (input.oldValue ?? "").trim();
@@ -208,14 +224,40 @@ function mapChatEvent(
       }
       return null;
     }
-    case "CONVERSATION_STATUS_CHANGED":
-    case "CONVERSATION_CLOSED":
+    case "CONVERSATION_CREATED": {
+      const who = lifecycleActor(input, actor);
+      return {
+        action: "entrada",
+        text: `${conversationLabel(conversationNumber)} aberta`,
+        actor: who,
+      };
+    }
+    case "CONVERSATION_CLOSED": {
+      const who = lifecycleActor(input, actor);
+      return {
+        action: "saida",
+        text: `${conversationLabel(conversationNumber)} encerrada`,
+        actor: who,
+      };
+    }
     case "CONVERSATION_REOPENED":
+      // Reabrir cria ticket novo (CONVERSATION_CREATED). Não logar "aberta" no antigo.
+      if (meta.newConversationId) return null;
+      return {
+        action: "entrada",
+        text: `${conversationLabel(conversationNumber)} aberta`,
+        actor: lifecycleActor(input, actor),
+      };
+    case "CONVERSATION_STATUS_CHANGED": {
+      const dest = (to || "").toUpperCase();
+      // Encerrar/abrir já têm CONVERSATION_CLOSED / CREATED / REOPENED.
+      if (dest === "RESOLVED" || dest === "OPEN") return null;
       return {
         action: "status",
         text: `Status alterado para ${statusLabel(to || type)}`,
         actor,
       };
+    }
     case "CONVERSATION_TABULATED": {
       const name =
         (typeof meta.tabulationName === "string" && meta.tabulationName) || to;
@@ -253,7 +295,22 @@ export function mirrorConversationChatEvent(input: MirrorInput): void {
 
   void (async () => {
     const actor = await resolveChatEventActor(input);
-    const mapped = mapChatEvent(input, actor);
+    let conversationNumber: number | null = null;
+    if (
+      input.type === "CONVERSATION_CREATED" ||
+      input.type === "CONVERSATION_CLOSED" ||
+      input.type === "CONVERSATION_REOPENED" ||
+      input.type === "CONVERSATION_STATUS_CHANGED"
+    ) {
+      const conv = await prisma.conversation
+        .findUnique({
+          where: { id: conversationId },
+          select: { number: true },
+        })
+        .catch(() => null);
+      conversationNumber = conv?.number ?? null;
+    }
+    const mapped = mapChatEvent(input, actor, conversationNumber);
     if (!mapped) return;
 
     const dedupeStartsWith =
@@ -267,7 +324,11 @@ export function mirrorConversationChatEvent(input: MirrorInput): void {
           ]
         : mapped.action === "ia"
           ? ["Agente IA sugeriu", "Agente IA transferiu", mapped.text.slice(0, 40)]
-          : [mapped.text.slice(0, 40)];
+          : mapped.action === "entrada" && /aberta/.test(mapped.text)
+            ? [mapped.text, "Conversa aberta", "Status alterado para Em atendimento"]
+            : mapped.action === "saida" && /encerrada/.test(mapped.text)
+              ? [mapped.text, "Conversa encerrada", "Status alterado para Encerrada"]
+              : [mapped.text.slice(0, 40)];
 
     await createConversationEvent({
       conversationId,

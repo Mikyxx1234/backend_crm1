@@ -29,7 +29,10 @@ import { cancelActiveContextsForContact } from "@/services/automation-context";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
 import { logEvent } from "@/services/activity-log";
-import { enrichEventMessageActors } from "@/services/conversation-event-actors";
+import {
+  enrichEventMessageActors,
+  resolveLifecycleEventActor,
+} from "@/services/conversation-event-actors";
 import {
   buildOutboundTemplateMessageContent,
   extractLegacyBracketTemplateName,
@@ -314,6 +317,7 @@ export async function GET(request: Request, context: RouteContext) {
       id: string;
       number: number;
       closedAt: Date | null;
+      createdAt: Date | null;
       rows: (typeof rows)[number][];
     };
     let historyTickets: HistoryTicket[] = [];
@@ -326,7 +330,7 @@ export async function GET(request: Request, context: RouteContext) {
           id: { not: conv.id },
         },
         orderBy: { createdAt: "desc" },
-        select: { id: true, number: true, closedAt: true },
+        select: { id: true, number: true, closedAt: true, createdAt: true },
         take: 5,
       });
       const loaded = await Promise.all(
@@ -341,6 +345,7 @@ export async function GET(request: Request, context: RouteContext) {
             id: pc.id,
             number: pc.number,
             closedAt: pc.closedAt,
+            createdAt: pc.createdAt,
             rows: pRows,
           };
         }),
@@ -505,14 +510,50 @@ export async function GET(request: Request, context: RouteContext) {
           channelId: r.channelId ?? null,
         }));
 
+      const ticketIds = [...historyTickets.map((t) => t.id), conv.id];
+      const lifeEvents = await prisma.activityEvent
+        .findMany({
+          where: {
+            conversationId: { in: ticketIds },
+            type: { in: ["CONVERSATION_CREATED", "CONVERSATION_CLOSED"] },
+          },
+          select: {
+            conversationId: true,
+            type: true,
+            actorUserId: true,
+            actorLabel: true,
+            actorType: true,
+            actorUser: { select: { name: true, email: true, type: true } },
+          },
+          orderBy: { occurredAt: "asc" },
+        })
+        .catch(() => []);
+      const createdByConv = new Map<string, (typeof lifeEvents)[number]>();
+      const closedByConv = new Map<string, (typeof lifeEvents)[number]>();
+      for (const ev of lifeEvents) {
+        if (!ev.conversationId) continue;
+        if (ev.type === "CONVERSATION_CREATED" && !createdByConv.has(ev.conversationId)) {
+          createdByConv.set(ev.conversationId, ev);
+        }
+        if (ev.type === "CONVERSATION_CLOSED") {
+          closedByConv.set(ev.conversationId, ev);
+        }
+      }
+
       const historical: InboxMessageDto[] = [];
       for (const ticket of historyTickets) {
-        // Separador: um item "system" especial com os metadados do ticket.
+        const opened = resolveLifecycleEventActor(createdByConv.get(ticket.id));
+        const closed = resolveLifecycleEventActor(closedByConv.get(ticket.id));
         historical.push({
           id: `__ticket_sep_${ticket.id}`,
           content: JSON.stringify({
             number: ticket.number,
             closedAt: ticket.closedAt?.toISOString() ?? null,
+            openedAt: ticket.createdAt?.toISOString() ?? null,
+            openedByName: opened.name,
+            openedByUserId: opened.userId,
+            closedByName: closed.name,
+            closedByUserId: closed.userId,
           }),
           createdAt: null,
           direction: "system",
@@ -520,20 +561,7 @@ export async function GET(request: Request, context: RouteContext) {
         });
         historical.push(...mapRows(ticket.rows));
       }
-      // Quem abriu o ticket atual (CONVERSATION_CREATED). Sem ator
-      // humano no log, cai no assignedTo humano — não inventa "Agente".
-      const createdEv = await prisma.activityEvent
-        .findFirst({
-          where: { conversationId: conv.id, type: "CONVERSATION_CREATED" },
-          orderBy: { occurredAt: "asc" },
-          select: { actorUserId: true, actorLabel: true },
-        })
-        .catch(() => null);
-      const assignedHuman =
-        conv.assignedTo?.type === "HUMAN" ? conv.assignedTo : null;
-      const openedByName =
-        (createdEv?.actorLabel ?? "").trim() || assignedHuman?.name || null;
-      const openedByUserId = createdEv?.actorUserId ?? assignedHuman?.id ?? null;
+      const opened = resolveLifecycleEventActor(createdByConv.get(conv.id));
 
       // Separador do ticket atual (só se houver histórico).
       historical.push({
@@ -543,8 +571,8 @@ export async function GET(request: Request, context: RouteContext) {
           closedAt: null,
           isCurrent: true,
           openedAt: conv.createdAt?.toISOString?.() ?? null,
-          openedByName,
-          openedByUserId,
+          openedByName: opened.name,
+          openedByUserId: opened.userId,
         }),
         createdAt: null,
         direction: "system",
