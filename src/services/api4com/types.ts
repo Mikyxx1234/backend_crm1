@@ -74,6 +74,7 @@ export const Api4ComExtensionListItemSchema = z.object({
   ramal: z.union([z.string(), z.number()]).transform((v) => String(v)),
   domain: z.string().optional(),
   senha: z.string().optional(),
+  email_address: z.string().optional().nullable(),
 });
 export type Api4ComExtensionListItem = z.infer<typeof Api4ComExtensionListItemSchema>;
 

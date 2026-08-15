@@ -187,6 +187,12 @@ export class Api4ComClient {
     }
 
     const existing = await this.listExtensions();
+    const reused = this.extensionFromEmail(existing, input.email);
+    if (reused) {
+      log.warn(`[api4com] ramal ${reused.ramal} já existe para ${input.email} — reutilizando.`);
+      return reused;
+    }
+
     const taken = existing.map((e) => e.ramal);
     const [first, ...rest] = (input.firstName ?? "CRM").trim().split(/\s+/);
     const firstName = first || "CRM";
@@ -212,7 +218,15 @@ export class Api4ComClient {
         });
       } catch (err) {
         lastErr = err;
-        if (err instanceof Api4ComConflictError) {
+        if (isEmailUniquenessError(err) && input.email) {
+          const listed = await this.listExtensions();
+          const match = this.extensionFromEmail(listed, input.email);
+          if (match) return match;
+        }
+        if (
+          err instanceof Api4ComConflictError ||
+          (err instanceof Api4ComValidationError && isConflictBody(err.responseBody ?? err.message))
+        ) {
           taken.push(ramal);
           continue;
         }
@@ -220,6 +234,23 @@ export class Api4ComClient {
       }
     }
     throw lastErr;
+  }
+
+  private extensionFromEmail(
+    listed: z.infer<typeof Api4ComExtensionListItemSchema>[],
+    email?: string,
+  ): Api4ComExtensionResponse | null {
+    if (!email) return null;
+    const needle = email.toLowerCase();
+    const match = listed.find((e) => e.email_address?.toLowerCase() === needle);
+    if (!match?.senha || !match.domain) return null;
+    return {
+      id: match.id,
+      ramal: match.ramal,
+      senha: match.senha,
+      domain: match.domain,
+      email_address: match.email_address ?? undefined,
+    };
   }
 
   /** DELETE /extensions/{id} — 404 = já inexistente (idempotente). */
@@ -387,8 +418,8 @@ export class Api4ComClient {
 
     if (res.status >= 400 && res.status < 500) {
       throw new Api4ComValidationError(
-        `Api4com recusou a requisição (${res.status}). ${text.slice(0, 200)}`.trim(),
-        { status: res.status, endpoint: opts.path, responseBody: text.slice(0, 500) },
+        `Api4com recusou a requisição (${res.status}). ${formatApi4ComErrorBody(text)}`.trim(),
+        { status: res.status, endpoint: opts.path, responseBody: text.slice(0, 800) },
       );
     }
 
@@ -459,8 +490,35 @@ function isConflictBody(text: string): boolean {
     lower.includes("already exists") ||
     lower.includes("já existe") ||
     lower.includes("ja existe") ||
-    lower.includes("duplicate")
+    lower.includes("duplicate") ||
+    lower.includes("not unique") ||
+    lower.includes("is not unique")
   );
+}
+
+function formatApi4ComErrorBody(text: string): string {
+  if (!text) return "";
+  try {
+    const json = JSON.parse(text) as { error?: unknown };
+    const err = json.error;
+    if (typeof err === "string") return err.slice(0, 400);
+    if (err && typeof err === "object") {
+      const rec = err as { message?: unknown; details?: unknown };
+      const msg = typeof rec.message === "string" ? rec.message : "";
+      const details = rec.details ? ` ${JSON.stringify(rec.details)}` : "";
+      const combined = `${msg}${details}`.trim();
+      if (combined) return combined.slice(0, 400);
+    }
+  } catch {
+    /* corpo não-JSON */
+  }
+  return text.slice(0, 400);
+}
+
+function isEmailUniquenessError(err: unknown): boolean {
+  if (!(err instanceof Api4ComError)) return false;
+  const text = `${err.message} ${err.responseBody ?? ""}`.toLowerCase();
+  return /email/.test(text) && /unique|already|existe|duplicate/.test(text);
 }
 
 function nextRamalNumber(ramais: string[]): string {
