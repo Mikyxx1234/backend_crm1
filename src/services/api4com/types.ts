@@ -6,7 +6,8 @@
  *   POST /users
  *   GET  /users
  *   DELETE /users/:id   (não documentado — best-effort)
- *   POST /extensions/nextAvailable
+ *   GET  /extensions
+ *   POST /extensions
  *   DELETE /extensions/:id
  *   PATCH /integrations
  *   POST /dialer
@@ -67,6 +68,20 @@ export const Api4ComExtensionResponseSchema = z.object({
   email_address: z.string().optional(),
 });
 export type Api4ComExtensionResponse = z.infer<typeof Api4ComExtensionResponseSchema>;
+
+export const Api4ComExtensionListItemSchema = z.object({
+  id: z.union([z.string(), z.number()]).transform((v) => String(v)),
+  ramal: z.union([z.string(), z.number()]).transform((v) => String(v)),
+  domain: z.string().optional(),
+  senha: z.string().optional(),
+});
+export type Api4ComExtensionListItem = z.infer<typeof Api4ComExtensionListItemSchema>;
+
+export type CreateExtensionInput = {
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+};
 
 // ── Integrations (webhook config) ─────────────────────────────────────────
 

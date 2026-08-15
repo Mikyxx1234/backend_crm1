@@ -125,7 +125,10 @@ describe("ProvisioningService", () => {
   it("provisiona novo usuário end-to-end", async () => {
     prismaMock.sipExtension.findUnique.mockResolvedValue(null);
     prismaMock.sipExtension.create.mockResolvedValue(makeExt());
-    prismaMock.user.findUnique.mockResolvedValue({ email: "test@example.com" });
+    prismaMock.user.findUnique.mockResolvedValue({
+      email: "test@example.com",
+      name: "Test User",
+    });
     prismaMock.user.findUniqueOrThrow.mockResolvedValue({
       email: "test@example.com",
       name: "Test User",
@@ -153,7 +156,11 @@ describe("ProvisioningService", () => {
         phone: "48999998888",
       }),
     );
-    expect(mockClient.createNextExtension).toHaveBeenCalledOnce();
+    expect(mockClient.createNextExtension).toHaveBeenCalledWith({
+      firstName: "Test",
+      lastName: "User",
+      email: "test@example.com",
+    });
     expect(mockClient.upsertIntegration).toHaveBeenCalledWith(
       expect.objectContaining({
         gateway: "test-gateway",

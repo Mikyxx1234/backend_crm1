@@ -298,7 +298,17 @@ async function createRemoteUser(ctx: ProvisionContext): Promise<string> {
 async function createRemoteExtension(
   ctx: ProvisionContext,
 ): Promise<Api4ComExtensionResponse> {
-  return ctx.client.createNextExtension();
+  const crmUser = await prisma.user.findUnique({
+    where: { id: ctx.userId },
+    select: { name: true, email: true },
+  });
+  const name = crmUser?.name?.trim() || "CRM";
+  const parts = name.split(/\s+/);
+  return ctx.client.createNextExtension({
+    firstName: parts[0],
+    lastName: parts.slice(1).join(" ") || parts[0],
+    email: crmUser?.email ?? undefined,
+  });
 }
 
 async function configureWebhook(

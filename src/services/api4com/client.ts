@@ -27,6 +27,7 @@ import {
 } from "./errors";
 import {
   AccessTokenResponseSchema,
+  Api4ComExtensionListItemSchema,
   Api4ComExtensionResponseSchema,
   Api4ComUserSchema,
   CreateUserRequestSchema,
@@ -35,6 +36,7 @@ import {
   IntegrationPatchSchema,
   type Api4ComExtensionResponse,
   type Api4ComUser,
+  type CreateExtensionInput,
   type CreateUserRequest,
   type DialerAck,
   type DialerRequest,
@@ -157,13 +159,67 @@ export class Api4ComClient {
     return users.filter((u) => u.email?.toLowerCase() === email);
   }
 
-  /** POST /extensions/nextAvailable — cria/aloca um ramal disponível. */
-  async createNextExtension(): Promise<Api4ComExtensionResponse> {
+  /** GET /extensions — lista ramais da conta. */
+  async listExtensions(): Promise<z.infer<typeof Api4ComExtensionListItemSchema>[]> {
     return this.request({
-      method: "POST",
-      path: "/extensions/nextAvailable",
-      schema: Api4ComExtensionResponseSchema,
+      method: "GET",
+      path: "/extensions",
+      schema: parseExtensionsListSchema,
     });
+  }
+
+  /**
+   * Aloca um ramal via POST /extensions (docs oficiais).
+   * Tenta /extensions/nextAvailable primeiro; 404 cai no fluxo oficial.
+   */
+  async createNextExtension(input: CreateExtensionInput = {}): Promise<Api4ComExtensionResponse> {
+    try {
+      return await this.request({
+        method: "POST",
+        path: "/extensions/nextAvailable",
+        schema: Api4ComExtensionResponseSchema,
+      });
+    } catch (err) {
+      if (!(err instanceof Api4ComValidationError) || err.status !== 404) {
+        throw err;
+      }
+      log.warn("[api4com] /extensions/nextAvailable não existe (404). Criando via POST /extensions.");
+    }
+
+    const existing = await this.listExtensions();
+    const taken = existing.map((e) => e.ramal);
+    const [first, ...rest] = (input.firstName ?? "CRM").trim().split(/\s+/);
+    const firstName = first || "CRM";
+    const lastName = input.lastName?.trim() || rest.join(" ") || "User";
+
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const ramal = nextRamalNumber(taken);
+      const senha = generateExtensionPassword();
+      try {
+        return await this.request({
+          method: "POST",
+          path: "/extensions",
+          body: {
+            ramal,
+            senha,
+            first_name: firstName,
+            last_name: lastName,
+            email_address: input.email,
+            gravar_audio: 1,
+          },
+          schema: Api4ComExtensionResponseSchema,
+        });
+      } catch (err) {
+        lastErr = err;
+        if (err instanceof Api4ComConflictError) {
+          taken.push(ramal);
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw lastErr;
   }
 
   /** DELETE /extensions/{id} — 404 = já inexistente (idempotente). */
@@ -406,6 +462,41 @@ function isConflictBody(text: string): boolean {
     lower.includes("duplicate")
   );
 }
+
+function nextRamalNumber(ramais: string[]): string {
+  let max = 999;
+  for (const raw of ramais) {
+    const n = Number.parseInt(String(raw).replace(/\D/g, ""), 10);
+    if (Number.isFinite(n) && n > max) max = n;
+  }
+  return String(max + 1);
+}
+
+function generateExtensionPassword(): string {
+  const chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+  let out = "";
+  for (let i = 0; i < 16; i++) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
+}
+
+/** Aceita array direto ou `{ data: [] }` / `{ items: [] }`. */
+const parseExtensionsListSchema = z.unknown().transform((raw) => {
+  const arr = Array.isArray(raw)
+    ? raw
+    : raw && typeof raw === "object"
+      ? Array.isArray((raw as { data?: unknown[] }).data)
+        ? (raw as { data: unknown[] }).data
+        : Array.isArray((raw as { items?: unknown[] }).items)
+          ? (raw as { items: unknown[] }).items
+          : []
+      : [];
+  return arr
+    .map((entry) => Api4ComExtensionListItemSchema.safeParse(entry))
+    .filter((r): r is z.ZodSafeParseSuccess<z.infer<typeof Api4ComExtensionListItemSchema>> => r.success)
+    .map((r) => r.data);
+});
 
 /** Aceita array direto ou `{ data: [] }` / `{ items: [] }`. */
 const parseUsersListSchema = z.unknown().transform((raw): Api4ComUser[] => {
