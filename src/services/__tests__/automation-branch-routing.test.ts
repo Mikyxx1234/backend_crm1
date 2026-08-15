@@ -15,6 +15,7 @@ import {
   hasExplicitEdges,
   linearFallbackStepId,
   matchInteractiveOption,
+  matchStaleInteractiveOption,
   readStepRef,
   shouldPersistDelay,
 } from "@/services/automation-context";
@@ -390,5 +391,90 @@ describe("matchInteractiveOption", () => {
     expect(matchInteractiveOption(opts, "João", "row_1")?.gotoStepId).toBe("s2");
     expect(matchInteractiveOption(opts, "João", "btn_1")?.gotoStepId).toBe("s2");
     expect(matchInteractiveOption(opts, "João", "ROW_1")?.gotoStepId).toBe("s2");
+  });
+});
+
+describe("matchStaleInteractiveOption — clique em menu anterior (WhatsApp)", () => {
+  const BV_STEPS = [
+    {
+      id: "welcome",
+      config: {
+        buttons: [
+          { id: "btn_0", title: "Sobre o Curso", gotoStepId: "webhook-curso" },
+          { id: "btn_1", title: "Receber dados de acesso", gotoStepId: "webhook-acesso" },
+          { id: "btn_2", title: "Não, obrigado", gotoStepId: "webhook-nao" },
+        ],
+      },
+    },
+    {
+      id: "menu-curso",
+      config: {
+        elseGotoStepId: "repetir-menu",
+        buttons: [
+          { id: "btn_mrw_0", title: "Acesso ao Portal", gotoStepId: "portal" },
+          { id: "btn_mrw_1", title: "Financeiro", gotoStepId: "fin" },
+          { id: "btn_mrw_2", title: "Entrega de Documentos", gotoStepId: "docs" },
+        ],
+      },
+    },
+    {
+      id: "plataforma-acesso",
+      config: {
+        buttons: [
+          { id: "btn_acesso_pc", title: "Portal (computador)", gotoStepId: "acesso-pc" },
+          { id: "btn_acesso_app", title: "App Duda (celular)", gotoStepId: "acesso-app" },
+        ],
+      },
+    },
+    {
+      id: "plataforma-docs",
+      config: {
+        buttons: [
+          { id: "btn_docs_pc", title: "Portal (computador)", gotoStepId: "docs-pc" },
+          { id: "btn_docs_app", title: "App Duda (celular)", gotoStepId: "docs-app" },
+        ],
+      },
+    },
+  ];
+
+  it("Daniela: no menu do curso, 'Receber dados de acesso' do welcome segue a perna de credencial", () => {
+    const hit = matchStaleInteractiveOption(
+      BV_STEPS,
+      "menu-curso",
+      "Receber dados de acesso",
+      "btn_1",
+    );
+    expect(hit?.gotoStepId).toBe("webhook-acesso");
+  });
+
+  it("não adivinha título repetido sem id distintivo (Portal em dois menus)", () => {
+    expect(
+      matchStaleInteractiveOption(BV_STEPS, "menu-curso", "Portal (computador)"),
+    ).toBeUndefined();
+  });
+
+  it("id explícito do menu antigo desambigua título repetido", () => {
+    const hit = matchStaleInteractiveOption(
+      BV_STEPS,
+      "plataforma-docs",
+      "Portal (computador)",
+      "btn_acesso_pc",
+    );
+    expect(hit?.gotoStepId).toBe("acesso-pc");
+  });
+
+  it("id genérico btn_N sozinho não casa o welcome errado", () => {
+    expect(
+      matchStaleInteractiveOption(BV_STEPS, "menu-curso", "blablabla", "btn_0"),
+    ).toBeUndefined();
+  });
+
+  it("título truncado em 20 chars (Entrega de Documentos) ainda casa", () => {
+    const hit = matchStaleInteractiveOption(
+      BV_STEPS,
+      "welcome",
+      "Entrega de Documento",
+    );
+    expect(hit?.gotoStepId).toBe("docs");
   });
 });
