@@ -23,7 +23,7 @@ import {
 } from "@/services/call-provider-configs";
 
 import { Api4ComClient } from "./client";
-import { Api4ComConflictError } from "./errors";
+import { Api4ComConflictError, Api4ComValidationError } from "./errors";
 import type { Api4ComExtensionResponse } from "./types";
 
 const log = getLogger("api4com-provisioning");
@@ -277,27 +277,48 @@ async function createRemoteUser(ctx: ProvisionContext): Promise<string> {
   });
 
   const password = generatePassword();
+  const phone = resolveApi4ComPhone(crmUser.phone);
+  const payload = {
+    name: crmUser.name ?? crmUser.email,
+    email: crmUser.email,
+    password,
+    phone,
+    role: "USER" as const,
+  };
 
   try {
-    const created = await ctx.client.createUser({
-      name: crmUser.name ?? crmUser.email,
-      email: crmUser.email,
-      password,
-      phone: resolveApi4ComPhone(crmUser.phone),
-      role: "USER",
-    });
-    return created.id;
+    return (await ctx.client.createUser(payload)).id;
   } catch (err) {
-    if (err instanceof Api4ComConflictError) {
-      log.warn(`[prov] Usuário ${crmUser.email} já existe na Api4com (409). Recuperando...`);
-      const existing = await ctx.client.findUsers({ email: crmUser.email });
-      if (existing.length > 0) return existing[0].id;
-      throw new Error(
-        `Conflito ao criar usuário (409), mas GET não retornou match para ${crmUser.email}.`,
-      );
+    if (
+      err instanceof Api4ComValidationError &&
+      /phone/i.test(`${err.message} ${err.responseBody ?? ""}`) &&
+      phone !== API4COM_FALLBACK_PHONE
+    ) {
+      log.warn(`[prov] Telefone ${phone} recusado. Tentando ${API4COM_FALLBACK_PHONE}.`);
+      try {
+        return (await ctx.client.createUser({ ...payload, phone: API4COM_FALLBACK_PHONE })).id;
+      } catch (retryErr) {
+        return recoverExistingUser(ctx, crmUser.email, retryErr);
+      }
     }
-    throw err;
+    return recoverExistingUser(ctx, crmUser.email, err);
   }
+}
+
+async function recoverExistingUser(
+  ctx: ProvisionContext,
+  email: string,
+  err: unknown,
+): Promise<string> {
+  if (err instanceof Api4ComConflictError) {
+    log.warn(`[prov] Usuário ${email} já existe na Api4com (409). Recuperando...`);
+    const existing = await ctx.client.findUsers({ email });
+    if (existing.length > 0) return existing[0].id;
+    throw new Error(
+      `Conflito ao criar usuário (409), mas GET não retornou match para ${email}.`,
+    );
+  }
+  throw err;
 }
 
 async function createRemoteExtension(
@@ -441,11 +462,29 @@ function generatePassword(): string {
   return pw;
 }
 
-/** Docs exigem telefone válido. Usa o do CRM ou um placeholder numérico estável. */
+/** Exemplo oficial da Api4Com — passa a validação DDD + 8/9 dígitos. */
+const API4COM_FALLBACK_PHONE = "4833328530";
+
+/**
+ * Api4Com exige DDD (2) + número (8 ou 9). Rejeita placeholder tipo 11999999999.
+ * Usa o telefone do CRM se for BR válido; senão o exemplo da documentação.
+ */
 function resolveApi4ComPhone(phone: string | null | undefined): string {
-  const digits = (phone ?? "").replace(/\D/g, "");
-  if (digits.length >= 8) return digits;
-  return "11999999999";
+  return normalizeBrPhone(phone) ?? API4COM_FALLBACK_PHONE;
+}
+
+function normalizeBrPhone(phone: string | null | undefined): string | null {
+  let digits = (phone ?? "").replace(/\D/g, "");
+  if (digits.startsWith("55") && (digits.length === 12 || digits.length === 13)) {
+    digits = digits.slice(2);
+  }
+  if (digits.length !== 10 && digits.length !== 11) return null;
+  const ddd = Number(digits.slice(0, 2));
+  if (ddd < 11 || ddd > 99) return null;
+  const local = digits.slice(2);
+  if (/^(\d)\1+$/.test(local)) return null;
+  if (digits.length === 11 && local[0] !== "9") return null;
+  return digits;
 }
 
 function readProviderExtensionId(meta: unknown): string | null {
