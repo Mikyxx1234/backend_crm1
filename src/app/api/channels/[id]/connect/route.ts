@@ -81,6 +81,32 @@ export async function POST(_request: Request, context: RouteContext) {
       });
     }
 
+    if (channel.provider === "META_INSTAGRAM_LOGIN") {
+      const accessToken = str(cfg, "accessToken");
+      const instagramUserId = str(cfg, "instagramUserId");
+      if (!accessToken || !instagramUserId) {
+        await updateChannelStatus(id, "FAILED");
+        return NextResponse.json(
+          {
+            message:
+              "Canal Instagram sem token. Use Conectar Instagram para autorizar de novo.",
+          },
+          { status: 400 },
+        );
+      }
+
+      const updated = await updateChannel(id, {
+        status: "CONNECTED",
+        lastConnectedAt: new Date(),
+        qrCode: null,
+      });
+
+      return NextResponse.json({
+        status: updated.status,
+        qrCode: undefined as string | undefined,
+      });
+    }
+
     await updateChannelStatus(id, "FAILED");
     return NextResponse.json({ message: "Provedor de canal não suportado para conexão." }, {
       status: 400,

@@ -21,7 +21,12 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Channel } from "@prisma/client";
 
-import { createChannel, appPublicBaseUrl } from "@/services/channels";
+import { prisma } from "@/lib/prisma";
+import {
+  createChannel,
+  updateChannel,
+  appPublicBaseUrl,
+} from "@/services/channels";
 import { CRM_META_APP_SECRET } from "@/lib/meta-constants";
 
 const IG_APP_ID = process.env.INSTAGRAM_APP_ID?.trim() || "";
@@ -204,12 +209,38 @@ export async function handleCallback(
   };
   if (displayName) config.displayName = displayName;
 
-  const channel = await createChannel({
-    name: `Instagram @${username || instagramUserId}`,
-    type: "INSTAGRAM",
-    provider: "META_INSTAGRAM_LOGIN",
-    config,
+  const name = `Instagram @${username || instagramUserId}`;
+  const existing = await prisma.channel.findFirst({
+    where: {
+      type: "INSTAGRAM",
+      provider: "META_INSTAGRAM_LOGIN",
+      config: { path: ["instagramUserId"], equals: instagramUserId },
+    },
+    select: { id: true },
   });
+
+  // Channel.status default no schema e DISCONNECTED (fluxo WhatsApp QR).
+  // Messenger ja seta CONNECTED apos criar; Instagram precisa do mesmo.
+  let channel: Channel;
+  if (existing) {
+    channel = await updateChannel(existing.id, {
+      name,
+      config,
+      status: "CONNECTED",
+      lastConnectedAt: new Date(),
+    });
+  } else {
+    channel = await createChannel({
+      name,
+      type: "INSTAGRAM",
+      provider: "META_INSTAGRAM_LOGIN",
+      config,
+    });
+    channel = await updateChannel(channel.id, {
+      status: "CONNECTED",
+      lastConnectedAt: new Date(),
+    });
+  }
 
   return { channel, username };
 }
