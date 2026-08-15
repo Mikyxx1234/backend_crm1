@@ -10,6 +10,44 @@ import {
 } from "@/lib/human-actor-name";
 import { isEventMessageType } from "@/services/conversation-events";
 
+export type LifecycleEventActor = {
+  name: string;
+  userId: string | null;
+};
+
+type LifecycleEventSource = {
+  actorType?: string | null;
+  actorLabel?: string | null;
+  actorUserId?: string | null;
+  actorUser?: { name: string | null; email: string | null; type: string } | null;
+};
+
+/**
+ * Quem abriu/encerrou: nome humano, Sistema ou Automação.
+ * Não usa actorLabel livre (pode ser aba/departamento, ex. "Aguardando Resposta").
+ */
+export function resolveLifecycleEventActor(
+  ev: LifecycleEventSource | null | undefined,
+): LifecycleEventActor {
+  if (!ev) return { name: "Sistema", userId: null };
+  const t = (ev.actorType ?? "").toUpperCase();
+  if (t === "AUTOMATION" || t === "AI" || ev.actorUser?.type === "AI") {
+    return { name: "Automação", userId: null };
+  }
+  if (t === "SYSTEM" || t === "INTEGRATION") {
+    return { name: "Sistema", userId: null };
+  }
+  const formatted = formatHumanActorDisplayName(
+    ev.actorUser?.name ?? null,
+    ev.actorUser?.email ?? null,
+  );
+  if (formatted) return { name: formatted, userId: ev.actorUserId ?? null };
+  if (t === "HUMAN" && ev.actorUserId) {
+    return { name: "Sistema", userId: ev.actorUserId };
+  }
+  return { name: "Sistema", userId: null };
+}
+
 export type EventActorEnrichment = {
   senderName: string;
   senderUserId: string | null;
@@ -37,10 +75,16 @@ function activityMatchesMessage(
         (action === "tabulacao" || action === "status") &&
         c.includes("tabulad")
       );
+    case "CONVERSATION_CREATED":
+      return action === "entrada" && c.includes("aberta");
     case "CONVERSATION_STATUS_CHANGED":
     case "CONVERSATION_CLOSED":
     case "CONVERSATION_REOPENED":
-      return action === "status" && c.includes("status");
+      return (
+        (action === "status" && c.includes("status")) ||
+        (action === "saida" && c.includes("encerrada")) ||
+        (action === "entrada" && c.includes("aberta"))
+      );
     case "TAG_ADDED":
       return action === "tag" && /adicion/.test(c);
     case "TAG_REMOVED":
