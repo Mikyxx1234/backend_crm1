@@ -216,7 +216,8 @@ describe("ProvisioningService", () => {
     });
 
     mockClient.findUsers.mockResolvedValue([]);
-    mockClient.createUser.mockRejectedValue(new Error("Network exploded"));
+    mockClient.createUser.mockRejectedValue(new Error("phone invalid"));
+    mockClient.createNextExtension.mockRejectedValue(new Error("Network exploded"));
 
     const result = await enableTelephony("user-1", "org-1");
 
@@ -225,13 +226,43 @@ describe("ProvisioningService", () => {
     expect(result.error).toContain("Network exploded");
   });
 
+  it("CREATE_USER falho não impede criar ramal", async () => {
+    prismaMock.sipExtension.findUnique.mockResolvedValue(null);
+    prismaMock.sipExtension.create.mockResolvedValue(makeExt());
+    prismaMock.user.findUnique.mockResolvedValue({
+      email: "sem-fone@test.com",
+      name: "Sem Fone",
+    });
+    prismaMock.user.findUniqueOrThrow.mockResolvedValue({
+      email: "sem-fone@test.com",
+      name: "Sem Fone",
+      phone: null,
+    });
+
+    mockClient.findUsers.mockResolvedValue([]);
+    mockClient.createUser.mockRejectedValue(new Error("phone invalid"));
+    mockClient.createNextExtension.mockResolvedValue({
+      id: "ext-3",
+      ramal: "1080",
+      senha: "sip-pw",
+      domain: "cruzeiroead.api4com.com",
+    });
+    mockClient.upsertIntegration.mockResolvedValue(undefined);
+
+    const result = await enableTelephony("user-1", "org-1");
+
+    expect(result.success).toBe(true);
+    expect(result.step).toBe("ACTIVE");
+    expect(mockClient.createNextExtension).toHaveBeenCalledOnce();
+  });
+
   it("retoma FAILED com ramal já persistido sem recriar extensão", async () => {
     const existing = makeExt({
       provisioningStep: "FAILED",
       authUser: "1079",
       authPasswordEncrypted: "enc:kept",
       sipUri: "1079@cruzeiroead.api4com.com",
-      api4comUserId: "api4-user-1",
+      api4comUserId: null,
       providerMeta: { extensionId: "ext-1079", ramal: "1079" },
     });
     prismaMock.sipExtension.findUnique.mockResolvedValue(existing);
@@ -242,7 +273,8 @@ describe("ProvisioningService", () => {
       email: "teste@eduit.com.br",
       name: "Pinha Dev",
     });
-    mockClient.findUsers.mockResolvedValue([{ id: "api4-user-1" }]);
+    mockClient.findUsers.mockResolvedValue([]);
+    mockClient.createUser.mockRejectedValue(new Error("phone invalid"));
     mockClient.upsertIntegration.mockRejectedValue(new Error("422 webhook"));
 
     const result = await enableTelephony("user-1", "org-1");
