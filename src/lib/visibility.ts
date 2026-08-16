@@ -294,7 +294,7 @@ function permissionsAllowKey(
  * filas injetam: as duas trazem conversa SEM responsável, então sem esse
  * gate o pool livre reaparecia na Inbox mesmo com o eixo desligado nas
  * permissões — a aba Entrada furava a regra. Assignee IA + inbound do
- * aluno entra no pool da Entrada (a IA em Lead de Entrada não responde).
+ * aluno entra no pool da Entrada até a IA responder.
  */
 export function withInboxQueueVisibility(
   base: Prisma.ConversationWhereInput,

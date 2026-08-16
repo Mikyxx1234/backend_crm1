@@ -66,7 +66,6 @@ import {
 } from "@/services/ai/academic-closure";
 import {
   buildSoftCloseAfterNudgeReply,
-  contactHasEntryLeadDeal,
   isIdleNudgeContent,
   userWantsSoftAiClose,
 } from "@/services/ai/idle-followup";
@@ -251,20 +250,6 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       }
     } catch (e) {
       console.error("[ai] phone allowlist in maybeReply — blocking", e);
-      return;
-    }
-
-    try {
-      if (await contactHasEntryLeadDeal(args.contactId)) {
-        logAi("blocked", {
-          conversationId: args.conversationId,
-          contactId: args.contactId,
-          reason: "entry_lead_stage",
-        });
-        return;
-      }
-    } catch (e) {
-      console.error("[ai] entry-stage check in maybeReply — blocking", e);
       return;
     }
 
