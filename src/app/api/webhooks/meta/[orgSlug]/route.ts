@@ -39,9 +39,11 @@ async function resolveScope(param: string) {
   // 1) Tenta como webhookId (per-channel, id aleatorio).
   const channel = await prismaBase.channel.findFirst({
     where: {
-      type: "WHATSAPP",
-      provider: "META_CLOUD_API",
       config: { path: ["webhookId"], equals: param },
+      OR: [
+        { type: "WHATSAPP", provider: "META_CLOUD_API" },
+        { type: "INSTAGRAM", provider: "META_INSTAGRAM_LOGIN" },
+      ],
     },
     select: {
       organizationId: true,

@@ -5,6 +5,30 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-15 — Instagram Direct manual (App da org, org por org)
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Conexão Instagram igual ao WhatsApp Cloud que já opera em
+produção: cada org cria o próprio App Meta, cola token + App Secret, e o
+CRM gera callback `/api/webhooks/meta/<webhookId>`. Não depende de App
+Review do `CRM_eduit`.
+
+**Contexto.** OAuth no App da EduIT conectava o canal, mas a Meta não
+entrega webhook `messages` em app Business com permissão Standard. O
+WhatsApp das orgs já era BYO app (manual-cloud + botão Webhook), não
+Embedded Signup.
+
+**Alternativas descartadas.**
+- Esperar review do `CRM_eduit`: semanas; bloqueia o teste DNAWork.
+- Interruptor Live do painel antigo: app Business não tem modo.
+
+**Impacto.** `POST /api/channels/instagram/manual`; webhook-info aceita
+`type=INSTAGRAM`; handler WhatsApp resolve webhookId de canal IG e
+encaminha `object=instagram`.
+
+---
+
 ### 2026-08-14 — Step `check_agent_status` (Disponível / Offline)
 
 **Modelo usado.** Cursor Grok 4.6.

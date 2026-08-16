@@ -85,30 +85,34 @@ export async function handleMessagingWebhookGet(request: Request): Promise<Respo
 
 // ── POST: recebimento ──────────────────────────────────────
 
-export async function handleMessagingWebhookPost(request: Request): Promise<Response> {
+export async function handleMessagingWebhookPost(
+  request: Request,
+  opts?: { skipSignature?: boolean },
+): Promise<Response> {
   const rawBody = await request.text();
   const signature = request.headers.get("x-hub-signature-256");
 
   const secrets = messagingWebhookSecrets();
-  let signatureValid = false;
-  if (secrets.length > 0) {
-    signatureValid = secrets.some((s) =>
-      verifyMetaWebhookSignature(rawBody, signature, s),
-    );
-    if (!signatureValid) {
-      log.warn(
-        `Assinatura invalida (${secrets.length} secret(s)) — recusando POST messaging`,
+  if (!opts?.skipSignature) {
+    if (secrets.length > 0) {
+      const signatureValid = secrets.some((s) =>
+        verifyMetaWebhookSignature(rawBody, signature, s),
       );
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      if (!signatureValid) {
+        log.warn(
+          `Assinatura invalida (${secrets.length} secret(s)) — recusando POST messaging`,
+        );
+        return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+      }
+    } else if (REQUIRE_SIGNATURE) {
+      log.error("PROD sem META_APP_SECRET/INSTAGRAM_APP_SECRET — recusando POST messaging");
+      return NextResponse.json(
+        { error: "Webhook signature verification not configured" },
+        { status: 503 },
+      );
+    } else {
+      log.debug("Sem App Secret — assinatura nao verificada (dev)");
     }
-  } else if (REQUIRE_SIGNATURE) {
-    log.error("PROD sem META_APP_SECRET/INSTAGRAM_APP_SECRET — recusando POST messaging");
-    return NextResponse.json(
-      { error: "Webhook signature verification not configured" },
-      { status: 503 },
-    );
-  } else {
-    log.debug("Sem App Secret — assinatura nao verificada (dev)");
   }
 
   let body: WebhookBody;

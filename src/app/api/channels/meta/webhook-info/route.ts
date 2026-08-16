@@ -108,9 +108,11 @@ export async function POST(request: Request) {
     }
 
     let name = "";
+    let channelKind: "WHATSAPP" | "INSTAGRAM" = "WHATSAPP";
     try {
-      const body = (await request.json()) as { name?: unknown };
+      const body = (await request.json()) as { name?: unknown; type?: unknown };
       if (typeof body.name === "string") name = body.name.trim();
+      if (body.type === "INSTAGRAM") channelKind = "INSTAGRAM";
     } catch {
       // body opcional; se nao vier, usa nome padrao
     }
@@ -118,17 +120,22 @@ export async function POST(request: Request) {
     const webhookId = generateRandomId(24);
     const verifyToken = generateRandomId(40);
 
-    // Cria canal em CONNECTING pra que o handshake Meta encontre o
-    // webhookId no banco. As credenciais reais (accessToken, phoneNumberId,
-    // wabaId) sao populadas depois via /api/channels/manual-cloud, que faz
-    // UPDATE deste canal e move status pra CONNECTED.
+    // Cria canal pra que o handshake Meta encontre o webhookId no banco.
+    // Credenciais reais entram depois (manual-cloud / instagram/manual)
+    // e movem status pra CONNECTED.
     const channel = await createChannel({
-      name: name || "Nova conexao WhatsApp",
-      type: "WHATSAPP",
-      provider: "META_CLOUD_API",
+      name:
+        name ||
+        (channelKind === "INSTAGRAM"
+          ? "Nova conexao Instagram"
+          : "Nova conexao WhatsApp"),
+      type: channelKind,
+      provider:
+        channelKind === "INSTAGRAM" ? "META_INSTAGRAM_LOGIN" : "META_CLOUD_API",
       config: {
         webhookId,
         verifyToken,
+        ...(channelKind === "INSTAGRAM" ? { platform: "instagram" } : {}),
       },
     });
 

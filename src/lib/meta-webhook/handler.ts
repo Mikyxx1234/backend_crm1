@@ -1771,6 +1771,11 @@ function timingSafeStringEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+const META_WEBHOOK_CHANNEL_OR = [
+  { type: "WHATSAPP" as const, provider: "META_CLOUD_API" as const },
+  { type: "INSTAGRAM" as const, provider: "META_INSTAGRAM_LOGIN" as const },
+];
+
 export async function handleMetaWebhookGet(
   request: Request,
   scope?: WebhookScope,
@@ -1787,8 +1792,7 @@ export async function handleMetaWebhookGet(
     const channels = await prismaBase.channel.findMany({
       where: {
         organizationId: scope.organizationId,
-        type: "WHATSAPP",
-        provider: "META_CLOUD_API",
+        OR: META_WEBHOOK_CHANNEL_OR,
       },
       select: { id: true, name: true, config: true },
     });
@@ -1852,7 +1856,7 @@ export async function handleMetaWebhookGet(
   if (VERIFY_TOKEN) legacyTokens.push(VERIFY_TOKEN);
   try {
     const channels = await prismaBase.channel.findMany({
-      where: { type: "WHATSAPP", provider: "META_CLOUD_API" },
+      where: { OR: META_WEBHOOK_CHANNEL_OR },
       select: { id: true, config: true },
     });
     for (const c of channels) {
@@ -1918,10 +1922,9 @@ async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
     const where = scope
       ? {
           organizationId: scope.organizationId,
-          type: "WHATSAPP" as const,
-          provider: "META_CLOUD_API" as const,
+          OR: META_WEBHOOK_CHANNEL_OR,
         }
-      : { type: "WHATSAPP" as const, provider: "META_CLOUD_API" as const };
+      : { OR: META_WEBHOOK_CHANNEL_OR };
     const channels = await prismaBase.channel.findMany({
       where,
       select: { config: true },
@@ -2114,6 +2117,7 @@ async function executePostBody(
         headers: request.headers,
         body: rawBody,
       }),
+      { skipSignature: true },
     );
   }
   if (object !== "whatsapp_business_account") {
