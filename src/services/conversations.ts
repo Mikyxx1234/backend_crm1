@@ -326,10 +326,10 @@ function tabToWhere(
                 lastInboundAt: { not: null },
               },
               { assignedTo: { is: { type: "HUMAN" } } },
-              // IA assignee + aluno já falou: a IA em Lead de Entrada
-              // não responde (entry_lead_stage). lastInboundAt (não a
-              // última direção) — campanha/template depois do inbound
-              // não devolve o card pra Automação.
+              // IA assignee + aluno já falou e ainda não teve reply
+              // contável. lastInboundAt (não a última direção) —
+              // campanha/template depois do inbound não devolve o
+              // card pra Automação.
               {
                 assignedTo: { is: { type: "AI" } },
                 lastInboundAt: { not: null },

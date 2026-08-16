@@ -1,7 +1,7 @@
 /**
  * AI Agent Inactivity Worker.
  *
- * 1) Follow-up só-IA (não atende Lead de Entrada):
+ * 1) Follow-up só-IA:
  *    30 min sem retorno → check-in empático (se janela 24h aberta).
  *    +30 min sem resposta ao check-in (ou 30 min e janela já fechada)
  *    → `closeAiOnlyConversation`. Overrides: `AI_AGENT_IDLE_NUDGE_MS`,
@@ -135,13 +135,6 @@ async function listIdleAiOnly(now: Date, idleMs: number): Promise<IdleRow[]> {
       AND c."lastMessageDirection" = 'out'
       AND c."hasAgentReply" = true
       AND last_out."createdAt" < (${now}::timestamptz - ((${idleMs})::text || ' milliseconds')::interval)
-      AND NOT EXISTS (
-        SELECT 1 FROM deals d
-        JOIN stages s ON s.id = d."stageId"
-        WHERE d."contactId" = c."contactId"
-          AND d.status = 'OPEN'
-          AND (s.slug = 'lead-de-entrada' OR lower(s.name) = 'lead de entrada')
-      )
     ORDER BY last_out."createdAt" ASC
     LIMIT ${BATCH_SIZE};
   `;

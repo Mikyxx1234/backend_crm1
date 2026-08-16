@@ -1,8 +1,6 @@
 /**
- * Follow-up de silêncio da IA + recusa de atendimento em Lead de Entrada.
+ * Follow-up de silêncio da IA.
  */
-
-import { prisma } from "@/lib/prisma";
 
 export const IDLE_NUDGE_MS = 30 * 60 * 1000;
 export const IDLE_CLOSE_AFTER_NUDGE_MS = 30 * 60 * 1000;
@@ -68,22 +66,4 @@ export function daypartWish(now = new Date()): "dia" | "tarde" | "noite" {
 
 export function buildSoftCloseAfterNudgeReply(now = new Date()): string {
   return `Ok! Qualquer coisa é só chamar. Tenha um ótimo ${daypartWish(now)} 😊`;
-}
-
-export async function contactHasEntryLeadDeal(
-  contactId: string,
-): Promise<boolean> {
-  const n = await prisma.deal.count({
-    where: {
-      contactId,
-      status: "OPEN",
-      stage: {
-        OR: [
-          { slug: "lead-de-entrada" },
-          { name: { equals: "Lead de Entrada", mode: "insensitive" } },
-        ],
-      },
-    },
-  });
-  return n > 0;
 }
