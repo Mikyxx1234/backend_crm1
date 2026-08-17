@@ -260,9 +260,22 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         assignedToId: true,
         contactId: true,
         hasHumanReply: true,
-        channelRef: { select: { id: true, config: true } },
+        channelRef: { select: { id: true, config: true, status: true, name: true } },
       },
     });
+    if (
+      conversation?.channelRef &&
+      conversation.channelRef.status !== "CONNECTED"
+    ) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        reason: "channel_not_connected",
+        channel: conversation.channelRef.name,
+        status: conversation.channelRef.status,
+      });
+      return;
+    }
     if (!conversation?.assignedToId) {
       // Sem responsável: se está na fila de distribuição (handoff IA),
       // tenta redistribuir; se não houver humano, oferece continuar com a IA

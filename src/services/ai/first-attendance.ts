@@ -246,6 +246,25 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
+  try {
+    const convCh = await prisma.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: { channelRef: { select: { status: true, name: true } } },
+    });
+    if (convCh?.channelRef && convCh.channelRef.status !== "CONNECTED") {
+      logAi("first_attendance_skip_channel_off", {
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        channel: convCh.channelRef.name,
+        status: convCh.channelRef.status,
+      });
+      return null;
+    }
+  } catch (e) {
+    console.error("[ai] first_attendance channel status check failed — skipping", e);
+    return null;
+  }
+
   // Automação pausada aguardando resposta do contato (ex.: template com
   // botões): em geral a IA NÃO assume, pra não matar o salesbot.
   // Exceção na janela da aula inaugural: tags calouros1008_* — a IA

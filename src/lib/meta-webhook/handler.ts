@@ -363,6 +363,29 @@ type ContactRow = {
  * Resolve contato a partir do webhook Meta, com BSUID (user_id / from_user_id) e/ou telefone (wa_id / from).
  * Ref: https://developers.facebook.com/documentation/business-messaging/whatsapp/business-scoped-user-ids
  */
+function ignoredMetaPhoneNumberIds(): Set<string> {
+  const raw = process.env.META_IGNORE_PHONE_NUMBER_IDS ?? "";
+  return new Set(
+    raw
+      .split(/[,;\s]+/)
+      .map((s) => s.trim())
+      .filter(Boolean),
+  );
+}
+
+function staleInboundMaxAgeMs(): number {
+  const raw = Number.parseFloat(
+    process.env.META_STALE_INBOUND_MAX_AGE_HOURS ?? "2",
+  );
+  const hours = Number.isFinite(raw) && raw > 0 ? raw : 2;
+  return hours * 60 * 60 * 1000;
+}
+
+function isStaleMetaInbound(timestamp: Date): boolean {
+  const age = Date.now() - timestamp.getTime();
+  return Number.isFinite(age) && age > staleInboundMaxAgeMs();
+}
+
 async function isKnownPhoneNumberId(phoneNumberId: string): Promise<boolean> {
   const envPhoneId = process.env.META_WHATSAPP_PHONE_NUMBER_ID?.trim();
   if (envPhoneId && phoneNumberId === envPhoneId) return true;
@@ -387,7 +410,7 @@ async function findChannelByPhoneNumberId(phoneNumberId?: string) {
   // admin migrar pra rota com slug.
   const channels = await prisma.channel.findMany({
     where: { type: "WHATSAPP", provider: "META_CLOUD_API" },
-    select: { id: true, name: true, config: true },
+    select: { id: true, name: true, status: true, config: true },
   });
   for (const ch of channels) {
     const cfg = ch.config as Record<string, unknown> | null;
@@ -2182,7 +2205,23 @@ export async function processMetaWebhookPayload(
       const phoneNumberId = str(metadata.phone_number_id);
 
       if (phoneNumberId) {
-        const isKnown = await isKnownPhoneNumberId(phoneNumberId);
+        if (ignoredMetaPhoneNumberIds().has(phoneNumberId)) {
+          log.warn(
+            `inbound ignorado — META_IGNORE_PHONE_NUMBER_IDS phone=${phoneNumberId}`,
+          );
+          continue;
+        }
+        const inboundChannel = await findChannelByPhoneNumberId(phoneNumberId);
+        if (inboundChannel && inboundChannel.status !== "CONNECTED") {
+          // Pausar/desconectar no CRM precisa cortar o webhook: a Meta
+          // continua entregando no Callback URL do App. Sem este gate o
+          // burst reabre a Entrada e dispara IA mesmo com o canal off.
+          log.warn(
+            `inbound ignorado — canal "${inboundChannel.name}" status=${inboundChannel.status} phone=${phoneNumberId}`,
+          );
+          continue;
+        }
+        const isKnown = inboundChannel != null || (await isKnownPhoneNumberId(phoneNumberId));
         if (!isKnown) {
           const envPhoneId = process.env.META_WHATSAPP_PHONE_NUMBER_ID?.trim() ?? "(none)";
           const knownChannels = await prisma.channel.findMany({
@@ -2268,6 +2307,16 @@ export async function processMetaWebhookPayload(
 
         if (isDuplicate(parsed.waMessageId)) {
           log.debug(`Mensagem duplicada ignorada: ${parsed.waMessageId}`);
+          continue;
+        }
+
+        if (isStaleMetaInbound(parsed.timestamp)) {
+          const ageMin = Math.round(
+            (Date.now() - parsed.timestamp.getTime()) / 60_000,
+          );
+          log.warn(
+            `inbound stale ignorado wamid=${parsed.waMessageId} ageMin=${ageMin} phone=${phoneNumberId ?? "?"}`,
+          );
           continue;
         }
 
