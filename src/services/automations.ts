@@ -8,6 +8,7 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
 import { normalizeHoursBeforeExpiry } from "@/services/whatsapp-session-expiry";
 import {
   findFirstMessageStepIndex,
+  newStepId,
   validateFirstMessageChannel,
 } from "@/lib/automation-workflow";
 
@@ -116,6 +117,38 @@ function remapStepRefsInValue(value: unknown, remap: Map<string, string>): unkno
   }
 
   return next;
+}
+
+/**
+ * Garante IDs únicos no payload de replace. Remapeia só o que colide com
+ * outro step (mesmo payload ou outra automação) — nunca trata os steps
+ * que acabamos de apagar desta automação como conflito.
+ */
+function prepareStepsForReplace(
+  steps: CreateAutomationStepInput[],
+  takenIds: Set<string>,
+): CreateAutomationStepInput[] {
+  const remap = new Map<string, string>();
+  const seen = new Set<string>();
+  const out: CreateAutomationStepInput[] = [];
+
+  for (const step of steps) {
+    const oldId = typeof step.id === "string" && step.id.trim() ? step.id.trim() : "";
+    let id = oldId;
+    if (!id || takenIds.has(id) || seen.has(id)) {
+      const generated = newStepId();
+      if (oldId) remap.set(oldId, generated);
+      id = generated;
+    }
+    seen.add(id);
+    out.push({ ...step, id });
+  }
+
+  if (remap.size === 0) return out;
+  return out.map((step) => ({
+    ...step,
+    config: remapStepRefsInValue(step.config, remap) as Prisma.InputJsonValue,
+  }));
 }
 
 export function evaluateTrigger(
@@ -787,33 +820,9 @@ export async function updateAutomation(id: string, data: UpdateAutomationInput) 
     if (channelErr) throw new Error(channelErr);
   }
 
+  const organizationId = getOrgIdOrThrow();
+
   return prisma.$transaction(async (tx) => {
-    if (data.steps) {
-      await tx.automationStep.deleteMany({ where: { automationId: id } });
-
-      const providedIds = data.steps.filter((s) => s.id).map((s) => s.id!);
-      let conflicting: string[] = [];
-      if (providedIds.length > 0) {
-        const existing = await tx.automationStep.findMany({
-          where: { id: { in: providedIds } },
-          select: { id: true },
-        });
-        conflicting = existing.map((e) => e.id);
-      }
-
-      if (conflicting.length > 0) {
-        const remap = new Map<string, string>();
-        for (const oldId of conflicting) {
-          remap.set(oldId, `step_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`);
-        }
-        data.steps = data.steps.map((s) => {
-          const newId = s.id ? remap.get(s.id) : undefined;
-          const cfg = remapStepRefsInValue(s.config, remap);
-          return { ...s, id: newId ?? s.id, config: cfg as Prisma.InputJsonValue };
-        });
-      }
-    }
-
     const updateData: Prisma.AutomationUpdateInput = {};
     if (data.name !== undefined) {
       const trimmed = data.name.trim();
@@ -835,24 +844,50 @@ export async function updateAutomation(id: string, data: UpdateAutomationInput) 
     if (data.allowManualRun !== undefined) {
       updateData.allowManualRun = data.allowManualRun;
     }
-    if (data.steps) {
-      const organizationId = getOrgIdOrThrow();
-      updateData.steps = {
-        create: data.steps.map((s, index) => ({
-          ...(s.id ? { id: s.id } : {}),
-          type: s.type,
-          config: s.config,
-          position: index,
-          organizationId,
-        })),
-      };
+
+    if (Object.keys(updateData).length > 0) {
+      await tx.automation.update({ where: { id }, data: updateData });
     }
 
-    return tx.automation.update({
+    // Replace atômico: deleteMany + createMany no step (não nested create
+    // no parent). O nested `steps: { create }` depois de um deleteMany
+    // separado fazia o Prisma ACUMULAR cópias a cada Salvar.
+    if (data.steps) {
+      await tx.automationStep.deleteMany({ where: { automationId: id } });
+
+      const providedIds = data.steps
+        .map((s) => (typeof s.id === "string" ? s.id.trim() : ""))
+        .filter(Boolean);
+      const takenIds = new Set<string>();
+      if (providedIds.length > 0) {
+        const foreign = await tx.automationStep.findMany({
+          where: { id: { in: providedIds }, automationId: { not: id } },
+          select: { id: true },
+        });
+        for (const row of foreign) takenIds.add(row.id);
+      }
+
+      const prepared = prepareStepsForReplace(data.steps, takenIds);
+      if (prepared.length > 0) {
+        await tx.automationStep.createMany({
+          data: prepared.map((s, index) => ({
+            id: s.id!,
+            type: s.type,
+            config: s.config,
+            position: index,
+            organizationId,
+            automationId: id,
+          })),
+        });
+      }
+    }
+
+    const saved = await tx.automation.findUnique({
       where: { id },
-      data: updateData,
       include: { steps: { orderBy: { position: "asc" } } },
     });
+    if (!saved) throw new Error("NOT_FOUND");
+    return saved;
   });
 }
 
