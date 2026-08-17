@@ -1,18 +1,19 @@
 /**
- * Números WhatsApp aposentados (ex.: CSV Atendimento 4535).
+ * Números WhatsApp aposentados.
  * Inbound e IA não devem atender — mesmo se o canal voltar CONNECTED.
+ *
+ * CSV Atendimento (+55 11 91518-4535 / phone_number_id 883452561518366)
+ * foi religado em 17/08/2026 — lista vazia de propósito.
  */
 
 /** Meta Cloud `phone_number_id` do CSV Atendimento +55 11 91518-4535. */
 export const RETIRED_CSV_ATENDIMENTO_PHONE_NUMBER_ID = "883452561518366";
 
-const RETIRED_META_PHONE_NUMBER_IDS = new Set<string>([
-  RETIRED_CSV_ATENDIMENTO_PHONE_NUMBER_ID,
-]);
+const RETIRED_META_PHONE_NUMBER_IDS = new Set<string>([]);
 
-const RETIRED_PHONE_DIGITS = ["11915184535", "5511915184535"] as const;
+const RETIRED_PHONE_DIGITS: readonly string[] = [];
 
-const RETIRED_CHANNEL_NAMES = new Set(["csv atendimento"]);
+const RETIRED_CHANNEL_NAMES = new Set<string>([]);
 
 function digitsOnly(raw: string | null | undefined): string {
   return (raw ?? "").replace(/\D+/g, "");

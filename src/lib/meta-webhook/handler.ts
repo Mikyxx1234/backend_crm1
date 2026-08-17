@@ -52,10 +52,7 @@ import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
-import {
-  isRetiredMetaPhoneNumberId,
-  isRetiredWhatsAppChannel,
-} from "@/lib/channels/retired-whatsapp";
+import { isRetiredMetaPhoneNumberId } from "@/lib/channels/retired-whatsapp";
 
 // Marcador único de build — usado pra confirmar via `grep` no bundle se o
 // rebuild do Easypanel pegou esta versão do source. Não tem outra função.
@@ -414,13 +411,17 @@ async function isKnownPhoneNumberId(phoneNumberId: string): Promise<boolean> {
 
 async function findChannelByPhoneNumberId(phoneNumberId?: string) {
   if (!phoneNumberId) return null;
-  // Quando o handler roda dentro de withSystemContext(orgId), a Prisma
-  // extension automaticamente injeta organizationId no where -> esta
-  // findMany so devolve canais DESSA org. Sem context (rota legacy)
-  // pode dar erro "fora de RequestContext" — esperado, eh sinal pro
-  // admin migrar pra rota com slug.
+  // Lookup pelo id da Meta no JSON — igual ao createMetaWebhookEvent.
+  // Nao filtra type/provider: um reconnect nao pode "sumir" o canal se
+  // o provider no banco divergir. Preferir CONNECTED se houver duplicata
+  // (linha velha DISCONNECTED + linha religada).
   const channels = await prisma.channel.findMany({
-    where: { type: "WHATSAPP", provider: "META_CLOUD_API" },
+    where: {
+      OR: [
+        { config: { path: ["phoneNumberId"], equals: phoneNumberId } },
+        { phoneNumber: phoneNumberId },
+      ],
+    },
     select: {
       id: true,
       name: true,
@@ -429,14 +430,8 @@ async function findChannelByPhoneNumberId(phoneNumberId?: string) {
       config: true,
     },
   });
-  for (const ch of channels) {
-    const cfg = ch.config as Record<string, unknown> | null;
-    if (cfg && String(cfg.phoneNumberId ?? "").trim() === phoneNumberId) return ch;
-  }
-  // ANTES retornava `channels[0] ?? null` — bug critico: se nenhum canal
-  // batesse com o phone_number_id, escolhia o primeiro de qualquer org
-  // (cross-tenant leak). Agora retorna null e o caller decide ignorar.
-  return null;
+  if (channels.length === 0) return null;
+  return channels.find((ch) => ch.status === "CONNECTED") ?? channels[0];
 }
 
 async function getChannelSourceName(phoneNumberId?: string): Promise<string> {
@@ -2209,6 +2204,7 @@ export async function processMetaWebhookPayload(
 ): Promise<Response> {
   const { metaWebhookEventId } = opts;
   const entries = arr(body.entry);
+  let skipReason: string | null = null;
 
   for (const entry of entries) {
     const e = obj(entry);
@@ -2220,29 +2216,31 @@ export async function processMetaWebhookPayload(
       const value = obj(ch.value);
       const metadata = obj(value.metadata);
       const phoneNumberId = str(metadata.phone_number_id);
+      let inboundPaused = false;
+      let inboundPausedName = "";
+      let inboundPausedStatus = "";
 
       if (phoneNumberId) {
         if (shouldDropMetaInbound(phoneNumberId)) {
+          skipReason = `ignored_phone ${phoneNumberId}`;
           log.warn(
             `inbound ignorado — número aposentado/ignorado phone=${phoneNumberId}`,
           );
           continue;
         }
         const inboundChannel = await findChannelByPhoneNumberId(phoneNumberId);
-        if (inboundChannel && isRetiredWhatsAppChannel(inboundChannel)) {
-          log.warn(
-            `inbound ignorado — canal aposentado "${inboundChannel.name}" phone=${phoneNumberId}`,
-          );
-          continue;
-        }
-        if (inboundChannel && inboundChannel.status !== "CONNECTED") {
-          // Pausar/desconectar no CRM precisa cortar o webhook: a Meta
-          // continua entregando no Callback URL do App. Sem este gate o
-          // burst reabre a Entrada e dispara IA mesmo com o canal off.
-          log.warn(
-            `inbound ignorado — canal "${inboundChannel.name}" status=${inboundChannel.status} phone=${phoneNumberId}`,
-          );
-          continue;
+        // So DISCONNECTED/FAILED param inbound. CONNECTING (o "Conectar"
+        // do CRM) e CONNECTED passam — senao o reconnect vira buraco negro
+        // e o worker marca processed sem gravar. Recibos (status) sempre
+        // processam: o gate antigo pulava o change inteiro e o tick ficava
+        // preso em sent.
+        inboundPaused =
+          inboundChannel != null &&
+          (inboundChannel.status === "DISCONNECTED" ||
+            inboundChannel.status === "FAILED");
+        if (inboundPaused) {
+          inboundPausedName = inboundChannel.name;
+          inboundPausedStatus = inboundChannel.status;
         }
         const isKnown = inboundChannel != null || (await isKnownPhoneNumberId(phoneNumberId));
         if (!isKnown) {
@@ -2258,6 +2256,7 @@ export async function processMetaWebhookPayload(
               return id ? `${ch.name}=${id}` : `${ch.name}=(nenhum)`;
             })
             .join(", ");
+          skipReason = `unknown_phone ${phoneNumberId}`;
           log.debug(
             `phone_number_id="${phoneNumberId}" não reconhecido — número não cadastrado como canal. env=${envPhoneId}. Canais: [${knownIds || "(nenhum)"}]`,
           );
@@ -2325,6 +2324,14 @@ export async function processMetaWebhookPayload(
         }
         if (!from && !fromUserId) continue;
 
+        if (inboundPaused) {
+          skipReason = `channel_${inboundPausedStatus} ${phoneNumberId}`;
+          log.warn(
+            `inbound ignorado — canal "${inboundPausedName}" status=${inboundPausedStatus} phone=${phoneNumberId}`,
+          );
+          continue;
+        }
+
         const parsed = parseMessage(m);
         if (!parsed) continue;
 
@@ -2337,6 +2344,7 @@ export async function processMetaWebhookPayload(
           const ageMin = Math.round(
             (Date.now() - parsed.timestamp.getTime()) / 60_000,
           );
+          skipReason = `stale_inbound ageMin=${ageMin} phone=${phoneNumberId ?? "?"}`;
           log.warn(
             `inbound stale ignorado wamid=${parsed.waMessageId} ageMin=${ageMin} phone=${phoneNumberId ?? "?"}`,
           );
@@ -2856,7 +2864,7 @@ export async function processMetaWebhookPayload(
   }
 
   if (metaWebhookEventId) {
-    await markWebhookEventProcessed(metaWebhookEventId, null);
+    await markWebhookEventProcessed(metaWebhookEventId, skipReason);
   }
 
   return NextResponse.json({ status: "ok" });
