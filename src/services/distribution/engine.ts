@@ -24,6 +24,7 @@ import {
 } from "@/services/deals";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 import { WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
+import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 
 import {
   clearOwnershipForRedistribution,
@@ -47,7 +48,8 @@ export type DistributionReason =
   | "ASSIGNED"
   | "SMART_DISTRIBUTION_NOT_ENABLED"
   | "NO_ELIGIBLE_RESPONSIBLE"
-  | "NO_DEPARTMENT";
+  | "NO_DEPARTMENT"
+  | "RETIRED_WHATSAPP_CHANNEL";
 
 export interface ExecuteDistributionInput {
   dealId?: string | null;
@@ -535,6 +537,33 @@ export async function executeDistribution(
       selectedUserName: null,
       evaluated: [],
     };
+  }
+
+  if (rawInput.conversationId) {
+    const retiredConv = await prisma.conversation.findUnique({
+      where: { id: rawInput.conversationId },
+      select: {
+        channelRef: {
+          select: { name: true, phoneNumber: true, config: true },
+        },
+      },
+    });
+    if (isRetiredWhatsAppChannel(retiredConv?.channelRef)) {
+      await prisma.distributionPending.updateMany({
+        where: {
+          conversationId: rawInput.conversationId,
+          status: "PENDING",
+        },
+        data: { status: "CANCELLED" },
+      });
+      return {
+        success: false,
+        reason: "RETIRED_WHATSAPP_CHANNEL",
+        selectedUserId: null,
+        selectedUserName: null,
+        evaluated: [],
+      };
+    }
   }
 
   const input = await hydrateDistributionIds(rawInput);

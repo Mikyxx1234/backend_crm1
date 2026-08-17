@@ -26,6 +26,7 @@ import {
 import { hasOrganizationWidget } from "@/services/organization-widgets";
 
 import { tryAssignFirstAttendanceAi } from "@/services/ai/first-attendance";
+import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import {
   clearOwnershipForRedistribution,
   isAssigneeCurrentlyEligible,
@@ -530,6 +531,20 @@ export async function maybeDistributeNewInboundTicket(input: {
   contactId: string;
   assignedToId?: string | null;
 }): Promise<void> {
+  const retiredConv = await prisma.conversation.findUnique({
+    where: { id: input.conversationId },
+    select: {
+      channelRef: { select: { name: true, phoneNumber: true, config: true } },
+    },
+  });
+  if (isRetiredWhatsAppChannel(retiredConv?.channelRef)) {
+    await prisma.distributionPending.updateMany({
+      where: { conversationId: input.conversationId, status: "PENDING" },
+      data: { status: "CANCELLED" },
+    });
+    return;
+  }
+
   // #region agent log
   console.warn(
     "[DBG-e46688 maybeDist] entry",

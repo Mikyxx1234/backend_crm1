@@ -52,6 +52,10 @@ import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { sanitizeContactName } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
+import {
+  isRetiredMetaPhoneNumberId,
+  isRetiredWhatsAppChannel,
+} from "@/lib/channels/retired-whatsapp";
 
 // Marcador único de build — usado pra confirmar via `grep` no bundle se o
 // rebuild do Easypanel pegou esta versão do source. Não tem outra função.
@@ -373,6 +377,13 @@ function ignoredMetaPhoneNumberIds(): Set<string> {
   );
 }
 
+function shouldDropMetaInbound(phoneNumberId: string): boolean {
+  return (
+    isRetiredMetaPhoneNumberId(phoneNumberId) ||
+    ignoredMetaPhoneNumberIds().has(phoneNumberId)
+  );
+}
+
 function staleInboundMaxAgeMs(): number {
   const raw = Number.parseFloat(
     process.env.META_STALE_INBOUND_MAX_AGE_HOURS ?? "2",
@@ -410,7 +421,13 @@ async function findChannelByPhoneNumberId(phoneNumberId?: string) {
   // admin migrar pra rota com slug.
   const channels = await prisma.channel.findMany({
     where: { type: "WHATSAPP", provider: "META_CLOUD_API" },
-    select: { id: true, name: true, status: true, config: true },
+    select: {
+      id: true,
+      name: true,
+      status: true,
+      phoneNumber: true,
+      config: true,
+    },
   });
   for (const ch of channels) {
     const cfg = ch.config as Record<string, unknown> | null;
@@ -2205,13 +2222,19 @@ export async function processMetaWebhookPayload(
       const phoneNumberId = str(metadata.phone_number_id);
 
       if (phoneNumberId) {
-        if (ignoredMetaPhoneNumberIds().has(phoneNumberId)) {
+        if (shouldDropMetaInbound(phoneNumberId)) {
           log.warn(
-            `inbound ignorado — META_IGNORE_PHONE_NUMBER_IDS phone=${phoneNumberId}`,
+            `inbound ignorado — número aposentado/ignorado phone=${phoneNumberId}`,
           );
           continue;
         }
         const inboundChannel = await findChannelByPhoneNumberId(phoneNumberId);
+        if (inboundChannel && isRetiredWhatsAppChannel(inboundChannel)) {
+          log.warn(
+            `inbound ignorado — canal aposentado "${inboundChannel.name}" phone=${phoneNumberId}`,
+          );
+          continue;
+        }
         if (inboundChannel && inboundChannel.status !== "CONNECTED") {
           // Pausar/desconectar no CRM precisa cortar o webhook: a Meta
           // continua entregando no Callback URL do App. Sem este gate o

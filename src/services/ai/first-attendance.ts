@@ -14,6 +14,7 @@
 
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
+import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import {
   contactHasCalouros1008Tag,
   isInauguralLinkWindow,
@@ -249,8 +250,20 @@ export async function tryAssignFirstAttendanceAi(args: {
   try {
     const convCh = await prisma.conversation.findUnique({
       where: { id: args.conversationId },
-      select: { channelRef: { select: { status: true, name: true } } },
+      select: {
+        channelRef: {
+          select: { status: true, name: true, phoneNumber: true, config: true },
+        },
+      },
     });
+    if (isRetiredWhatsAppChannel(convCh?.channelRef)) {
+      logAi("first_attendance_skip_retired_channel", {
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        channel: convCh?.channelRef?.name,
+      });
+      return null;
+    }
     if (convCh?.channelRef && convCh.channelRef.status !== "CONNECTED") {
       logAi("first_attendance_skip_channel_off", {
         conversationId: args.conversationId,

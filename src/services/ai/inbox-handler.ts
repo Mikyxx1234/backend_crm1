@@ -38,6 +38,7 @@ import {
 } from "@/lib/ai-agents/piloting";
 import { cache } from "@/lib/cache";
 import { prisma } from "@/lib/prisma";
+import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
@@ -260,9 +261,26 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         assignedToId: true,
         contactId: true,
         hasHumanReply: true,
-        channelRef: { select: { id: true, config: true, status: true, name: true } },
+        channelRef: {
+          select: {
+            id: true,
+            config: true,
+            status: true,
+            name: true,
+            phoneNumber: true,
+          },
+        },
       },
     });
+    if (isRetiredWhatsAppChannel(conversation?.channelRef)) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        contactId: args.contactId,
+        reason: "retired_whatsapp_channel",
+        channel: conversation?.channelRef?.name,
+      });
+      return;
+    }
     if (
       conversation?.channelRef &&
       conversation.channelRef.status !== "CONNECTED"

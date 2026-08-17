@@ -6,6 +6,7 @@
 
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
+import { isRetiredWhatsAppChannel } from "@/lib/channels/retired-whatsapp";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
 import { collectUnansweredInboundText } from "@/services/ai/inbound-debounce";
 import { maybeReplyAsAIAgent } from "@/services/ai/inbox-handler";
@@ -72,7 +73,9 @@ export async function replayStuckAiInbox(
       channel: true,
       assignedTo: { select: { name: true, type: true } },
       contact: { select: { name: true } },
-      channelRef: { select: { provider: true } },
+      channelRef: {
+        select: { provider: true, name: true, phoneNumber: true, config: true },
+      },
     },
     orderBy: { lastInboundAt: "desc" },
     take: limit * 3,
@@ -81,6 +84,7 @@ export async function replayStuckAiInbox(
   const candidates: typeof rows = [];
   for (const row of rows) {
     if (!row.contactId) continue;
+    if (isRetiredWhatsAppChannel(row.channelRef)) continue;
     if (numbers.length || row.assignedTo?.type === "AI") {
       candidates.push(row);
       continue;

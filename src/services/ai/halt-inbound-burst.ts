@@ -8,8 +8,10 @@ import { prismaBase } from "@/lib/prisma-base";
 import { invalidateInboxTabCounts } from "@/lib/cache/keys";
 import { withSystemContext } from "@/lib/webhook-context";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
+import { RETIRED_CSV_ATENDIMENTO_PHONE_NUMBER_ID } from "@/lib/channels/retired-whatsapp";
 
-export const DEFAULT_BURST_PHONE_NUMBER_ID = "883452561518366";
+export const DEFAULT_BURST_PHONE_NUMBER_ID =
+  RETIRED_CSV_ATENDIMENTO_PHONE_NUMBER_ID;
 const HANDOFF_SNIPPET = "já pedi para a equipe";
 const CHUNK = 50;
 
