@@ -241,7 +241,7 @@ export async function GET(request: Request, context: RouteContext) {
     const includeHistory = url.searchParams.get("history") === "1" && !before;
 
     // Hot path paralelo: pins + sessão + página atual (antes: awaits em série).
-    const [pinnedBundle, lastInboundAtResolved, rowsDesc] = await Promise.all([
+    const [pinnedBundle, convSession, rowsDesc] = await Promise.all([
       (async (): Promise<{ pinnedNoteId: string | null; pinnedMessageIds: string[] }> => {
         try {
           const pins = await prisma.pinnedMessage.findMany({
@@ -272,20 +272,7 @@ export async function GET(request: Request, context: RouteContext) {
           return { pinnedNoteId: conv.pinnedNoteId ?? null, pinnedMessageIds: [] };
         }
       })(),
-      (async (): Promise<Date | null> => {
-        if (conv.lastInboundAt) return conv.lastInboundAt;
-        const lastInMsg = await prisma.message.findFirst({
-          where: {
-            direction: "in",
-            conversation: conv.contactId
-              ? { contactId: conv.contactId, channel: conv.channel }
-              : { id: conv.id },
-          },
-          orderBy: { createdAt: "desc" },
-          select: { createdAt: true },
-        });
-        return lastInMsg?.createdAt ?? null;
-      })(),
+      getConversationSession(conv),
       findMessagesSafe({
         where: {
           conversationId: conv.id,
@@ -298,19 +285,13 @@ export async function GET(request: Request, context: RouteContext) {
 
     const pinnedNoteId = pinnedBundle.pinnedNoteId;
     const pinnedMessageIds = pinnedBundle.pinnedMessageIds;
-    const lastInboundAt = lastInboundAtResolved;
+    const lastInboundAt = convSession.lastInboundAt;
+    const sessionActive = convSession.active;
+    const sessionExpiresAt = convSession.expiresAt?.toISOString() ?? null;
     const rows = [...rowsDesc].reverse();
 
-    const SESSION_WINDOW_MS = 24 * 60 * 60 * 1000;
-    const nowMs = Date.now();
-    const diffMs = lastInboundAt ? nowMs - lastInboundAt.getTime() : null;
-    const sessionActive = diffMs !== null ? diffMs < SESSION_WINDOW_MS : false;
-    const sessionExpiresAt = lastInboundAt
-      ? new Date(lastInboundAt.getTime() + SESSION_WINDOW_MS).toISOString()
-      : null;
-
     debugLog(
-      `[session] conv=${conv.id} lastInbound=${lastInboundAt?.toISOString() ?? "NULL"} diffH=${diffMs !== null ? (diffMs / 3_600_000).toFixed(2) : "N/A"} active=${sessionActive}`
+      `[session] conv=${conv.id} lastInbound=${lastInboundAt?.toISOString() ?? "NULL"} active=${sessionActive}`
     );
 
     type HistoryTicket = {
