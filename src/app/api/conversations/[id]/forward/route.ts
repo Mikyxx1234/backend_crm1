@@ -208,7 +208,11 @@ export async function POST(request: Request, context: RouteContext) {
 
       fireTrigger("message_sent", {
         contactId: targetConv.contactId,
-        data: { channel: "WhatsApp", content: "[encaminhado]" },
+        data: {
+          channel: "WhatsApp",
+          ...(targetConv.channelId ? { channelId: targetConv.channelId } : {}),
+          content: "[encaminhado]",
+        },
       }).catch(() => {});
 
       try {

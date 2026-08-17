@@ -265,6 +265,16 @@ export function summarizeTriggerConfig(
     case "message_received":
     case "message_sent": {
       const ch = c.channel;
+      const ids = Array.isArray(c.channelIds)
+        ? c.channelIds.filter((x): x is string => typeof x === "string" && x.trim() !== "")
+        : typeof c.channelId === "string" && c.channelId.trim()
+          ? [c.channelId.trim()]
+          : [];
+      if (ids.length === 1) {
+        const id = ids[0];
+        return `Conexão: ${lookup?.[id] ?? id.slice(0, 8)}`;
+      }
+      if (ids.length > 1) return `${ids.length} conexões`;
       return ch ? `Canal: ${String(ch)}` : "Qualquer canal";
     }
     case "call_received":
@@ -867,7 +877,7 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
       return { toAgentId: "" };
     case "message_received":
     case "message_sent":
-      return { channel: "" };
+      return { channel: "", channelIds: [], pipelineId: "", stageId: "", dealStatus: "" };
     case "call_received":
     case "call_made":
       // status: "" (qualquer) | "answered" | "missed"

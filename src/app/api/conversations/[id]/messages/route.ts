@@ -892,7 +892,11 @@ export async function POST(request: Request, context: RouteContext) {
       void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
         fireTrigger("message_sent", {
           contactId: conv.contactId,
-          data: { channel: channelLabel, content },
+          data: {
+            channel: channelLabel,
+            ...(outboundChannelId ? { channelId: outboundChannelId } : {}),
+            content,
+          },
         }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
       );
 
@@ -1045,7 +1049,11 @@ export async function POST(request: Request, context: RouteContext) {
     void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
       fireTrigger("message_sent", {
         contactId: conv.contactId,
-        data: { channel: "WhatsApp", content },
+        data: {
+          channel: "WhatsApp",
+          ...(outboundChannelId ? { channelId: outboundChannelId } : {}),
+          content,
+        },
       }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
     );
 

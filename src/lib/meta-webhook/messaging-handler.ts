@@ -35,6 +35,7 @@ import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services
 import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { getLogger } from "@/lib/logger";
+import { fireTrigger } from "@/services/automation-triggers";
 
 const log = getLogger("meta-messaging-webhook");
 const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN?.trim() || "";
@@ -385,6 +386,20 @@ async function processEvent(
     preview: content || "[midia]",
     channel: platform === "instagram" ? "Instagram" : "Messenger",
   }).catch((err) => log.debug("push falhou (nao-fatal):", err));
+
+  try {
+    await fireTrigger("message_received", {
+      contactId: contact.id,
+      data: {
+        channel: platform,
+        channelId: hit.channelId,
+        content,
+        conversationId: conversation.id,
+      },
+    });
+  } catch (err) {
+    log.error("Falha ao disparar gatilho message_received:", err);
+  }
 
   if (content?.trim()) {
     void scheduleAiReply({

@@ -2813,6 +2813,7 @@ export async function processMetaWebhookPayload(
                 contactId: contact.id,
                 data: {
                   channel: "WhatsApp",
+                  channelId: conversation.channelId ?? undefined,
                   content: parsed.text,
                   phoneNumberId,
                   conversationId: conversation.id,

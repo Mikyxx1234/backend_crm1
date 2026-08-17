@@ -260,7 +260,11 @@ export async function POST(request: Request, context: RouteContext) {
 
         fireTrigger("message_sent", {
           contactId: conv.contactId,
-          data: { channel: "WhatsApp", content: caption || "[Anexo]" },
+          data: {
+            channel: "WhatsApp",
+            ...(conv.channelId ? { channelId: conv.channelId } : {}),
+            content: caption || "[Anexo]",
+          },
         }).catch((err) => console.warn("[automation trigger] message_sent:", err));
 
         try {

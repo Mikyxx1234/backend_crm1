@@ -1300,7 +1300,11 @@ async function afterOutboundSideEffects(
   }
   fireTrigger("message_sent", {
     contactId: conv.contactId,
-    data: { channel: "WhatsApp", content },
+    data: {
+      channel: "WhatsApp",
+      ...(conv.channelId ? { channelId: conv.channelId } : {}),
+      content,
+    },
   }).catch((err) => console.warn("[automation trigger] message_sent:", err));
   cancelPendingForConversation(conv.id, "agent_reply", actorId).catch((err) =>
     console.warn("[scheduled-messages] falha ao cancelar apos envio:", err),

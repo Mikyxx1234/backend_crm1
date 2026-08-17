@@ -75,6 +75,14 @@ function readTriggerStageIds(cfg: Record<string, unknown>): string[] {
   return one ? [one] : [];
 }
 
+/** Conexões (Channel.id) do gatilho. Vazio = qualquer canal conectado. */
+function readTriggerChannelIds(cfg: Record<string, unknown>): string[] {
+  const many = readStringArray(cfg, "channelIds");
+  if (many.length > 0) return many;
+  const one = readString(cfg, "channelId");
+  return one ? [one] : [];
+}
+
 const STEP_ID_REF_KEYS = new Set([
   "nextStepId",
   "elseGotoStepId",
@@ -234,6 +242,11 @@ export function evaluateTrigger(
       const channel = readString(cfg, "channel");
       const dataChannel = readString(data, "channel");
       if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
+      const channelIds = readTriggerChannelIds(cfg);
+      const dataChannelId = readString(data, "channelId");
+      if (channelIds.length > 0) {
+        if (!dataChannelId || !channelIds.includes(dataChannelId)) return false;
+      }
       const stageIds = readTriggerStageIds(cfg);
       const dataStageId = readString(data, "stageId") ?? readString(data, "dealStageId");
       if (stageIds.length > 0 && dataStageId && !stageIds.includes(dataStageId)) return false;

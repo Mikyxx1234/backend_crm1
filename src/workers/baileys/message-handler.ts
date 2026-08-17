@@ -647,6 +647,7 @@ export async function handleBaileysMessage(
         contactId: contact.id,
         data: {
           channel: "WhatsApp",
+          channelId,
           content: parsed.text,
           conversationId: conversation.id,
           waMessageId: parsed.externalId,

@@ -64,3 +64,36 @@ describe("evaluateTrigger — stage_changed", () => {
     expect(evaluateTrigger("stage_changed", cfg, ctx({ fromStageId: "x", toStageId: "b" }))).toBe(false);
   });
 });
+
+describe("evaluateTrigger — message_received channelId", () => {
+  function msg(data: Record<string, unknown>) {
+    return { event: "message_received" as const, data };
+  }
+
+  it("sem filtro: qualquer conexão dispara", () => {
+    expect(
+      evaluateTrigger("message_received", {}, msg({ channelId: "ch-a" })),
+    ).toBe(true);
+  });
+
+  it("channelId único casa só com aquela conexão", () => {
+    expect(
+      evaluateTrigger("message_received", { channelId: "ch-a" }, msg({ channelId: "ch-a" })),
+    ).toBe(true);
+    expect(
+      evaluateTrigger("message_received", { channelId: "ch-a" }, msg({ channelId: "ch-b" })),
+    ).toBe(false);
+  });
+
+  it("channelIds: dispara se o payload está na lista", () => {
+    const cfg = { channelIds: ["ch-a", "ch-c"] };
+    expect(evaluateTrigger("message_received", cfg, msg({ channelId: "ch-a" }))).toBe(true);
+    expect(evaluateTrigger("message_received", cfg, msg({ channelId: "ch-b" }))).toBe(false);
+  });
+
+  it("filtro de conexão sem channelId no payload não dispara", () => {
+    expect(
+      evaluateTrigger("message_received", { channelId: "ch-a" }, msg({ channel: "WhatsApp" })),
+    ).toBe(false);
+  });
+});
