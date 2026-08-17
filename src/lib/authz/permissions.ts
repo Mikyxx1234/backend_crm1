@@ -244,6 +244,32 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
     ],
   },
   {
+    resource: "demand",
+    label: "Demandas (roadmap interno)",
+    description:
+      "Boards de demandas, bugs, melhorias e solicitações do time (dev/suporte).",
+    actions: [
+      { action: "view", label: "Visualizar boards e cards" },
+      { action: "create", label: "Criar demanda" },
+      { action: "edit", label: "Editar demanda (título, tipo, prioridade, responsável)" },
+      { action: "move", label: "Mover entre fases" },
+      { action: "comment", label: "Comentar" },
+      { action: "vote", label: "Votar / priorizar" },
+      { action: "manage_board", label: "Criar e configurar boards e fases" },
+    ],
+  },
+  {
+    resource: "team_chat",
+    label: "Chat interno",
+    description:
+      "Mensagens diretas e grupos entre colegas da organização (substitui o WhatsApp do time).",
+    actions: [
+      { action: "view", label: "Ver conversas e mensagens" },
+      { action: "send", label: "Enviar mensagens" },
+      { action: "create_room", label: "Abrir DM ou criar grupo" },
+    ],
+  },
+  {
     resource: "org_unit",
     label: "Unidades (filiais)",
     description: "Filiais/CNPJs do tenant para ofertas e pools por unidade.",
@@ -310,6 +336,8 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "logs",         label: "Logs" },
       { action: "widgets",      label: "Widgets" },
       { action: "calls",        label: "Chamadas (histórico)" },
+      { action: "demands",      label: "Demandas (roadmap)" },
+      { action: "team-chat",    label: "Chat interno" },
     ],
   },
 ];

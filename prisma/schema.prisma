@@ -155,6 +155,15 @@ model Organization {
   quotaPolicies            QuotaConsumptionPolicy[]
   dealQuotas               DealQuota[]
   quotaMovements           QuotaMovement[]
+  demandBoards             DemandBoard[]
+  demandStages             DemandStage[]
+  demandItems              DemandItem[]
+  demandComments           DemandComment[]
+  demandVotes              DemandVote[]
+  demandEvents             DemandEvent[]
+  teamChatRooms            TeamChatRoom[]
+  teamChatMembers          TeamChatMember[]
+  teamChatMessages         TeamChatMessage[]
 
   @@index([status])
   @@map("organizations")
@@ -550,6 +559,14 @@ model User {
   supportTicketsRequested        SupportTicket[]           @relation("SupportTicketRequester")
   supportTicketsAssigned         SupportTicket[]           @relation("SupportTicketAssignee")
   supportTicketMessages          SupportTicketMessage[]    @relation("SupportTicketMessageAuthor")
+  demandItemsRequested           DemandItem[]              @relation("DemandItemRequester")
+  demandItemsAssigned            DemandItem[]              @relation("DemandItemAssignee")
+  demandCommentsAuthored         DemandComment[]           @relation("DemandCommentAuthor")
+  demandVotes                    DemandVote[]
+  demandEvents                   DemandEvent[]             @relation("DemandEventActor")
+  teamChatRoomsCreated           TeamChatRoom[]            @relation("TeamChatRoomCreatedBy")
+  teamChatMemberships            TeamChatMember[]
+  teamChatMessagesAuthored       TeamChatMessage[]         @relation("TeamChatMessageAuthor")
 
   @@index([type])
   @@index([organizationId])
@@ -5147,4 +5164,211 @@ model AcademicImportHistory {
 
   @@index([organizationId, importedAt])
   @@map("academic_import_history")
+}
+
+// ──────────────────────────────────────────────
+// Demandas (boards estilo Pipefy / Trello / Gleap)
+// ──────────────────────────────────────────────
+// Sistema interno do time (dev/suporte) para demandas, bugs, melhorias
+// e solicitações. NÃO substitui SupportTicket (helpdesk EduIT).
+// Primeiro acesso de uma org cria Roadmap + Bugs + Suporte.
+
+model DemandBoard {
+  id             String    @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  name           String
+  slug           String
+  /// ROADMAP | BUGS | SUPPORT | CUSTOM
+  kind           String    @default("CUSTOM")
+  description    String?
+  color          String?
+  position       Int       @default(0)
+  isDefault      Boolean   @default(false)
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  stages DemandStage[]
+  items  DemandItem[]
+
+  @@unique([organizationId, slug])
+  @@index([organizationId, archivedAt])
+  @@map("demand_boards")
+}
+
+model DemandStage {
+  id             String    @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  boardId        String
+  board          DemandBoard @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  name           String
+  key            String
+  color          String?
+  position       Int       @default(0)
+  isTerminal     Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  items DemandItem[]
+
+  @@unique([boardId, key])
+  @@index([organizationId, boardId])
+  @@map("demand_stages")
+}
+
+model DemandItem {
+  id             String    @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  boardId        String
+  board          DemandBoard @relation(fields: [boardId], references: [id], onDelete: Cascade)
+  stageId        String
+  stage          DemandStage @relation(fields: [stageId], references: [id], onDelete: Restrict)
+  /// Número sequencial por organização (exibido como #42).
+  number         Int
+  title          String
+  description    String    @default("")
+  /// FEATURE | IMPROVEMENT | BUG | REQUEST | TASK
+  kind           String    @default("REQUEST")
+  /// NONE | LOW | MEDIUM | HIGH | URGENT
+  priority       String    @default("NONE")
+  position       Float     @default(1000)
+  votesCount     Int       @default(0)
+  tags           String[]  @default([])
+  requesterId    String
+  requester      User      @relation("DemandItemRequester", fields: [requesterId], references: [id], onDelete: Cascade)
+  assigneeId     String?
+  assignee       User?     @relation("DemandItemAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  dueAt          DateTime?
+  completedAt    DateTime?
+  archivedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  comments DemandComment[]
+  votes    DemandVote[]
+  events   DemandEvent[]
+
+  @@unique([organizationId, number])
+  @@index([organizationId, boardId, stageId])
+  @@index([organizationId, assigneeId])
+  @@index([boardId, stageId, position])
+  @@map("demand_items")
+}
+
+model DemandComment {
+  id             String    @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  itemId         String
+  item           DemandItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  authorId       String
+  author         User      @relation("DemandCommentAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  content        String
+  createdAt      DateTime  @default(now())
+
+  @@index([itemId, createdAt])
+  @@index([organizationId])
+  @@map("demand_comments")
+}
+
+model DemandVote {
+  id             String    @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  itemId         String
+  item           DemandItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt      DateTime  @default(now())
+
+  @@unique([itemId, userId])
+  @@index([organizationId])
+  @@map("demand_votes")
+}
+
+model DemandEvent {
+  id             String    @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  itemId         String
+  item           DemandItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  actorId        String?
+  actor          User?     @relation("DemandEventActor", fields: [actorId], references: [id], onDelete: SetNull)
+  /// CREATED | MOVED | UPDATED | COMMENTED | ASSIGNED | VOTED | COMPLETED
+  type           String
+  payload        Json?
+  createdAt      DateTime  @default(now())
+
+  @@index([itemId, createdAt])
+  @@index([organizationId])
+  @@map("demand_events")
+}
+
+// ──────────────────────────────────────────────
+// Chat interno do time (DMs + grupos)
+// ──────────────────────────────────────────────
+// Substitui o alinhamento que hoje vai para o WhatsApp pessoal.
+// NÃO mistura com Inbox (leads) nem com SupportTicket (helpdesk).
+
+model TeamChatRoom {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  /// DM | GROUP
+  kind           String
+  name           String?
+  topic          String?
+  /// Par ordenado "userA:userB" — único por org. Null em grupos.
+  dmKey          String?
+  createdById    String
+  createdBy      User         @relation("TeamChatRoomCreatedBy", fields: [createdById], references: [id])
+  lastMessageAt  DateTime     @default(now())
+  lastPreview    String?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  members  TeamChatMember[]
+  messages TeamChatMessage[]
+
+  @@unique([organizationId, dmKey])
+  @@index([organizationId, lastMessageAt])
+  @@map("team_chat_rooms")
+}
+
+model TeamChatMember {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  roomId         String
+  room           TeamChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lastReadAt     DateTime     @default(now())
+  muted          Boolean      @default(false)
+  joinedAt       DateTime     @default(now())
+
+  @@unique([roomId, userId])
+  @@index([organizationId, userId])
+  @@map("team_chat_members")
+}
+
+model TeamChatMessage {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  roomId         String
+  room           TeamChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  authorId       String?
+  author         User?        @relation("TeamChatMessageAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  /// TEXT | SYSTEM
+  kind           String       @default("TEXT")
+  content        String
+  createdAt      DateTime     @default(now())
+
+  @@index([roomId, createdAt])
+  @@index([organizationId])
+  @@map("team_chat_messages")
 }
