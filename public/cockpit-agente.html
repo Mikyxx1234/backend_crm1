@@ -113,7 +113,7 @@
       /* ── Cards de totais ─────────────────────── */
       .totals {
         display: grid;
-        grid-template-columns: repeat(4, 1fr);
+        grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
         gap: 14px;
         margin-bottom: 22px;
       }
@@ -313,6 +313,69 @@
       .band-cross { color: #c4b5fd; background: rgba(139,92,246,0.14); }
       .r-arrow { color: var(--muted-2); margin: 0 4px; }
       .r-muted { color: var(--muted); font-size: 11px; }
+
+      /* ── Shell com abas ──────────────────────── */
+      .wrap { max-width: none; margin: 0; padding: 0; min-height: 100vh; }
+      .app {
+        display: flex;
+        min-height: 100vh;
+        align-items: stretch;
+      }
+      .sidebar {
+        width: 232px;
+        flex-shrink: 0;
+        background: rgba(10, 16, 32, 0.72);
+        border-right: 1px solid var(--border);
+        padding: 20px 12px 28px;
+      }
+      .side-brand {
+        display: flex; align-items: center; gap: 10px;
+        padding: 0 8px 18px;
+      }
+      .nav-group {
+        font-size: 10px; font-weight: 700; letter-spacing: 0.08em;
+        text-transform: uppercase; color: var(--muted-2);
+        padding: 14px 10px 6px;
+      }
+      .nav-btn {
+        display: block; width: 100%; text-align: left;
+        background: transparent; border: 0; border-radius: 10px;
+        padding: 9px 10px; color: var(--muted); font-weight: 600;
+        margin-bottom: 2px;
+      }
+      .nav-btn:hover { background: rgba(255,255,255,0.06); color: var(--text); }
+      .nav-btn.active {
+        background: rgba(91, 111, 245, 0.18);
+        color: #c7d2fe;
+        border: 1px solid rgba(91, 111, 245, 0.35);
+      }
+      .main { flex: 1; min-width: 0; padding: 24px 28px 48px; }
+      .panel { display: none; }
+      .panel.active { display: block; }
+      .page-kicker { font-size: 12px; color: var(--muted); margin: 0 0 4px; }
+      .hbar { display: grid; grid-template-columns: minmax(120px, 1fr) 3fr 48px; gap: 10px; align-items: center; margin: 8px 0; }
+      .hbar .lab { font-size: 12px; color: var(--muted); }
+      .hbar .track { height: 8px; background: rgba(255,255,255,0.08); border-radius: 99px; overflow: hidden; }
+      .hbar .track i { display: block; height: 100%; background: var(--primary); border-radius: 99px; }
+      .hbar b { font-size: 13px; text-align: right; font-variant-numeric: tabular-nums; }
+      .donut-row { display: grid; grid-template-columns: 160px 1fr; gap: 24px; align-items: center; }
+      .donut {
+        width: 140px; height: 140px; border-radius: 50%;
+        background: conic-gradient(var(--success) 0 33%, var(--warn) 33% 66%, #8b5cf6 66% 100%);
+        position: relative;
+      }
+      .donut::after {
+        content: attr(data-center);
+        position: absolute; inset: 22px; border-radius: 50%;
+        background: var(--card); display: grid; place-items: center;
+        font-weight: 800; font-size: 22px;
+      }
+      .legend span { display: flex; align-items: center; gap: 8px; margin: 6px 0; font-size: 13px; color: var(--muted); }
+      .sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+      @media (max-width: 860px) {
+        .app { flex-direction: column; }
+        .sidebar { width: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+      }
     </style>
   </head>
   <body>
@@ -331,107 +394,228 @@
 
       <!-- DASHBOARD -->
       <div id="dash" class="hidden">
-        <header>
-          <div class="brand">
-            <div class="logo">🤖</div>
-            <div>
-              <h1>Cockpit IA</h1>
-              <p>Cruzeiro do Sul · monitoramento do agente</p>
+        <div class="app">
+          <aside class="sidebar">
+            <div class="side-brand">
+              <div class="logo">🤖</div>
+              <div>
+                <h1 style="margin:0;font-size:15px">Cockpit IA</h1>
+                <p style="margin:2px 0 0;font-size:11px;color:var(--muted)">Cruzeiro do Sul</p>
+              </div>
             </div>
-          </div>
-          <div class="head-actions">
-            <div class="updated"><span id="status-dot" class="dot"></span><span id="updated-txt">—</span></div>
-            <button class="ghost" onclick="refresh(true)">Atualizar</button>
-            <button class="ghost" id="btn-logout" onclick="logout()">Sair</button>
-          </div>
-        </header>
+            <div class="nav-group">Operação</div>
+            <button type="button" class="nav-btn active" data-tab="dashboard">Dashboard</button>
+            <button type="button" class="nav-btn" data-tab="rechamado">Rechamado</button>
+            <div class="nav-group">Agente acadêmico</div>
+            <button type="button" class="nav-btn" data-tab="saude">Saúde</button>
+            <button type="button" class="nav-btn" data-tab="resolucao">Resolução</button>
+            <button type="button" class="nav-btn" data-tab="handoff">Handoff</button>
+            <button type="button" class="nav-btn" data-tab="funil">Funil acadêmico</button>
+          </aside>
+          <div class="main">
+            <header>
+              <div class="brand">
+                <div>
+                  <p class="page-kicker" id="page-kicker">Operação</p>
+                  <h1 id="page-title" style="margin:0">Dashboard</h1>
+                  <p id="page-sub">Visão do dia · zera à meia-noite (SP)</p>
+                </div>
+              </div>
+              <div class="head-actions">
+                <div class="updated"><span id="status-dot" class="dot"></span><span id="updated-txt">—</span></div>
+                <button class="ghost" onclick="refresh(true)">Atualizar</button>
+                <button class="ghost" id="btn-logout" onclick="logout()">Sair</button>
+              </div>
+            </header>
 
-        <div class="totals">
-          <div class="stat" style="--accent: var(--primary)">
-            <div class="label">Atendimentos hoje</div>
-            <div class="value" id="t-dist">—</div>
-            <div class="sub" id="t-dist-sub">conversas · todos os canais</div>
-          </div>
-          <div class="stat" style="--accent: #8b5cf6">
-            <div class="label">Pelo agente IA hoje</div>
-            <div class="value" id="t-agent">—</div>
-            <div class="sub">handoff do agente</div>
-          </div>
-          <div class="stat" style="--accent: var(--success)">
-            <div class="label">Atendendo agora</div>
-            <div class="value" id="t-att">—</div>
-            <div class="sub">conversas do agente</div>
-          </div>
-          <div class="stat" style="--accent: var(--warn)">
-            <div class="label">Fila de espera</div>
-            <div class="value" id="t-pend">—</div>
-            <div class="sub">sem responsável elegível</div>
-          </div>
-        </div>
+            <div id="panel-dashboard" class="panel active">
+              <div class="totals">
+                <div class="stat" style="--accent: var(--primary)">
+                  <div class="label">Atendimentos hoje</div>
+                  <div class="value" id="t-dist">—</div>
+                  <div class="sub" id="t-dist-sub">conversas · todos os canais</div>
+                </div>
+                <div class="stat" style="--accent: #8b5cf6">
+                  <div class="label">Pelo agente IA hoje</div>
+                  <div class="value" id="t-agent">—</div>
+                  <div class="sub">handoff do agente</div>
+                </div>
+                <div class="stat" style="--accent: var(--success)">
+                  <div class="label">Atendendo agora</div>
+                  <div class="value" id="t-att">—</div>
+                  <div class="sub">conversas do agente</div>
+                </div>
+                <div class="stat" style="--accent: var(--warn)">
+                  <div class="label">Fila de espera</div>
+                  <div class="value" id="t-pend">—</div>
+                  <div class="sub">sem responsável elegível</div>
+                </div>
+              </div>
+              <div class="section-title">Agentes de IA</div>
+              <div id="agents" class="agents"></div>
+              <div class="section-title">Consultores</div>
+              <div class="table-card">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Consultor</th>
+                      <th class="num">Recebidos hoje</th>
+                      <th class="num">Fila</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody id="consultants"></tbody>
+                </table>
+                <div id="consultants-empty" class="empty hidden">Nenhum consultor encontrado.</div>
+              </div>
+            </div>
 
-        <div class="section-title">Rechamado</div>
-        <div class="rechamado-panel">
-          <div class="rechamado-head">
-            <div>
-              <h3>Retornos em 24h · hoje</h3>
-              <p>
-                Mesmo aluno (telefone/contato) redistribuído após um atendimento
-                anterior. Três faixas para calibrar: recontato, mesmo departamento
-                e cruzado (ex.: Retenção → Atendimento).
-              </p>
+            <div id="panel-rechamado" class="panel">
+              <div class="rechamado-panel">
+                <div class="rechamado-head">
+                  <div>
+                    <h3>Retornos em 24h · hoje</h3>
+                    <p>Mesmo aluno redistribuído após um atendimento anterior.</p>
+                  </div>
+                  <span class="rechamado-pill" id="r-unique">— contatos</span>
+                </div>
+                <div class="rechamado-grid">
+                  <div class="r-card r-all">
+                    <div class="r-label">Recontato 24h</div>
+                    <div class="r-value" id="r-recontato">—</div>
+                    <div class="r-hint">voltou · qualquer depto</div>
+                  </div>
+                  <div class="r-card r-same">
+                    <div class="r-label">Mesmo departamento</div>
+                    <div class="r-value" id="r-mesmo">—</div>
+                    <div class="r-hint">sinal mais forte</div>
+                  </div>
+                  <div class="r-card r-cross">
+                    <div class="r-label">Cruzado</div>
+                    <div class="r-value" id="r-cruzado">—</div>
+                    <div class="r-hint">depto diferente na volta</div>
+                  </div>
+                </div>
+                <div class="r-samples table-card" style="border: none; border-radius: 0; border-top: 1px solid var(--border)">
+                  <table>
+                    <thead>
+                      <tr><th>Contato</th><th>Faixa</th><th>Roteamento</th><th>Quando</th></tr>
+                    </thead>
+                    <tbody id="r-samples"></tbody>
+                  </table>
+                  <div id="r-samples-empty" class="empty hidden">Nenhum recontato hoje ainda.</div>
+                </div>
+              </div>
             </div>
-            <span class="rechamado-pill" id="r-unique">— contatos</span>
-          </div>
-          <div class="rechamado-grid">
-            <div class="r-card r-all">
-              <div class="r-label">Recontato 24h</div>
-              <div class="r-value" id="r-recontato">—</div>
-              <div class="r-hint">voltou · qualquer depto</div>
-            </div>
-            <div class="r-card r-same">
-              <div class="r-label">Mesmo departamento</div>
-              <div class="r-value" id="r-mesmo">—</div>
-              <div class="r-hint">sinal mais forte de não resolução</div>
-            </div>
-            <div class="r-card r-cross">
-              <div class="r-label">Cruzado</div>
-              <div class="r-value" id="r-cruzado">—</div>
-              <div class="r-hint">depto diferente na volta</div>
-            </div>
-          </div>
-          <div class="r-samples table-card" style="border: none; border-radius: 0; border-top: 1px solid var(--border)">
-            <table>
-              <thead>
-                <tr>
-                  <th>Contato</th>
-                  <th>Faixa</th>
-                  <th>Roteamento</th>
-                  <th>Quando</th>
-                </tr>
-              </thead>
-              <tbody id="r-samples"></tbody>
-            </table>
-            <div id="r-samples-empty" class="empty hidden">Nenhum recontato hoje ainda — ótimo, ou ainda cedo no dia.</div>
-          </div>
-        </div>
 
-        <div class="section-title">Agentes de IA</div>
-        <div id="agents" class="agents"></div>
+            <div id="panel-saude" class="panel">
+              <div class="totals">
+                <div class="stat" style="--accent: var(--success)">
+                  <div class="label">Status do agente</div>
+                  <div class="value" id="a-active">—</div>
+                  <div class="sub" id="a-name">—</div>
+                </div>
+                <div class="stat" style="--accent: var(--primary)">
+                  <div class="label">Falou hoje</div>
+                  <div class="value" id="a-spoke">—</div>
+                  <div class="sub">conversas com msg da IA</div>
+                </div>
+                <div class="stat" style="--accent: var(--success)">
+                  <div class="label">Resolveu sozinha</div>
+                  <div class="value" id="a-solo">—</div>
+                  <div class="sub">encerrou sem humano</div>
+                </div>
+                <div class="stat" style="--accent: var(--warn)">
+                  <div class="label">Passou a humano</div>
+                  <div class="value" id="a-hand">—</div>
+                  <div class="sub">handoff IA hoje</div>
+                </div>
+                <div class="stat" style="--accent: #8b5cf6">
+                  <div class="label">Ainda com a IA</div>
+                  <div class="value" id="a-now">—</div>
+                  <div class="sub">OPEN atribuídas ao agente</div>
+                </div>
+                <div class="stat" style="--accent: var(--danger)">
+                  <div class="label">Falhas de envio</div>
+                  <div class="value" id="a-fail">—</div>
+                  <div class="sub">1ª resposta mediana: <span id="a-median">—</span></div>
+                </div>
+              </div>
+              <div class="section-title">Desfecho do dia</div>
+              <div class="table-card" style="padding:18px">
+                <div class="donut-row">
+                  <div class="donut" id="a-donut" data-center="0"></div>
+                  <div class="legend" id="a-legend"></div>
+                </div>
+              </div>
+            </div>
 
-        <div class="section-title">Consultores</div>
-        <div class="table-card">
-          <table>
-            <thead>
-              <tr>
-                <th>Consultor</th>
-                <th class="num">Recebidos hoje</th>
-                <th class="num">Fila</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody id="consultants"></tbody>
-          </table>
-          <div id="consultants-empty" class="empty hidden">Nenhum consultor encontrado.</div>
+            <div id="panel-resolucao" class="panel">
+              <div class="totals">
+                <div class="stat" style="--accent: var(--success)">
+                  <div class="label">Encerradas pela IA</div>
+                  <div class="value" id="c-ai">—</div>
+                  <div class="sub">hoje · só atendimento IA</div>
+                </div>
+                <div class="stat" style="--accent: var(--warn)">
+                  <div class="label">Por silêncio / 30 min</div>
+                  <div class="value" id="c-idle">—</div>
+                  <div class="sub">check-in sem retorno</div>
+                </div>
+                <div class="stat" style="--accent: var(--primary)">
+                  <div class="label">Pedido do aluno</div>
+                  <div class="value" id="c-ask">—</div>
+                  <div class="sub">encerrar / só isso</div>
+                </div>
+                <div class="stat" style="--accent: #8b5cf6">
+                  <div class="label">Check-ins enviados</div>
+                  <div class="value" id="c-nudge">—</div>
+                  <div class="sub">“faz uns 30 minutos…”</div>
+                </div>
+                <div class="stat" style="--accent: var(--danger)">
+                  <div class="label">Voltaram depois</div>
+                  <div class="value" id="c-back">—</div>
+                  <div class="sub">novo ticket após close da IA</div>
+                </div>
+              </div>
+            </div>
+
+            <div id="panel-handoff" class="panel">
+              <div class="totals">
+                <div class="stat" style="--accent: var(--warn)">
+                  <div class="label">Handoffs hoje</div>
+                  <div class="value" id="h-total">—</div>
+                  <div class="sub">distribuições com origem IA</div>
+                </div>
+              </div>
+              <div class="section-title">Destino</div>
+              <div class="table-card" style="padding:16px 18px" id="h-dept"></div>
+              <div class="section-title">Resultado da distribuição</div>
+              <div class="table-card" style="padding:16px 18px" id="h-kind"></div>
+            </div>
+
+            <div id="panel-funil" class="panel">
+              <div class="totals">
+                <div class="stat" style="--accent: var(--primary)">
+                  <div class="label">Canal Acadêmico</div>
+                  <div class="value" id="f-acad">—</div>
+                  <div class="sub">conversas com IA no 0401</div>
+                </div>
+                <div class="stat" style="--accent: var(--warn)">
+                  <div class="label">Outros canais</div>
+                  <div class="value" id="f-other">—</div>
+                  <div class="sub">IA falou fora do Acadêmico</div>
+                </div>
+                <div class="stat" style="--accent: var(--success)">
+                  <div class="label">Lead de Entrada abertos</div>
+                  <div class="value" id="f-lead">—</div>
+                  <div class="sub">com a IA: <span id="f-lead-ai">0</span></div>
+                </div>
+              </div>
+              <div class="section-title">Etapa do negócio (aluno que a IA falou hoje)</div>
+              <div class="table-card" style="padding:16px 18px" id="f-stages"></div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -644,12 +828,113 @@
           .join("");
       }
 
+      var TAB_META = {
+        dashboard: { kicker: "Operação", title: "Dashboard", sub: "Visão do dia · zera à meia-noite (SP)" },
+        rechamado: { kicker: "Operação", title: "Rechamado", sub: "Retornos em 24h · hoje" },
+        saude: { kicker: "Agente acadêmico", title: "Saúde", sub: "Ligado, volume, sozinha vs humano, falhas" },
+        resolucao: { kicker: "Agente acadêmico", title: "Resolução", sub: "Encerramento pela IA · silêncio vs pedido do aluno" },
+        handoff: { kicker: "Agente acadêmico", title: "Handoff", sub: "Para qual departamento a IA passou hoje" },
+        funil: { kicker: "Agente acadêmico", title: "Funil acadêmico", sub: "Canal 0401 vs outros · etapa do negócio" },
+      };
+
+      function showTab(id) {
+        if (!TAB_META[id]) return;
+        document.querySelectorAll(".nav-btn").forEach(function (b) {
+          b.classList.toggle("active", b.getAttribute("data-tab") === id);
+        });
+        document.querySelectorAll(".panel").forEach(function (p) {
+          p.classList.toggle("active", p.id === "panel-" + id);
+        });
+        var meta = TAB_META[id];
+        document.getElementById("page-kicker").textContent = meta.kicker;
+        document.getElementById("page-title").textContent = meta.title;
+        document.getElementById("page-sub").textContent = meta.sub;
+      }
+
+      function fmtMedian(sec) {
+        if (sec == null || !isFinite(sec)) return "—";
+        var s = Math.round(sec);
+        if (s < 60) return s + "s";
+        var m = Math.floor(s / 60);
+        var r = s % 60;
+        return r ? m + "m " + r + "s" : m + " min";
+      }
+
+      function bars(el, rows, emptyTxt) {
+        if (!el) return;
+        var list = rows || [];
+        if (!list.length) {
+          el.innerHTML = '<div class="empty">' + (emptyTxt || "Sem dados hoje.") + "</div>";
+          return;
+        }
+        var max = Math.max.apply(null, list.map(function (r) { return r.n || 0; })) || 1;
+        el.innerHTML = list
+          .map(function (r) {
+            var pct = Math.round(((r.n || 0) / max) * 100);
+            return (
+              '<div class="hbar"><div class="lab">' + esc(r.name || "—") + "</div>" +
+              '<div class="track"><i style="width:' + pct + '%"></i></div>' +
+              "<b>" + (r.n || 0) + "</b></div>"
+            );
+          })
+          .join("");
+      }
+
+      function renderAcademic(a) {
+        if (!a) a = {};
+        var s = a.saude || {};
+        var r = a.resolucao || {};
+        var h = a.handoff || {};
+        var f = a.funil || {};
+
+        document.getElementById("a-active").textContent = s.agentActive ? "ON" : "OFF";
+        document.getElementById("a-name").textContent = s.agentName || "nenhum agente ativo";
+        document.getElementById("a-spoke").textContent = s.spokeToday != null ? s.spokeToday : "—";
+        document.getElementById("a-solo").textContent = s.resolvedSoloToday != null ? s.resolvedSoloToday : "—";
+        document.getElementById("a-hand").textContent = s.handoffToday != null ? s.handoffToday : "—";
+        document.getElementById("a-now").textContent = s.attendingNow != null ? s.attendingNow : "—";
+        document.getElementById("a-fail").textContent = s.sendFailedToday != null ? s.sendFailedToday : "—";
+        document.getElementById("a-median").textContent = fmtMedian(s.firstResponseMedianSec);
+
+        var solo = s.resolvedSoloToday || 0;
+        var hand = s.handoffToday || 0;
+        var now = s.attendingNow || 0;
+        var total = solo + hand + now;
+        var p1 = total ? (solo / total) * 100 : 0;
+        var p2 = total ? ((solo + hand) / total) * 100 : 0;
+        var donut = document.getElementById("a-donut");
+        donut.setAttribute("data-center", String(total));
+        donut.style.background =
+          "conic-gradient(var(--success) 0 " + p1 + "%, var(--warn) " + p1 + "% " + p2 + "%, #8b5cf6 " + p2 + "% 100%)";
+        document.getElementById("a-legend").innerHTML =
+          '<span><i class="sw" style="background:var(--success)"></i> Resolveu sozinha · ' + solo + "</span>" +
+          '<span><i class="sw" style="background:var(--warn)"></i> Passou a humano · ' + hand + "</span>" +
+          '<span><i class="sw" style="background:#8b5cf6"></i> Ainda com a IA · ' + now + "</span>";
+
+        document.getElementById("c-ai").textContent = r.closedByAiToday != null ? r.closedByAiToday : "—";
+        document.getElementById("c-idle").textContent = r.closedByIdle != null ? r.closedByIdle : "—";
+        document.getElementById("c-ask").textContent = r.closedByStudentAsk != null ? r.closedByStudentAsk : "—";
+        document.getElementById("c-nudge").textContent = r.idleNudgesToday != null ? r.idleNudgesToday : "—";
+        document.getElementById("c-back").textContent = r.returnedAfterAiClose != null ? r.returnedAfterAiClose : "—";
+
+        document.getElementById("h-total").textContent = h.totalToday != null ? h.totalToday : "—";
+        bars(document.getElementById("h-dept"), h.byDepartment, "Nenhum handoff da IA hoje.");
+        bars(document.getElementById("h-kind"), h.byKind, "Nenhum resultado de distribuição hoje.");
+
+        document.getElementById("f-acad").textContent = f.academicChannelSpoke != null ? f.academicChannelSpoke : "—";
+        document.getElementById("f-other").textContent = f.otherChannelSpoke != null ? f.otherChannelSpoke : "—";
+        document.getElementById("f-lead").textContent = f.leadDeEntradaOpen != null ? f.leadDeEntradaOpen : "—";
+        document.getElementById("f-lead-ai").textContent = f.leadDeEntradaWithAi != null ? f.leadDeEntradaWithAi : "0";
+        bars(document.getElementById("f-stages"), f.byStage, "A IA ainda não falou com alunos em negócio aberto hoje.");
+      }
+
       function render(data) {
         document.getElementById("t-dist").textContent = data.totals.attendancesToday;
         document.getElementById("t-agent").textContent = data.totals.distributedByAgentToday;
         document.getElementById("t-att").textContent = data.totals.attendingNow;
         document.getElementById("t-pend").textContent = data.totals.pendingQueue;
         renderRechamado(data.rechamado);
+        renderAcademic(data.academic);
 
         var agentsEl = document.getElementById("agents");
         if (!data.agents.length) {
@@ -710,6 +995,12 @@
             }
           });
       }
+
+      document.addEventListener("click", function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest(".nav-btn") : null;
+        if (!btn) return;
+        showTab(btn.getAttribute("data-tab"));
+      });
 
       function boot() {
         if (isAutoMode()) {
