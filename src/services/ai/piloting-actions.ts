@@ -147,6 +147,20 @@ export async function sendAgentMessage(args: {
     return { status: "skipped", reason: "phone_allowlist_error" };
   }
 
+  try {
+    const convCh = await prisma.conversation.findUnique({
+      where: { id: args.conversationId },
+      select: {
+        channelRef: { select: { status: true, name: true } },
+      },
+    });
+    if (convCh?.channelRef && convCh.channelRef.status !== "CONNECTED") {
+      return { status: "skipped", reason: "channel_not_connected" };
+    }
+  } catch {
+    /* se o canal não carregar, segue o fluxo existente */
+  }
+
   // Revalida autorização imediatamente antes de qualquer envio.
   if (!args.bypassAssigneeCheck) {
     const { assertAiStillAuthorized } = await import(
