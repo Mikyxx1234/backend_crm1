@@ -9,7 +9,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { metaClientFromConfig, formatMetaSendError } from "@/lib/meta-whatsapp/client";
 import { sseBus } from "@/lib/sse-bus";
 import { getConversationLite } from "@/services/conversations";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -208,11 +208,12 @@ export async function POST(request: Request, context: RouteContext) {
 
       fireTrigger("message_sent", {
         contactId: targetConv.contactId,
-        data: {
+        data: buildMessageTriggerData({
           channel: "WhatsApp",
-          ...(targetConv.channelId ? { channelId: targetConv.channelId } : {}),
+          channelId: targetConv.channelId,
+          conversationId: targetConversationId,
           content: "[encaminhado]",
-        },
+        }),
       }).catch(() => {});
 
       try {

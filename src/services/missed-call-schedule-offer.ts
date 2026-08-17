@@ -6,7 +6,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 
 function templateName(): string | null {
   const n = process.env.META_WHATSAPP_CALL_SCHEDULE_TEMPLATE_NAME?.trim();
@@ -136,7 +136,11 @@ export async function maybeSendMissedCallScheduleTemplate(params: {
 
   fireTrigger("message_sent", {
     contactId: params.contactId,
-    data: { channel: "WhatsApp", templateScheduleOffer: true },
+    data: buildMessageTriggerData({
+      channel: "WhatsApp",
+      conversationId: params.conversationId,
+      extra: { templateScheduleOffer: true },
+    }),
   }).catch(() => {});
 
   sseBus.publish("new_message", {

@@ -35,7 +35,7 @@ import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services
 import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { getLogger } from "@/lib/logger";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 
 const log = getLogger("meta-messaging-webhook");
 const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN?.trim() || "";
@@ -390,12 +390,12 @@ async function processEvent(
   try {
     await fireTrigger("message_received", {
       contactId: contact.id,
-      data: {
+      data: buildMessageTriggerData({
         channel: platform,
         channelId: hit.channelId,
-        content,
         conversationId: conversation.id,
-      },
+        content,
+      }),
     });
   } catch (err) {
     log.error("Falha ao disparar gatilho message_received:", err);

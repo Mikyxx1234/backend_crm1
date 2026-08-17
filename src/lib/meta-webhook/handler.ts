@@ -45,7 +45,7 @@ import {
   maybeDenyWhatsappCallConsent,
   maybeGrantWhatsappCallConsent,
 } from "@/services/whatsapp-call-consent-webhook";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { resolveAdAndPersistAsync } from "@/services/meta-ad-resolver";
 import { scheduleAiReply } from "@/services/ai/inbound-debounce";
 import { ensureInboundAiAttendance } from "@/services/ai/first-attendance";
@@ -2819,22 +2819,24 @@ export async function processMetaWebhookPayload(
             try {
               await fireTrigger("message_received", {
                 contactId: contact.id,
-                data: {
+                data: buildMessageTriggerData({
                   channel: "WhatsApp",
-                  channelId: conversation.channelId ?? undefined,
-                  content: parsed.text,
-                  phoneNumberId,
+                  channelId: conversation.channelId,
                   conversationId: conversation.id,
-                  waMessageId: parsed.waMessageId,
-                  metaWebhookEventId,
-                  ...(parsed.flowPayload
-                    ? {
-                        flowResponse: parsed.flowPayload,
-                        flowMetaName: parsed.flowMetaName,
-                        flowToken: parsed.flowToken,
-                      }
-                    : {}),
-                },
+                  content: parsed.text,
+                  extra: {
+                    phoneNumberId,
+                    waMessageId: parsed.waMessageId,
+                    metaWebhookEventId,
+                    ...(parsed.flowPayload
+                      ? {
+                          flowResponse: parsed.flowPayload,
+                          flowMetaName: parsed.flowMetaName,
+                          flowToken: parsed.flowToken,
+                        }
+                      : {}),
+                  },
+                }),
               });
             } catch (err) {
               log.error("Falha ao disparar gatilho message_received:", err);

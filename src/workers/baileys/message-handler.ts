@@ -5,7 +5,7 @@ import crypto from "crypto";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { generateFileName, saveFile } from "@/lib/storage/local";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { ensureOpenDealForContact } from "@/services/auto-deals";
 import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services/contacts";
 import {
@@ -645,13 +645,13 @@ export async function handleBaileysMessage(
     try {
       await fireTrigger("message_received", {
         contactId: contact.id,
-        data: {
+        data: buildMessageTriggerData({
           channel: "WhatsApp",
           channelId,
-          content: parsed.text,
           conversationId: conversation.id,
-          waMessageId: parsed.externalId,
-        },
+          content: parsed.text,
+          extra: { waMessageId: parsed.externalId },
+        }),
       });
     } catch (err) {
       log.error("Falha ao disparar gatilho message_received:", err);

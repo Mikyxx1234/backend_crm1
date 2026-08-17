@@ -91,6 +91,26 @@ describe("evaluateTrigger — message_received channelId", () => {
     expect(evaluateTrigger("message_received", cfg, msg({ channelId: "ch-b" }))).toBe(false);
   });
 
+  it("com channelIds ignora o tipo legado (whatsapp vs WhatsApp)", () => {
+    const cfg = { channel: "email", channelIds: ["ch-a"] };
+    expect(evaluateTrigger("message_received", cfg, msg({ channel: "WhatsApp", channelId: "ch-a" }))).toBe(true);
+  });
+
+  it("message_sent filtra pela mesma conexão", () => {
+    expect(
+      evaluateTrigger("message_sent", { channelIds: ["ch-a"] }, {
+        event: "message_sent",
+        data: { channelId: "ch-a" },
+      }),
+    ).toBe(true);
+    expect(
+      evaluateTrigger("message_sent", { channelIds: ["ch-a"] }, {
+        event: "message_sent",
+        data: { channelId: "ch-b" },
+      }),
+    ).toBe(false);
+  });
+
   it("filtro de conexão sem channelId no payload não dispara", () => {
     expect(
       evaluateTrigger("message_received", { channelId: "ch-a" }, msg({ channel: "WhatsApp" })),

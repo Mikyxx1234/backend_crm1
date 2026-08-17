@@ -29,7 +29,27 @@ function readNumber(obj: Record<string, unknown>, key: string): number | undefin
 
 function readString(obj: Record<string, unknown>, key: string): string | undefined {
   const v = obj[key];
-  return typeof v === "string" ? v : undefined;
+  return typeof v === "string" && v.trim() !== "" ? v.trim() : undefined;
+}
+
+/**
+ * Payload padrão dos gatilhos `message_received` / `message_sent`.
+ * Sem `channelId` + `conversationId`, o filtro por conexão da org não casa.
+ */
+export function buildMessageTriggerData(args: {
+  channel: string;
+  channelId?: string | null;
+  conversationId?: string | null;
+  content?: string;
+  extra?: Record<string, unknown>;
+}): Record<string, unknown> {
+  return {
+    channel: args.channel,
+    ...(args.channelId ? { channelId: args.channelId } : {}),
+    ...(args.conversationId ? { conversationId: args.conversationId } : {}),
+    ...(args.content !== undefined ? { content: args.content } : {}),
+    ...args.extra,
+  };
 }
 
 /** Comparação frouxa (trim + case-insensitive) usada nas condições de campo. */
@@ -221,9 +241,13 @@ export async function evaluateTriggerConditions(
       if (type === "channel") {
         const channelId = (readString(c, "channelId") ?? "").trim();
         if (!channelId) continue;
-        // Payload já traz o canal (gatilhos de conversa/mensagem)?
-        const dataChannel = readString(data, "channelId") ?? readString(data, "channel");
-        if (dataChannel && dataChannel === channelId) continue;
+        // Só compara Channel.id — `data.channel` é o TIPO ("WhatsApp"),
+        // não o id da conexão.
+        const dataChannelId = readString(data, "channelId");
+        if (dataChannelId) {
+          if (dataChannelId !== channelId) return false;
+          continue;
+        }
         const ids = await loadChannelIds();
         if (!ids.has(channelId)) return false;
         continue;
@@ -244,6 +268,37 @@ export async function evaluateTriggerConditions(
   }
 }
 
+async function resolveMessageChannelId(
+  contactId: string | undefined,
+  data: Record<string, unknown>,
+): Promise<string | undefined> {
+  const existing = readString(data, "channelId");
+  if (existing) return existing;
+
+  const conversationId = readString(data, "conversationId");
+  if (conversationId) {
+    const conv = await prisma.conversation.findUnique({
+      where: { id: conversationId },
+      select: { channelId: true },
+    });
+    if (conv?.channelId) return conv.channelId;
+  }
+
+  const phoneNumberId = readString(data, "phoneNumberId");
+  if (phoneNumberId) {
+    const channel = await prisma.channel.findFirst({
+      where: {
+        type: "WHATSAPP",
+        config: { path: ["phoneNumberId"], equals: phoneNumberId },
+      },
+      select: { id: true },
+    });
+    if (channel?.id) return channel.id;
+  }
+
+  return undefined;
+}
+
 async function enrichContext(event: string, context: AutomationJobContext): Promise<AutomationJobContext> {
   const data = asRecord(context.data) ?? {};
 
@@ -261,6 +316,9 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
   }
 
   if ((event === "message_received" || event === "message_sent") && context.contactId) {
+    const channelId = await resolveMessageChannelId(context.contactId, data);
+    const withChannel = channelId ? { ...data, channelId } : data;
+
     // 27/mai/26 (v3) — Suporte ao filtro `dealStatus` (OPEN/WON/LOST).
     // Antes pegavamos só o deal OPEN; agora priorizamos OPEN mas, se
     // o contato não tem nenhum aberto, caímos no deal mais recente
@@ -294,10 +352,7 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
         ...context,
         dealId: context.dealId ?? deal.id,
         data: {
-          ...data,
-          // Mantemos os dois conjuntos de chaves pra retro-compat:
-          // `dealStageId`/`dealPipelineId` (legado) e `stageId`/`pipelineId`
-          // (alinhado com o payload de deal_created e com o config da UI).
+          ...withChannel,
           stageId: deal.stageId,
           pipelineId: deal.stage.pipelineId,
           dealStageId: deal.stageId,
@@ -306,6 +361,7 @@ async function enrichContext(event: string, context: AutomationJobContext): Prom
         },
       };
     }
+    return { ...context, data: withChannel };
   }
 
   if (event === "contact_created" && context.contactId) {

@@ -272,13 +272,16 @@ export function evaluateTrigger(
       // deixamos passar — caso contrario o gatilho "mensagem recebida"
       // nunca dispara pra contatos sem negocio aberto, que e o cenario
       // mais comum em receptivo.
-      const channel = readString(cfg, "channel");
-      const dataChannel = readString(data, "channel");
-      if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
       const channelIds = readTriggerChannelIds(cfg);
       const dataChannelId = readString(data, "channelId");
       if (channelIds.length > 0) {
         if (!dataChannelId || !channelIds.includes(dataChannelId)) return false;
+      } else {
+        // Tipo (whatsapp/email) só vale quando NÃO há conexão específica.
+        // Com channelIds, a conexão já implica o tipo.
+        const channel = readString(cfg, "channel");
+        const dataChannel = readString(data, "channel");
+        if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
       }
       const stageIds = readTriggerStageIds(cfg);
       const dataStageId = readString(data, "stageId") ?? readString(data, "dealStageId");

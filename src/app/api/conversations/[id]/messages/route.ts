@@ -24,7 +24,7 @@ import {
 } from "@/lib/send-meta-messaging";
 import { sseBus } from "@/lib/sse-bus";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { cancelActiveContextsForContact } from "@/services/automation-context";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { cancelAiReplyDebounce } from "@/services/ai/inbound-debounce";
@@ -892,11 +892,12 @@ export async function POST(request: Request, context: RouteContext) {
       void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
         fireTrigger("message_sent", {
           contactId: conv.contactId,
-          data: {
+          data: buildMessageTriggerData({
             channel: channelLabel,
-            ...(outboundChannelId ? { channelId: outboundChannelId } : {}),
+            channelId: outboundChannelId,
+            conversationId: conv.id,
             content,
-          },
+          }),
         }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
       );
 
@@ -1049,11 +1050,12 @@ export async function POST(request: Request, context: RouteContext) {
     void stopAutomationsAfterHumanReply(conv.contactId).then(() =>
       fireTrigger("message_sent", {
         contactId: conv.contactId,
-        data: {
+        data: buildMessageTriggerData({
           channel: "WhatsApp",
-          ...(outboundChannelId ? { channelId: outboundChannelId } : {}),
+          channelId: outboundChannelId,
+          conversationId: conv.id,
           content,
-        },
+        }),
       }).catch((err) => console.warn("[automation trigger] message_sent:", err)),
     );
 

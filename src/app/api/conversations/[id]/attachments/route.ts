@@ -20,7 +20,7 @@ import { sendWhatsAppMedia, isBaileysChannel } from "@/lib/send-whatsapp";
 import { sseBus } from "@/lib/sse-bus";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -260,11 +260,12 @@ export async function POST(request: Request, context: RouteContext) {
 
         fireTrigger("message_sent", {
           contactId: conv.contactId,
-          data: {
+          data: buildMessageTriggerData({
             channel: "WhatsApp",
-            ...(conv.channelId ? { channelId: conv.channelId } : {}),
+            channelId: conv.channelId,
+            conversationId: conv.id,
             content: caption || "[Anexo]",
-          },
+          }),
         }).catch((err) => console.warn("[automation trigger] message_sent:", err));
 
         try {
@@ -434,7 +435,12 @@ export async function POST(request: Request, context: RouteContext) {
 
       fireTrigger("message_sent", {
         contactId: conv.contactId,
-        data: { channel: "WhatsApp", content: displayContent || "[Anexo]" },
+        data: buildMessageTriggerData({
+          channel: "WhatsApp",
+          channelId: conv.channelId,
+          conversationId: conv.id,
+          content: displayContent || "[Anexo]",
+        }),
       }).catch((err) => console.warn("[automation trigger] message_sent:", err));
 
       // Tempo real: notifica abas/inboxes que a conversa mudou (vai pra

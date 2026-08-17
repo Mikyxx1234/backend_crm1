@@ -36,7 +36,7 @@ import { formatHumanActorDisplayName } from "@/lib/human-actor-name";
 import { logEvent } from "@/services/activity-log";
 import { cancelActiveContextsForContact } from "@/services/automation-context";
 import { createConversationEvent } from "@/services/conversation-events";
-import { fireTrigger } from "@/services/automation-triggers";
+import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
 import { getConversationLite, reopenResolvedAsNewTicket } from "@/services/conversations";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 
@@ -409,7 +409,13 @@ export async function sendTextToConversation(args: {
   }
 
   publishNewMessage(conv, content, saved.createdAt);
-  await afterOutboundSideEffects(conv, args.actor.id, content, args.stopAutomations !== false);
+  await afterOutboundSideEffects(
+    conv,
+    args.actor.id,
+    content,
+    args.stopAutomations !== false,
+    outboundChannelId,
+  );
 
   return {
     ok: true,
@@ -640,7 +646,13 @@ export async function sendInteractiveButtonsToConversation(args: {
   }
 
   publishNewMessage(conv, displayContent, saved.createdAt);
-  await afterOutboundSideEffects(conv, args.actor.id, displayContent, args.stopAutomations !== false);
+  await afterOutboundSideEffects(
+    conv,
+    args.actor.id,
+    displayContent,
+    args.stopAutomations !== false,
+    outboundChannelId,
+  );
 
   if (sendError) {
     return { ok: false, status: 502, message: sendError };
@@ -944,7 +956,13 @@ export async function sendInteractiveListToConversation(args: {
   }
 
   publishNewMessage(conv, displayContent, saved.createdAt);
-  await afterOutboundSideEffects(conv, args.actor.id, displayContent, args.stopAutomations !== false);
+  await afterOutboundSideEffects(
+    conv,
+    args.actor.id,
+    displayContent,
+    args.stopAutomations !== false,
+    outboundChannelId,
+  );
 
   if (sendError) {
     return { ok: false, status: 502, message: sendError };
@@ -1260,8 +1278,12 @@ export async function sendTemplateToConversation(
     });
   }
 
-  cancelPendingForConversation(conv.id, "agent_reply", args.actor.id).catch((err) =>
-    console.warn("[scheduled-messages] falha ao cancelar apos envio de template:", err),
+  await afterOutboundSideEffects(
+    conv,
+    args.actor.id,
+    content,
+    true,
+    outboundChannelId,
   );
 
   return {
@@ -1286,10 +1308,11 @@ export async function sendTemplateToConversation(
  * Todos best-effort — nenhum deles deve derrubar um envio bem-sucedido.
  */
 async function afterOutboundSideEffects(
-  conv: Pick<ConversationLite, "id" | "contactId">,
+  conv: Pick<ConversationLite, "id" | "contactId" | "channelId" | "channel">,
   actorId: string,
   content: string,
   stopAutomations: boolean,
+  outboundChannelId?: string | null,
 ): Promise<void> {
   if (stopAutomations && conv.contactId) {
     try {
@@ -1298,13 +1321,15 @@ async function afterOutboundSideEffects(
       console.warn("[automation] cancel after outbound:", err);
     }
   }
+  const channelId = outboundChannelId || conv.channelId || null;
   fireTrigger("message_sent", {
     contactId: conv.contactId,
-    data: {
-      channel: "WhatsApp",
-      ...(conv.channelId ? { channelId: conv.channelId } : {}),
+    data: buildMessageTriggerData({
+      channel: conv.channel || "WhatsApp",
+      channelId,
+      conversationId: conv.id,
       content,
-    },
+    }),
   }).catch((err) => console.warn("[automation trigger] message_sent:", err));
   cancelPendingForConversation(conv.id, "agent_reply", actorId).catch((err) =>
     console.warn("[scheduled-messages] falha ao cancelar apos envio:", err),
