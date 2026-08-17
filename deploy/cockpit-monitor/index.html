@@ -89,6 +89,7 @@
       .stage.hidden, .hidden { display: none !important; }
 
       .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+      .kpis.fit { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
       @media (max-width: 960px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
       .kpi {
         background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
@@ -254,6 +255,11 @@
           <button type="button" class="pipe active" data-stage="dashboard"><span class="ico">◈</span> Dashboard</button>
           <button type="button" class="pipe" data-stage="distribuicao"><span class="ico">⇄</span> Distribuição</button>
           <button type="button" class="pipe" data-stage="rechamado"><span class="ico">↻</span> Rechamado</button>
+          <div class="nav-label">Agente acadêmico</div>
+          <button type="button" class="pipe" data-stage="saude"><span class="ico">♥</span> Saúde</button>
+          <button type="button" class="pipe" data-stage="resolucao"><span class="ico">✓</span> Resolução</button>
+          <button type="button" class="pipe" data-stage="handoff"><span class="ico">↗</span> Handoff</button>
+          <button type="button" class="pipe" data-stage="funil"><span class="ico">▤</span> Funil</button>
           <div class="nav-label">Infra</div>
           <button type="button" class="pipe" data-stage="sistema"><span class="ico">⚙</span> Sistema</button>
         </nav>
@@ -431,6 +437,132 @@
           </div>
         </section>
 
+        <!-- SAÚDE -->
+        <section id="stage-saude" class="stage hidden">
+          <div class="kpis fit">
+            <div class="kpi">
+              <div class="label">Status do agente</div>
+              <div class="value" id="a-active">—</div>
+              <div class="hint" id="a-name">—</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Falou hoje</div>
+              <div class="value" id="a-spoke">—</div>
+              <div class="hint">conversas com msg da IA</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Resolveu sozinha</div>
+              <div class="value" id="a-solo">—</div>
+              <div class="hint">encerrou sem humano</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Passou a humano</div>
+              <div class="value" id="a-hand">—</div>
+              <div class="hint">handoff IA hoje</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Ainda com a IA</div>
+              <div class="value" id="a-now">—</div>
+              <div class="hint">OPEN atribuídas ao agente</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Falhas de envio</div>
+              <div class="value" id="a-fail">—</div>
+              <div class="hint">1ª resposta mediana: <span id="a-median">—</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Desfecho do dia</h3>
+            <p class="card-sub">Sozinha vs handoff vs ainda em atendimento</p>
+            <div class="donut-wrap">
+              <div class="donut" id="a-donut">
+                <div class="donut-center"><div><b id="a-donut-n">0</b><span>casos</span></div></div>
+              </div>
+              <div class="legend" id="a-legend"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- RESOLUÇÃO -->
+        <section id="stage-resolucao" class="stage hidden">
+          <div class="kpis fit">
+            <div class="kpi">
+              <div class="label">Encerradas pela IA</div>
+              <div class="value" id="c-ai">—</div>
+              <div class="hint">hoje · só atendimento IA</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Por silêncio / 30 min</div>
+              <div class="value" id="c-idle">—</div>
+              <div class="hint">check-in sem retorno</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Pedido do aluno</div>
+              <div class="value" id="c-ask">—</div>
+              <div class="hint">encerrar / só isso</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Check-ins enviados</div>
+              <div class="value" id="c-nudge">—</div>
+              <div class="hint">“faz uns 30 minutos…”</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Voltaram depois</div>
+              <div class="value" id="c-back">—</div>
+              <div class="hint">novo ticket após close da IA</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- HANDOFF -->
+        <section id="stage-handoff" class="stage hidden">
+          <div class="kpis">
+            <div class="kpi">
+              <div class="label">Handoffs hoje</div>
+              <div class="value" id="h-total">—</div>
+              <div class="hint">distribuições com origem IA</div>
+            </div>
+          </div>
+          <div class="grid-2">
+            <div class="card">
+              <h3>Destino</h3>
+              <p class="card-sub">Departamento para o qual a IA passou</p>
+              <div class="bars" id="h-dept"></div>
+            </div>
+            <div class="card">
+              <h3>Resultado da distribuição</h3>
+              <p class="card-sub">Atribuído vs sem consultor elegível</p>
+              <div class="bars" id="h-kind"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- FUNIL -->
+        <section id="stage-funil" class="stage hidden">
+          <div class="kpis">
+            <div class="kpi">
+              <div class="label">Canal Acadêmico</div>
+              <div class="value" id="f-acad">—</div>
+              <div class="hint">conversas com IA no 0401</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Outros canais</div>
+              <div class="value" id="f-other">—</div>
+              <div class="hint">IA falou fora do Acadêmico</div>
+            </div>
+            <div class="kpi">
+              <div class="label">Lead de Entrada abertos</div>
+              <div class="value" id="f-lead">—</div>
+              <div class="hint">com a IA: <span id="f-lead-ai">0</span></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3>Etapa do negócio</h3>
+            <p class="card-sub">Aluno com negócio aberto com quem a IA falou hoje</p>
+            <div class="bars" id="f-stages"></div>
+          </div>
+        </section>
+
         <!-- SISTEMA (front + back) -->
         <section id="stage-sistema" class="stage hidden">
           <div class="launcher">
@@ -475,8 +607,13 @@
         dashboard: { title: "Dashboard", sub: "Visão geral do dia · gráficos e totais" },
         distribuicao: { title: "Distribuição", sub: "Agente, fila e consultores" },
         rechamado: { title: "Rechamado", sub: "Retornos em 24h · mesmo aluno" },
+        saude: { title: "Saúde", sub: "Ligado, volume, sozinha vs humano, falhas" },
+        resolucao: { title: "Resolução", sub: "Encerramento pela IA · silêncio vs pedido do aluno" },
+        handoff: { title: "Handoff", sub: "Para qual departamento a IA passou hoje" },
+        funil: { title: "Funil acadêmico", sub: "Canal 0401 vs outros · etapa do negócio" },
         sistema: { title: "Sistema", sub: "Frontend e backend · acesso rápido" },
       };
+      var STAGES = ["dashboard", "distribuicao", "rechamado", "saude", "resolucao", "handoff", "funil", "sistema"];
 
       function cfg() { return window.COCKPIT_CONFIG || {}; }
       function urls(kind) {
@@ -511,7 +648,7 @@
         document.querySelectorAll(".pipe").forEach(function (el) {
           el.classList.toggle("active", el.getAttribute("data-stage") === stage);
         });
-        ["dashboard", "distribuicao", "rechamado", "sistema"].forEach(function (s) {
+        STAGES.forEach(function (s) {
           var el = document.getElementById("stage-" + s);
           if (el) el.classList.toggle("hidden", s !== stage);
         });
@@ -677,6 +814,71 @@
         }));
 
         paintSamples();
+        paintAcademic(data.academic);
+      }
+
+      function fmtMedian(sec) {
+        if (sec == null || !isFinite(sec)) return "—";
+        var s = Math.round(sec);
+        if (s < 60) return s + "s";
+        var m = Math.floor(s / 60);
+        var r = s % 60;
+        return r ? m + "m " + r + "s" : m + " min";
+      }
+
+      function namedBars(elId, rows, cls) {
+        paintBars(elId, (rows || []).map(function (r) {
+          return { label: r.name || "—", value: r.n || 0, cls: cls || "" };
+        }));
+      }
+
+      function paintAcademic(a) {
+        if (!a) a = {};
+        var s = a.saude || {};
+        var r = a.resolucao || {};
+        var h = a.handoff || {};
+        var f = a.funil || {};
+
+        document.getElementById("a-active").textContent = s.agentActive ? "ON" : "OFF";
+        document.getElementById("a-name").textContent = s.agentName || "nenhum agente ativo";
+        document.getElementById("a-spoke").textContent = s.spokeToday != null ? s.spokeToday : "—";
+        document.getElementById("a-solo").textContent = s.resolvedSoloToday != null ? s.resolvedSoloToday : "—";
+        document.getElementById("a-hand").textContent = s.handoffToday != null ? s.handoffToday : "—";
+        document.getElementById("a-now").textContent = s.attendingNow != null ? s.attendingNow : "—";
+        document.getElementById("a-fail").textContent = s.sendFailedToday != null ? s.sendFailedToday : "—";
+        document.getElementById("a-median").textContent = fmtMedian(s.firstResponseMedianSec);
+
+        var solo = s.resolvedSoloToday || 0;
+        var hand = s.handoffToday || 0;
+        var now = s.attendingNow || 0;
+        var total = solo + hand + now;
+        document.getElementById("a-donut-n").textContent = total;
+        var d1 = total ? (solo / total) * 360 : 0;
+        var d2 = total ? d1 + (hand / total) * 360 : 0;
+        document.getElementById("a-donut").style.background =
+          total === 0
+            ? "conic-gradient(rgba(255,255,255,0.06) 0deg 360deg)"
+            : "conic-gradient(var(--success) 0deg " + d1 + "deg, var(--warn) " + d1 + "deg " + d2 + "deg, var(--violet) " + d2 + "deg 360deg)";
+        document.getElementById("a-legend").innerHTML =
+          '<div class="legend-item"><span class="l"><span class="sw" style="background:var(--success)"></span>Resolveu sozinha</span><b>' + solo + "</b></div>" +
+          '<div class="legend-item"><span class="l"><span class="sw" style="background:var(--warn)"></span>Passou a humano</span><b>' + hand + "</b></div>" +
+          '<div class="legend-item"><span class="l"><span class="sw" style="background:var(--violet)"></span>Ainda com a IA</span><b>' + now + "</b></div>";
+
+        document.getElementById("c-ai").textContent = r.closedByAiToday != null ? r.closedByAiToday : "—";
+        document.getElementById("c-idle").textContent = r.closedByIdle != null ? r.closedByIdle : "—";
+        document.getElementById("c-ask").textContent = r.closedByStudentAsk != null ? r.closedByStudentAsk : "—";
+        document.getElementById("c-nudge").textContent = r.idleNudgesToday != null ? r.idleNudgesToday : "—";
+        document.getElementById("c-back").textContent = r.returnedAfterAiClose != null ? r.returnedAfterAiClose : "—";
+
+        document.getElementById("h-total").textContent = h.totalToday != null ? h.totalToday : "—";
+        namedBars("h-dept", h.byDepartment, "warn");
+        namedBars("h-kind", h.byKind, "violet");
+
+        document.getElementById("f-acad").textContent = f.academicChannelSpoke != null ? f.academicChannelSpoke : "—";
+        document.getElementById("f-other").textContent = f.otherChannelSpoke != null ? f.otherChannelSpoke : "—";
+        document.getElementById("f-lead").textContent = f.leadDeEntradaOpen != null ? f.leadDeEntradaOpen : "—";
+        document.getElementById("f-lead-ai").textContent = f.leadDeEntradaWithAi != null ? f.leadDeEntradaWithAi : "0";
+        namedBars("f-stages", f.byStage, "");
       }
 
       function deptLabel(name) {
