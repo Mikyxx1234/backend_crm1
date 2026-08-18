@@ -77,7 +77,11 @@ export async function POST(
       data: { status: newStatus },
     });
 
-    const job = await enqueueCampaignDispatch({ campaignId: id }, delay);
+    // `id` pode ser o `number` público (ex.: "32") — o prisma escopado resolve
+    // number→id na leitura acima, mas o worker consome via prismaBase (sem essa
+    // extensão) e só acha pelo cuid. Enfileirar o id real evita "Campaign N não
+    // encontrada" e campanha presa em PROCESSING.
+    const job = await enqueueCampaignDispatch({ campaignId: campaign.id }, delay);
     if (!job) {
       // Redis indisponível: o enqueue retorna null em silêncio. Reverter o
       // status para DRAFT em vez de deixar a campanha presa em PROCESSING/

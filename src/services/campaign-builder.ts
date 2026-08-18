@@ -151,7 +151,9 @@ export async function launchDraft(id: string, actor: Actor) {
     where: { id },
     data: { status },
   });
-  const job = await enqueueCampaignDispatch({ campaignId: id }, delay);
+  // Enfileira o cuid real (não o `number` público): o worker resolve via
+  // prismaBase, que não faz number→id como o prisma escopado desta leitura.
+  const job = await enqueueCampaignDispatch({ campaignId: campaign.id }, delay);
   if (!job) {
     // Redis indisponível: reverter para DRAFT (não deixar preso sem consumidor).
     await prisma.campaign.update({
