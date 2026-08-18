@@ -86,6 +86,7 @@ export async function GET(request: Request) {
         dealId: c.dealId ?? null,
         extensionId: c.extensionId ?? null,
         contact: c.contact ?? null,
+        agent: c.agent ?? null,
       }));
       return NextResponse.json({
         calls,
