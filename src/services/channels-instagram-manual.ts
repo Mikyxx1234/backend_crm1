@@ -17,6 +17,7 @@ import type { Channel } from "@prisma/client";
 import {
   createChannel,
   getChannelById,
+  parseChannelConfig,
   updateChannel,
 } from "@/services/channels";
 
@@ -330,9 +331,11 @@ export async function provisionInstagramManualChannel(
   if (!accessToken) {
     throw new IgManualProvisionError("Token de acesso e obrigatorio.", 400);
   }
+  let existingConfig: Record<string, unknown> = {};
   if (input.channelId) {
     const existing = await getChannelById(input.channelId);
     if (!existing) throw new IgManualProvisionError("Canal nao encontrado.", 404);
+    existingConfig = parseChannelConfig(existing.config);
   }
 
   const identity = await resolveInstagramManualIdentity(
@@ -341,6 +344,7 @@ export async function provisionInstagramManualChannel(
   );
 
   const config: Record<string, unknown> = {
+    ...existingConfig,
     platform: "instagram",
     accessToken: identity.accessToken,
   };
