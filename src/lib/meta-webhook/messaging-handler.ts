@@ -3,15 +3,10 @@
  *   - object === "page"      -> Facebook Messenger
  *   - object === "instagram" -> Instagram Direct
  *
- * Diferencas vs o handler do WhatsApp (`./handler.ts`):
- *   - Payload usa `entry[].messaging[]` (nao `changes[].value.messages`).
- *   - Identidade do canal e `entry[].id` (pageId para Messenger, IGSID da
- *     conta business para Instagram) — NAO ha `phone_number_id`.
- *   - Destinatarios sao PSID/IGSID em `sender.id` — nao ha telefone.
- *
- * Callback URL: uma so, global do App (nao scoped por org). Assinatura
- * validada com CRM_META_APP_SECRET (o mesmo App do CRM que provisiona os
- * WhatsApps via subscribed_apps).
+ * Payload Messenger: `entry[].messaging[]`.
+ * Payload Instagram Login (messages): `entry[].changes[].value` com
+ * `from.id` / `message` string — NAO so `entry[].messaging[]`.
+ * Identidade do canal: `entry.id` (= IGSID / pageId).
  */
 import { NextResponse } from "next/server";
 import { Prisma } from "@prisma/client";
@@ -36,6 +31,13 @@ import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { getLogger } from "@/lib/logger";
 import { fireTrigger, buildMessageTriggerData } from "@/services/automation-triggers";
+import {
+  asMetaId,
+  configMetaIds,
+  extractMessagingEvents,
+  type MessagingEvent,
+  type WebhookEntry,
+} from "@/lib/meta-webhook/messaging-payload";
 
 const log = getLogger("meta-messaging-webhook");
 const VERIFY_TOKEN = process.env.META_WEBHOOK_VERIFY_TOKEN?.trim() || "";
@@ -45,12 +47,6 @@ const IG_APP_SECRET = process.env.INSTAGRAM_APP_SECRET?.trim() || "";
 /** Secrets que a Meta usa no X-Hub-Signature-256 deste endpoint. */
 function messagingWebhookSecrets(): string[] {
   return [...new Set([CRM_META_APP_SECRET, IG_APP_SECRET].filter(Boolean))];
-}
-
-function asMetaId(v: unknown): string {
-  if (typeof v === "string") return v.trim();
-  if (typeof v === "number" && Number.isFinite(v)) return String(Math.trunc(v));
-  return "";
 }
 
 const GRAPH_API_VERSION = "v21.0";
@@ -151,31 +147,6 @@ type WebhookBody = {
   entry?: WebhookEntry[];
 };
 
-type WebhookEntry = {
-  id?: string | number;
-  time?: number;
-  messaging?: MessagingEvent[];
-  changes?: Array<{ field?: string; value?: MessagingEvent }>;
-};
-
-type MessagingEvent = {
-  sender?: { id?: string };
-  recipient?: { id?: string };
-  timestamp?: number;
-  message?: {
-    mid?: string;
-    text?: string;
-    attachments?: Array<{
-      type?: string;
-      payload?: { url?: string; sticker_id?: number };
-    }>;
-    is_echo?: boolean;
-  };
-  postback?: { mid?: string; title?: string; payload?: string };
-  read?: { watermark?: number };
-  delivery?: { mids?: string[]; watermark?: number };
-};
-
 // ── Resolve org/canal por entry.id ─────────────────────────
 
 type ChannelHit = {
@@ -188,59 +159,70 @@ type ChannelHit = {
   accessToken: string;
 };
 
+const CHANNEL_SELECT = {
+  id: true,
+  organizationId: true,
+  type: true,
+  provider: true,
+  config: true,
+} as const;
+
+function toChannelHit(channel: {
+  id: string;
+  organizationId: string;
+  type: string;
+  provider: string;
+  config: Prisma.JsonValue;
+}): ChannelHit {
+  const cfg = (channel.config ?? {}) as Record<string, unknown>;
+  const tokenRaw = typeof cfg.accessToken === "string" ? cfg.accessToken : "";
+  const token =
+    tokenRaw && isEncryptedSecret(tokenRaw) ? safeDecrypt(tokenRaw) : tokenRaw;
+  const senderRef =
+    asMetaId(cfg.instagramUserId) ||
+    asMetaId(cfg.instagramAccountId) ||
+    asMetaId(cfg.pageId);
+
+  return {
+    channelId: channel.id,
+    organizationId: channel.organizationId,
+    channelType: channel.type as "FACEBOOK" | "INSTAGRAM",
+    provider: channel.provider as "META_CLOUD_API" | "META_INSTAGRAM_LOGIN",
+    senderRef,
+    accessToken: token,
+  };
+}
+
 async function findChannelByEntryId(
   entryId: string,
   platform: Platform,
 ): Promise<ChannelHit | null> {
-  // Instagram tem 2 fluxos possiveis:
-  // - META_INSTAGRAM_LOGIN: entry.id = instagramUserId (config.instagramUserId)
-  // - META_CLOUD_API (via Facebook Page, legado): entry.id = instagramAccountId
-  // Messenger: entry.id = pageId (config.pageId) sob META_CLOUD_API.
-  const candidates = platform === "instagram"
-    ? [
-        { provider: "META_INSTAGRAM_LOGIN" as const, path: "instagramUserId" },
-        { provider: "META_CLOUD_API" as const, path: "instagramAccountId" },
-      ]
-    : [{ provider: "META_CLOUD_API" as const, path: "pageId" }];
+  const type = platform === "instagram" ? "INSTAGRAM" : "FACEBOOK";
+  const paths =
+    platform === "instagram"
+      ? (["instagramUserId", "instagramAccountId", "pageId"] as const)
+      : (["pageId"] as const);
 
-  for (const c of candidates) {
+  for (const path of paths) {
     const channel = await prismaBase.channel.findFirst({
-      where: {
-        type: platform === "instagram" ? "INSTAGRAM" : "FACEBOOK",
-        provider: c.provider,
-        config: { path: [c.path], equals: entryId },
-      },
-      select: {
-        id: true,
-        organizationId: true,
-        type: true,
-        provider: true,
-        config: true,
-      },
+      where: { type, config: { path: [path], equals: entryId } },
+      select: CHANNEL_SELECT,
     });
-    if (!channel) continue;
+    if (channel) return toChannelHit(channel);
+  }
 
-    const cfg = (channel.config ?? {}) as Record<string, unknown>;
-    const tokenRaw = typeof cfg.accessToken === "string" ? cfg.accessToken : "";
-    const token = tokenRaw && isEncryptedSecret(tokenRaw)
-      ? safeDecrypt(tokenRaw)
-      : tokenRaw;
-
-    const senderRef =
-      c.provider === "META_INSTAGRAM_LOGIN"
-        ? String(cfg.instagramUserId ?? "")
-        : platform === "instagram"
-          ? String(cfg.instagramAccountId ?? "")
-          : String(cfg.pageId ?? "");
-
-    return {
-      channelId: channel.id,
-      organizationId: channel.organizationId,
-      channelType: channel.type as "FACEBOOK" | "INSTAGRAM",
-      provider: channel.provider as "META_CLOUD_API" | "META_INSTAGRAM_LOGIN",
-      senderRef,
-      accessToken: token,
-    };
+  const fallback = await prismaBase.channel.findMany({
+    where: { type },
+    select: CHANNEL_SELECT,
+  });
+  const matched = fallback.filter((row) => configMetaIds(row.config).has(entryId));
+  if (matched.length === 1) return toChannelHit(matched[0]);
+  if (matched.length > 1) {
+    log.warn(
+      { entryId, platform, count: matched.length },
+      "multiplos canais para o mesmo entry.id",
+    );
+    return null;
   }
   return null;
 }
@@ -256,26 +238,17 @@ function safeDecrypt(v: string): string {
 
 // ── Processa uma entry ─────────────────────────────────────
 
-function extractMessagingEvents(entry: WebhookEntry): MessagingEvent[] {
-  const fromMessaging = Array.isArray(entry.messaging) ? entry.messaging : [];
-  if (fromMessaging.length > 0) return fromMessaging;
-  const fromChanges: MessagingEvent[] = [];
-  if (Array.isArray(entry.changes)) {
-    for (const ch of entry.changes) {
-      const field = typeof ch.field === "string" ? ch.field : "";
-      if (field !== "messages" && field !== "messaging_postbacks") continue;
-      if (ch.value && typeof ch.value === "object") fromChanges.push(ch.value);
-    }
-  }
-  return fromChanges;
-}
-
 async function processEntry(entry: WebhookEntry, platform: Platform): Promise<void> {
   const entryId = asMetaId(entry.id);
   const events = extractMessagingEvents(entry);
-  if (!entryId || events.length === 0) {
-    log.warn(
-      `entry ignorada (id=${entryId || "vazio"} events=${events.length} platform=${platform})`,
+  if (!entryId) {
+    log.warn({ keys: Object.keys(entry) }, "entry messaging sem id — ignorada");
+    return;
+  }
+  if (events.length === 0) {
+    log.info(
+      { entryId, platform, keys: Object.keys(entry) },
+      "entry sem messaging/changes de mensagem — ignorada",
     );
     return;
   }
@@ -288,9 +261,16 @@ async function processEntry(entry: WebhookEntry, platform: Platform): Promise<vo
     }
   }
   if (!hit) {
-    log.warn(`entry.id=${entryId} (${platform}) nao mapeado a canal — ignorando`);
+    log.warn(
+      { entryId, platform },
+      "entry.id nao mapeado a nenhum canal Instagram/Messenger — ignorando",
+    );
     return;
   }
+  log.info(
+    { entryId, platform, channelId: hit.channelId, events: events.length },
+    "webhook messaging: processando entry",
+  );
 
   await withSystemContext(hit.organizationId, async () => {
     for (const ev of events) {
@@ -308,8 +288,11 @@ async function processEvent(
   hit: ChannelHit,
   platform: Platform,
 ): Promise<void> {
-  const senderId = typeof ev.sender?.id === "string" ? ev.sender.id.trim() : "";
-  if (!senderId) return;
+  const senderId = asMetaId(ev.sender?.id);
+  if (!senderId) {
+    log.warn({ channelId: hit.channelId }, "evento messaging sem sender.id — ignorado");
+    return;
+  }
 
   // Ignora echo do proprio negocio (nossa mensagem enviada volta como evento)
   if (ev.message?.is_echo) {

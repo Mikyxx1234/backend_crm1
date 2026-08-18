@@ -65,6 +65,7 @@ import { logEvent, logMessageFailed, logMessageRead } from "@/services/activity-
 import { metaErrorReason, isMetaNonConversationErrorCode } from "@/lib/meta-whatsapp/error-catalog";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { handleMessagingWebhookPost } from "@/lib/meta-webhook/messaging-handler";
+import { asMetaId, configMetaIds } from "@/lib/meta-webhook/messaging-payload";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { markCampaignReplyByContact } from "@/services/campaigns";
 import {
@@ -2037,6 +2038,21 @@ export async function handleMetaWebhookPost(
           `Legacy POST: phone_number_id=${phoneNumberId} nao mapeado a nenhum canal — ignorando`,
         );
       }
+    } else {
+      const messagingEntryId = extractFirstMessagingEntryId(parsed);
+      if (messagingEntryId) {
+        const channel = await findMessagingChannelForEntryId(messagingEntryId);
+        if (channel) {
+          inferredScope = {
+            organizationId: channel.organizationId,
+            organizationSlug: channel.organizationSlug,
+          };
+        } else {
+          log.debug(
+            `Legacy POST: entry.id=${messagingEntryId} nao mapeado a canal Instagram/Messenger`,
+          );
+        }
+      }
     }
   } catch (err) {
     log.warn("Legacy POST: falha ao parsear body pra inferir org:", err);
@@ -2091,6 +2107,56 @@ function extractFirstPhoneNumberId(body: Record<string, unknown>): string | null
     }
   }
   return null;
+}
+
+function extractFirstMessagingEntryId(body: Record<string, unknown>): string | null {
+  const object = typeof body.object === "string" ? body.object : "";
+  if (object !== "instagram" && object !== "page") return null;
+  const entries = Array.isArray(body.entry) ? body.entry : [];
+  for (const entry of entries) {
+    const id = asMetaId((entry as { id?: unknown } | null)?.id);
+    if (id) return id;
+  }
+  return null;
+}
+
+async function findMessagingChannelForEntryId(
+  entryId: string,
+): Promise<{ organizationId: string; organizationSlug: string } | null> {
+  const paths = ["instagramUserId", "instagramAccountId", "pageId"] as const;
+  for (const path of paths) {
+    const channel = await prismaBase.channel.findFirst({
+      where: {
+        OR: [{ type: "INSTAGRAM" }, { type: "FACEBOOK" }],
+        config: { path: [path], equals: entryId },
+      },
+      select: {
+        organizationId: true,
+        organization: { select: { slug: true } },
+      },
+    });
+    if (channel) {
+      return {
+        organizationId: channel.organizationId,
+        organizationSlug: channel.organization?.slug ?? "",
+      };
+    }
+  }
+
+  const fallback = await prismaBase.channel.findMany({
+    where: { OR: [{ type: "INSTAGRAM" }, { type: "FACEBOOK" }] },
+    select: {
+      organizationId: true,
+      config: true,
+      organization: { select: { slug: true } },
+    },
+  });
+  const matched = fallback.filter((row) => configMetaIds(row.config).has(entryId));
+  if (matched.length !== 1) return null;
+  return {
+    organizationId: matched[0].organizationId,
+    organizationSlug: matched[0].organization?.slug ?? "",
+  };
 }
 
 async function executePostBody(
