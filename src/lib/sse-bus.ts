@@ -234,9 +234,20 @@ let _bootstrapped = false;
 
 /** Durante `next build`, o Next define NEXT_PHASE=phase-production-build; não há DB real no container de build. */
 function shouldSkipBackgroundServices(): boolean {
+  // Os sweepers de fundo (timeout de automação, inatividade da IA, mensagens
+  // agendadas, presença, expiração de sessão) são projetados para rodar em UM
+  // único processo — a API. Quando um worker BullMQ (APP_MODE=worker-*) importa
+  // sse-bus transitivamente (ex.: campaign-worker → whatsapp-conversation),
+  // ele NÃO deve subir os sweepers: caso contrário o mesmo automationContext
+  // expirado é varrido por vários processos ao mesmo tempo, processando o
+  // timeout em duplicidade (mensagem/handoff/encerramento repetidos). APP_MODE
+  // ausente (ex.: `next dev` local) mantém o comportamento atual (roda).
+  const appMode = process.env.APP_MODE?.trim();
+  const isWorkerProcess = Boolean(appMode) && appMode !== "api";
   return (
     process.env.NEXT_PHASE === "phase-production-build" ||
-    process.env.CRM_SKIP_BACKGROUND_SERVERS === "1"
+    process.env.CRM_SKIP_BACKGROUND_SERVERS === "1" ||
+    isWorkerProcess
   );
 }
 
