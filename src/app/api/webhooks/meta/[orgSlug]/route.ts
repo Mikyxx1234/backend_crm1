@@ -43,6 +43,7 @@ async function resolveScope(param: string) {
       OR: [
         { type: "WHATSAPP", provider: "META_CLOUD_API" },
         { type: "INSTAGRAM", provider: "META_INSTAGRAM_LOGIN" },
+        { type: "INSTAGRAM", provider: "META_CLOUD_API" },
       ],
     },
     select: {

@@ -18,7 +18,6 @@ import { maybeDistributeNewInboundTicket } from "@/services/distribution";
 import { verifyMetaWebhookSignature } from "@/lib/meta-webhook-signature";
 import { decryptSecret, isEncryptedSecret } from "@/lib/crypto/secrets";
 import { generateFileName, saveFile } from "@/lib/storage/local";
-import { handleMessagingWebhookPost } from "@/lib/meta-webhook/messaging-handler";
 import { enqueueMetaWebhookEvent } from "@/lib/queue";
 
 /**
@@ -65,6 +64,7 @@ import { processIncomingMessage as processSalesbotMessage } from "@/services/aut
 import { logEvent, logMessageFailed, logMessageRead } from "@/services/activity-log";
 import { metaErrorReason, isMetaNonConversationErrorCode } from "@/lib/meta-whatsapp/error-catalog";
 import { notifyInboundMessage } from "@/lib/web-push";
+import { handleMessagingWebhookPost } from "@/lib/meta-webhook/messaging-handler";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { markCampaignReplyByContact } from "@/services/campaigns";
 import {
@@ -1809,6 +1809,8 @@ function timingSafeStringEqual(a: string, b: string): boolean {
 const META_WEBHOOK_CHANNEL_OR = [
   { type: "WHATSAPP" as const, provider: "META_CLOUD_API" as const },
   { type: "INSTAGRAM" as const, provider: "META_INSTAGRAM_LOGIN" as const },
+  { type: "INSTAGRAM" as const, provider: "META_CLOUD_API" as const },
+  { type: "FACEBOOK" as const, provider: "META_CLOUD_API" as const },
 ];
 
 export async function handleMetaWebhookGet(
