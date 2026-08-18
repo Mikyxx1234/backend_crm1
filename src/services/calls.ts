@@ -85,6 +85,18 @@ const VALID_SORT_FIELDS: readonly CallsSortField[] = [
   "direction",
 ];
 
+type CallAgent = { id: string; name: string; avatarUrl: string | null };
+
+/** crm_user_id gravado no /dialer (snake_case) ou camelCase defensivo. */
+function crmUserIdFromMetadata(metadata: unknown): string | null {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+    return null;
+  }
+  const m = metadata as Record<string, unknown>;
+  const raw = m.crm_user_id ?? m.crmUserId;
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null;
+}
+
 export type UpdateCallInput = {
   status?: CallStatus;
   recordingUrl?: string | null;
@@ -609,8 +621,15 @@ export async function listCalls(filters: ListCallsFilters = {}) {
       skip: (page - 1) * perPage,
       take: perPage,
       include: {
-        contact: { select: { id: true, name: true, phone: true } },
-        extension: { select: { id: true, label: true, sipUri: true } },
+        contact: { select: { id: true, name: true, phone: true, avatarUrl: true } },
+        extension: {
+          select: {
+            id: true,
+            label: true,
+            sipUri: true,
+            user: { select: { id: true, name: true, avatarUrl: true } },
+          },
+        },
       },
     }),
     prisma.call.count({ where }),
@@ -633,7 +652,7 @@ export async function listCalls(filters: ListCallsFilters = {}) {
     if (allVariants.size) {
       const contacts = await prisma.contact.findMany({
         where: { phone: { in: [...allVariants] } },
-        select: { id: true, name: true, phone: true },
+        select: { id: true, name: true, phone: true, avatarUrl: true },
       });
       const byPhone = new Map(contacts.map((ct) => [ct.phone, ct]));
       for (const c of unresolved) {
@@ -650,7 +669,49 @@ export async function listCalls(filters: ListCallsFilters = {}) {
     }
   }
 
-  return { calls, total, page, perPage };
+  // Agente: metadata.crm_user_id (quem discou / contexto do /dialer),
+  // senão o dono do ramal (inbound atendido / fallback). Sem id → null.
+  const agentById = new Map<string, CallAgent>();
+  for (const c of calls) {
+    const extUser = c.extension?.user;
+    if (extUser) {
+      agentById.set(extUser.id, {
+        id: extUser.id,
+        name: extUser.name,
+        avatarUrl: extUser.avatarUrl ?? null,
+      });
+    }
+  }
+  const missingIds = new Set<string>();
+  for (const c of calls) {
+    const fromMeta = crmUserIdFromMetadata(c.metadata);
+    if (fromMeta && !agentById.has(fromMeta)) missingIds.add(fromMeta);
+  }
+  if (missingIds.size) {
+    const extra = await prisma.user.findMany({
+      where: { id: { in: [...missingIds] } },
+      select: { id: true, name: true, avatarUrl: true },
+    });
+    for (const u of extra) {
+      agentById.set(u.id, {
+        id: u.id,
+        name: u.name,
+        avatarUrl: u.avatarUrl ?? null,
+      });
+    }
+  }
+
+  const callsWithAgent = calls.map((c) => {
+    const fromMeta = crmUserIdFromMetadata(c.metadata);
+    const fallbackId = c.extension?.user?.id ?? null;
+    const agent =
+      (fromMeta ? agentById.get(fromMeta) : undefined) ??
+      (fallbackId ? agentById.get(fallbackId) : undefined) ??
+      null;
+    return { ...c, agent };
+  });
+
+  return { calls: callsWithAgent, total, page, perPage };
 }
 
 /**
