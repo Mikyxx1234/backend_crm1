@@ -54,6 +54,27 @@ const { store, prismaMock, getContactsMock, createContactMock, findConfigMock } 
   } = { calls: new Map(), callEvents: new Map(), seq: 0 };
 
   const prismaMock = {
+    conversation: {
+      async findFirst() {
+        return null;
+      },
+      async update() {
+        return {};
+      },
+    },
+    message: {
+      async findFirst() {
+        return null;
+      },
+      async create() {
+        return { id: `msg_${++store.seq}` };
+      },
+    },
+    deal: {
+      async findUnique() {
+        return null;
+      },
+    },
     callEvent: {
       async create(args: { data: Record<string, unknown>; select: unknown }) {
         store.seq += 1;
@@ -190,6 +211,18 @@ vi.mock("@/services/call-provider-configs", () => ({
     return findConfigMock;
   },
   decryptWebhookSecret: (_cfg: { webhookSecretEncrypted: string }) => "plain-secret",
+}));
+
+vi.mock("@/services/activity-log", () => ({
+  logEvent: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/services/automation-triggers", () => ({
+  fireTrigger: vi.fn(async () => undefined),
+}));
+
+vi.mock("@/lib/sse-bus", () => ({
+  sseBus: { publish: vi.fn() },
 }));
 
 // ── Import do SUT (depois dos mocks) ─────────────────────────────────────

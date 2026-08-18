@@ -27,24 +27,15 @@ import { getLogger } from "@/lib/logger";
 import { normalizePhone, phoneMatchVariants } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
 import { generateFileName, saveFile } from "@/lib/storage/local";
 import { logEvent } from "@/services/activity-log";
 import { fireTrigger } from "@/services/automation-triggers";
 import { getContacts, createContact } from "@/services/contacts";
+import { logSipCallInConversation } from "@/services/sip-call-chat";
 import { getAdapter } from "./call-adapters";
 import { findConfigByWebhookToken, decryptWebhookSecret } from "./call-provider-configs";
 
 const log = getLogger("calls-service");
-
-/** Duração legível pra o aviso de chamada no chat (ex.: "2min 12s", "45s"). */
-function formatCallDuration(totalSeconds: number): string {
-  const s = Math.max(0, Math.round(totalSeconds));
-  const m = Math.floor(s / 60);
-  const sec = s % 60;
-  if (m <= 0) return `${sec}s`;
-  return sec > 0 ? `${m}min ${sec}s` : `${m}min`;
-}
 
 // ── Tipos públicos ────────────────────────────────────────────────────────
 
@@ -407,7 +398,8 @@ export async function processWebhookEvent(
         }
 
         // ── 8. Re-hospedar gravação ────────────────────────────────────
-        if (normalized.recordingUrl && !call.recordingUrl) {
+        let recordingUrl = call.recordingUrl;
+        if (normalized.recordingUrl && !recordingUrl) {
           if (config.recordingDelivery === "URL") {
             const hosted = await reHostRecording(
               organizationId,
@@ -419,6 +411,7 @@ export async function processWebhookEvent(
                 where: { id: call.id },
                 data: { recordingUrl: hosted },
               });
+              recordingUrl = hosted;
             }
           } else if (
             config.recordingDelivery === "FETCH_LATER" ||
@@ -429,6 +422,7 @@ export async function processWebhookEvent(
               where: { id: call.id },
               data: { recordingUrl: normalized.recordingUrl },
             });
+            recordingUrl = normalized.recordingUrl;
           }
         }
 
@@ -461,18 +455,17 @@ export async function processWebhookEvent(
           const contactIdForLog = call.contactId ?? crmMetadata.contactId ?? null;
           const durationSec = durationSeconds ?? null;
 
-          // Conversa mais recente do contato — dá conversationId pro log e
-          // hospeda o aviso no chat. Decisão de produto: NÃO criar conversa
-          // nova só pra isso; sem conversa, fica só log + timeline.
-          let conversationId: string | null = null;
-          if (contactIdForLog) {
-            const conv = await prisma.conversation.findFirst({
-              where: { contactId: contactIdForLog },
-              orderBy: { updatedAt: "desc" },
-              select: { id: true },
-            });
-            conversationId = conv?.id ?? null;
-          }
+          const conversationId = await logSipCallInConversation({
+            organizationId,
+            callId: call.id,
+            contactId: contactIdForLog,
+            direction: normalized.direction,
+            answered,
+            durationSec,
+            recordingUrl,
+            occurredAt: resolvedEndedAt ?? eventTime,
+            notifyInbox: true,
+          });
 
           const dealForLog = resolvedDealId
             ? await prisma.deal.findUnique({
@@ -509,57 +502,6 @@ export async function processWebhookEvent(
             }).catch((err) =>
               log.warn({ err }, "[calls] logEvent de ligação falhou — ignorando"),
             );
-          }
-
-          // ── 10b. Aviso no chat (se houver conversa) ────────────────────
-          if (conversationId) {
-            const callMessageDirection: "in" | "out" = isInbound ? "in" : "out";
-            const label = isInbound ? "Ligação recebida" : "Ligação realizada";
-            const suffix = answered
-              ? durationSec && durationSec > 0
-                ? ` · ${formatCallDuration(durationSec)}`
-                : ""
-              : " · não atendida";
-            const chatLine = `${label}${suffix}`;
-            const dedupeKey = `sip_call:${call.id}`;
-            const already = await prisma.message.findFirst({
-              where: { conversationId, externalId: dedupeKey },
-              select: { id: true },
-            });
-            if (!already) {
-              const eventNow = new Date();
-              await prisma.message.create({
-                data: withOrg(
-                  {
-                    conversationId,
-                    content: chatLine,
-                    direction: callMessageDirection,
-                    messageType: "sip_call",
-                    senderName: "Telefonia",
-                    externalId: dedupeKey,
-                    sendStatus: "delivered",
-                  },
-                  organizationId,
-                ),
-              });
-              await prisma.conversation
-                .update({
-                  where: { id: conversationId },
-                  data: {
-                    updatedAt: eventNow,
-                    lastMessageDirection: callMessageDirection,
-                  },
-                })
-                .catch(() => {});
-              sseBus.publish("new_message", {
-                organizationId,
-                conversationId,
-                contactId: contactIdForLog ?? undefined,
-                direction: callMessageDirection,
-                content: chatLine,
-                timestamp: eventNow,
-              });
-            }
           }
         }
 
