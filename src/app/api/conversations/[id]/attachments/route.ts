@@ -8,6 +8,7 @@ import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import {
   convertToOgg,
   convertToMp3,
+  convertToM4a,
   guessInputExt,
   isValidOgg,
   needsVoiceConversion,
@@ -356,13 +357,27 @@ export async function POST(request: Request, context: RouteContext) {
                 sendAsVoice = false;
                 console.log(`[meta-attach] Fallback MP3 OK, ${buffer.length} -> ${uploadBuffer.length} bytes | voice=false`);
               } else {
-                // Ambas as conversões falharam (tipicamente ffmpeg ausente no
-                // container). Enviar webm cru garantiria a rejeição da Meta,
-                // então abortamos o envio: a mídia já está salva localmente e
-                // reportamos o erro ao usuário.
-                throw new Error(
-                  "Não foi possível converter o áudio para um formato aceito pelo WhatsApp (ffmpeg indisponível no servidor). O áudio foi salvo localmente.",
-                );
+                // Último recurso: AAC/m4a. O encoder `aac` é NATIVO do ffmpeg
+                // (não precisa de libopus/libmp3lame), então funciona mesmo em
+                // builds minimalistas onde OGG/MP3 falham. audio/mp4 é aceito
+                // pela Meta como áudio regular.
+                console.error("[meta-attach] Conversao MP3 falhou. Tentando fallback M4A/AAC (audio/mp4).");
+                const m4a = await convertToM4a(buffer, inputExt);
+                if (m4a && m4a.length > 0) {
+                  uploadBuffer = m4a;
+                  uploadMime = "audio/mp4";
+                  uploadName = uploadName.replace(/\.[^.]+$/, ".m4a");
+                  if (!uploadName.endsWith(".m4a")) uploadName += ".m4a";
+                  sendAsVoice = false;
+                  console.log(`[meta-attach] Fallback M4A/AAC OK, ${buffer.length} -> ${uploadBuffer.length} bytes | voice=false`);
+                } else {
+                  // Todas as conversões falharam — ffmpeg realmente ausente ou
+                  // input não decodificável. Enviar webm cru garantiria rejeição
+                  // da Meta, então abortamos: a mídia já está salva localmente.
+                  throw new Error(
+                    "Não foi possível converter o áudio para um formato aceito pelo WhatsApp (ffmpeg indisponível no servidor). O áudio foi salvo localmente.",
+                  );
+                }
               }
             }
           } else if (isAudioType && !needsVoiceConversion(mimeBase)) {

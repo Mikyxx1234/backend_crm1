@@ -223,6 +223,68 @@ export async function convertToMp3(
 }
 
 /**
+ * Convert any audio buffer to M4A/AAC (audio/mp4) via FFmpeg.
+ *
+ * Use case: ÚLTIMO recurso de envio pra Meta quando OGG/Opus (libopus) e
+ * MP3 (libmp3lame) falham. O encoder `aac` é NATIVO do ffmpeg — não depende
+ * de biblioteca externa — então funciona mesmo em builds minimalistas
+ * (ex.: `ffmpeg-static`) que não trazem libopus/libmp3lame. A Meta aceita
+ * `audio/mp4` (AAC) como áudio regular (não-PTT).
+ *
+ * Retorna `null` se ffmpeg realmente não existir/decodificar o input.
+ */
+export async function convertToM4a(
+  inputBuffer: Buffer,
+  inputExt = "webm",
+): Promise<Buffer | null> {
+  await mkdir(TMP_DIR, { recursive: true });
+
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 8);
+  const inputPath = path.join(TMP_DIR, `in-${ts}-${rand}.${inputExt}`);
+  const outputPath = path.join(TMP_DIR, `out-${ts}-${rand}.m4a`);
+
+  try {
+    await writeFile(inputPath, inputBuffer);
+
+    const bin = getFFmpeg();
+    const args = [
+      "-i", inputPath,
+      "-vn",
+      "-c:a", "aac",
+      "-ar", "44100",
+      "-ac", "1",
+      "-b:a", "96k",
+      "-movflags", "+faststart",
+      "-y",
+      outputPath,
+    ];
+
+    console.log(`[ffmpeg] Convertendo pra M4A/AAC: ${bin} ${args.join(" ")}`);
+    const { ok, stderr } = await runFFmpeg(bin, args);
+
+    if (!ok) {
+      console.warn(`[ffmpeg] Conversao M4A falhou: ${stderr.slice(-300)}`);
+      return null;
+    }
+    if (!existsSync(outputPath)) {
+      console.warn("[ffmpeg] M4A nao foi gerado");
+      return null;
+    }
+    const result = await readFile(outputPath);
+    if (result.length === 0) return null;
+    console.log(`[ffmpeg] Conversao M4A OK: ${inputBuffer.length} -> ${result.length} bytes`);
+    return result;
+  } catch (err) {
+    console.error("[audio-convert] M4A conversion error:", err instanceof Error ? err.message : err);
+    return null;
+  } finally {
+    await unlink(inputPath).catch(() => {});
+    await unlink(outputPath).catch(() => {});
+  }
+}
+
+/**
  * Convert any audio buffer to WAV 16kHz mono — formato canônico
  * exigido pelo Whisper (OpenAI) e a maioria dos modelos de ASR.
  *
