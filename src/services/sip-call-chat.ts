@@ -104,7 +104,6 @@ export async function logSipCallInConversation(
           senderName: "Telefonia",
           externalId: dedupeKey,
           sendStatus: "delivered",
-          mediaUrl: input.recordingUrl?.trim() || null,
           createdAt: eventNow,
         },
         input.organizationId,
