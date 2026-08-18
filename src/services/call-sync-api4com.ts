@@ -16,6 +16,10 @@
  * é responsabilidade do webhook (tempo real); disparar aqui faria a primeira
  * sincronização "explodir" automações pra chamadas antigas.
  *
+ * O aviso no chat (`sip_call`) SIM é gravado aqui, com dedupe por callId —
+ * o widget /calls é alimentado por este sync, e sem isso a ligação não
+ * aparece na conversa quando o webhook de hangup falha ou não está ativo.
+ *
  * Ref CDR: https://developers.api4com.com/operations/Call.find__get_calls.html
  */
 import type { CallDirection, CallStatus, Prisma } from "@prisma/client";
@@ -25,6 +29,7 @@ import { normalizePhone } from "@/lib/phone";
 import { prisma } from "@/lib/prisma";
 import { withOrg } from "@/lib/prisma-helpers";
 import { getContacts } from "@/services/contacts";
+import { logSipCallInConversation } from "@/services/sip-call-chat";
 import { resolveApi4ComDialToken } from "@/services/sip-extensions";
 import { resolveApi4ComGateway } from "@/services/telephony-providers/api4com";
 
@@ -198,9 +203,10 @@ export async function syncApi4ComCalls(
             providerCallId,
           },
         },
-        select: { id: true },
+        select: { id: true, recordingUrl: true },
       });
 
+      let callId: string;
       if (existing) {
         await prisma.call.update({
           where: { id: existing.id },
@@ -215,8 +221,9 @@ export async function syncApi4ComCalls(
           },
         });
         updated++;
+        callId = existing.id;
       } else {
-        await prisma.call.create({
+        const createdRow = await prisma.call.create({
           data: withOrg(
             {
               direction,
@@ -236,8 +243,31 @@ export async function syncApi4ComCalls(
             },
             organizationId,
           ),
+          select: { id: true },
         });
         created++;
+        callId = createdRow.id;
+      }
+
+      const terminal =
+        status === "COMPLETED" ||
+        status === "MISSED" ||
+        status === "BUSY" ||
+        status === "FAILED";
+      if (terminal && resolvedContactId) {
+        const answered = status === "COMPLETED" || (durationSeconds ?? 0) > 0;
+        await logSipCallInConversation({
+          organizationId,
+          callId,
+          contactId: resolvedContactId,
+          direction,
+          answered,
+          durationSec: durationSeconds ?? null,
+          recordingUrl: recordingUrl ?? existing?.recordingUrl ?? null,
+          occurredAt: endedAt ?? startedAt ?? new Date(),
+        }).catch((err) => {
+          log.warn({ err, callId }, "[calls-sync] falha ao logar sip_call no chat");
+        });
       }
     }
 
