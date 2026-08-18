@@ -61,15 +61,23 @@ export async function GET(request: Request) {
   const errorParam = searchParams.get("error_description") || searchParams.get("error");
 
   if (errorParam) {
-    return renderResult(false, {}, errorParam);
+    return renderResult(false, { message: errorParam }, errorParam);
   }
   if (!code || !state) {
-    return renderResult(false, {}, "code/state ausentes na resposta da Meta.");
+    return renderResult(
+      false,
+      { message: "code/state ausentes na resposta da Meta." },
+      "code/state ausentes na resposta da Meta.",
+    );
   }
 
   const s = verifyState(state);
   if (!s) {
-    return renderResult(false, {}, "state invalido (CSRF ou expirado).");
+    return renderResult(
+      false,
+      { message: "state invalido (CSRF ou expirado)." },
+      "state invalido (CSRF ou expirado).",
+    );
   }
 
   try {
@@ -86,6 +94,6 @@ export async function GET(request: Request) {
           ? e.message
           : "Erro no callback OAuth.";
     console.error("[ig-oauth/callback]", e);
-    return renderResult(false, {}, msg);
+    return renderResult(false, { message: msg }, msg);
   }
 }
