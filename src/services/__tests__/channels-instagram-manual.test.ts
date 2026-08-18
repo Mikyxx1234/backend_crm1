@@ -117,6 +117,6 @@ describe("resolveInstagramManualIdentity", () => {
 
     await expect(
       IG_MANUAL_INTERNAL.resolveInstagramManualIdentity("EAA_BAD"),
-    ).rejects.toThrow(/instagram_manage_messages|Entrar com Instagram/i);
+    ).rejects.toThrow(/instagram_manage_messages|usuario do sistema/i);
   });
 });

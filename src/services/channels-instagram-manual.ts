@@ -308,12 +308,9 @@ export async function resolveInstagramManualIdentity(
 
   if (isUnparseableIgToken(ig.error)) {
     throw new IgManualProvisionError(
-      `Token de Usuario do sistema nao funciona no Instagram Login. ` +
+      `Esse token e do Facebook Graph (usuario do sistema / Pagina). ` +
         `${fb.error} ` +
-        `Caminho mais simples: use "Entrar com Instagram". ` +
-        `Se for token EAA da Pagina, precisa das permissoes pages_show_list, ` +
-        `pages_messaging, instagram_basic, instagram_manage_messages e ` +
-        `pages_manage_metadata.`,
+        `No App da empresa: atribua o usuario do sistema a Pagina, vincule o Instagram Business a essa Pagina e gere o token com pages_show_list, pages_messaging, instagram_basic, instagram_manage_messages e pages_manage_metadata.`,
       400,
     );
   }
