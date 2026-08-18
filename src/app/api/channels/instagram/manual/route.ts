@@ -48,7 +48,7 @@ export async function POST(request: Request) {
           { status: 400 },
         );
       }
-      if (webhookId && !appSecret) {
+      if (webhookId && !appSecret && !channelId) {
         return NextResponse.json(
           {
             message:
