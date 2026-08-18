@@ -30,6 +30,8 @@ import { insertContactWithNextNumber, isPrismaUniqueViolation } from "@/services
 import { sanitizeContactName } from "@/lib/display-name";
 import { notifyInboundMessage } from "@/lib/web-push";
 import { getLogger } from "@/lib/logger";
+import { fireTrigger } from "@/services/automation-triggers";
+import { ensureOpenDealForContact } from "@/services/auto-deals";
 import {
   asMetaId,
   configMetaIds,
@@ -308,6 +310,28 @@ async function processEvent(
   }
 
   const contact = await upsertContact(senderId, platform, hit);
+  const channelLabel = platform === "instagram" ? "Instagram" : "Messenger";
+  const sourceName =
+    platform === "instagram" ? "Instagram Direct" : "Messenger";
+
+  // Mesma ordem do WhatsApp (handler.ts / baileys): contato novo dispara
+  // contact_created ANTES do auto-deal, e o deal é garantido também para
+  // contato existente sem histórico (v3 — auto-deals.ts).
+  if (contact.isNew) {
+    fireTrigger("contact_created", {
+      contactId: contact.id,
+      data: { source: sourceName, channel: channelLabel },
+    }).catch((err) => log.warn("Falha no gatilho contact_created:", err));
+  }
+
+  ensureOpenDealForContact({
+    contactId: contact.id,
+    contactName: contact.name,
+    source: platform === "instagram" ? "auto_instagram" : "auto_messenger",
+    logTag: "meta-messaging-webhook",
+    channelId: hit.channelId,
+  }).catch((err) => log.warn("Falha ao garantir deal aberto:", err));
+
   const conversation = await findOrCreateConversation(contact.id, platform, hit.channelId);
 
   // Anexos: guardamos o primeiro URL como preview no `content` quando nao ha texto.
@@ -349,8 +373,18 @@ async function processEvent(
     contactId: contact.id,
     contactName: contact.name,
     preview: content || "[midia]",
-    channel: platform === "instagram" ? "Instagram" : "Messenger",
+    channel: channelLabel,
   }).catch((err) => log.debug("push falhou (nao-fatal):", err));
+
+  fireTrigger("message_received", {
+    contactId: contact.id,
+    data: {
+      channel: channelLabel,
+      content,
+      conversationId: conversation.id,
+      channelId: hit.channelId,
+    },
+  }).catch((err) => log.warn("Falha no gatilho message_received:", err));
 
   if (content?.trim()) {
     void scheduleAiReply({
@@ -369,26 +403,31 @@ async function upsertContact(
   externalUserId: string,
   platform: Platform,
   hit: ChannelHit,
-): Promise<{ id: string; name: string }> {
+): Promise<{ id: string; name: string; isNew: boolean }> {
   const field = platform === "instagram" ? "instagramIgsid" : "messengerPsid";
 
   const existing = await prisma.contact.findFirst({
     where: { [field]: externalUserId } as Prisma.ContactWhereInput,
     select: { id: true, name: true },
   });
-  if (existing) return existing;
+  if (existing) return { ...existing, isNew: false };
 
   // Best-effort fetch do perfil publico (nome). Falhas nao bloqueiam.
   const profile = await fetchProfileName(externalUserId, hit).catch(() => null);
   const name =
     (profile ? sanitizeContactName(profile) || profile : null) ||
     `${platform === "instagram" ? "Instagram" : "Messenger"} ${externalUserId.slice(-6)}`;
+  const sourceName =
+    platform === "instagram" ? "Instagram Direct" : "Messenger";
 
   try {
-    return await createContactWithNumber({
+    const created = await createContactWithNumber({
       name,
       [field]: externalUserId,
+      lifecycleStage: "LEAD",
+      source: sourceName,
     });
+    return { ...created, isNew: true };
   } catch (err) {
     // Corrida: outro webhook criou o contato simultaneamente.
     if (isPrismaUniqueViolation(err)) {
@@ -396,7 +435,7 @@ async function upsertContact(
         where: { [field]: externalUserId } as Prisma.ContactWhereInput,
         select: { id: true, name: true },
       });
-      if (won) return won;
+      if (won) return { ...won, isNew: false };
     }
     throw err;
   }
