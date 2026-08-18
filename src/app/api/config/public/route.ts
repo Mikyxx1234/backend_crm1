@@ -16,7 +16,9 @@ export function GET() {
     messengerLoginConfigured:
       CRM_META_APP_ID.length > 0 && CRM_META_MESSENGER_CONFIG_ID.length > 0,
     instagramLoginConfigured:
-      (process.env.NEXT_PUBLIC_INSTAGRAM_APP_ID?.trim() || "").length > 0,
+      (process.env.INSTAGRAM_APP_ID?.trim() ||
+        process.env.NEXT_PUBLIC_INSTAGRAM_APP_ID?.trim() ||
+        "").length > 0,
     instagramAppId: process.env.NEXT_PUBLIC_INSTAGRAM_APP_ID?.trim() || "",
   });
 }
