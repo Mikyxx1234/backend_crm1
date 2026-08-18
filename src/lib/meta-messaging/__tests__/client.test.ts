@@ -100,6 +100,24 @@ describe("messagingClientFromConfig", () => {
     );
   });
 
+  it("Instagram via Pagina: usa graph.facebook.com/{pageId}/messages", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ message_id: "mid_ig_page" }), { status: 200 }),
+    );
+    globalThis.fetch = fetchMock as unknown as typeof fetch;
+    const c = messagingClientFromConfig({
+      platform: "instagram",
+      pageId: "PAGE_77",
+      instagramAccountId: "17841400000000000",
+      accessToken: "EAA...",
+    });
+    await c.sendText("IGSID_1", "oi");
+    const [url] = fetchMock.mock.calls[0];
+    expect(String(url)).toBe(
+      "https://graph.facebook.com/v21.0/PAGE_77/messages",
+    );
+  });
+
   it("Messenger: usa graph.facebook.com/{pageId}/messages", async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(
       new Response(JSON.stringify({ message_id: "mid_fb" }), { status: 200 }),

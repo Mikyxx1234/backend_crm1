@@ -63,6 +63,7 @@ import { processIncomingMessage as processSalesbotMessage } from "@/services/aut
 import { logEvent, logMessageFailed, logMessageRead } from "@/services/activity-log";
 import { metaErrorReason, isMetaNonConversationErrorCode } from "@/lib/meta-whatsapp/error-catalog";
 import { notifyInboundMessage } from "@/lib/web-push";
+import { handleMessagingWebhookPost } from "@/lib/meta-webhook/messaging-handler";
 import { cancelPendingForConversation } from "@/services/scheduled-messages";
 import { markCampaignReplyByContact } from "@/services/campaigns";
 import {
@@ -1807,8 +1808,11 @@ export async function handleMetaWebhookGet(
     const channels = await prismaBase.channel.findMany({
       where: {
         organizationId: scope.organizationId,
-        type: "WHATSAPP",
-        provider: "META_CLOUD_API",
+        OR: [
+          { type: "WHATSAPP", provider: "META_CLOUD_API" },
+          { type: "INSTAGRAM" },
+          { type: "FACEBOOK" },
+        ],
       },
       select: { id: true, name: true, config: true },
     });
@@ -1936,10 +1940,19 @@ async function collectAppSecrets(scope?: WebhookScope): Promise<string[]> {
     const where = scope
       ? {
           organizationId: scope.organizationId,
-          type: "WHATSAPP" as const,
-          provider: "META_CLOUD_API" as const,
+          OR: [
+            { type: "WHATSAPP" as const, provider: "META_CLOUD_API" as const },
+            { type: "INSTAGRAM" as const },
+            { type: "FACEBOOK" as const },
+          ],
         }
-      : { type: "WHATSAPP" as const, provider: "META_CLOUD_API" as const };
+      : {
+          OR: [
+            { type: "WHATSAPP" as const, provider: "META_CLOUD_API" as const },
+            { type: "INSTAGRAM" as const },
+            { type: "FACEBOOK" as const },
+          ],
+        };
     const channels = await prismaBase.channel.findMany({
       where,
       select: { config: true },
@@ -2123,6 +2136,16 @@ async function executePostBody(
   });
 
   const object = str(body.object);
+  if (object === "page" || object === "instagram") {
+    return handleMessagingWebhookPost(
+      new Request(request.url, {
+        method: "POST",
+        headers: request.headers,
+        body: rawBody,
+      }),
+      { skipSignature: true },
+    );
+  }
   if (object !== "whatsapp_business_account") {
     if (metaWebhookEventId) {
       await markWebhookEventProcessed(metaWebhookEventId, "object_ignored");
