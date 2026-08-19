@@ -393,14 +393,10 @@ export async function getAutomations(params: GetAutomationsParams = {}) {
     prisma.automation.count({ where }),
   ]);
 
-  // Métricas reais por automação (execuções/sucesso/última). Logs de nível
-  // de gatilho (stepId = null) descrevem cada execução:
-  //   • STARTED              = 1 por execução iniciada (→ "execuções")
-  //   • COMPLETED            = terminou sem erro de passo
-  //   • COMPLETED_WITH_ERRORS / FAILED = terminou com falha
-  // Tudo agregado em poucas queries (groupBy) — escala independente da
-  // quantidade de automações na página. Filtrar por `automationId in ids`
-  // (ids já são da org) garante o escopo mesmo no nível de log.
+  // Métricas por card: só a janela de hoje (não all-time). O groupBy
+  // histórico em automation_logs (stepId IS NULL) saturava o índice
+  // (automationId, stepId) e competia com o worker. KPIs da página
+  // vêm de GET /api/automations/summary.
   const stats = await buildAutomationListStats(items.map((i) => i.id));
 
   return {
@@ -430,67 +426,117 @@ const EMPTY_AUTOMATION_STATS: AutomationListStats = {
   lastRunAt: null,
 };
 
-async function buildAutomationListStats(
-  ids: string[],
-): Promise<Map<string, AutomationListStats>> {
-  const out = new Map<string, AutomationListStats>();
-  if (ids.length === 0) return out;
+export type AutomationListSummary = {
+  total: number;
+  active: number;
+  paused: number;
+  runsToday: number;
+  avgSuccess: number;
+};
 
+/**
+ * KPIs da listagem: COUNTs na tabela de automações + agregação de logs
+ * só de hoje (stepId IS NULL). Sem groupBy all-time e sem carregar N
+ * automações só para somar no cliente.
+ */
+export async function getAutomationListSummary(): Promise<AutomationListSummary> {
+  const organizationId = getOrgIdOrThrow();
   const startOfToday = new Date();
   startOfToday.setHours(0, 0, 0, 0);
 
-  const [statusAgg, lastRuns, todayAgg] = await Promise.all([
-    prisma.automationLog.groupBy({
-      by: ["automationId", "status"],
-      where: { automationId: { in: ids }, stepId: null },
+  const [counts, todayStatus] = await Promise.all([
+    prisma.automation.groupBy({
+      by: ["active"],
+      where: { organizationId },
       _count: { id: true },
     }),
     prisma.automationLog.groupBy({
-      by: ["automationId"],
-      where: { automationId: { in: ids }, stepId: null },
-      _max: { executedAt: true },
-    }),
-    prisma.automationLog.groupBy({
-      by: ["automationId"],
+      by: ["status"],
       where: {
-        automationId: { in: ids },
+        organizationId,
         stepId: null,
-        status: "STARTED",
         executedAt: { gte: startOfToday },
       },
       _count: { id: true },
     }),
   ]);
 
+  let active = 0;
+  let paused = 0;
+  for (const row of counts) {
+    if (row.active) active = row._count.id;
+    else paused = row._count.id;
+  }
+
+  let started = 0;
+  let completed = 0;
+  let finishedWithError = 0;
+  for (const row of todayStatus) {
+    const n = row._count.id;
+    if (row.status === "STARTED") started += n;
+    else if (row.status === "COMPLETED") completed += n;
+    else if (row.status === "COMPLETED_WITH_ERRORS" || row.status === "FAILED") {
+      finishedWithError += n;
+    }
+  }
+  const finished = completed + finishedWithError;
+
+  return {
+    total: active + paused,
+    active,
+    paused,
+    runsToday: started,
+    avgSuccess: finished > 0 ? Math.round((completed / finished) * 100) : 0,
+  };
+}
+
+async function buildAutomationListStats(
+  ids: string[],
+): Promise<Map<string, AutomationListStats>> {
+  const out = new Map<string, AutomationListStats>();
+  if (ids.length === 0) return out;
+
+  const organizationId = getOrgIdOrThrow();
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+
+  const todayAgg = await prisma.automationLog.groupBy({
+    by: ["automationId", "status"],
+    where: {
+      organizationId,
+      automationId: { in: ids },
+      stepId: null,
+      executedAt: { gte: startOfToday },
+    },
+    _count: { id: true },
+    _max: { executedAt: true },
+  });
+
   const accum = new Map<
     string,
-    { started: number; completed: number; finishedWithError: number }
+    {
+      started: number;
+      completed: number;
+      finishedWithError: number;
+      lastRunAt: Date | null;
+    }
   >();
-  for (const row of statusAgg) {
+  for (const row of todayAgg) {
     const cur = accum.get(row.automationId) ?? {
       started: 0,
       completed: 0,
       finishedWithError: 0,
+      lastRunAt: null as Date | null,
     };
     const n = row._count.id;
     if (row.status === "STARTED") cur.started += n;
     else if (row.status === "COMPLETED") cur.completed += n;
-    else if (row.status === "COMPLETED_WITH_ERRORS" || row.status === "FAILED")
+    else if (row.status === "COMPLETED_WITH_ERRORS" || row.status === "FAILED") {
       cur.finishedWithError += n;
+    }
+    const at = row._max.executedAt;
+    if (at && (!cur.lastRunAt || at > cur.lastRunAt)) cur.lastRunAt = at;
     accum.set(row.automationId, cur);
-  }
-
-  const lastRunMap = new Map<string, string | null>();
-  for (const row of lastRuns) {
-    lastRunMap.set(
-      row.automationId,
-      row._max.executedAt ? row._max.executedAt.toISOString() : null,
-    );
-  }
-
-  const todayMap = new Map<string, number>();
-  for (const row of todayAgg) {
-    todayMap.set(row.automationId, row._count.id);
   }
 
   for (const id of ids) {
@@ -498,16 +544,16 @@ async function buildAutomationListStats(
       started: 0,
       completed: 0,
       finishedWithError: 0,
+      lastRunAt: null as Date | null,
     };
     const finished = a.completed + a.finishedWithError;
+    const runsToday = a.started || finished;
     out.set(id, {
-      // "execuções" = quantas vezes o fluxo rodou (STARTED). Se por algum
-      // motivo só houver logs terminais, caímos no total finalizado.
-      runs: a.started || finished,
-      runsToday: todayMap.get(id) ?? 0,
+      runs: runsToday,
+      runsToday,
       successRate:
         finished > 0 ? Math.round((a.completed / finished) * 100) : 0,
-      lastRunAt: lastRunMap.get(id) ?? null,
+      lastRunAt: a.lastRunAt ? a.lastRunAt.toISOString() : null,
     });
   }
 
