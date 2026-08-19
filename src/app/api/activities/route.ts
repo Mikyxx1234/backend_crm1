@@ -170,6 +170,7 @@ export async function POST(request: Request) {
         dealId: resolvedDealId,
         userId: resolvedUserId,
         departmentId,
+        createdById: authResult.user.id,
       });
 
       if (resolvedDealId) {

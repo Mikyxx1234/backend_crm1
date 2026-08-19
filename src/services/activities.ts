@@ -36,6 +36,7 @@ export type GetActivitiesParams = {
 
 const listInclude = {
   user: { select: { id: true, name: true, email: true, avatarUrl: true } },
+  createdBy: { select: { id: true, name: true, email: true, avatarUrl: true } },
   department: { select: { id: true, name: true, color: true, icon: true } },
   contact: { select: { id: true, name: true, email: true } },
   deal: { select: { id: true, title: true, stageId: true } },
@@ -92,6 +93,8 @@ export type CreateActivityInput = {
   userId?: string | null;
   /** Responsável departamento (tarefa compartilhada). */
   departmentId?: string | null;
+  /** Quem criou a tarefa (distinto do responsável). Null = sistema/automação. */
+  createdById?: string | null;
 };
 
 /**
@@ -135,6 +138,7 @@ export async function createActivity(data: CreateActivityInput) {
       dealId: data.dealId === undefined ? undefined : data.dealId,
       userId: data.userId ?? null,
       departmentId,
+      createdById: data.createdById === undefined ? undefined : data.createdById,
     }),
     include: listInclude,
   });
