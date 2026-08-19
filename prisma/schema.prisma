@@ -164,6 +164,7 @@ model Organization {
   teamChatRooms            TeamChatRoom[]
   teamChatMembers          TeamChatMember[]
   teamChatMessages         TeamChatMessage[]
+  teamChatNotes            TeamChatNote[]
 
   @@index([status])
   @@map("organizations")
@@ -567,6 +568,7 @@ model User {
   teamChatRoomsCreated           TeamChatRoom[]            @relation("TeamChatRoomCreatedBy")
   teamChatMemberships            TeamChatMember[]
   teamChatMessagesAuthored       TeamChatMessage[]         @relation("TeamChatMessageAuthor")
+  teamChatNotesAuthored          TeamChatNote[]            @relation("TeamChatNoteAuthor")
 
   @@index([type])
   @@index([organizationId])
@@ -5332,6 +5334,7 @@ model TeamChatRoom {
 
   members  TeamChatMember[]
   messages TeamChatMessage[]
+  notes    TeamChatNote[]
 
   @@unique([organizationId, dmKey])
   @@index([organizationId, lastMessageAt])
@@ -5366,9 +5369,31 @@ model TeamChatMessage {
   /// TEXT | SYSTEM
   kind           String       @default("TEXT")
   content        String
+  pinned         Boolean      @default(false)
+  /// [{ emoji, userIds: string[] }]
+  reactions      Json         @default("[]")
+  /// [{ url, name, mimeType, size, kind: image|audio|video|file|sticker, emoji? }]
+  attachments    Json         @default("[]")
   createdAt      DateTime     @default(now())
 
   @@index([roomId, createdAt])
   @@index([organizationId])
   @@map("team_chat_messages")
+}
+
+model TeamChatNote {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  roomId         String
+  room           TeamChatRoom @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  authorId       String
+  author         User         @relation("TeamChatNoteAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  content        String
+  pinned         Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+
+  @@index([roomId, authorId])
+  @@index([organizationId])
+  @@map("team_chat_notes")
 }

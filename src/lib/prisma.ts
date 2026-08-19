@@ -88,6 +88,7 @@ const SCOPED_MODELS = new Set<Prisma.ModelName>([
   "TeamChatRoom",
   "TeamChatMember",
   "TeamChatMessage",
+  "TeamChatNote",
   "DemandBoard",
   "DemandStage",
   "DemandItem",
