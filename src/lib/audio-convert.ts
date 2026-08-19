@@ -49,36 +49,25 @@ export function isValidOgg(buf: Buffer): boolean {
 }
 
 /**
- * Build FFmpeg argument strategies in priority order:
- * 1. Transcode com libopus (mono 48kHz) — reencoda de fato, gerando um Ogg
- *    com OpusHead/pre-skip e granule positions corretos.
- * 2. Transcode com o encoder opus interno (experimental) — fallback quando
- *    o build do ffmpeg não tem libopus.
- * 3. Remux (codec copy) — último recurso.
- *
- * O remux era a primeira estratégia, mas copiar Opus de WebM (MediaRecorder,
- * timestamps em ms, sem Cues/Duration) pra Ogg gera granule positions
- * inconsistentes. O arquivo toca no Chrome/VLC e a Meta até extrai duração,
- * mas o WhatsApp iOS recusa o PTT ("Este áudio não está mais disponível").
- * Reencodar é ~100ms pra áudio de voz e elimina a classe do problema.
+ * Só libopus. O encoder opus experimental e o remux (codec copy) geram
+ * OggS válido que a Meta aceita, mas o WhatsApp iOS recusa com
+ * "Este áudio não está mais disponível" ou "atualize o WhatsApp".
  */
-function getConversionStrategies(inputExt: string): { label: string; args: string[] }[] {
-  const strategies: { label: string; args: string[] }[] = [
+function getConversionStrategies(_inputExt: string): { label: string; args: string[] }[] {
+  return [
     {
       label: "transcode libopus",
-      args: ["-c:a", "libopus", "-ac", "1", "-ar", "48000", "-b:a", "32k", "-application", "voip", "-map_metadata", "-1"],
-    },
-    {
-      label: "transcode opus (experimental)",
-      args: ["-strict", "-2", "-c:a", "opus", "-ac", "1", "-ar", "48000", "-b:a", "32k", "-map_metadata", "-1"],
+      args: [
+        "-c:a", "libopus",
+        "-ac", "1",
+        "-ar", "48000",
+        "-b:a", "32k",
+        "-application", "voip",
+        "-map_metadata", "-1",
+        "-f", "ogg",
+      ],
     },
   ];
-
-  if (inputExt === "webm" || inputExt === "ogg") {
-    strategies.push({ label: "remux (codec copy)", args: ["-c:a", "copy"] });
-  }
-
-  return strategies;
 }
 
 function runFFmpeg(bin: string, args: string[], timeoutMs = 30_000): Promise<{ ok: boolean; stderr: string }> {
@@ -95,8 +84,9 @@ function runFFmpeg(bin: string, args: string[], timeoutMs = 30_000): Promise<{ o
 
 /**
  * Converts any audio buffer to OGG/Opus via FFmpeg.
- * Tries multiple strategies: remux first (for webm/opus), then transcode.
- * Returns the converted buffer, or null if all strategies fail.
+ * Só reencoda com libopus. Remux/experimental opus não entram mais:
+ * o iOS recusa o PTT mesmo com OggS válido.
+ * Returns the converted buffer, or null if libopus falhar.
  */
 export async function convertToOgg(
   inputBuffer: Buffer,
@@ -223,6 +213,125 @@ export async function convertToMp3(
 }
 
 /**
+ * Convert any audio buffer to M4A/AAC (audio/mp4) via FFmpeg.
+ *
+ * Encoder `aac` é nativo do ffmpeg (não depende de libopus/libmp3lame).
+ * A Meta aceita `audio/mp4` como áudio regular (não-PTT) — o formato que
+ * o WhatsApp iOS reproduz com estabilidade.
+ */
+export async function convertToM4a(
+  inputBuffer: Buffer,
+  inputExt = "webm",
+): Promise<Buffer | null> {
+  await mkdir(TMP_DIR, { recursive: true });
+
+  const ts = Date.now();
+  const rand = Math.random().toString(36).slice(2, 8);
+  const inputPath = path.join(TMP_DIR, `in-${ts}-${rand}.${inputExt}`);
+  const outputPath = path.join(TMP_DIR, `out-${ts}-${rand}.m4a`);
+
+  try {
+    await writeFile(inputPath, inputBuffer);
+
+    const bin = getFFmpeg();
+    const args = [
+      "-i", inputPath,
+      "-vn",
+      "-c:a", "aac",
+      "-ar", "44100",
+      "-ac", "1",
+      "-b:a", "96k",
+      "-movflags", "+faststart",
+      "-f", "mp4",
+      "-y",
+      outputPath,
+    ];
+
+    console.log(`[ffmpeg] Convertendo pra M4A/AAC: ${bin} ${args.join(" ")}`);
+    const { ok, stderr } = await runFFmpeg(bin, args);
+
+    if (!ok) {
+      console.warn(`[ffmpeg] Conversao M4A falhou: ${stderr.slice(-300)}`);
+      return null;
+    }
+    if (!existsSync(outputPath)) {
+      console.warn("[ffmpeg] M4A nao foi gerado");
+      return null;
+    }
+    const result = await readFile(outputPath);
+    if (result.length === 0) return null;
+    console.log(`[ffmpeg] Conversao M4A OK: ${inputBuffer.length} -> ${result.length} bytes`);
+    return result;
+  } catch (err) {
+    console.error("[audio-convert] M4A conversion error:", err instanceof Error ? err.message : err);
+    return null;
+  } finally {
+    await unlink(inputPath).catch(() => {});
+    await unlink(outputPath).catch(() => {});
+  }
+}
+
+export type WhatsAppAudioPayload = {
+  buffer: Buffer;
+  mime: string;
+  fileName: string;
+  voice: boolean;
+};
+
+function withAudioExt(name: string, ext: string): string {
+  const base = name.replace(/\.[^.]+$/, "").trim() || "audio";
+  return `${base}.${ext}`;
+}
+
+/**
+ * Áudio de saída para a Cloud API — sempre `type=audio`, nunca document.
+ *
+ * Primário: OGG/Opus reencodado com libopus + `voice=true` (bolha de voz
+ * do WhatsApp). Sem remux: o WebM do navegador copiado pra Ogg chega no
+ * iPhone e não toca.
+ *
+ * Se libopus não existir no ffmpeg, cai pra AAC/MP3 ainda como áudio
+ * (player no chat), não como arquivo.
+ */
+export async function prepareWhatsAppAudio(
+  inputBuffer: Buffer,
+  inputExt: string,
+  originalName: string,
+): Promise<WhatsAppAudioPayload | null> {
+  const ogg = await convertToOgg(inputBuffer, inputExt);
+  if (ogg && isValidOgg(ogg)) {
+    return {
+      buffer: ogg,
+      mime: "audio/ogg",
+      fileName: withAudioExt(originalName, "ogg"),
+      voice: true,
+    };
+  }
+
+  const m4a = await convertToM4a(inputBuffer, inputExt);
+  if (m4a && m4a.length > 0) {
+    return {
+      buffer: m4a,
+      mime: "audio/mp4",
+      fileName: withAudioExt(originalName, "m4a"),
+      voice: false,
+    };
+  }
+
+  const mp3 = await convertToMp3(inputBuffer, inputExt);
+  if (mp3 && mp3.length > 0) {
+    return {
+      buffer: mp3,
+      mime: "audio/mpeg",
+      fileName: withAudioExt(originalName, "mp3"),
+      voice: false,
+    };
+  }
+
+  return null;
+}
+
+/**
  * Convert any audio buffer to WAV 16kHz mono — formato canônico
  * exigido pelo Whisper (OpenAI) e a maioria dos modelos de ASR.
  *
@@ -293,6 +402,9 @@ export function guessInputExt(mimeBase: string): string {
       return "wav";
     case "audio/aac":
       return "aac";
+    case "audio/ogg":
+    case "audio/opus":
+      return "ogg";
     default:
       return "bin";
   }

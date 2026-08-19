@@ -6,12 +6,9 @@ import { getContactChannelSession, getConversationSession } from "@/lib/channel-
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { resolveOutboundChannel } from "@/lib/outbound-channel";
 import {
-  convertToOgg,
-  convertToMp3,
   guessInputExt,
-  isValidOgg,
-  needsVoiceConversion,
   mimeFromExtension,
+  prepareWhatsAppAudio,
 } from "@/lib/audio-convert";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
@@ -324,45 +321,22 @@ export async function POST(request: Request, context: RouteContext) {
           let uploadName = fileName;
           let sendAsVoice = false;
 
-          if (isAudioType && needsVoiceConversion(mimeBase)) {
+          if (isAudioType) {
             const inputExt = guessInputExt(mimeBase);
-            console.log(`[meta-attach] PTT requer OGG/Opus. Convertendo ${mimeBase} (.${inputExt}) -> audio/ogg via FFmpeg`);
-
-            const converted = await convertToOgg(buffer, inputExt);
-            if (converted && isValidOgg(converted)) {
-              uploadBuffer = converted;
-              uploadMime = "audio/ogg";
-              uploadName = uploadName.replace(/\.[^.]+$/, ".ogg");
-              if (!uploadName.endsWith(".ogg")) uploadName += ".ogg";
-              sendAsVoice = true;
-              console.log(`[meta-attach] Conversao OK, ${buffer.length} -> ${uploadBuffer.length} bytes | voice=true`);
-            } else {
-              // Fallback: OGG/Opus falhou. NÃO reenviar o container original
-              // (ex.: audio/webm), pois a Meta rejeita com (#100) "Param file
-              // must be a file of one of the following types...". Tentamos MP3
-              // (audio/mpeg É aceito pela Meta) como áudio regular.
-              console.error("[meta-attach] Conversao OGG falhou. Tentando fallback MP3 (audio/mpeg).");
-              const mp3 = await convertToMp3(buffer, inputExt);
-              if (mp3 && mp3.length > 0) {
-                uploadBuffer = mp3;
-                uploadMime = "audio/mpeg";
-                uploadName = uploadName.replace(/\.[^.]+$/, ".mp3");
-                if (!uploadName.endsWith(".mp3")) uploadName += ".mp3";
-                sendAsVoice = false;
-                console.log(`[meta-attach] Fallback MP3 OK, ${buffer.length} -> ${uploadBuffer.length} bytes | voice=false`);
-              } else {
-                // Ambas as conversões falharam (tipicamente ffmpeg ausente no
-                // container). Enviar webm cru garantiria a rejeição da Meta,
-                // então abortamos o envio: a mídia já está salva localmente e
-                // reportamos o erro ao usuário.
-                throw new Error(
-                  "Não foi possível converter o áudio para um formato aceito pelo WhatsApp (ffmpeg indisponível no servidor). O áudio foi salvo localmente.",
-                );
-              }
+            console.log(`[meta-attach] Convertendo audio ${mimeBase} (.${inputExt}) para formato aceito pelo WhatsApp`);
+            const prepared = await prepareWhatsAppAudio(buffer, inputExt, fileName);
+            if (!prepared) {
+              throw new Error(
+                "Não foi possível converter o áudio para um formato aceito pelo WhatsApp (ffmpeg indisponível no servidor). O áudio foi salvo localmente.",
+              );
             }
-          } else if (isAudioType && !needsVoiceConversion(mimeBase)) {
-            sendAsVoice = true;
-            console.log("[meta-attach] Audio ja em OGG/Opus, enviando como PTT | voice=true");
+            uploadBuffer = prepared.buffer;
+            uploadMime = prepared.mime;
+            uploadName = prepared.fileName;
+            sendAsVoice = prepared.voice;
+            console.log(
+              `[meta-attach] Conversao OK, ${buffer.length} -> ${uploadBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
+            );
           }
 
           const mediaId = await metaClient.uploadMedia(uploadBuffer, uploadMime, uploadName);
