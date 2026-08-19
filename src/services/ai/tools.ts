@@ -109,6 +109,7 @@ function createDealTool(ctx: RunContext) {
             dealId: deal.id,
             contactId: ctx.contactId,
             userId: ctx.agentUserId,
+            createdById: ctx.agentUserId,
           }).catch(() => null);
         }
         createDealEvent(deal.id, ctx.agentUserId, "AI_AGENT_ACTION", {
@@ -237,6 +238,7 @@ function moveStageTool(ctx: RunContext) {
             dealId: deal.id,
             contactId: ctx.contactId,
             userId: ctx.agentUserId,
+            createdById: ctx.agentUserId,
           }).catch(() => null);
         }
         return ok({ stageId: target.id, stageName: target.name });
@@ -321,6 +323,7 @@ function createActivityTool(ctx: RunContext) {
           contactId: ctx.contactId ?? undefined,
           dealId: ctx.dealId ?? undefined,
           userId: ctx.agentUserId,
+          createdById: ctx.agentUserId,
         });
         return ok({ activityId: activity.id });
       } catch (err) {
@@ -698,6 +701,7 @@ function transferToHumanTool(ctx: RunContext) {
             contactId: ctx.contactId,
             dealId: ctx.dealId ?? undefined,
             userId: ctx.agentUserId,
+            createdById: ctx.agentUserId,
           }).catch(() => null);
         }
         sseBus.publish(

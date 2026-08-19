@@ -5,6 +5,39 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-19 — Activity: criador ≠ responsável + comentários assinados
+
+**Modelo usado.** Cursor Grok 4.5 (execução seguindo spec Opus).
+
+**Decisão.**
+1. `Activity.createdById` (nullable) separa criador do responsável
+   (`userId` / `departmentId`). Novos POSTs autenticados preenchem
+   `createdById`; backfill de legados usa `userId` quando presente.
+2. Comentários de tarefa usam models dedicados `ActivityComment` +
+   `ActivityCommentRevision` (append-only: CREATED|UPDATED|DELETED).
+   Soft-delete via `deletedAt`; conteúdo permanece no banco; lista
+   normal oculta `content` de deletados; endpoint de revisions/histórico
+   expõe conteúdo para auditoria.
+3. Autor do comentário vem só da autenticação. Quem vê a Activity pode
+   listar/criar; editar/excluir só o próprio autor (nem ADMIN edita
+   nota de terceiro). ADMIN pode consultar histórico.
+4. Comentário, revision e `ActivityEvent` são gravados na mesma transação:
+   a mutação só confirma quando toda a trilha de auditoria persistir.
+
+**Alternativas descartadas.**
+- Reutilizar `Note`: acopla nota de deal/contato a thread de tarefa;
+  sem soft-delete/revision nativos.
+- Modelar histórico só com `ActivityEvent`: feed é particionado e
+  tipado para timeline; não garante append-only por comentário nem
+  `before/after` estruturado; hard de filtrar auditoria de um commentId.
+- Hard-delete de comentário: perderia trilha forense.
+
+**Impacto.** Schema/migration `20260819124500_activity_created_by_and_comments`;
+services `activities` + `activity-comments`; rotas
+`/api/activities/[id]/comments` (+ `[commentId]` e `revisions`).
+
+---
+
 ### 2026-08-14 — Step `check_agent_status` (Disponível / Offline)
 
 **Modelo usado.** Cursor Grok 4.6.

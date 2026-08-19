@@ -59,6 +59,8 @@ model Organization {
   activityEvents           ActivityEvent[]
   products                 Product[]
   activities               Activity[]
+  activityComments         ActivityComment[]
+  activityCommentRevisions ActivityCommentRevision[]
   notes                    Note[]
   conversations            Conversation[]
   messages                 Message[]
@@ -515,7 +517,10 @@ model User {
   updatedAt DateTime @updatedAt
 
   deals                          Deal[]
-  activities                     Activity[]
+  activities                     Activity[]                @relation("ActivityAssignee")
+  activitiesCreated              Activity[]                @relation("ActivityCreatedBy")
+  activityComments               ActivityComment[]
+  activityCommentRevisions       ActivityCommentRevision[] @relation("ActivityCommentRevisionActor")
   notes                          Note[]
   assignedLeads                  Contact[]                 @relation("AssignedTo")
   distributionMembers            DistributionMember[]
@@ -2550,9 +2555,16 @@ model Activity {
   // compartilhada — todos os membros do depto veem/concluem). Pelo menos
   // um dos dois costuma estar preenchido; ambos podem coexistir.
   userId       String?
-  user         User?       @relation(fields: [userId], references: [id])
+  user         User?       @relation("ActivityAssignee", fields: [userId], references: [id])
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+
+  /// Quem criou a tarefa (distinto do responsável). Nullable para
+  /// registros legados/automação sem ator identificável.
+  createdById String?
+  createdBy   User?   @relation("ActivityCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+
+  comments ActivityComment[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2560,12 +2572,66 @@ model Activity {
   @@index([organizationId])
   @@index([organizationId, scheduledAt])
   @@index([organizationId, userId])
+  @@index([organizationId, createdById])
   @@index([organizationId, departmentId])
   @@index([organizationId, completed, scheduledAt])
   @@index([contactId])
   @@index([dealId])
   @@index([dealId, scheduledAt])
   @@map("activities")
+}
+
+/// Comentário assinado em tarefa (Activity). Soft-delete via deletedAt —
+/// nunca hard-delete individual (histórico/revisões devem sobreviver).
+model ActivityComment {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  activityId     String
+  activity       Activity     @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  authorId       String
+  author         User         @relation(fields: [authorId], references: [id])
+  content        String
+  editedAt       DateTime?
+  deletedAt      DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  revisions ActivityCommentRevision[]
+
+  @@index([organizationId])
+  @@index([organizationId, activityId, createdAt])
+  @@index([organizationId, authorId])
+  @@index([activityId])
+  @@map("activity_comments")
+}
+
+enum ActivityCommentRevisionAction {
+  CREATED
+  UPDATED
+  DELETED
+}
+
+/// Histórico append-only de criação/edição/exclusão de comentário.
+/// Cascade com o comment (e portanto com Activity) — soft-delete do
+/// comentário NÃO remove revisions.
+model ActivityCommentRevision {
+  id             String                         @id @default(cuid())
+  organizationId String
+  organization   Organization                   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  commentId      String
+  comment        ActivityComment                @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  actorId        String
+  actor          User                           @relation("ActivityCommentRevisionActor", fields: [actorId], references: [id])
+  action         ActivityCommentRevisionAction
+  beforeContent  String?
+  afterContent   String?
+  createdAt      DateTime                       @default(now())
+
+  @@index([organizationId])
+  @@index([organizationId, commentId, createdAt])
+  @@index([commentId, createdAt])
+  @@map("activity_comment_revisions")
 }
 
 enum ActivityType {

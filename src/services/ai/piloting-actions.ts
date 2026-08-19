@@ -711,6 +711,7 @@ export async function executeAgentHandoff(
       contactId: args.contactId,
       dealId: args.dealId ?? undefined,
       userId: args.agentUserId,
+      createdById: args.agentUserId,
     }).catch(() => null);
   }
 
