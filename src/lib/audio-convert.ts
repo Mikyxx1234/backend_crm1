@@ -56,7 +56,19 @@ export function isValidOgg(buf: Buffer): boolean {
 function getConversionStrategies(_inputExt: string): { label: string; args: string[] }[] {
   return [
     {
-      label: "transcode libopus",
+      label: "transcode libopus 16k voip",
+      args: [
+        "-c:a", "libopus",
+        "-ac", "1",
+        "-ar", "16000",
+        "-b:a", "24k",
+        "-application", "voip",
+        "-map_metadata", "-1",
+        "-f", "ogg",
+      ],
+    },
+    {
+      label: "transcode libopus 48k voip",
       args: [
         "-c:a", "libopus",
         "-ac", "1",
@@ -230,38 +242,42 @@ export async function convertToM4a(
   const inputPath = path.join(TMP_DIR, `in-${ts}-${rand}.${inputExt}`);
   const outputPath = path.join(TMP_DIR, `out-${ts}-${rand}.m4a`);
 
+  const strategies = [
+    { label: "aac native", args: ["-c:a", "aac"] },
+    { label: "libfdk_aac", args: ["-c:a", "libfdk_aac"] },
+  ];
+
   try {
     await writeFile(inputPath, inputBuffer);
-
     const bin = getFFmpeg();
-    const args = [
-      "-i", inputPath,
-      "-vn",
-      "-c:a", "aac",
-      "-ar", "44100",
-      "-ac", "1",
-      "-b:a", "96k",
-      "-movflags", "+faststart",
-      "-f", "mp4",
-      "-y",
-      outputPath,
-    ];
 
-    console.log(`[ffmpeg] Convertendo pra M4A/AAC: ${bin} ${args.join(" ")}`);
-    const { ok, stderr } = await runFFmpeg(bin, args);
-
-    if (!ok) {
-      console.warn(`[ffmpeg] Conversao M4A falhou: ${stderr.slice(-300)}`);
-      return null;
+    for (const strategy of strategies) {
+      const args = [
+        "-i", inputPath,
+        "-vn",
+        ...strategy.args,
+        "-ar", "44100",
+        "-ac", "1",
+        "-b:a", "96k",
+        "-movflags", "+faststart",
+        "-f", "mp4",
+        "-y",
+        outputPath,
+      ];
+      console.log(`[ffmpeg] Convertendo pra M4A/AAC (${strategy.label}): ${bin} ${args.join(" ")}`);
+      const { ok, stderr } = await runFFmpeg(bin, args);
+      if (!ok) {
+        console.warn(`[ffmpeg] Conversao M4A ${strategy.label} falhou: ${stderr.slice(-300)}`);
+        await unlink(outputPath).catch(() => {});
+        continue;
+      }
+      if (!existsSync(outputPath)) continue;
+      const result = await readFile(outputPath);
+      if (result.length === 0) continue;
+      console.log(`[ffmpeg] Conversao M4A OK (${strategy.label}): ${inputBuffer.length} -> ${result.length} bytes`);
+      return result;
     }
-    if (!existsSync(outputPath)) {
-      console.warn("[ffmpeg] M4A nao foi gerado");
-      return null;
-    }
-    const result = await readFile(outputPath);
-    if (result.length === 0) return null;
-    console.log(`[ffmpeg] Conversao M4A OK: ${inputBuffer.length} -> ${result.length} bytes`);
-    return result;
+    return null;
   } catch (err) {
     console.error("[audio-convert] M4A conversion error:", err instanceof Error ? err.message : err);
     return null;
@@ -269,6 +285,19 @@ export async function convertToM4a(
     await unlink(inputPath).catch(() => {});
     await unlink(outputPath).catch(() => {});
   }
+}
+
+function guessInputExtFromBuffer(buf: Buffer, mimeBase: string): string {
+  if (buf.length >= 4 && buf.subarray(0, 4).equals(OGG_MAGIC)) return "ogg";
+  if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) {
+    return "webm";
+  }
+  if (buf.length >= 12 && buf.toString("ascii", 4, 8) === "ftyp") return "m4a";
+  if (buf.length >= 12 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WAVE") {
+    return "wav";
+  }
+  if (buf.length >= 3 && buf.toString("ascii", 0, 3) === "ID3") return "mp3";
+  return guessInputExt(mimeBase);
 }
 
 export type WhatsAppAudioPayload = {
@@ -286,20 +315,21 @@ function withAudioExt(name: string, ext: string): string {
 /**
  * Áudio de saída para a Cloud API — sempre `type=audio`, nunca document.
  *
- * Primário: AAC/M4A como áudio regular (`voice=false`). O PTT
- * (`voice=true`, OGG/Opus) é o caminho frágil: o WhatsApp do iPhone
- * recusa com "Este áudio não está mais disponível" mesmo com Ogg/Opus
- * válido gerado pelo libopus. AAC/M4A toca em Android e iOS.
+ * Formatos oficiais Meta (Cloud API):
+ *   audio/aac | audio/mp4 | audio/mpeg | audio/amr | audio/ogg (somente Opus)
+ * WebM/browser NÃO entra nessa lista — converter sempre, nunca reenviar o blob.
  *
- * OGG/Opus fica só como último recurso, caso o ffmpeg não tenha nem AAC
- * nem libmp3lame.
+ * Primário: AAC/M4A (`audio/mp4`, voice=false) — toca no WhatsApp Android e iOS.
+ * Depois MP3 (`audio/mpeg`). OGG/Opus só no fim, com `codecs=opus` e voice=true.
  */
 export async function prepareWhatsAppAudio(
   inputBuffer: Buffer,
   inputExt: string,
   originalName: string,
 ): Promise<WhatsAppAudioPayload | null> {
-  const m4a = await convertToM4a(inputBuffer, inputExt);
+  const ext = guessInputExtFromBuffer(inputBuffer, mimeFromExtension(inputExt) || `audio/${inputExt}`);
+
+  const m4a = await convertToM4a(inputBuffer, ext);
   if (m4a && m4a.length > 0) {
     return {
       buffer: m4a,
@@ -309,7 +339,7 @@ export async function prepareWhatsAppAudio(
     };
   }
 
-  const mp3 = await convertToMp3(inputBuffer, inputExt);
+  const mp3 = await convertToMp3(inputBuffer, ext);
   if (mp3 && mp3.length > 0) {
     return {
       buffer: mp3,
@@ -319,11 +349,11 @@ export async function prepareWhatsAppAudio(
     };
   }
 
-  const ogg = await convertToOgg(inputBuffer, inputExt);
+  const ogg = await convertToOgg(inputBuffer, ext);
   if (ogg && isValidOgg(ogg)) {
     return {
       buffer: ogg,
-      mime: "audio/ogg",
+      mime: "audio/ogg; codecs=opus",
       fileName: withAudioExt(originalName, "ogg"),
       voice: true,
     };

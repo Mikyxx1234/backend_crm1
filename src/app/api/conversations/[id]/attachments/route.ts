@@ -189,9 +189,6 @@ export async function POST(request: Request, context: RouteContext) {
         return NextResponse.json({ message: `Tipo não suportado: ${mimeBase}` }, { status: 400 });
       }
 
-      const ext = fileName.includes(".") ? fileName.split(".").pop()! : mimeBase.split("/").pop() ?? "bin";
-      const safeFileName = generateFileName({ prefix: "att", ext });
-
       let buffer: Buffer;
       try {
         buffer = await blobToBuffer(raw);
@@ -200,6 +197,39 @@ export async function POST(request: Request, context: RouteContext) {
         return NextResponse.json({ message: "Erro ao ler arquivo." }, { status: 500 });
       }
 
+      const mediaType = resolveMediaType(mimeBase);
+      let storeBuffer = buffer;
+      let uploadMime = mimeBase;
+      let uploadName = fileName;
+      let sendAsVoice = false;
+      let storeExt = fileName.includes(".") ? fileName.split(".").pop()! : mimeBase.split("/").pop() ?? "bin";
+
+      if (mediaType === "audio") {
+        const inputExt = guessInputExt(mimeBase);
+        console.log(`[meta-attach] Convertendo audio ${mimeBase} (.${inputExt}) para formato aceito pela Meta`);
+        const prepared = await prepareWhatsAppAudio(buffer, inputExt, fileName);
+        if (!prepared) {
+          return NextResponse.json(
+            {
+              message:
+                "Não foi possível converter o áudio para um formato aceito pela Meta (AAC/MP4, MP3 ou OGG/Opus). O WebM do navegador não é enviado.",
+              code: "AUDIO_CONVERT_FAILED",
+            },
+            { status: 422 },
+          );
+        }
+        storeBuffer = prepared.buffer;
+        uploadMime = prepared.mime;
+        uploadName = prepared.fileName;
+        sendAsVoice = prepared.voice;
+        storeExt = prepared.fileName.split(".").pop() || "m4a";
+        console.log(
+          `[meta-attach] Conversao OK, ${buffer.length} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
+        );
+      }
+
+      const safeFileName = generateFileName({ prefix: "att", ext: storeExt });
+
       // PR 1.3: storage prefixado por org. Antes: `public/uploads/<file>`
       // (servido estático sem auth). Agora: `<STORAGE_ROOT>/<orgId>/attachments/<file>`,
       // entregue via `/api/storage/...` com validação de tenant.
@@ -207,7 +237,7 @@ export async function POST(request: Request, context: RouteContext) {
         orgId: conv.organizationId,
         bucket: "attachments",
         fileName: safeFileName,
-        buffer,
+        buffer: storeBuffer,
       });
       const publicUrl = saved.url;
 
@@ -219,7 +249,6 @@ export async function POST(request: Request, context: RouteContext) {
       let externalId: string | null = null;
 
       if (useBaileys) {
-        const mediaType = resolveMediaType(mimeBase);
         const msgRow = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: conv.id,
@@ -313,33 +342,7 @@ export async function POST(request: Request, context: RouteContext) {
 
       if (metaClient.configured && (to || recipient)) {
         try {
-          const mediaType = resolveMediaType(mimeBase);
-          const isAudioType = mediaType === "audio";
-
-          let uploadBuffer = buffer;
-          let uploadMime = mimeBase;
-          let uploadName = fileName;
-          let sendAsVoice = false;
-
-          if (isAudioType) {
-            const inputExt = guessInputExt(mimeBase);
-            console.log(`[meta-attach] Convertendo audio ${mimeBase} (.${inputExt}) para formato aceito pelo WhatsApp`);
-            const prepared = await prepareWhatsAppAudio(buffer, inputExt, fileName);
-            if (!prepared) {
-              throw new Error(
-                "Não foi possível converter o áudio para um formato aceito pelo WhatsApp (ffmpeg indisponível no servidor). O áudio foi salvo localmente.",
-              );
-            }
-            uploadBuffer = prepared.buffer;
-            uploadMime = prepared.mime;
-            uploadName = prepared.fileName;
-            sendAsVoice = prepared.voice;
-            console.log(
-              `[meta-attach] Conversao OK, ${buffer.length} -> ${uploadBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
-            );
-          }
-
-          const mediaId = await metaClient.uploadMedia(uploadBuffer, uploadMime, uploadName);
+          const mediaId = await metaClient.uploadMedia(storeBuffer, uploadMime, uploadName);
 
           const result = await metaClient.sendMediaById(
             to,
@@ -372,7 +375,6 @@ export async function POST(request: Request, context: RouteContext) {
       }
       void metaWhatsApp;
 
-      const mediaType = resolveMediaType(mimeBase);
       const isAudioFile = mediaType === "audio";
       const displayContent = caption || (isAudioFile ? "" : `📎 ${fileName}`);
 
