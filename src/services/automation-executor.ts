@@ -44,6 +44,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getOrgIdOrNull, runWithActor } from "@/lib/request-context";
 import { botOutboundReplyMark } from "@/lib/conversation-reply-marking";
 import type { AutomationJobPayload } from "@/lib/queue";
+import { assertSafeOutboundUrl } from "@/lib/safe-outbound-url";
 import { sseBus } from "@/lib/sse-bus";
 import {
   assignDealOwner,
@@ -3050,11 +3051,12 @@ async function executeStep(
       const body = await interpolateMessageVariables(bodyRaw, rt, interactiveVars);
 
       const rawButtons = Array.isArray(cfg.buttons) ? cfg.buttons as { id?: string; title?: string; text?: string; gotoStepId?: string }[] : [];
-      const buttons = rawButtons.slice(0, 3).map((b, i) => ({
+      if (rawButtons.length === 0) throw new Error("send_whatsapp_interactive: pelo menos 1 botão obrigatório");
+      const asList = rawButtons.length > 3;
+      const buttons = rawButtons.slice(0, asList ? 10 : 3).map((b, i) => ({
         id: b.id || `btn_${i}`,
-        title: (b.title || b.text || `Opção ${i + 1}`).slice(0, 20),
+        title: (b.title || b.text || `Opção ${i + 1}`).slice(0, asList ? 24 : 20),
       }));
-      if (buttons.length === 0) throw new Error("send_whatsapp_interactive: pelo menos 1 botão obrigatório");
 
       const headerRaw = readString(cfg, "header");
       const footerRaw = readString(cfg, "footer");
@@ -3062,7 +3064,9 @@ async function executeStep(
       const footer = footerRaw ? await interpolateMessageVariables(footerRaw, rt, interactiveVars) : footerRaw;
 
       const btnLabels = buttons.map((b) => b.title).join(", ");
-      const displayContent = `${body}\n[Botões: ${btnLabels}]`;
+      const displayContent = asList
+        ? `${body}\n[Lista: ${btnLabels}]`
+        : `${body}\n[Botões: ${btnLabels}]`;
 
       let conversationId: string | undefined;
       if (rt.contactId) {
@@ -3087,7 +3091,28 @@ async function executeStep(
 
       let externalId: string | null = null;
       try {
-        const sendResult = await interactiveMetaClient.sendInteractiveButtons(to, body, buttons, header, footer, recipient);
+        const sendResult = asList
+          ? await interactiveMetaClient.sendInteractiveList(
+              to,
+              body,
+              (
+                (readString(cfg, "button")
+                  ? await interpolateMessageVariables(readString(cfg, "button")!, rt, interactiveVars)
+                  : "Ver opções")
+              ).slice(0, 20),
+              [
+                {
+                  title: readString(cfg, "sectionTitle")?.trim()
+                    ? (await interpolateMessageVariables(readString(cfg, "sectionTitle")!, rt, interactiveVars)).trim() || null
+                    : null,
+                  rows: buttons.map((b) => ({ id: b.id, title: b.title })),
+                },
+              ],
+              header,
+              footer,
+              recipient,
+            )
+          : await interactiveMetaClient.sendInteractiveButtons(to, body, buttons, header, footer, recipient);
         externalId = sendResult.messages?.[0]?.id ?? null;
       } catch (sendErr) {
         const classified = classifyMetaSendFailure(sendErr) ?? toMetaSendFailure(sendErr);
@@ -3386,6 +3411,7 @@ async function executeStep(
         });
       }
 
+      await assertSafeOutboundUrl(finalUrl);
       const res = await fetch(finalUrl, {
         method,
         headers: h,
@@ -3530,11 +3556,11 @@ async function executeStep(
           }
 
           const rightRaw = rule.value;
-          // Right pode ser string com {{variavel}} — interpola com as
-          // flowVars antes de comparar.
+          // Right pode ser string com {{variavel}} — mesmo interpolador
+          // das mensagens (caminhos com ponto: contact.name, etc.).
           const right =
-            typeof rightRaw === "string" && flowVars
-              ? interpolateVariables(rightRaw, flowVars)
+            typeof rightRaw === "string"
+              ? interpolateContextVariables(rightRaw, rt, flowVars)
               : rightRaw;
 
           // ── Regra de expediente (independente de field) ─────────
@@ -3553,8 +3579,9 @@ async function executeStep(
           if (branch.nextStepId) {
             return { skipRemaining: true, gotoStepId: branch.nextStepId };
           }
-          // Branch bateu mas não tem destino — segue o fluxo linear.
-          return {};
+          // Branch bateu sem destino: para. Cair no linear dispara o
+          // passo vizinho (mesmo bug do fallback steps[i+1]).
+          return { skipRemaining: true };
         }
       }
 
@@ -3737,7 +3764,7 @@ async function executeStep(
       let varValue: unknown = cfg["value"] ?? "";
       if (typeof varValue === "string") {
         const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
-        if (vars) varValue = interpolateVariables(varValue, vars);
+        varValue = interpolateContextVariables(varValue, rt, vars);
       }
       if (rt.contactId) {
         const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
@@ -4180,6 +4207,48 @@ const WA_SEND_STEP_TYPES = new Set([
   "question",
 ]);
 
+/** Passos que pausam o fluxo — no retry, se já SUCCESS, não continua linear. */
+const RETRY_PAUSE_STEP_TYPES = new Set([
+  "question",
+  "send_whatsapp_interactive",
+  "send_whatsapp_list",
+  "wait_for_reply",
+]);
+
+/** Só roteiam — reexecutar no retry (sem efeito colateral). */
+const RETRY_REROUTE_STEP_TYPES = new Set([
+  "condition",
+  "goto",
+  "round_robin",
+  "business_hours",
+  "check_agent_status",
+  "set_variable",
+]);
+
+async function loadRetryCompletedStepIds(
+  automationId: string,
+  contactId: string | null | undefined,
+): Promise<Set<string>> {
+  if (!contactId) return new Set();
+  const lastStarted = await prisma.automationLog.findFirst({
+    where: { automationId, contactId, status: "STARTED" },
+    orderBy: { executedAt: "desc" },
+    select: { executedAt: true },
+  });
+  if (!lastStarted) return new Set();
+  const done = await prisma.automationLog.findMany({
+    where: {
+      automationId,
+      contactId,
+      status: "SUCCESS",
+      stepId: { not: null },
+      executedAt: { gte: lastStarted.executedAt },
+    },
+    select: { stepId: true },
+  });
+  return new Set(done.map((d) => d.stepId).filter((id): id is string => Boolean(id)));
+}
+
 const DEFAULT_TYPING_DELAY_MS = 2000;
 
 function readHumanizeSettings(triggerConfig: unknown): {
@@ -4302,6 +4371,12 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
       ? contextData.metaWebhookEventId
       : null;
 
+  // Antes do STARTED desta tentativa: SUCCESS da tentativa anterior.
+  const completedOnPriorAttempt =
+    (payload.attemptsMade ?? 0) > 0
+      ? await loadRetryCompletedStepIds(automationId, context.contactId)
+      : new Set<string>();
+
   await logStep({
     automationId,
     contactId: context.contactId,
@@ -4358,10 +4433,27 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     const enrichedConfig = { ...stepConfig, __stepId: step.id, __variables: flowVariables };
     const { __rfPos: _, __stepId: _s, nextStepId: _n, __hasExplicitEdges: _e, ...cleanConfig } = stepConfig;
 
-    await humanizeBeforeStep(step.type, humanize, wamid, runMetaClient);
-
     let result: StepResult;
     try {
+      if (completedOnPriorAttempt.has(step.id) && !RETRY_REROUTE_STEP_TYPES.has(step.type)) {
+        if (RETRY_PAUSE_STEP_TYPES.has(step.type)) {
+          log.info(`[${traceId}] Retry: "${step.type}" já SUCCESS e pausa — não reexecuta`);
+          pausedAtEnd = true;
+          break;
+        }
+        if (step.type === "delay") {
+          const delayMs = Number(stepConfig.ms ?? stepConfig.milliseconds ?? 0);
+          if (shouldPersistDelay(Math.max(0, Math.floor(Number.isFinite(delayMs) ? delayMs : 0)))) {
+            log.info(`[${traceId}] Retry: delay persistido já SUCCESS — não reexecuta`);
+            pausedAtEnd = true;
+            break;
+          }
+        }
+        log.info(`[${traceId}] Retry: pulando "${step.type}" ${step.id} (já SUCCESS)`);
+        result = {};
+      } else {
+      await humanizeBeforeStep(step.type, humanize, wamid, runMetaClient);
+
       // A origem (automação + nº do card) viaja pelo ALS para que TODO
       // evento de timeline escrito dentro do passo — inclusive os
       // gravados por services indiretos, como o motor da Distribuição
@@ -4413,6 +4505,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
         pausedAtEnd = true;
         break;
       }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(`[${traceId}] Falha no step "${step.type}":`, msg);
@@ -4452,6 +4545,10 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     if (result.gotoStepId && stepById.has(result.gotoStepId)) {
       current = stepById.get(result.gotoStepId);
       continue;
+    }
+    if (result.gotoStepId) {
+      log.warn(`[${traceId}] Step "${step.type}" tem gotoStepId=${result.gotoStepId} inválido — fim de fluxo`);
+      break;
     }
 
     const nid = typeof stepConfig.nextStepId === "string" ? stepConfig.nextStepId : null;
@@ -4793,6 +4890,10 @@ export async function continueFromStep(
     if (result.gotoStepId && stepById.has(result.gotoStepId)) {
       current = stepById.get(result.gotoStepId);
       continue;
+    }
+    if (result.gotoStepId) {
+      log.warn(`continueFromStep: step "${step.type}" tem gotoStepId=${result.gotoStepId} inválido — fim`);
+      break;
     }
 
     const baseCfg = step.config as Record<string, unknown>;

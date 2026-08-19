@@ -70,6 +70,8 @@ export type AutomationJobContext = {
 export type AutomationJobPayload = {
   automationId: string;
   context: AutomationJobContext;
+  /** Tentativas já feitas no BullMQ (0 = primeira). Usado pra não reenviar WhatsApp no retry. */
+  attemptsMade?: number;
 };
 
 export type BaileysOutboundPayload = {
