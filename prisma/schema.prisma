@@ -167,6 +167,7 @@ model Organization {
   teamChatMembers          TeamChatMember[]
   teamChatMessages         TeamChatMessage[]
   teamChatNotes            TeamChatNote[]
+  activityAlertStates      ActivityAlertState[]
 
   @@index([status])
   @@map("organizations")
@@ -521,6 +522,7 @@ model User {
   activitiesCreated              Activity[]                @relation("ActivityCreatedBy")
   activityComments               ActivityComment[]
   activityCommentRevisions       ActivityCommentRevision[] @relation("ActivityCommentRevisionActor")
+  activityAlertStates            ActivityAlertState[]
   notes                          Note[]
   assignedLeads                  Contact[]                 @relation("AssignedTo")
   distributionMembers            DistributionMember[]
@@ -2564,7 +2566,8 @@ model Activity {
   createdById String?
   createdBy   User?   @relation("ActivityCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
 
-  comments ActivityComment[]
+  comments    ActivityComment[]
+  alertStates ActivityAlertState[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -2632,6 +2635,38 @@ model ActivityCommentRevision {
   @@index([organizationId, commentId, createdAt])
   @@index([commentId, createdAt])
   @@map("activity_comment_revisions")
+}
+
+enum ActivityAlertSnoozeKind {
+  PRE_DUE
+  DUE
+}
+
+/// Persistência por usuário/atividade dos avisos de agendamento
+/// (pré-aviso 15min + vencimento). Um registro por (activityId, userId);
+/// reagendar reseta o estado no mesmo registro.
+model ActivityAlertState {
+  id             String                   @id @default(cuid())
+  organizationId String
+  organization   Organization             @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  activityId     String
+  activity       Activity                 @relation(fields: [activityId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User                     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Espelho de Activity.scheduledAt no momento do estado; divergência ⇒ reset.
+  scheduledFor   DateTime
+  preDueShownAt  DateTime?
+  dueShownAt     DateTime?
+  snoozedUntil   DateTime?
+  snoozedKind    ActivityAlertSnoozeKind?
+  dismissedAt    DateTime?
+  createdAt      DateTime                 @default(now())
+  updatedAt      DateTime                 @updatedAt
+
+  @@unique([activityId, userId])
+  @@index([organizationId, userId])
+  @@index([activityId])
+  @@map("activity_alert_states")
 }
 
 enum ActivityType {
