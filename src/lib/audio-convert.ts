@@ -285,28 +285,19 @@ function withAudioExt(name: string, ext: string): string {
 /**
  * Áudio de saída para a Cloud API — sempre `type=audio`, nunca document.
  *
- * Primário: OGG/Opus reencodado com libopus + `voice=true` (bolha de voz
- * do WhatsApp). Sem remux: o WebM do navegador copiado pra Ogg chega no
- * iPhone e não toca.
+ * Primário: AAC/M4A como áudio regular (`voice=false`). O PTT
+ * (`voice=true`, OGG/Opus) é o caminho frágil: o WhatsApp do iPhone
+ * recusa com "Este áudio não está mais disponível" mesmo com Ogg/Opus
+ * válido gerado pelo libopus. AAC/M4A toca em Android e iOS.
  *
- * Se libopus não existir no ffmpeg, cai pra AAC/MP3 ainda como áudio
- * (player no chat), não como arquivo.
+ * OGG/Opus fica só como último recurso, caso o ffmpeg não tenha nem AAC
+ * nem libmp3lame.
  */
 export async function prepareWhatsAppAudio(
   inputBuffer: Buffer,
   inputExt: string,
   originalName: string,
 ): Promise<WhatsAppAudioPayload | null> {
-  const ogg = await convertToOgg(inputBuffer, inputExt);
-  if (ogg && isValidOgg(ogg)) {
-    return {
-      buffer: ogg,
-      mime: "audio/ogg",
-      fileName: withAudioExt(originalName, "ogg"),
-      voice: true,
-    };
-  }
-
   const m4a = await convertToM4a(inputBuffer, inputExt);
   if (m4a && m4a.length > 0) {
     return {
@@ -324,6 +315,16 @@ export async function prepareWhatsAppAudio(
       mime: "audio/mpeg",
       fileName: withAudioExt(originalName, "mp3"),
       voice: false,
+    };
+  }
+
+  const ogg = await convertToOgg(inputBuffer, inputExt);
+  if (ogg && isValidOgg(ogg)) {
+    return {
+      buffer: ogg,
+      mime: "audio/ogg",
+      fileName: withAudioExt(originalName, "ogg"),
+      voice: true,
     };
   }
 
