@@ -69,6 +69,13 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
     locked: false,
     requiredPermission: "nav:demands",
   },
+  {
+    key: "team-chat",
+    title: "Órbita",
+    href: "/orbita",
+    locked: false,
+    requiredPermission: "nav:team-chat",
+  },
   // "Chamadas" foi movido do trilho para dentro de Logs (aba "Chamadas").
   // O histórico segue acessível via /widgets/calls (gate `calls_history`),
   // mas deixou de ser um item independente/customizável da sidebar.
