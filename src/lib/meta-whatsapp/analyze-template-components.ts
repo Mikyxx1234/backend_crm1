@@ -19,6 +19,8 @@ export type TemplateComponentsAnalysis = {
   bodyText: string | null;
   /** Texto do componente HEADER quando `format = TEXT` (pode ter placeholders). */
   headerText: string | null;
+  /** Texto do componente FOOTER. */
+  footerText: string | null;
   hasVariables: boolean;
   flowAction: string | null;
   flowId: string | null;
@@ -47,6 +49,7 @@ export function analyzeTemplateComponents(
   const buttons: TemplateButton[] = [];
   let bodyText: string | null = null;
   let headerText: string | null = null;
+  let footerText: string | null = null;
   let hasVariables = false;
   let flowAction: string | null = null;
   let flowId: string | null = null;
@@ -63,6 +66,7 @@ export function analyzeTemplateComponents(
       buttons: [],
       bodyText: null,
       headerText: null,
+      footerText: null,
       hasVariables,
       flowAction: null,
       flowId: null,
@@ -74,6 +78,11 @@ export function analyzeTemplateComponents(
     const comp = asRecord(c);
     if (!comp) continue;
     const type = String(comp.type ?? "").toUpperCase();
+
+    if (type === "FOOTER") {
+      const footer = typeof comp.text === "string" ? comp.text : "";
+      if (footer) footerText = footer;
+    }
 
     if (type === "BODY" || type === "HEADER") {
       const text = typeof comp.text === "string" ? comp.text : "";
@@ -128,6 +137,7 @@ export function analyzeTemplateComponents(
     buttons,
     bodyText,
     headerText,
+    footerText,
     hasVariables,
     flowAction,
     flowId,

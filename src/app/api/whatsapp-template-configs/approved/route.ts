@@ -96,6 +96,7 @@ export async function GET(request: Request) {
             agentEnabled: agentByName.get(name) ?? false,
             bodyPreview: analysis.bodyText ?? "",
             headerPreview: analysis.headerText ?? "",
+            footerPreview: analysis.footerText ?? "",
             hasButtons: analysis.hasButtons,
             buttonTypes: analysis.buttonTypes,
             buttons: analysis.buttons,
