@@ -3,7 +3,11 @@ import { NextResponse } from "next/server";
 import { authenticateApiRequest, runWithApiUserContext } from "@/lib/api-auth";
 import { getActivityById } from "@/services/activities";
 import { listCommentRevisions } from "@/services/activity-comments";
-import { canAccessActivity, type TaskViewer } from "@/services/task-visibility";
+import {
+  canAccessActivity,
+  canViewActivityCommentHistory,
+  type TaskViewer,
+} from "@/services/task-visibility";
 
 type RouteContext = { params: Promise<{ id: string; commentId: string }> };
 
@@ -23,7 +27,7 @@ function viewerFromAuth(user: {
 
 /**
  * Histórico imutável de um comentário (CREATED/UPDATED/DELETED).
- * Acesso: quem pode ver a Activity (ADMIN inclusive). Conteúdo de
+ * Acesso: quem vê a Activity E é ADMIN/MANAGER. Conteúdo de
  * revisões é exposto aqui mesmo após soft-delete.
  */
 export async function GET(request: Request, context: RouteContext) {
@@ -41,8 +45,15 @@ export async function GET(request: Request, context: RouteContext) {
       if (!activity) {
         return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
       }
-      if (!(await canAccessActivity(viewerFromAuth(authResult.user), activity))) {
+      const viewer = viewerFromAuth(authResult.user);
+      if (!(await canAccessActivity(viewer, activity))) {
         return NextResponse.json({ message: "Atividade não encontrada." }, { status: 404 });
+      }
+      if (!canViewActivityCommentHistory(viewer)) {
+        return NextResponse.json(
+          { message: "Apenas administradores e gestores podem ver o histórico." },
+          { status: 403 },
+        );
       }
 
       try {

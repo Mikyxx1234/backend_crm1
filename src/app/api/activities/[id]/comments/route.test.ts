@@ -35,9 +35,13 @@ vi.mock("@/services/activities", () => ({
   getActivityById,
 }));
 
-vi.mock("@/services/task-visibility", () => ({
-  canAccessActivity,
-}));
+vi.mock("@/services/task-visibility", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/services/task-visibility")>();
+  return {
+    ...actual,
+    canAccessActivity,
+  };
+});
 
 vi.mock("@/services/activity-comments", () => ({
   COMMENT_CONTENT_MAX: 10_000,
@@ -137,6 +141,30 @@ describe("GET /api/activities/[id]/comments?history=1", () => {
     expect(res.status).toBe(404);
     expect(listActivityCommentHistory).not.toHaveBeenCalled();
   });
+
+  it("403 quando operador (MEMBER) tenta ver o histórico", async () => {
+    const { GET } = await import("./route");
+    const req = new Request("http://localhost/api/activities/act_1/comments?history=1");
+    const res = await GET(req, { params: Promise.resolve({ id: "act_1" }) });
+
+    expect(res.status).toBe(403);
+    expect(listActivityCommentHistory).not.toHaveBeenCalled();
+  });
+
+  it("lista histórico para ADMIN", async () => {
+    authenticateApiRequest.mockResolvedValue({
+      ok: true,
+      user: { ...AUTH_USER, role: "ADMIN" },
+    });
+    listActivityCommentHistory.mockResolvedValue([]);
+
+    const { GET } = await import("./route");
+    const req = new Request("http://localhost/api/activities/act_1/comments?history=1");
+    const res = await GET(req, { params: Promise.resolve({ id: "act_1" }) });
+
+    expect(res.status).toBe(200);
+    expect(listActivityCommentHistory).toHaveBeenCalledWith("act_1");
+  });
 });
 
 describe("PUT /api/activities/[id]/comments/[commentId]", () => {
@@ -185,6 +213,17 @@ describe("GET /api/activities/[id]/comments/[commentId]/revisions", () => {
     });
 
     expect(res.status).toBe(404);
+    expect(listCommentRevisions).not.toHaveBeenCalled();
+  });
+
+  it("403 quando operador tenta ver revisões", async () => {
+    const { GET } = await import("./[commentId]/revisions/route");
+    const req = new Request("http://localhost/api/activities/act_1/comments/c1/revisions");
+    const res = await GET(req, {
+      params: Promise.resolve({ id: "act_1", commentId: "c1" }),
+    });
+
+    expect(res.status).toBe(403);
     expect(listCommentRevisions).not.toHaveBeenCalled();
   });
 });

@@ -8,7 +8,11 @@ import {
   listActivityComments,
   listActivityCommentHistory,
 } from "@/services/activity-comments";
-import { canAccessActivity, type TaskViewer } from "@/services/task-visibility";
+import {
+  canAccessActivity,
+  canViewActivityCommentHistory,
+  type TaskViewer,
+} from "@/services/task-visibility";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -55,6 +59,12 @@ export async function GET(request: Request, context: RouteContext) {
       }
 
       if (history) {
+        if (!canViewActivityCommentHistory(viewerFromAuth(authResult.user))) {
+          return NextResponse.json(
+            { message: "Apenas administradores e gestores podem ver o histórico." },
+            { status: 403 },
+          );
+        }
         const revisions = await listActivityCommentHistory(id);
         return NextResponse.json({ items: revisions });
       }

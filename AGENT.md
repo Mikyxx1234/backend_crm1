@@ -5,6 +5,35 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-19 — Alertas globais de Activity (polling autenticado)
+
+**Modelo usado.** Cursor Grok 4.5 (execução sob spec Opus).
+
+**Decisão.**
+1. Avisos de agendamento para qualquer Activity incompleta com
+   `scheduledAt` (não só TASK): pré-aviso 15 min (só se o usuário
+   consultar na janela; offline não recupera) e vencimento (recupera no
+   próximo login enquanto incompleta).
+2. Destinatários = `activity.userId` e/ou membros atuais em
+   `DepartmentMember`. ADMIN/MANAGER não recebem automaticamente.
+3. Persistência por usuário em `ActivityAlertState` (unique
+   activityId+userId); dismiss/click definitivo; snooze 10 min;
+   reagendar reseta; GET entrega no máx. 1 alerta e marca shown
+   atomicamente (dedupe cross-refresh/dispositivo).
+4. Entrega via **polling autenticado** nas rotas
+   `GET/POST /api/activities/alerts` — sem SSE, worker ou Web Push neste
+   escopo.
+
+**Alternativas descartadas.**
+- SSE / Web Push / worker de push: fora do escopo; frontend faz polling.
+- Alertar só type TASK: produto pediu qualquer Activity com horário.
+- Incluir gestores por papel: vazaria avisos de tarefas alheias.
+
+**Impacto.** Schema/migration `20260819130000_activity_alert_states`;
+service `activity-alerts`; rotas `/api/activities/alerts`.
+
+---
+
 ### 2026-08-19 — Activity: criador ≠ responsável + comentários assinados
 
 **Modelo usado.** Cursor Grok 4.5 (execução seguindo spec Opus).

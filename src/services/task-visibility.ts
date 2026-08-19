@@ -25,10 +25,15 @@ export type TaskViewer = {
   isSuperAdmin?: boolean;
 };
 
-function canSeeAllTasks(viewer: TaskViewer): boolean {
+export function canSeeAllTasks(viewer: TaskViewer): boolean {
   if (viewer.isSuperAdmin) return true;
   const role = (viewer.role ?? "").toUpperCase();
   return role === "ADMIN" || role === "MANAGER" || role === "OWNER";
+}
+
+/** Histórico de notas: só gestão (ADMIN/MANAGER/OWNER). Operador não consulta. */
+export function canViewActivityCommentHistory(viewer: TaskViewer): boolean {
+  return canSeeAllTasks(viewer);
 }
 
 /** Ids dos departamentos dos quais o usuário é membro (na org). */
