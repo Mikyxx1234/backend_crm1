@@ -13,7 +13,7 @@ import { getTree } from "@/services/tabulations";
  *   → { departmentId, requireTabulationOnClose, tree: TabulationNode[] }
  */
 export async function GET(request: Request) {
-  return withOrgContext(async () => {
+  return withOrgContext(async (session) => {
     const url = new URL(request.url);
     const departmentId = url.searchParams.get("departmentId")?.trim();
     if (!departmentId) {
@@ -22,8 +22,15 @@ export async function GET(request: Request) {
         { status: 400 },
       );
     }
+    const orgId = session.user.organizationId;
+    if (!orgId) {
+      return NextResponse.json(
+        { message: "Organização não definida na sessão." },
+        { status: 400 },
+      );
+    }
     const dept = await prisma.department.findFirst({
-      where: { id: departmentId },
+      where: { id: departmentId, organizationId: orgId },
       select: { id: true, requireTabulationOnClose: true },
     });
     if (!dept) {

@@ -310,16 +310,6 @@ export async function tryAssignFirstAttendanceAi(args: {
     return null;
   }
 
-  // Roster de depts (Wesley/Danúbia/Marília/…) — best-effort.
-  try {
-    const { ensureAcademicDepartmentRoster } = await import(
-      "@/services/ai/ensure-academic-dept-roster"
-    );
-    await ensureAcademicDepartmentRoster();
-  } catch {
-    /* ignore */
-  }
-
   const conv = await prisma.conversation.findUnique({
     where: { id: args.conversationId },
     select: {
@@ -516,6 +506,17 @@ export async function tryAssignFirstAttendanceAi(args: {
       conversationId: args.conversationId,
       contactId,
     });
+  }
+
+  // Roster só depois de confirmar pipe acadêmico — senão qualquer inbound
+  // de outro tenant criava Acolhimento/SAC/Retenção na org errada.
+  try {
+    const { ensureAcademicDepartmentRoster } = await import(
+      "@/services/ai/ensure-academic-dept-roster"
+    );
+    await ensureAcademicDepartmentRoster();
+  } catch {
+    /* ignore */
   }
 
   const aiUserId = agent.userId;

@@ -5,6 +5,27 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-20 — Roster acadêmico não cria departamentos em outros tenants
+
+**Decisão.** `ensureAcademicDepartmentRoster` só cria/sincroniza Acolhimento,
+Retenção e Atendimento - SAC se a org atual tiver pelo menos um e-mail do
+roster Cruzeiro. O 1º atendimento só chama o roster depois de confirmar pipe
+acadêmico.
+
+**Contexto.** DnaWork via Acolhimento / Atendimento - SAC / Retenção em
+activities e settings/tabulations. O 1º atendimento está ligado por default
+(`ai.firstAttendanceEnabled` ausente = true) e chamava o roster **antes** do
+filtro de funil acadêmico — `ensureDeptMap` criava os 3 departamentos na org
+errada.
+
+**Alternativas descartadas.** Gate por slug/env (frágil entre ambientes);
+apagar automaticamente os departamentos órfãos (destrutivo se alguém criou
+nome igual de propósito).
+
+**Impacto.** DnaWork (e qualquer tenant sem os e-mails Cruzeiro) deixa de
+ganhar esses departamentos. Os 3 já gravados na org precisam ser apagados
+na UI de departamentos se não tiverem conversas.
+
 ### 2026-08-20 — FCM nativo no APK (Spark, só Messaging)
 
 **Modelo usado.** Cursor Grok 4.6.

@@ -18,7 +18,13 @@ export async function GET() {
   return withOrgContext(async (session) => {
     // Listagem (id/nome) é necessária no inbox para "Distribuir p/ departamento".
     // Mutações (POST/PATCH) continuam restritas a ADMIN/MANAGER.
-    const orgId = session.user.organizationId!;
+    const orgId = session.user.organizationId;
+    if (!orgId) {
+      return NextResponse.json(
+        { message: "Organização não definida na sessão." },
+        { status: 400 },
+      );
+    }
     const role = session.user.role;
     const isManagerUp = role === "ADMIN" || role === "MANAGER";
     try {
