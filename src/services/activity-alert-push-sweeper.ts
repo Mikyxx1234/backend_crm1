@@ -5,7 +5,7 @@
  */
 import { prismaBase } from "@/lib/prisma-base";
 import { withSystemContext } from "@/lib/webhook-context";
-import { FCM_ENDPOINT_PREFIX } from "@/lib/fcm";
+import { FCM_ENDPOINT_PREFIX, isFcmConfigured } from "@/lib/fcm";
 import { getNextActivityAlert } from "@/services/activity-alerts";
 
 const INTERVAL_MS =
@@ -29,7 +29,10 @@ export function startActivityAlertPushSweeper(): void {
     tick();
     setInterval(tick, INTERVAL_MS);
   }, 30_000);
-  console.info(`[activity-alert-push] sweeper iniciado (tick=${INTERVAL_MS}ms)`);
+  console.info(
+    `[activity-alert-push] sweeper iniciado (tick=${INTERVAL_MS}ms, ` +
+      `fcm=${isFcmConfigured() ? "configurado" : "AUSENTE"})`,
+  );
 }
 
 export async function sweepActivityAlertPushes(): Promise<{ users: number }> {

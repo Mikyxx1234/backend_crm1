@@ -22,6 +22,21 @@ na API basta).
 **Impacto.** `src/lib/fcm.ts`, subscribe/unsubscribe, `sendPushToUser`,
 `activity-alert-push-sweeper`, migration `20260820140000_web_push_fcm_transport`.
 
+### 2026-08-20 — Manter sweeper de aviso FCM (não job no cadastro)
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Permanecer com o tick de ~60s em `activity-alert-push-sweeper`.
+Disparar no cadastro da tarefa não cobre “15 min antes” nem “na hora”.
+`setTimeout` no processo piora memória e some no restart. Fila delayed
+(BullMQ) só faria sentido com volume bem maior ou exigência de pontualidade
+no segundo.
+
+**Alternativas descartadas.** Chamar o sweeper só no create; timer in-process
+por atividade; job delayed por horário.
+
+**Impacto.** Nenhum código. Intervalo ajustável por `ACTIVITY_ALERT_PUSH_INTERVAL_MS`.
+
 ---
 
 ### 2026-08-19 — Alertas globais de Activity (polling autenticado)
