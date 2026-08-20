@@ -101,6 +101,7 @@ const listSelect = {
   number: true,
   externalId: true,
   channel: true,
+  channelId: true,
   status: true,
   inboxName: true,
   unreadCount: true,
