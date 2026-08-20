@@ -64,6 +64,21 @@ export function getVapidPublicKey(): string | null {
   return process.env.VAPID_PUBLIC_KEY?.trim() ?? null;
 }
 
+let fcmSkipWarned = false;
+
+/**
+ * Sem credencial do Firebase o token do APK era descartado em silencio, o que
+ * fez o aviso "sumir" sem nenhum rastro no banco nem no log.
+ */
+function warnFcmSkippedOnce(): void {
+  if (fcmSkipWarned) return;
+  fcmSkipWarned = true;
+  console.warn(
+    "[web-push] token FCM ignorado: credencial do Firebase ausente ou invalida " +
+      "(FCM_ENABLED / FCM_PROJECT_ID / FCM_SERVICE_ACCOUNT_JSON|PATH).",
+  );
+}
+
 /**
  * Envia push pra TODAS as subscriptions de um usuario.
  * Best-effort: erros individuais nao quebram o batch (cada
@@ -96,7 +111,10 @@ export async function sendPushToUser(
     subs.map(async (sub) => {
       try {
         if (isFcmEndpoint(sub.endpoint)) {
-          if (!fcmOk) return;
+          if (!fcmOk) {
+            warnFcmSkippedOnce();
+            return;
+          }
           const result = await sendFcmToToken(
             fcmTokenFromEndpoint(sub.endpoint),
             payload,
