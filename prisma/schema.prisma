@@ -4316,7 +4316,12 @@ model WebPushSubscription {
   /// pra criptografar o payload.
   p256dh         String
   /// Auth secret (base64url). Tambem usada na criptografia.
+  /// Tokens FCM nativos usam placeholder "fcm" (endpoint = "fcm:<token>").
   auth           String
+  /// WEB = Push API (VAPID). FCM = token nativo do APK Capacitor.
+  transport      String       @default("WEB")
+  /// "android" | "ios" | "web" — informativo, para diagnostico.
+  platform       String?
   /// User-Agent capturado no momento da subscription — facilita
   /// "esquecer dispositivo X" no UI.
   userAgent      String?

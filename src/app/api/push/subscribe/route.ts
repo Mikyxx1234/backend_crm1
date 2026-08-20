@@ -23,6 +23,9 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 export async function POST(request: Request) {
   return withOrgContext(async (session) => {
     let body: {
+      transport?: string;
+      token?: string;
+      platform?: string;
       endpoint?: string;
       keys?: { p256dh?: string; auth?: string };
     };
@@ -32,9 +35,20 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "invalid_json" }, { status: 400 });
     }
 
-    const endpoint = body.endpoint?.trim();
-    const p256dh = body.keys?.p256dh?.trim();
-    const authKey = body.keys?.auth?.trim();
+    const { fcmEndpointFromToken } = await import("@/lib/fcm");
+    const isFcm =
+      body.transport?.trim().toLowerCase() === "fcm" &&
+      Boolean(body.token?.trim());
+
+    const endpoint = isFcm
+      ? fcmEndpointFromToken(body.token!)
+      : body.endpoint?.trim();
+    const p256dh = isFcm ? "fcm" : body.keys?.p256dh?.trim();
+    const authKey = isFcm ? "fcm" : body.keys?.auth?.trim();
+    const transport = isFcm ? "FCM" : "WEB";
+    const platform = isFcm
+      ? (body.platform?.trim() || "android")
+      : (body.platform?.trim() || null);
 
     if (!endpoint || !p256dh || !authKey) {
       return NextResponse.json(
@@ -52,15 +66,16 @@ export async function POST(request: Request) {
         endpoint,
         p256dh,
         auth: authKey,
+        transport,
+        platform,
         userAgent,
       }),
       update: {
-        // Se o mesmo endpoint volta pra outro usuario (reset de
-        // browser, login com outra conta no mesmo aparelho), trocamos
-        // o owner — o endpoint sempre pertence ao usuario logado AGORA.
         userId: session.user.id,
         p256dh,
         auth: authKey,
+        transport,
+        platform,
         userAgent,
         failedAt: null,
       },

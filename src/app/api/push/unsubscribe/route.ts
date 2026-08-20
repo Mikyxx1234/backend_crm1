@@ -20,14 +20,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
 
-  let body: { endpoint?: string };
+  let body: { endpoint?: string; token?: string };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
 
-  const endpoint = body.endpoint?.trim();
+  const { fcmEndpointFromToken } = await import("@/lib/fcm");
+  const endpoint = body.token?.trim()
+    ? fcmEndpointFromToken(body.token)
+    : body.endpoint?.trim();
   if (!endpoint) {
     return NextResponse.json({ error: "missing_endpoint" }, { status: 400 });
   }

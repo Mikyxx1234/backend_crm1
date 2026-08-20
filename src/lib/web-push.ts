@@ -75,7 +75,12 @@ export async function sendPushToUser(
   userId: string,
   payload: PushPayload,
 ): Promise<number> {
-  if (!ensureConfigured()) return 0;
+  const { isFcmConfigured, isFcmEndpoint, fcmTokenFromEndpoint, sendFcmToToken } =
+    await import("@/lib/fcm");
+
+  const vapidOk = ensureConfigured();
+  const fcmOk = isFcmConfigured();
+  if (!vapidOk && !fcmOk) return 0;
 
   const subs = await prisma.webPushSubscription.findMany({
     where: { userId, failedAt: null },
@@ -90,30 +95,46 @@ export async function sendPushToUser(
   await Promise.all(
     subs.map(async (sub) => {
       try {
-        await webpush.sendNotification(
-          {
-            endpoint: sub.endpoint,
-            keys: { p256dh: sub.p256dh, auth: sub.auth },
-          },
-          body,
-          { TTL: 60 * 60 * 24 }, // 24h — alem disso o push service descarta.
-        );
+        if (isFcmEndpoint(sub.endpoint)) {
+          if (!fcmOk) return;
+          const result = await sendFcmToToken(
+            fcmTokenFromEndpoint(sub.endpoint),
+            payload,
+          );
+          if (result === "unregistered") {
+            prisma.webPushSubscription
+              .delete({ where: { id: sub.id } })
+              .catch(() => {});
+            return;
+          }
+          if (result !== "ok") {
+            prisma.webPushSubscription
+              .update({ where: { id: sub.id }, data: { failedAt: new Date() } })
+              .catch(() => {});
+            return;
+          }
+        } else {
+          if (!vapidOk) return;
+          await webpush.sendNotification(
+            {
+              endpoint: sub.endpoint,
+              keys: { p256dh: sub.p256dh, auth: sub.auth },
+            },
+            body,
+            { TTL: 60 * 60 * 24 },
+          );
+        }
         success++;
-        // Best-effort: nao bloqueia se update falhar.
         prisma.webPushSubscription
           .update({ where: { id: sub.id }, data: { lastUsedAt: new Date() } })
           .catch(() => {});
       } catch (err: unknown) {
         const status = (err as { statusCode?: number }).statusCode;
-        // 410 Gone / 404 Not Found = subscription morta. Limpamos.
         if (status === 410 || status === 404) {
           prisma.webPushSubscription
             .delete({ where: { id: sub.id } })
             .catch(() => {});
         } else {
-          // Outros erros: marca como falhou pra revisao manual,
-          // mas nao deleta (pode ser problema transiente do push
-          // service).
           prisma.webPushSubscription
             .update({ where: { id: sub.id }, data: { failedAt: new Date() } })
             .catch(() => {});
@@ -160,7 +181,10 @@ export async function notifyInboundMessage(params: {
   preview: string;
   channel?: "WhatsApp" | "Email" | "Instagram" | "Meta";
 }): Promise<void> {
-  if (!ensureConfigured()) return;
+  if (!ensureConfigured()) {
+    const { isFcmConfigured } = await import("@/lib/fcm");
+    if (!isFcmConfigured()) return;
+  }
 
   try {
     const conversation = await prisma.conversation.findUnique({
