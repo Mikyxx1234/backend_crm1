@@ -4,6 +4,7 @@
  * o popup interno de quem só usa desktop.
  */
 import { prismaBase } from "@/lib/prisma-base";
+import { withSystemContext } from "@/lib/webhook-context";
 import { FCM_ENDPOINT_PREFIX } from "@/lib/fcm";
 import { getNextActivityAlert } from "@/services/activity-alerts";
 
@@ -42,7 +43,19 @@ export async function sweepActivityAlertPushes(): Promise<{ users: number }> {
   });
 
   for (const sub of subs) {
-    await getNextActivityAlert(sub.userId, sub.organizationId);
+    // getNextActivityAlert usa o prisma com escopo de tenant, que exige
+    // RequestContext. Sem isto o worker morre no primeiro usuario e ninguem
+    // recebe aviso com o app fechado.
+    try {
+      await withSystemContext(sub.organizationId, () =>
+        getNextActivityAlert(sub.userId, sub.organizationId),
+      );
+    } catch (error) {
+      console.warn(
+        `[activity-alert-push] falha no usuario ${sub.userId}:`,
+        error instanceof Error ? error.message : error,
+      );
+    }
   }
   return { users: subs.length };
 }
