@@ -27,6 +27,24 @@ export type ActivityAlertDto = {
   department?: { id: string; name: string } | null;
 };
 
+function notifyActivityAlertPush(userId: string, alert: ActivityAlertDto): void {
+  void import("@/lib/web-push")
+    .then(({ sendPushToUser }) =>
+      sendPushToUser(userId, {
+        title:
+          alert.kind === "PRE_DUE" ? "Tarefa em 15 minutos" : "Tarefa no horário",
+        body: alert.title,
+        url: "/activities",
+        tag: `activity:${alert.id}`,
+        renotify: true,
+        data: { activityId: alert.id, kind: alert.kind },
+      }),
+    )
+    .catch((err) => {
+      console.error("[activity-alerts] push failed (non-fatal):", err);
+    });
+}
+
 export type AlertStateSnapshot = {
   id?: string;
   scheduledFor: Date;
@@ -514,7 +532,10 @@ export async function getNextActivityAlert(
         candidate,
         now,
       );
-      if (claimed) return claimed;
+      if (claimed) {
+        void notifyActivityAlertPush(userId, claimed);
+        return claimed;
+      }
     }
 
     const last = activities[activities.length - 1];

@@ -311,5 +311,11 @@ function startBackgroundSweepers() {
     .catch((e) =>
       console.error("[sse-bus] failed to start session-expiry sweeper:", e),
     );
+
+  import("@/services/activity-alert-push-sweeper")
+    .then(({ startActivityAlertPushSweeper }) => startActivityAlertPushSweeper())
+    .catch((e) =>
+      console.error("[sse-bus] failed to start activity-alert push sweeper:", e),
+    );
 }
 bootstrapBackgroundServices();

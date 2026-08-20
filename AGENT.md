@@ -5,6 +5,25 @@ documenta **por que** algo foi feito, não **o que**.
 
 ---
 
+### 2026-08-20 — FCM nativo no APK (Spark, só Messaging)
+
+**Modelo usado.** Cursor Grok 4.6.
+
+**Decisão.** Coexistir FCM com Web Push VAPID. Token do APK em
+`WebPushSubscription` com endpoint `fcm:<token>`. Envio HTTP v1 com
+service account em env (`FCM_SERVICE_ACCOUNT_JSON` ou PATH). Alertas de
+tarefa disparam no claim; sweeper a cada 60s só para quem tem token FCM,
+para o CRM fechado ainda receber. Sem Auth/Analytics/Firestore.
+
+**Alternativas descartadas.** firebase-admin (SDK pesado); só Web Push no
+APK (não entrega com o app morto); worker BullMQ novo (20 usuários, tick
+na API basta).
+
+**Impacto.** `src/lib/fcm.ts`, subscribe/unsubscribe, `sendPushToUser`,
+`activity-alert-push-sweeper`, migration `20260820140000_web_push_fcm_transport`.
+
+---
+
 ### 2026-08-19 — Alertas globais de Activity (polling autenticado)
 
 **Modelo usado.** Cursor Grok 4.5 (execução sob spec Opus).

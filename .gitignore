@@ -46,6 +46,9 @@ dev.log
 .env
 .env*.local
 
+# Chaves locais (Firebase Admin / FCM). NUNCA versionar.
+/.secrets/
+
 # vercel
 .vercel
 

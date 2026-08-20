@@ -4,6 +4,10 @@
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@/lib/web-push", () => ({
+  sendPushToUser: vi.fn(async () => 0),
+}));
+
 const { deliveryStore, deliveryPrisma, actionStore, actionPrisma } = vi.hoisted(() => {
   const deliveryStore: {
     activities: Array<Record<string, unknown>>;
