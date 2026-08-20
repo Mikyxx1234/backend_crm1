@@ -175,9 +175,11 @@ export async function sendFcmToToken(
             body: payload.body,
           },
           data: stringifyData(payload),
-          android: {
+            android: {
             ttl: "3600s",
             notification: {
+              icon: "ic_stat_notify",
+              color: "#0D1B3E",
               tag: payload.tag,
               click_action: "OPEN_ACTIVITY",
             },
