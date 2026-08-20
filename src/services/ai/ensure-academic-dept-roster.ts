@@ -180,6 +180,25 @@ async function syncUserDepts(args: {
 }
 
 /**
+ * Só a org acadêmica (Cruzeiro) tem esses e-mails. Sem isso, o 1º
+ * atendimento — ligado por default em qualquer tenant — criava
+ * Acolhimento / Retenção / Atendimento - SAC na org errada (ex.: DnaWork).
+ */
+async function orgHasAcademicRosterUsers(orgId: string): Promise<boolean> {
+  const hit = await prisma.user.findFirst({
+    where: {
+      organizationId: orgId,
+      type: "HUMAN",
+      OR: ROSTER.map((row) => ({
+        email: { equals: row.email, mode: "insensitive" as const },
+      })),
+    },
+    select: { id: true },
+  });
+  return !!hit;
+}
+
+/**
  * Sincroniza roster acadêmico. Best-effort — nunca derruba o fluxo.
  * @param opts.force — ignora o TTL de 5 min (uso admin / handoff crítico).
  */
@@ -196,6 +215,10 @@ export async function ensureAcademicDepartmentRoster(opts?: {
   lastSyncAt.set(orgId, Date.now());
 
   try {
+    if (!(await orgHasAcademicRosterUsers(orgId))) {
+      return { synced: 0, missing: [] };
+    }
+
     const deptMap = await ensureDeptMap(orgId);
     const academicIdSet = new Set(Object.values(deptMap));
 
