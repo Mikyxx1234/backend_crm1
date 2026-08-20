@@ -40,6 +40,7 @@ import {
 import {
   flushCampaignCounters,
   incrementCampaignCounter,
+  maybeCompleteCampaign,
 } from "@/lib/campaign-counters";
 import {
   buildFlowButtonComponent,
@@ -769,10 +770,9 @@ async function markRecipientSent(recipientId: string, campaignId: string) {
 }
 
 async function checkCampaignCompletion(campaignId: string) {
-  // Amostra 1/N — evita 1 read por destinatário só pra checar se acabou.
-  // O residual (últimos N-1) é coberto pelo sweep periódico no dispatch.
-  const n = envPositiveInt("CAMPAIGN_COMPLETION_CHECK_EVERY", 25);
-  if (Math.floor(Math.random() * n) !== 0) return;
+  // Sempre flush + check: o sample 1/N deixava ~96% das campanhas presas em
+  // SENDING depois do último destinatário, porque o sweep citado no comentário
+  // antigo nunca existiu e o flush do timer não concluía o status.
   await checkCampaignCompletionNow(campaignId);
 }
 
@@ -780,20 +780,7 @@ async function checkCampaignCompletionNow(campaignId: string) {
   // Contadores são bufferizados (campaign-counters) — flusha antes de ler,
   // senão o check de conclusão enxerga valores defasados.
   await flushCampaignCounters(campaignId);
-  const campaign = await prisma.campaign.findUnique({
-    where: { id: campaignId },
-    select: { totalRecipients: true, sentCount: true, failedCount: true, status: true },
-  });
-  if (!campaign || campaign.status !== "SENDING") return;
-
-  const processed = campaign.sentCount + campaign.failedCount;
-  if (processed >= campaign.totalRecipients) {
-    await prisma.campaign.update({
-      where: { id: campaignId },
-      data: { status: "COMPLETED", completedAt: new Date() },
-    });
-    console.info(`[campaign-send] Campaign ${campaignId} completed: ${campaign.sentCount} sent, ${campaign.failedCount} failed`);
-  }
+  await maybeCompleteCampaign(campaignId);
 }
 
 // ── Bootstrap ────────────────────────────────────────────
@@ -892,6 +879,37 @@ export function startCampaignWorkers() {
   sendWorker.on("failed", (job, err) => {
     console.error(`[campaign-send] Job ${job?.id} failed:`, err.message);
   });
+
+  // Recupera campanhas que já bateram 100% mas ficaram em SENDING (check
+  // amostrado antigo, crash no meio do flush, buffer de outro processo).
+  const sweepStuck = () => {
+    void (async () => {
+      try {
+        const sending = await prismaBase.campaign.findMany({
+          where: { status: "SENDING" },
+          select: {
+            id: true,
+            sentCount: true,
+            failedCount: true,
+            totalRecipients: true,
+          },
+        });
+        for (const c of sending) {
+          if (c.sentCount + c.failedCount >= c.totalRecipients) {
+            await maybeCompleteCampaign(c.id);
+          }
+        }
+      } catch (err) {
+        console.warn(
+          "[campaign-worker] sweep de conclusão falhou:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+    })();
+  };
+  sweepStuck();
+  const sweepTimer = setInterval(sweepStuck, 30_000);
+  sweepTimer.unref?.();
 
   console.info(
     `[campaign-worker] Dispatch and send workers started (sendConcurrency=${sendConcurrency}, rateLimit=${rateLimitMax}/${rateLimitDuration}ms, sendRateMax=${getCampaignSendRateMax()})`,

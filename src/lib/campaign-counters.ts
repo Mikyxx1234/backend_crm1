@@ -55,6 +55,7 @@ async function flush(campaignId: string): Promise<void> {
   if (p.failedCount > 0) data.failedCount = { increment: p.failedCount };
   buf.delete(campaignId);
   if (Object.keys(data).length === 0) return;
+  const sentOrFailed = Boolean(data.sentCount || data.failedCount);
   try {
     // prismaBase: workers rodam fora de RequestContext; campaign.update por id
     // não precisa de filtro de tenant (id é global único).
@@ -64,7 +65,38 @@ async function flush(campaignId: string): Promise<void> {
       `[campaign-counters] flush falhou campaign=${campaignId}:`,
       err instanceof Error ? err.message : err,
     );
+    return;
   }
+  // O flush do timer (2s) é o último evento da campanha — se não concluirmos
+  // aqui, o status fica SENDING com 100% na UI para sempre.
+  if (sentOrFailed) await maybeCompleteCampaign(campaignId);
+}
+
+/**
+ * Marca COMPLETED quando sent+failed já cobriu o total. Idempotente.
+ * Tem de viver neste módulo (não no worker) para o flush do timer também
+ * concluir — o worker só chama o check em 1/N envios.
+ */
+export async function maybeCompleteCampaign(campaignId: string): Promise<void> {
+  const campaign = await prismaBase.campaign.findUnique({
+    where: { id: campaignId },
+    select: {
+      totalRecipients: true,
+      sentCount: true,
+      failedCount: true,
+      status: true,
+    },
+  });
+  if (!campaign || campaign.status !== "SENDING") return;
+  const processed = campaign.sentCount + campaign.failedCount;
+  if (processed < campaign.totalRecipients) return;
+  await prismaBase.campaign.update({
+    where: { id: campaignId },
+    data: { status: "COMPLETED", completedAt: new Date() },
+  });
+  console.info(
+    `[campaign-send] Campaign ${campaignId} completed: ${campaign.sentCount} sent, ${campaign.failedCount} failed`,
+  );
 }
 
 export function incrementCampaignCounter(
