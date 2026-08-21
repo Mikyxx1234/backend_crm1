@@ -4,6 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { getCallPermissionTemplateName } from "@/lib/call-permission-env";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { repairWhatsappCallConsentFromMessages } from "@/services/whatsapp-call-consent-webhook";
 
 /**
  * Resolve o nome do template de Call Permission com fallback em cascata:
@@ -209,6 +210,55 @@ export async function GET(_request: Request, context: RouteContext) {
         "[calling-context] type/expiresAt ausente (migration pendente):",
         err instanceof Error ? err.message : err,
       );
+    }
+
+    // Timeline com "✅ Cliente aceitou" mas coluna ainda REQUESTED/NONE
+    // (reenvio de template zerava o opt-in; webhook duplicado pulava o grant).
+    if (conv.channel === "whatsapp") {
+      try {
+        const repaired = await repairWhatsappCallConsentFromMessages(id);
+        if (repaired) {
+          const fresh = await prisma.conversation.findUnique({
+            where: { id },
+            select: {
+              whatsappCallConsentStatus: true,
+              whatsappCallConsentUpdatedAt: true,
+            },
+          });
+          if (fresh) {
+            conv.whatsappCallConsentStatus = fresh.whatsappCallConsentStatus;
+            conv.whatsappCallConsentUpdatedAt = fresh.whatsappCallConsentUpdatedAt;
+          }
+          try {
+            const orgIdFilter = session.user.organizationId ?? "__no_org__";
+            const rows = (await prisma.$queryRaw`
+              SELECT
+                "whatsappCallConsentType"::text AS "consentType",
+                "whatsappCallConsentExpiresAt" AS "consentExpiresAt"
+              FROM "conversations"
+              WHERE "id" = ${id}
+                AND "organizationId" = ${orgIdFilter}
+            `) as Array<{ consentType: string | null; consentExpiresAt: Date | string | null }>;
+            const row = rows[0];
+            if (row) {
+              consentType =
+                row.consentType === "PERMANENT" || row.consentType === "TEMPORARY"
+                  ? row.consentType
+                  : null;
+              consentExpiresAt = row.consentExpiresAt
+                ? new Date(row.consentExpiresAt as Date | string)
+                : null;
+            }
+          } catch {
+            /* segue com o que já tínhamos */
+          }
+        }
+      } catch (err) {
+        console.warn(
+          "[calling-context] repair consent:",
+          err instanceof Error ? err.message : err,
+        );
+      }
     }
 
     // Consentimento é do contato (Meta), não do ticket. Ticket resolvido

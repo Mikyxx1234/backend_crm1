@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { fireTrigger } from "@/services/automation-triggers";
 import {
   getCallPermissionAcceptButtonIds,
   getCallPermissionAcceptButtonTitlesFromEnv,
@@ -189,16 +190,24 @@ export async function maybeGrantWhatsappCallConsent(
 async function applyGrant(
   conversationId: string,
   type: "PERMANENT" | "TEMPORARY",
+  opts?: { grantedAt?: Date; fireAutomation?: boolean },
 ): Promise<void> {
-  const now = new Date();
+  const now = opts?.grantedAt ?? new Date();
   const expiresAt =
     type === "TEMPORARY" ? new Date(now.getTime() + TEMPORARY_CONSENT_TTL_MS) : null;
 
   const src = await prisma.conversation.findUnique({
     where: { id: conversationId },
-    select: { id: true, contactId: true, channel: true, organizationId: true },
+    select: {
+      id: true,
+      contactId: true,
+      channel: true,
+      organizationId: true,
+      whatsappCallConsentStatus: true,
+    },
   });
   if (!src) return;
+  const previousStatus = src.whatsappCallConsentStatus;
 
   const targets = src.contactId
     ? await prisma.conversation.findMany({
@@ -246,6 +255,123 @@ async function applyGrant(
       err instanceof Error ? err.message : err,
     );
   }
+
+  // Primeiro grant apenas: duplicata com status já GRANTED não re-dispara.
+  // EXPIRED/DENIED/REQUESTED/NONE → GRANTED dispara. Ligação inbound
+  // (USER_INITIATED) NÃO passa por aqui. Repair a partir da timeline
+  // não dispara automação (o aceite já aconteceu).
+  if (
+    opts?.fireAutomation !== false &&
+    previousStatus !== "GRANTED" &&
+    src.contactId
+  ) {
+    void fireTrigger("call_permission_granted", {
+      contactId: src.contactId,
+      data: {
+        conversationId,
+        consentType: type,
+        expiresAt: expiresAt ? expiresAt.toISOString() : null,
+        channel: "whatsapp",
+      },
+    }).catch((err) =>
+      console.warn(
+        "[whatsapp-call-consent] fireTrigger:",
+        err instanceof Error ? err.message : err,
+      ),
+    );
+  }
+}
+
+function isEffectiveGrant(
+  status: string | null | undefined,
+  type: "PERMANENT" | "TEMPORARY" | null | undefined,
+  updatedAt: Date | null | undefined,
+  expiresAt: Date | null | undefined,
+): boolean {
+  if (status !== "GRANTED") return false;
+  if (type === "PERMANENT") return true;
+  const exp =
+    expiresAt ??
+    (updatedAt ? new Date(updatedAt.getTime() + TEMPORARY_CONSENT_TTL_MS) : null);
+  return !!exp && exp.getTime() > Date.now();
+}
+
+/**
+ * Recupera GRANTED quando a timeline já tem "✅ Cliente aceitou" mas a
+ * coluna da conversa ficou em REQUESTED/NONE (webhook duplicado, reenvio
+ * de template que zerou o opt-in, etc.).
+ *
+ * Retorna true se persistiu um grant novo.
+ */
+export async function repairWhatsappCallConsentFromMessages(
+  conversationId: string,
+): Promise<boolean> {
+  const conv = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: {
+      contactId: true,
+      channel: true,
+      whatsappCallConsentStatus: true,
+      whatsappCallConsentUpdatedAt: true,
+      whatsappCallConsentType: true,
+      whatsappCallConsentExpiresAt: true,
+    },
+  });
+  if (!conv || conv.channel !== "whatsapp") return false;
+
+  if (
+    isEffectiveGrant(
+      conv.whatsappCallConsentStatus,
+      conv.whatsappCallConsentType,
+      conv.whatsappCallConsentUpdatedAt,
+      conv.whatsappCallConsentExpiresAt,
+    )
+  ) {
+    return false;
+  }
+
+  const convIds = conv.contactId
+    ? (
+        await prisma.conversation.findMany({
+          where: { contactId: conv.contactId, channel: "whatsapp" },
+          select: { id: true },
+        })
+      ).map((c) => c.id)
+    : [conversationId];
+  if (convIds.length === 0) return false;
+
+  const since = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  const msg = await prisma.message.findFirst({
+    where: {
+      conversationId: { in: convIds },
+      createdAt: { gte: since },
+      OR: [
+        { content: { contains: "Cliente aceitou", mode: "insensitive" } },
+        { content: { contains: "Cliente recusou", mode: "insensitive" } },
+      ],
+    },
+    orderBy: { createdAt: "desc" },
+    select: { content: true, createdAt: true },
+  });
+  if (!msg?.content) return false;
+
+  const t = msg.content.toLowerCase();
+  if (t.includes("recusou")) return false;
+  if (!t.includes("aceitou")) return false;
+
+  const type: "PERMANENT" | "TEMPORARY" = t.includes("permanen")
+    ? "PERMANENT"
+    : "TEMPORARY";
+  if (type === "TEMPORARY") {
+    const exp = msg.createdAt.getTime() + TEMPORARY_CONSENT_TTL_MS;
+    if (exp <= Date.now()) return false;
+  }
+
+  await applyGrant(conversationId, type, {
+    grantedAt: msg.createdAt,
+    fireAutomation: false,
+  });
+  return true;
 }
 
 /**

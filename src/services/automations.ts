@@ -26,6 +26,7 @@ export const AUTOMATION_TRIGGER_TYPES = [
   "message_sent",
   "call_received",
   "call_made",
+  "call_permission_granted",
   "conversation_tabulated",
   "whatsapp_session_expiring",
   "lead_distributed",
@@ -272,6 +273,16 @@ export function evaluateTrigger(
         const answered = data.answered === true;
         if (status === "answered" && !answered) return false;
         if (status === "missed" && answered) return false;
+      }
+      return true;
+    }
+    case "call_permission_granted": {
+      // Opt-in de voz WhatsApp (template call_permission), não SIP.
+      // consentType "" = qualquer; PERMANENT / TEMPORARY filtram o payload.
+      const consentType = readString(cfg, "consentType");
+      if (consentType === "PERMANENT" || consentType === "TEMPORARY") {
+        const dataType = readString(data, "consentType");
+        if (!dataType || dataType !== consentType) return false;
       }
       return true;
     }

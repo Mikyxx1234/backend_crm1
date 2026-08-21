@@ -3,7 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext, requireAuthWithCtx } from "@/lib/auth-helpers";
 import { can, loadAuthzContext } from "@/lib/authz";
 import { listAllowedChannelIds, listAllowedPipelineIds } from "@/lib/authz/resource-policy";
-import { canSeeInboxTab, getScopeGrants } from "@/lib/authz/scope-grants";
+import { canSeeInboxTab, getScopeGrants, INBOX_TAB_BAR_ORDER } from "@/lib/authz/scope-grants";
 import { isFeatureEnabled } from "@/lib/feature-flags";
 import { prisma } from "@/lib/prisma";
 import { prismaBase } from "@/lib/prisma-base";
@@ -17,7 +17,6 @@ import {
   getTabCounts,
   INBOX_CATEGORY_TABS,
   type InboxCategoryTab,
-  type InboxTab,
 } from "@/services/conversations";
 
 /**
@@ -119,7 +118,7 @@ export async function GET(request: Request) {
       includeUnassigned: visibility.includeUnassigned,
     });
 
-    const visibleTabs = (["todos", ...INBOX_CATEGORY_TABS] as InboxTab[]).filter((tab) =>
+    const visibleTabs = INBOX_TAB_BAR_ORDER.filter((tab) =>
       canSeeInboxTab({ grants, role, tab, permissions }),
     );
     const memberCategoryTabs: InboxCategoryTab[] | null =
@@ -196,8 +195,8 @@ export async function GET(request: Request) {
     }
     // As conversas existem e passam por todos os filtros, mas moram numa aba
     // que o papel não enxerga — a fila fica vazia sem nenhum erro aparente.
-    const abasBloqueadasComConversas = INBOX_CATEGORY_TABS.filter(
-      (t) => abasComEscopoDeCanais[t] > 0 && !visibleTabs.includes(t),
+    const abasBloqueadasComConversas = INBOX_TAB_BAR_ORDER.filter(
+      (t) => t !== "todos" && abasComEscopoDeCanais[t] > 0 && !visibleTabs.includes(t),
     );
     if (abasBloqueadasComConversas.length > 0) {
       const detalhe = abasBloqueadasComConversas

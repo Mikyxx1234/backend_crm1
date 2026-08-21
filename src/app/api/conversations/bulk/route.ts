@@ -23,6 +23,7 @@ const FILTER_TABS = new Set<InboxTab>([
   "erro",
   "todos",
   "abertas",
+  "ligar",
 ]);
 
 /**

@@ -2654,7 +2654,51 @@ export async function processMetaWebhookPayload(
             });
           });
 
-          if (!msgCreated) continue;
+          if (!msgCreated) {
+            // Reentrega da Meta: a linha já existe, mas o grant pode ter
+            // falhado no ingest anterior. Sem isso o chat mostra
+            // "Cliente aceitou" e o botão de ligar fica cinza.
+            if (!isSystemMessage) {
+              try {
+                const consentPayload = {
+                  type: parsed.type,
+                  interactiveButtonId: parsed.interactiveButtonId,
+                  interactiveButtonTitle: parsed.interactiveButtonTitle,
+                  interactiveKind: parsed.interactiveKind,
+                  text: parsed.text,
+                  callPermissionType: parsed.callPermissionType,
+                };
+                const granted = await maybeGrantWhatsappCallConsent(
+                  conversation.id,
+                  consentPayload,
+                );
+                if (granted) {
+                  sseBus.publish("conversation_updated", {
+                    organizationId: getOrgIdOrNull(),
+                    conversationId: conversation.id,
+                    contactId: contact.id,
+                    whatsappCallConsentStatus: "GRANTED",
+                  });
+                } else {
+                  const denied = await maybeDenyWhatsappCallConsent(
+                    conversation.id,
+                    consentPayload,
+                  );
+                  if (denied) {
+                    sseBus.publish("conversation_updated", {
+                      organizationId: getOrgIdOrNull(),
+                      conversationId: conversation.id,
+                      contactId: contact.id,
+                      whatsappCallConsentStatus: "DENIED",
+                    });
+                  }
+                }
+              } catch (err) {
+                log.warn("Falha ao atualizar consent de ligação (duplicata):", err);
+              }
+            }
+            continue;
+          }
 
           // Activity Log: registra MESSAGE_RECEIVED no feed unificado.
           // Mensagens "system" do WhatsApp (ex.: user_changed_number)

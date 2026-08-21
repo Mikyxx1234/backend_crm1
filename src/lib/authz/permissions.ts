@@ -114,6 +114,7 @@ export const PERMISSION_CATALOG: ResourceDef[] = [
       { action: "tab:entrada", label: "Entrada (fila livre)" },
       { action: "tab:esperando", label: "Aguardando" },
       { action: "tab:respondidas", label: "Respondidas" },
+      { action: "tab:ligar", label: "Ligar (permissão de voz)" },
       { action: "tab:automacao", label: "Automação" },
       { action: "tab:finalizados", label: "Encerradas" },
       { action: "tab:erro", label: "Erro" },

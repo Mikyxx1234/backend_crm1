@@ -39,6 +39,7 @@ export const MANAGER_PERMISSIONS: readonly string[] = [
   "conversation:resolve", "conversation:send_template", "conversation:transfer_channel",
   // Filas da Inbox — Gestor vê todas as abas
   "inbox:tab:todos", "inbox:tab:entrada", "inbox:tab:esperando", "inbox:tab:respondidas",
+  "inbox:tab:ligar",
   "inbox:tab:automacao", "inbox:tab:finalizados", "inbox:tab:erro",
   // Automation / AI
   "automation:view", "automation:create", "automation:edit", "automation:publish", "automation:delete",
@@ -97,7 +98,7 @@ export const MEMBER_PERMISSIONS: readonly string[] = [
   // minhas" e a fila inteira é o toggle do header da Inbox (`?mine=1`).
   // Automação segue exigindo grant explícito em Settings → Permissões.
   "inbox:tab:todos", "inbox:tab:entrada", "inbox:tab:esperando",
-  "inbox:tab:respondidas",
+  "inbox:tab:respondidas", "inbox:tab:ligar",
   "tag:view",
   "task:view", "task:create", "task:edit",
   "report:view",

@@ -43,8 +43,12 @@ export type InboxCategoryTab = (typeof INBOX_CATEGORY_TABS)[number];
  * `abertas` = TODAS as conversas em aberto (status OPEN), sem subdividir por
  * categoria e excluindo as Resolvidas. Igual a `todos`, é um "super-tab" e não
  * uma categoria (não entra em `INBOX_CATEGORY_TABS`).
+ *
+ * `ligar` = fila de trabalho de WhatsApp com opt-in de voz ativo (GRANTED e
+ * não expirado). Também não é categoria: a conversa continua em
+ * Entrada/Aguardando/Respondidas, mas a aba aparece na barra da Inbox.
  */
-export type InboxTab = InboxCategoryTab | "todos" | "abertas";
+export type InboxTab = InboxCategoryTab | "todos" | "abertas" | "ligar";
 
 export type GetConversationsParams = {
   contactId?: string;
@@ -391,6 +395,10 @@ function tabToWhere(
       return { status: "RESOLVED" };
     case "erro":
       return erroTabWhere();
+    default: {
+      const _exhaustive: never = tab;
+      return _exhaustive;
+    }
   }
 }
 
@@ -406,6 +414,20 @@ function tabToWhere(
  */
 export function erroTabWhere(): Prisma.ConversationWhereInput {
   return { status: "OPEN", hasError: true };
+}
+
+/** WhatsApp OPEN com permissão de ligação ativa (permanente ou TTL vigente). */
+export function ligarTabWhere(): Prisma.ConversationWhereInput {
+  return {
+    status: "OPEN",
+    channel: "whatsapp",
+    hasError: false,
+    whatsappCallConsentStatus: "GRANTED",
+    OR: [
+      { whatsappCallConsentExpiresAt: null },
+      { whatsappCallConsentExpiresAt: { gt: new Date() } },
+    ],
+  };
 }
 
 /**
@@ -484,6 +506,7 @@ function tabFilterWhere(
     return null;
   }
   if (tab === "abertas") return { status: "OPEN" };
+  if (tab === "ligar") return ligarTabWhere();
   return tabToWhere(tab, countAgentReply);
 }
 
@@ -976,7 +999,7 @@ export async function getTabCounts(
     scopeFp = createHash("sha1")
       .update(
         JSON.stringify({
-          k: 2,
+          k: 3,
           v: visibilityWhere ?? null,
           m: todosMemberCategoryTabs ?? null,
           c: allowedChannelIds ?? null,
@@ -1069,11 +1092,23 @@ async function computeTabCounts(
     if (searchWhere) conditions.push(searchWhere);
     return countConversationsLikeList(conditions, collapseByContact);
   })();
+  const ligar = await (() => {
+    const conditions: Prisma.ConversationWhereInput[] = [];
+    if (visibilityWhere && Object.keys(visibilityWhere).length > 0) {
+      conditions.push(visibilityWhere);
+    }
+    conditions.push(ligarTabWhere());
+    if (allowedChannelIds) conditions.push({ channelId: { in: allowedChannelIds } });
+    if (extra.length > 0) conditions.push(...extra);
+    if (searchWhere) conditions.push(searchWhere);
+    return countConversationsLikeList(conditions, collapseByContact);
+  })();
 
   const record = Object.fromEntries(lightResults) as Record<InboxTab, number>;
   record.finalizados = finalizados;
   record.todos = todos;
   record.abertas = abertas;
+  record.ligar = ligar;
   return record;
 }
 
