@@ -9,6 +9,7 @@ import {
 } from "@/lib/meta-whatsapp/client";
 import { buildCallBizOpaquePayload } from "@/lib/whatsapp-call-chat";
 import { prisma } from "@/lib/prisma";
+import { ensureWhatsappCallConsentForOutbound } from "@/services/whatsapp-call-consent-webhook";
 
 type RouteContext = { params: Promise<{ id: string }> };
 
@@ -163,7 +164,10 @@ export async function POST(request: Request, context: RouteContext) {
     }
 
     if (action === "initiate") {
-      if (conv.whatsappCallConsentStatus !== "GRANTED") {
+      const granted =
+        conv.whatsappCallConsentStatus === "GRANTED" ||
+        (await ensureWhatsappCallConsentForOutbound(id));
+      if (!granted) {
         return NextResponse.json(
           {
             message:
