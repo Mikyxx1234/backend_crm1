@@ -345,14 +345,18 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
           return;
         }
 
-        const aiAgent = await prisma.user.findFirst({
-          where: {
-            type: "AI",
-            aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
-          },
-          select: { id: true },
-          orderBy: { createdAt: "asc" },
-        });
+        const orgId = getOrgIdOrNull();
+        const aiAgent = orgId
+          ? await prisma.user.findFirst({
+              where: {
+                organizationId: orgId,
+                type: "AI",
+                aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
+              },
+              select: { id: true },
+              orderBy: { createdAt: "asc" },
+            })
+          : null;
         if (!aiAgent) {
           logAi("waiting_queue_no_ai", {
             conversationId: args.conversationId,
@@ -435,6 +439,7 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
       select: {
         id: true,
         type: true,
+        organizationId: true,
         aiAgentConfig: {
           select: {
             id: true,
@@ -454,6 +459,25 @@ export async function maybeReplyAsAIAgent(args: InboundAIArgs): Promise<void> {
         },
       },
     });
+    const orgId = getOrgIdOrNull();
+    if (orgId && assignee && assignee.organizationId !== orgId) {
+      logAi("blocked", {
+        conversationId: args.conversationId,
+        reason: "foreign_ai_assignee",
+        agentUserId: assignee.id,
+        agentOrgId: assignee.organizationId,
+        orgId,
+      });
+      await prisma.conversation.update({
+        where: { id: args.conversationId },
+        data: { assignedToId: null },
+      });
+      await prisma.contact.update({
+        where: { id: args.contactId },
+        data: { assignedToId: null },
+      });
+      return;
+    }
     if (!assignee || assignee.type !== "AI") {
       logAi("blocked", {
         conversationId: args.conversationId,
