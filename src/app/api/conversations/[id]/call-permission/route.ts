@@ -126,41 +126,50 @@ async function dispatchCallPermissionTemplate(args: {
   }
 
   const now = new Date();
-  const [savedMsg] = await prisma.$transaction([
-    prisma.message.create({
-      data: withOrgFromCtx({
-        conversationId: args.conv.id,
-        content: args.content,
-        direction: "out",
-        messageType: "template",
-        senderName: args.senderName,
-        ...(externalId ? { externalId } : {}),
-      }),
+  const prior = await prisma.conversation.findUnique({
+    where: { id: args.conv.id },
+    select: { whatsappCallConsentStatus: true },
+  });
+  // Reenviar o template NÃO revoga um opt-in ainda válido. Zerar para
+  // REQUESTED apagava type/expiresAt e o botão de ligar ficava cinza
+  // mesmo com "✅ Cliente aceitou" na timeline.
+  const keepGranted = prior?.whatsappCallConsentStatus === "GRANTED";
+
+  const savedMsg = await prisma.message.create({
+    data: withOrgFromCtx({
+      conversationId: args.conv.id,
+      content: args.content,
+      direction: "out",
+      messageType: "template",
+      senderName: args.senderName,
+      ...(externalId ? { externalId } : {}),
     }),
-    prisma.conversation.update({
+  });
+
+  if (!keepGranted) {
+    await prisma.conversation.update({
       where: { id: args.conv.id },
       data: {
         whatsappCallConsentStatus: "REQUESTED",
         whatsappCallConsentUpdatedAt: now,
         updatedAt: now,
       },
-    }),
-  ]);
-
-  try {
-    await prisma.$executeRaw`
-      UPDATE "conversations"
-      SET
-        "whatsappCallConsentType" = NULL,
-        "whatsappCallConsentExpiresAt" = NULL
-      WHERE "id" = ${args.conv.id}
-        AND "organizationId" = ${args.orgIdFilter}
-    `;
-  } catch (err) {
-    console.warn(
-      "[call-permission] não resetou type/expiresAt (migration pendente?):",
-      err instanceof Error ? err.message : err,
-    );
+    });
+    try {
+      await prisma.$executeRaw`
+        UPDATE "conversations"
+        SET
+          "whatsappCallConsentType" = NULL,
+          "whatsappCallConsentExpiresAt" = NULL
+        WHERE "id" = ${args.conv.id}
+          AND "organizationId" = ${args.orgIdFilter}
+      `;
+    } catch (err) {
+      console.warn(
+        "[call-permission] não resetou type/expiresAt (migration pendente?):",
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
 
   sseBus.publish("new_message", {
@@ -175,7 +184,7 @@ async function dispatchCallPermissionTemplate(args: {
     organizationId: args.conv.organizationId,
     conversationId: args.conv.id,
     contactId: args.conv.contactId,
-    whatsappCallConsentStatus: "REQUESTED",
+    whatsappCallConsentStatus: keepGranted ? "GRANTED" : "REQUESTED",
   });
 
   return {

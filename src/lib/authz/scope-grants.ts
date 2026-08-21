@@ -20,6 +20,7 @@ export {
   canSeeSettingsItem,
   canSeeSidebarRoute,
   listAllowedInboxTabsForUser,
+  INBOX_TAB_BAR_ORDER,
   parseScopeGrants,
   readCrmActionGrant,
   CRM_ACTION_KEYS,

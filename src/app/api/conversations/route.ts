@@ -32,6 +32,7 @@ const validTabs = new Set<InboxTab>([
   "erro",
   "todos",
   "abertas",
+  "ligar",
 ]);
 const validSortBy = new Set(["updatedAt", "createdAt", "unreadCount"]);
 
@@ -173,6 +174,9 @@ export async function GET(request: Request) {
             if (!canSeeInboxTab({ grants, role: user.role, tab: key, permissions: inboxPerms })) {
               masked[key] = 0;
             }
+          }
+          if (!canSeeInboxTab({ grants, role: user.role, tab: "ligar", permissions: inboxPerms })) {
+            masked.ligar = 0;
           }
           return NextResponse.json(masked);
         }
