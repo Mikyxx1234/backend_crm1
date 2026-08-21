@@ -7,6 +7,7 @@ import {
   metaErrorReason,
 } from "@/lib/meta-whatsapp/error-catalog";
 import { metrics, templatizeRoute } from "@/lib/metrics";
+import { whatsappUploadAudioMime } from "@/lib/audio-convert";
 
 /**
  * Emite métricas Prometheus de uma chamada à Graph API (contador + latência).
@@ -469,16 +470,18 @@ export class MetaWhatsAppClient {
   async sendAudio(
     to: string | undefined,
     audioUrl: string,
-    recipient?: string
+    recipient?: string,
+    voice = false,
   ): Promise<{ messages: Array<{ id: string }> }> {
     const dest = MetaWhatsAppClient.recipientFields(to, recipient);
     return this.graphFetch(`${this.phoneNumberId}/messages`, {
       method: "POST",
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        recipient_type: "individual",
         ...dest,
         type: "audio",
-        audio: { link: audioUrl },
+        audio: { link: audioUrl, ...(voice ? { voice: true } : {}) },
       }),
     });
   }
@@ -582,14 +585,15 @@ export class MetaWhatsAppClient {
   // ── Upload media ──────────────────────────────
 
   async uploadMedia(buffer: Buffer, mimeType: string, filename: string): Promise<string> {
+    const uploadType = whatsappUploadAudioMime(mimeType, filename);
     const form = new FormData();
     form.append("messaging_product", "whatsapp");
     form.append(
       "file",
-      new Blob([new Uint8Array(buffer)], { type: mimeType }),
+      new Blob([new Uint8Array(buffer)], { type: uploadType }),
       filename
     );
-    form.append("type", mimeType);
+    form.append("type", uploadType);
 
     const url = MetaWhatsAppClient.buildGraphUrl(`${this.phoneNumberId}/media`);
     const res = await fetch(url, {
@@ -768,6 +772,7 @@ export class MetaWhatsAppClient {
       method: "POST",
       body: JSON.stringify({
         messaging_product: "whatsapp",
+        recipient_type: "individual",
         ...dest,
         type,
         [type]: mediaPayload,

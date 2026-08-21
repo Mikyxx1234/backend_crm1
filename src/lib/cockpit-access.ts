@@ -1,4 +1,8 @@
 import type { RequestContext } from "@/lib/request-context";
+import {
+  verifyCockpitEmbedToken,
+  type CockpitEmbedRejectReason,
+} from "@/services/cockpit-embed";
 
 const COCKPIT_USER_ID = "cockpit-monitor";
 
@@ -24,6 +28,43 @@ export function tryCockpitAccessAuth(request: Request): RequestContext | null {
     userId: COCKPIT_USER_ID,
     isSuperAdmin: false,
     actor: { type: "INTEGRATION", label: "Cockpit monitor" },
+  };
+}
+
+export type CockpitEmbedAuth =
+  | { kind: "none" }
+  | { kind: "ok"; context: RequestContext }
+  | { kind: "rejected"; reason: CockpitEmbedRejectReason };
+
+/**
+ * Autenticação do cockpit **embedado** no CRM (iframe na página Agentes de IA).
+ *
+ * Diferente de `tryCockpitAccessAuth`, a organização vem do JWT emitido para a
+ * sessão do usuário — nunca de env. É isso que garante isolamento entre
+ * organizações quando o cockpit é aberto de dentro do CRM.
+ *
+ * Devolve `none` quando o Bearer não é um token de embed, para que o caller
+ * siga com os modos de autenticação já existentes.
+ */
+export async function tryCockpitEmbedAuth(request: Request): Promise<CockpitEmbedAuth> {
+  const authHeader = request.headers.get("authorization") ?? "";
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match) return { kind: "none" };
+
+  const result = await verifyCockpitEmbedToken(match[1].trim());
+  if (result.kind === "none") return { kind: "none" };
+  if (result.kind === "rejected") {
+    return { kind: "rejected", reason: result.reason };
+  }
+
+  return {
+    kind: "ok",
+    context: {
+      organizationId: result.payload.orgId,
+      userId: result.payload.userId,
+      isSuperAdmin: false,
+      actor: { type: "INTEGRATION", label: "Cockpit embed" },
+    },
   };
 }
 

@@ -1,0 +1,16 @@
+[
+  {
+    "group": "Operação",
+    "items": [
+      { "id": "dashboard", "label": "Dashboard" },
+      { "id": "distribuicao", "label": "Distribuição" },
+      { "id": "rechamado", "label": "Rechamado" }
+    ]
+  },
+  {
+    "group": "Infra",
+    "items": [
+      { "id": "sistema", "label": "Sistema" }
+    ]
+  }
+]

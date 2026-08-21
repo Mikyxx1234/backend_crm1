@@ -68,7 +68,7 @@ async function processAutomationJob(job: Job<AutomationJobPayload>): Promise<voi
   );
 
   await withSystemContext(automation.organizationId, async () => {
-    await runAutomationInline(job.data);
+    await runAutomationInline({ ...job.data, attemptsMade: job.attemptsMade });
   });
 }
 
