@@ -4,52 +4,34 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { getCallPermissionTemplateName } from "@/lib/call-permission-env";
 import { buildOutboundTemplateMessageContent } from "@/lib/whatsapp-outbound-template-label";
 import { requireConversationAccess } from "@/lib/conversation-access";
-import { metaClientFromConfig, type MetaWhatsAppClient } from "@/lib/meta-whatsapp/client";
-import { enrichTemplateComponentsForFlowSend } from "@/lib/meta-whatsapp/enrich-template-flow";
+import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
-import { extractTemplateComponents } from "@/lib/whatsapp-template-components";
 
 import { WhatsappCallConsentStatus } from "@prisma/client";
 
 import type { InboxMessageDto } from "../messages/route";
 
-/**
- * Busca componentes do template pela Meta (para construir o log do chat com
- * a cópia real, incluindo os botões). Resiliente: se qualquer passo falhar,
- * devolve `null` e o endpoint cai no texto genérico.
- */
-async function fetchTemplatePreviewFromMeta(
-  metaClient: MetaWhatsAppClient,
-  templateName: string,
-  languageCode: string,
-): Promise<{ bodyText: string; headerText: string; footerText: string; buttons: string[] } | null> {
-  try {
-    const raw = (await metaClient.listMessageTemplates({ limit: 200 })) as {
-      data?: Array<{
-        name?: string;
-        language?: string;
-        components?: unknown[];
-      }>;
-    };
-    const rows = Array.isArray(raw.data) ? raw.data : [];
-    // Match exato por nome + idioma; se não bater idioma, aceita primeiro do nome.
-    const match =
-      rows.find(
-        (r) =>
-          (r.name ?? "").trim() === templateName &&
-          (r.language ?? "").trim().toLowerCase() === languageCode.toLowerCase(),
-      ) ?? rows.find((r) => (r.name ?? "").trim() === templateName);
-    if (!match) return null;
-    return extractTemplateComponents(match.components);
-  } catch (e) {
-    console.warn(
-      "[call-permission] falha ao buscar preview do template:",
-      e instanceof Error ? e.message : e,
-    );
-    return null;
-  }
+function strField(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/** Cópia já conhecida pelo inbox — evita relistar `message_templates` no POST. */
+function previewFromBody(b: Record<string, unknown>): {
+  bodyText: string;
+  headerText: string;
+  footerText: string;
+  buttons: string[];
+} | null {
+  const bodyText = strField(b.bodyText);
+  const headerText = strField(b.headerText);
+  const footerText = strField(b.footerText);
+  const buttons = Array.isArray(b.buttons)
+    ? b.buttons.filter((x): x is string => typeof x === "string").map((x) => x.trim()).filter(Boolean)
+    : [];
+  if (!bodyText && !headerText && !footerText && buttons.length === 0) return null;
+  return { bodyText, headerText, footerText, buttons };
 }
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -142,24 +124,10 @@ export async function POST(request: Request, context: RouteContext) {
 
       const senderName = session.user.name ?? session.user.email ?? "Agente";
 
-      let templateGraphId: string | null = null;
-      try {
-        const cfg = await prisma.whatsAppTemplateConfig.findFirst({
-          where: { metaTemplateName: templateName },
-          select: { metaTemplateId: true },
-        });
-        templateGraphId = cfg?.metaTemplateId?.trim() || null;
-      } catch {
-        /* ignore */
-      }
-      if (!templateGraphId) {
-        console.warn(
-          `[meta-flow-enrich] template config não encontrada para nome=${templateName}`,
-        );
-      }
-
-      // Busca cópia real do template (corpo + botões) pra log fiel no chat.
-      const preview = await fetchTemplatePreviewFromMeta(metaClient, templateName, languageCode);
+      // Templates CALL_PERMISSIONS_REQUEST não usam WhatsApp Flow. Relistar
+      // `message_templates` (preview + enrich) no POST estoura o timeout do
+      // EasyPanel e o browser recebe 502 HTML em vez do JSON da API.
+      const preview = previewFromBody(b);
       const content = buildOutboundTemplateMessageContent(
         templateName,
         "call_permission",
@@ -176,21 +144,13 @@ export async function POST(request: Request, context: RouteContext) {
       );
 
       let externalId: string | null = null;
-      let resolvedFlowToken: string | null = null;
       try {
-        const enrichResult = await enrichTemplateComponentsForFlowSend(metaClient, {
-          templateName,
-          languageCode,
-          components: undefined,
-          templateGraphId,
-        });
-        resolvedFlowToken = enrichResult.flowToken;
         const result = await metaClient.sendTemplate(
           to,
           templateName,
           languageCode,
-          enrichResult.components,
-          recipient
+          undefined,
+          recipient,
         );
         externalId = result.messages?.[0]?.id ?? null;
       } catch (e: unknown) {
@@ -210,9 +170,6 @@ export async function POST(request: Request, context: RouteContext) {
             messageType: "template",
             senderName,
             ...(externalId ? { externalId } : {}),
-            ...(typeof resolvedFlowToken === "string" && resolvedFlowToken.trim()
-              ? { flowToken: resolvedFlowToken.trim() }
-              : {}),
           }),
         }),
         prisma.conversation.update({
