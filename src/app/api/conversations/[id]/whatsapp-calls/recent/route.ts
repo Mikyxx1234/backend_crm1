@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
 
@@ -27,13 +27,9 @@ type RouteContext = { params: Promise<{ id: string }> };
  * recente sem poluir o chat com bolhas redundantes.
  */
 export async function GET(request: Request, context: RouteContext) {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
-
-    const { id } = await context.params;
+  return withOrgContext(async (session) => {
+    try {
+      const { id } = await context.params;
     const denied = await requireConversationAccess(session, id);
     if (denied) return denied;
 
@@ -152,8 +148,9 @@ export async function GET(request: Request, context: RouteContext) {
     }));
 
     return NextResponse.json({ items });
-  } catch (e) {
-    console.error("[whatsapp-calls/recent]", e);
-    return NextResponse.json({ message: "Erro ao listar chamadas." }, { status: 500 });
-  }
+    } catch (e) {
+      console.error("[whatsapp-calls/recent]", e);
+      return NextResponse.json({ message: "Erro ao listar chamadas." }, { status: 500 });
+    }
+  });
 }
