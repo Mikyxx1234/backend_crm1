@@ -9,6 +9,11 @@
  *       - true: quando a conversa tem um departamento com distribuição automática
  *         ligada, restringe aos membros desse departamento; sem departamento cai
  *         no org-wide.
+ *   - `autoOnInbound`:
+ *       - true (default): todo ticket OPEN sem responsável entra na fila de
+ *         espera (legado acadêmico — não exige passo na automação).
+ *       - false: a fila só recebe quem passou por `execute_distribution`
+ *         (automação, IA ou redistribuição manual).
  *
  * PUT aceita atualização PARCIAL (só grava as chaves presentes no corpo).
  * Gateado por `smart_distribution` + `distribution:execute`.
@@ -24,7 +29,8 @@ import {
   WidgetNotEnabledError,
 } from "@/services/organization-widgets";
 
-const KEY = "distribution.respectDepartment";
+const RESPECT_DEPT_KEY = "distribution.respectDepartment";
+const AUTO_ON_INBOUND_KEY = "distribution.autoOnInbound";
 
 async function guard(session: {
   user: { id: string; organizationId: string | null; isSuperAdmin: boolean };
@@ -57,12 +63,19 @@ async function guard(session: {
   return null;
 }
 
+async function readSettings() {
+  const [respectDepartment, autoOnInbound] = await Promise.all([
+    getOrgSettingBool(RESPECT_DEPT_KEY, false),
+    getOrgSettingBool(AUTO_ON_INBOUND_KEY, true),
+  ]);
+  return { respectDepartment, autoOnInbound };
+}
+
 export async function GET() {
   return withOrgContext(async (session) => {
     const denied = await guard(session);
     if (denied) return denied;
-    const respectDepartment = await getOrgSettingBool(KEY, false);
-    return NextResponse.json({ respectDepartment });
+    return NextResponse.json(await readSettings());
   });
 }
 
@@ -72,14 +85,17 @@ export async function PUT(req: Request) {
     if (denied) return denied;
     const body = (await req.json().catch(() => ({}))) as {
       respectDepartment?: unknown;
+      autoOnInbound?: unknown;
     };
 
     // Atualização PARCIAL: só toca as chaves presentes no corpo.
     if ("respectDepartment" in body) {
-      await setOrgSettingBool(KEY, Boolean(body.respectDepartment));
+      await setOrgSettingBool(RESPECT_DEPT_KEY, Boolean(body.respectDepartment));
+    }
+    if ("autoOnInbound" in body) {
+      await setOrgSettingBool(AUTO_ON_INBOUND_KEY, Boolean(body.autoOnInbound));
     }
 
-    const respectDepartment = await getOrgSettingBool(KEY, false);
-    return NextResponse.json({ respectDepartment });
+    return NextResponse.json(await readSettings());
   });
 }

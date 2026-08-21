@@ -11,6 +11,7 @@
 
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
+import { getWaitingQueueWhere } from "./pending";
 
 export interface DistributionLogView {
   id: string;
@@ -358,13 +359,7 @@ export async function getDistributionDepartmentStats(): Promise<{
   const [pendingGroups, successLogs, departments] = await Promise.all([
     prisma.conversation.groupBy({
       by: ["departmentId"],
-      where: {
-        organizationId: orgId,
-        status: "OPEN",
-        assignedToId: null,
-        // Alinha com a fila de espera: só quem já respondeu.
-        lastInboundAt: { not: null },
-      },
+      where: await getWaitingQueueWhere(),
       _count: { _all: true },
     }),
     prisma.distributionLog.findMany({

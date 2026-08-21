@@ -74,11 +74,48 @@ export const ABERTA_SEM_RESPONSAVEL: Prisma.ConversationWhereInput = {
   lastInboundAt: { not: null },
 };
 
+/** Default true: inbound sem dono entra na fila (legado acadêmico). */
+const AUTO_ON_INBOUND_KEY = "distribution.autoOnInbound";
+
+export async function isDistributionAutoOnInbound(): Promise<boolean> {
+  return getOrgSettingBool(AUTO_ON_INBOUND_KEY, true);
+}
+
+async function listExplicitPendingConversationIds(): Promise<string[]> {
+  const rows = await prisma.distributionPending.findMany({
+    where: { status: "PENDING", conversationId: { not: null } },
+    select: { conversationId: true },
+    take: 5000,
+  });
+  return [
+    ...new Set(
+      rows
+        .map((r) => r.conversationId)
+        .filter((id): id is string => Boolean(id)),
+    ),
+  ];
+}
+
+/**
+ * Filtro da fila de espera.
+ * - autoOnInbound true: toda conversa OPEN sem responsável (com inbound).
+ * - false: só quem já passou por execute_distribution / redistribuição
+ *   manual / IA e ficou em DistributionPending.
+ */
+export async function getWaitingQueueWhere(): Promise<Prisma.ConversationWhereInput> {
+  if (await isDistributionAutoOnInbound()) return ABERTA_SEM_RESPONSAVEL;
+  const ids = await listExplicitPendingConversationIds();
+  if (ids.length === 0) return { id: { equals: "__no_distribution_pending__" } };
+  return { id: { in: ids }, status: "OPEN", assignedToId: null };
+}
+
 export async function getPendingDistributions(): Promise<
   PendingDistributionView[]
 > {
   // Limpa pendências de quem só recebeu template e nunca respondeu.
   await purgeUnansweredFromPendingQueue().catch(() => 0);
+
+  const autoOnInbound = await isDistributionAutoOnInbound();
 
   // Inclui também conversas OPEN sem dono enfileiradas MANUALMENTE mesmo
   // sem lastInboundAt (redistribuição p/ depto com fila cheia).
@@ -95,21 +132,33 @@ export async function getPendingDistributions(): Promise<
     .map((p) => p.conversationId)
     .filter((id): id is string => Boolean(id));
 
+  const explicitIds = autoOnInbound
+    ? []
+    : await listExplicitPendingConversationIds();
+
   const items = await prisma.conversation.findMany({
-    where: {
-      OR: [
-        ABERTA_SEM_RESPONSAVEL,
-        ...(manualConvIds.length > 0
-          ? [
-              {
-                id: { in: manualConvIds },
-                status: "OPEN" as const,
-                assignedToId: null,
-              },
-            ]
-          : []),
-      ],
-    },
+    where: autoOnInbound
+      ? {
+          OR: [
+            ABERTA_SEM_RESPONSAVEL,
+            ...(manualConvIds.length > 0
+              ? [
+                  {
+                    id: { in: manualConvIds },
+                    status: "OPEN" as const,
+                    assignedToId: null,
+                  },
+                ]
+              : []),
+          ],
+        }
+      : explicitIds.length === 0
+        ? { id: { equals: "__no_distribution_pending__" } }
+        : {
+            id: { in: explicitIds },
+            status: "OPEN",
+            assignedToId: null,
+          },
     orderBy: { createdAt: "asc" },
     select: {
       id: true,
@@ -325,7 +374,7 @@ async function explainEmptyDrain(opts: {
   }
 
   const waiting = await prisma.conversation.findMany({
-    where: ABERTA_SEM_RESPONSAVEL,
+    where: await getWaitingQueueWhere(),
     select: {
       departmentId: true,
       department: { select: { name: true, distributionEnabled: true } },
@@ -661,6 +710,21 @@ export async function maybeDistributeNewInboundTicket(input: {
     // #endregion
     if (!widgetActive) return;
 
+    const autoOnInbound = await isDistributionAutoOnInbound();
+    if (!autoOnInbound) {
+      const alreadyQueued = await prisma.distributionPending.findFirst({
+        where: { status: "PENDING", contactId: input.contactId },
+        select: { id: true },
+      });
+      if (!alreadyQueued) {
+        console.warn(
+          "[DBG-e46688 maybeDist] skip autoOnInbound=false",
+          JSON.stringify({ convId: input.conversationId }),
+        );
+        return;
+      }
+    }
+
     const remapped = await prisma.distributionPending.updateMany({
       where: { status: "PENDING", contactId: input.contactId },
       data: {
@@ -746,7 +810,7 @@ export async function processPendingDistributionQueue(opts: {
   const state = getDrainState(orgId);
   if (state.running) {
     const pending = await prisma.conversation.count({
-      where: ABERTA_SEM_RESPONSAVEL,
+      where: await getWaitingQueueWhere(),
     });
     // Manual: não mente "ninguém elegível" — a drenagem já está no ar.
     if (opts.trigger === "manual") {
@@ -787,6 +851,11 @@ export async function processPendingDistributionQueue(opts: {
       return { resolved: 0, cancelled: 0, pending: 0, trigger: opts.trigger };
     }
 
+    const autoOnInbound = await isDistributionAutoOnInbound();
+    const explicitPendingIds = autoOnInbound
+      ? null
+      : await listExplicitPendingConversationIds();
+
     let cancelledOrphans = 0;
     try {
       cancelledOrphans = await cancelStalePendingOrphans(orgId);
@@ -817,7 +886,7 @@ export async function processPendingDistributionQueue(opts: {
 
     if (eligible.length === 0) {
       const pending = await prisma.conversation.count({
-        where: ABERTA_SEM_RESPONSAVEL,
+        where: await getWaitingQueueWhere(),
       });
       console.info(
         "[distribution] processPending skip — nenhum consultor elegível",
@@ -846,7 +915,7 @@ export async function processPendingDistributionQueue(opts: {
       const focus = views.find((r) => r.userId === opts.userId);
       if (!focus?.eligible) {
         const pending = await prisma.conversation.count({
-          where: ABERTA_SEM_RESPONSAVEL,
+          where: await getWaitingQueueWhere(),
         });
         console.info(
           "[distribution] processPending skip — userId não elegível",
@@ -877,7 +946,7 @@ export async function processPendingDistributionQueue(opts: {
       // Também drena depts que JÁ têm gente na espera — senão Acolhimento
       // (ou qualquer depto sem membro no KPI) nunca é tentado.
       const waitingDepts = await prisma.conversation.findMany({
-        where: ABERTA_SEM_RESPONSAVEL,
+        where: await getWaitingQueueWhere(),
         select: { departmentId: true },
       });
       for (const w of waitingDepts) {
@@ -933,12 +1002,17 @@ export async function processPendingDistributionQueue(opts: {
         .map((p) => p.conversationId)
         .filter((id): id is string => Boolean(id));
 
-      // Mesmo critério da aba Fila: inbound real do aluno. A janela Meta 24h
-      // só barra a saudação no motor — não pode esconder o ticket da drenagem.
+      // autoOnInbound=false: só drena quem já foi pedido à distribuição
+      // (automação / IA / redistribuição manual). Senão o cron puxa a
+      // aba Entrada inteira sem execute_distribution.
+      if (explicitPendingIds && explicitPendingIds.length === 0) return;
+
       const items = await prisma.conversation.findMany({
         where: {
+          ...(explicitPendingIds
+            ? { id: { in: explicitPendingIds } }
+            : { lastInboundAt: { not: null } }),
           status: "OPEN",
-          lastInboundAt: { not: null },
           departmentId: departmentId === null ? null : departmentId,
           OR: [
             { assignedToId: null },
@@ -1057,7 +1131,7 @@ export async function processPendingDistributionQueue(opts: {
     }
 
     const pending = await prisma.conversation.count({
-      where: ABERTA_SEM_RESPONSAVEL,
+      where: await getWaitingQueueWhere(),
     });
 
     let skipReason: string | null = null;

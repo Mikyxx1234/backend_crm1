@@ -18,6 +18,7 @@ import {
   type RechamadoMetrics,
 } from "./rechamado";
 import { getDistributionResponsibles } from "./responsibles";
+import { getWaitingQueueWhere } from "./pending";
 import {
   getAcademicCockpitMetrics,
   type AcademicCockpit,
@@ -141,18 +142,7 @@ export async function getCockpitData(): Promise<CockpitData> {
         },
       }),
       prisma.conversation.count({
-        where: {
-          organizationId: orgId,
-          status: "OPEN",
-          assignedToId: null,
-          // Só conta quem já respondeu (exclui calouros só com template BV).
-          lastInboundAt: { not: null },
-          contact: {
-            automationContexts: {
-              none: { status: { in: ["RUNNING", "PAUSED"] } },
-            },
-          },
-        },
+        where: await getWaitingQueueWhere(),
       }),
       getRechamadoMetrics({ organizationId: orgId, since, sampleLimit: 80 }),
     ]);

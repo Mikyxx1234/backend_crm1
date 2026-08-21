@@ -42,6 +42,8 @@ export {
 export {
   ABERTA_SEM_RESPONSAVEL,
   getPendingDistributions,
+  getWaitingQueueWhere,
+  isDistributionAutoOnInbound,
   purgeUnansweredFromPendingQueue,
   retryPendingDistributions,
   processPendingDistributionQueue,
