@@ -169,6 +169,7 @@ export async function GET(_request: Request, context: RouteContext) {
       where: { id },
       select: {
         channel: true,
+        contactId: true,
         whatsappCallConsentStatus: true,
         whatsappCallConsentUpdatedAt: true,
       },
@@ -208,6 +209,56 @@ export async function GET(_request: Request, context: RouteContext) {
         "[calling-context] type/expiresAt ausente (migration pendente):",
         err instanceof Error ? err.message : err,
       );
+    }
+
+    // Consentimento é do contato (Meta), não do ticket. Ticket resolvido
+    // vizinho pode ter GRANTED enquanto este ainda está NONE.
+    if (
+      conv.channel === "whatsapp" &&
+      conv.contactId &&
+      conv.whatsappCallConsentStatus !== "GRANTED"
+    ) {
+      const sibling = await prisma.conversation.findFirst({
+        where: {
+          contactId: conv.contactId,
+          channel: "whatsapp",
+          whatsappCallConsentStatus: "GRANTED",
+          id: { not: id },
+        },
+        orderBy: { whatsappCallConsentUpdatedAt: "desc" },
+        select: {
+          id: true,
+          whatsappCallConsentStatus: true,
+          whatsappCallConsentUpdatedAt: true,
+        },
+      });
+      if (sibling) {
+        conv.whatsappCallConsentStatus = sibling.whatsappCallConsentStatus;
+        conv.whatsappCallConsentUpdatedAt = sibling.whatsappCallConsentUpdatedAt;
+        try {
+          const orgIdFilter = session.user.organizationId ?? "__no_org__";
+          const rows = (await prisma.$queryRaw`
+            SELECT
+              "whatsappCallConsentType"::text AS "consentType",
+              "whatsappCallConsentExpiresAt" AS "consentExpiresAt"
+            FROM "conversations"
+            WHERE "id" = ${sibling.id}
+              AND "organizationId" = ${orgIdFilter}
+          `) as Array<{ consentType: string | null; consentExpiresAt: Date | string | null }>;
+          const row = rows[0];
+          if (row) {
+            consentType =
+              row.consentType === "PERMANENT" || row.consentType === "TEMPORARY"
+                ? row.consentType
+                : null;
+            consentExpiresAt = row.consentExpiresAt
+              ? new Date(row.consentExpiresAt as Date | string)
+              : null;
+          }
+        } catch {
+          /* segue com fallback 7d */
+        }
+      }
     }
 
     if (conv.channel !== "whatsapp") {
