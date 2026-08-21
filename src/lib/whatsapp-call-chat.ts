@@ -112,9 +112,9 @@ export function buildConnectChatLine(params: {
 }): string {
   const hm = formatCallHm(params.eventTime);
   if (params.direction === "USER_INITIATED") {
-    return `Chamada · entrada · ${hm}`;
+    return `Chamada recebida pelo WhatsApp · ${hm}`;
   }
-  return `Chamada · saída · ${hm}`;
+  return `Chamada realizada pelo WhatsApp · ${hm}`;
 }
 
 /**
@@ -148,11 +148,11 @@ export function buildTerminateChatLine(params: {
   const span = hmStart && hmStart !== hmEnd ? `${hmStart}–${hmEnd}` : hmEnd;
 
   if (st === "FAILED") {
-    return `Chamada · fim · falhou · ${span}`;
+    return `Chamada WhatsApp · fim · falhou · ${span}`;
   }
   return durShort
-    ? `Chamada · fim · ${durShort} · ${span}`
-    : `Chamada · fim · ${span}`;
+    ? `Chamada WhatsApp · fim · ${durShort} · ${span}`
+    : `Chamada WhatsApp · fim · ${span}`;
 }
 
 /**
@@ -181,7 +181,7 @@ export function buildConversationTimelineCallRecordingContent(params: {
       : null;
   const spanShort = hmS ? `${hmS}–${hmE}` : hmE;
   const pieces = [
-    `Chamada · ${dirLabel}`,
+    `Chamada WhatsApp · ${dirLabel}`,
     durShort ? `· ${durShort}` : null,
     `· ${spanShort}`,
   ].filter(Boolean);

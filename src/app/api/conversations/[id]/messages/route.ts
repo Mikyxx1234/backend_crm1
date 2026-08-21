@@ -303,20 +303,22 @@ export async function GET(request: Request, context: RouteContext) {
     };
     let historyTickets: HistoryTicket[] = [];
     if (includeHistory && conv.contactId && conv.channel) {
+      const viewingResolved = conv.status === "RESOLVED";
       const prevConvs = await prisma.conversation.findMany({
         where: {
           contactId: conv.contactId,
           channel: conv.channel,
-          status: "RESOLVED",
           id: { not: conv.id },
-          // Só tickets mais antigos. Incluir um ticket NOVO (ex. #70154)
-          // na "história" de um resolvido (#3198) coloca mensagens de hoje
-          // ANTES de julho e some o consentimento do ticket aberto.
-          createdAt: { lt: conv.createdAt },
+          // Ticket RESOLVED: só anteriores (não misturar o ticket aberto).
+          // Ticket aberto: todos os outros do contato/canal — se o card
+          // saltou para um id antigo, o chat recente continua visível.
+          ...(viewingResolved
+            ? { status: "RESOLVED" as const, createdAt: { lt: conv.createdAt } }
+            : {}),
         },
         orderBy: { createdAt: "desc" },
         select: { id: true, number: true, closedAt: true, createdAt: true },
-        take: 5,
+        take: viewingResolved ? 5 : 8,
       });
       const loaded = await Promise.all(
         prevConvs.map(async (pc) => {
