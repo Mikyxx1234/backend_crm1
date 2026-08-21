@@ -1,3 +1,5 @@
+import { Prisma } from "@prisma/client";
+
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
 import {
@@ -104,10 +106,13 @@ export async function maybeGrantWhatsappCallConsent(
   });
   if (!conv || conv.channel !== "whatsapp") return false;
 
-  const isRequested = conv.whatsappCallConsentStatus === "REQUESTED";
-  if (!isRequested) return false;
-
   if (isCallPermissionDecline(parsed)) return false;
+
+  const isRequested = conv.whatsappCallConsentStatus === "REQUESTED";
+  const kindEarly = (parsed.interactiveKind ?? "").toLowerCase();
+  const strongAccept =
+    isCallPermissionAcceptFromParsedText(parsed) ||
+    kindEarly.includes("call_permission");
 
   if (isCallPermissionAcceptFromParsedText(parsed)) {
     // Inferir tipo a partir do texto parseado pelo webhook
@@ -128,20 +133,20 @@ export async function maybeGrantWhatsappCallConsent(
   const combined = titleBtn || titleText;
   const kind = (parsed.interactiveKind ?? "").toLowerCase();
 
-  let grant = false;
+  let grant = strongAccept;
 
-  if (parsed.interactiveButtonId && acceptIds.length > 0) {
+  if (!grant && isRequested && parsed.interactiveButtonId && acceptIds.length > 0) {
     grant = acceptIds.includes(parsed.interactiveButtonId);
   }
 
-  if (!grant && acceptTitlesEnv.length > 0 && combined) {
+  if (!grant && isRequested && acceptTitlesEnv.length > 0 && combined) {
     grant = acceptTitlesEnv.some((t) => {
       const x = t.trim().toLowerCase();
       return x.length > 0 && (combined === x || combined.includes(x));
     });
   }
 
-  if (!grant && (parsed.type === "interactive" || parsed.type === "button")) {
+  if (!grant && isRequested && (parsed.type === "interactive" || parsed.type === "button")) {
     if (combined) {
       if (BUILTIN_ACCEPT_TITLE_SNIPPETS.some((s) => combined.includes(s))) {
         grant = true;
@@ -189,8 +194,24 @@ async function applyGrant(
   const expiresAt =
     type === "TEMPORARY" ? new Date(now.getTime() + TEMPORARY_CONSENT_TTL_MS) : null;
 
-  await prisma.conversation.update({
+  const src = await prisma.conversation.findUnique({
     where: { id: conversationId },
+    select: { id: true, contactId: true, channel: true, organizationId: true },
+  });
+  if (!src) return;
+
+  const targets = src.contactId
+    ? await prisma.conversation.findMany({
+        where: { contactId: src.contactId, channel: src.channel },
+        select: { id: true },
+      })
+    : [{ id: conversationId }];
+  const targetIds = (targets.length > 0 ? targets : [{ id: conversationId }]).map(
+    (t) => t.id,
+  );
+
+  await prisma.conversation.updateMany({
+    where: { id: { in: targetIds } },
     data: {
       whatsappCallConsentStatus: "GRANTED",
       whatsappCallConsentUpdatedAt: now,
@@ -199,8 +220,6 @@ async function applyGrant(
   });
 
   try {
-    // Defesa em profundidade: WHERE id ja e PK unica, mas adicionamos
-    // organizationId pra alinhar com RLS quando ativarmos.
     const orgId = getOrgIdOrThrow();
     if (expiresAt) {
       await prisma.$executeRaw`
@@ -208,7 +227,7 @@ async function applyGrant(
         SET
           "whatsappCallConsentType" = ${type}::"WhatsappCallConsentType",
           "whatsappCallConsentExpiresAt" = ${expiresAt}
-        WHERE "id" = ${conversationId}
+        WHERE "id" IN (${Prisma.join(targetIds)})
           AND "organizationId" = ${orgId}
       `;
     } else {
@@ -217,7 +236,7 @@ async function applyGrant(
         SET
           "whatsappCallConsentType" = ${type}::"WhatsappCallConsentType",
           "whatsappCallConsentExpiresAt" = NULL
-        WHERE "id" = ${conversationId}
+        WHERE "id" IN (${Prisma.join(targetIds)})
           AND "organizationId" = ${orgId}
       `;
     }

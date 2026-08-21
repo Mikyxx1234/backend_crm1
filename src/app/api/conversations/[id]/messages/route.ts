@@ -309,6 +309,10 @@ export async function GET(request: Request, context: RouteContext) {
           channel: conv.channel,
           status: "RESOLVED",
           id: { not: conv.id },
+          // Só tickets mais antigos. Incluir um ticket NOVO (ex. #70154)
+          // na "história" de um resolvido (#3198) coloca mensagens de hoje
+          // ANTES de julho e some o consentimento do ticket aberto.
+          createdAt: { lt: conv.createdAt },
         },
         orderBy: { createdAt: "desc" },
         select: { id: true, number: true, closedAt: true, createdAt: true },
@@ -536,7 +540,7 @@ export async function GET(request: Request, context: RouteContext) {
             closedByName: closed.name,
             closedByUserId: closed.userId,
           }),
-          createdAt: null,
+          createdAt: ticket.createdAt?.toISOString() ?? ticket.closedAt?.toISOString() ?? new Date(0).toISOString(),
           direction: "system",
           messageType: "ticket-separator",
         });
@@ -555,7 +559,7 @@ export async function GET(request: Request, context: RouteContext) {
           openedByName: opened.name,
           openedByUserId: opened.userId,
         }),
-        createdAt: null,
+        createdAt: conv.createdAt?.toISOString?.() ?? new Date().toISOString(),
         direction: "system",
         messageType: "ticket-separator",
       });

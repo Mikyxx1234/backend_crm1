@@ -8,6 +8,7 @@ import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { getRequestContext, runWithContext } from "@/lib/request-context";
+import { reopenResolvedAsNewTicket } from "@/services/conversations";
 import { sseBus } from "@/lib/sse-bus";
 
 import { WhatsappCallConsentStatus } from "@prisma/client";
@@ -229,7 +230,7 @@ export async function POST(request: Request, context: RouteContext) {
         );
       }
 
-      const conv = await prisma.conversation.findUnique({
+      let conv = await prisma.conversation.findUnique({
         where: { id },
         include: {
           contact: { select: { phone: true, whatsappBsuid: true, name: true } },
@@ -246,6 +247,24 @@ export async function POST(request: Request, context: RouteContext) {
           { message: "Opt-in de chamada só se aplica a conversas WhatsApp." },
           { status: 400 }
         );
+      }
+
+      let reopenedConversationId: string | null = null;
+      if (conv.status === "RESOLVED" && conv.contactId) {
+        const reopened = await reopenResolvedAsNewTicket(conv.id);
+        if (reopened.id !== conv.id) {
+          const fresh = await prisma.conversation.findUnique({
+            where: { id: reopened.id },
+            include: {
+              contact: { select: { phone: true, whatsappBsuid: true, name: true } },
+              channelRef: { select: { id: true, config: true } },
+            },
+          });
+          if (fresh) {
+            reopenedConversationId = fresh.id;
+            conv = fresh;
+          }
+        }
       }
 
       const digits = conv.contact?.phone?.replace(/\D/g, "") ?? "";
@@ -345,7 +364,13 @@ export async function POST(request: Request, context: RouteContext) {
           })
           .catch((e) => console.error("[call-permission] bg", e)),
       );
-      return NextResponse.json({ pending: true }, { status: 202 });
+      return NextResponse.json(
+        {
+          pending: true,
+          ...(reopenedConversationId ? { reopenedConversationId } : {}),
+        },
+        { status: 202 },
+      );
     } catch (e: unknown) {
       console.error(e);
       const msg = e instanceof Error ? e.message : "Erro ao solicitar permissão de chamada.";
