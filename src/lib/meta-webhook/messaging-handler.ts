@@ -508,6 +508,7 @@ async function findOrCreateConversation(
   const findActive = () =>
     prisma.conversation.findFirst({
       where: { contactId, channel: channelSlug, status: { not: "RESOLVED" } },
+      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
       select: { id: true, channelId: true, assignedToId: true },
     });
 

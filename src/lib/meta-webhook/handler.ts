@@ -809,8 +809,10 @@ async function findOrCreateConversation(contactId: string, phoneNumberId?: strin
   const findActive = () =>
     prisma.conversation.findFirst({
       where: { contactId, channel: "whatsapp", status: { not: "RESOLVED" } },
-      // PR 1.3: incluímos organizationId para que callers (download de
-      // mídia inbound) possam roteá-lo no storage tenant-scoped.
+      // Sem orderBy o Postgres devolve o ticket mais antigo. Ligação
+      // gravada lá faz o inbox (1 card / contato) saltar para esse id
+      // e o chat do ticket atual some da timeline.
+      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
       select: convSelect,
     });
 
