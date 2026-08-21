@@ -208,21 +208,21 @@ export async function POST(request: Request, context: RouteContext) {
         const inputExt = guessInputExt(mimeBase);
         console.log(`[meta-attach] Convertendo audio ${mimeBase} (.${inputExt}) para formato aceito pela Meta`);
         const prepared = await prepareWhatsAppAudio(buffer, inputExt, fileName);
-        if (!prepared) {
+        if (!prepared.ok) {
+          console.error(`[meta-attach] preparo de audio falhou: ${prepared.reason}`);
           return NextResponse.json(
             {
-              message:
-                "Não foi possível converter o áudio para OGG/Opus (formato obrigatório da Meta para mensagem de voz). Verifique se o FFmpeg com libopus está instalado.",
+              message: `Não foi possível preparar o áudio como nota de voz: ${prepared.reason}`,
               code: "AUDIO_CONVERT_FAILED",
             },
             { status: 422 },
           );
         }
-        storeBuffer = prepared.buffer;
-        uploadMime = prepared.mime;
-        uploadName = prepared.fileName;
-        sendAsVoice = prepared.voice;
-        storeExt = prepared.fileName.split(".").pop() || "ogg";
+        storeBuffer = prepared.payload.buffer;
+        uploadMime = prepared.payload.mime;
+        uploadName = prepared.payload.fileName;
+        sendAsVoice = prepared.payload.voice;
+        storeExt = prepared.payload.fileName.split(".").pop() || "ogg";
         console.log(
           `[meta-attach] Conversao OK, ${buffer.length} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
         );

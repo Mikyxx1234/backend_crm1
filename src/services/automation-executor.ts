@@ -2967,15 +2967,15 @@ async function executeStep(
               guessInputExt(mimeType),
               fName,
             );
-            if (!prepared) {
+            if (!prepared.ok) {
               throw new MetaSendFailureError(
-                "send_whatsapp_media: falha ao converter áudio para OGG/Opus (mensagem de voz da Meta).",
+                `send_whatsapp_media: falha ao preparar áudio como nota de voz — ${prepared.reason}`,
               );
             }
-            uploadBuffer = prepared.buffer;
-            uploadMime = prepared.mime;
-            uploadName = prepared.fileName;
-            sendAsVoice = prepared.voice;
+            uploadBuffer = prepared.payload.buffer;
+            uploadMime = prepared.payload.mime;
+            uploadName = prepared.payload.fileName;
+            sendAsVoice = prepared.payload.voice;
           }
 
           const metaMediaId = await mediaMetaClient.uploadMedia(uploadBuffer, uploadMime, uploadName);
