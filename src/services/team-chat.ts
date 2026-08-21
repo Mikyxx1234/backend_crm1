@@ -139,11 +139,22 @@ export function isOwnedStorageUrl(url: string, organizationId: string) {
 }
 
 function publish(
-  event: "team_chat_message" | "team_chat_room_updated",
+  event: "team_chat_message" | "team_chat_room_updated" | "team_chat_typing",
   organizationId: string,
   data: Record<string, unknown>,
 ) {
   sseBus.publish(event, { organizationId, ...data });
+}
+
+export async function signalTyping(viewer: TeamChatViewer, roomId: string, name: string) {
+  const member = await requireMember(viewer, roomId);
+  if (!member) return { error: "Conversa não encontrada.", status: 404 as const };
+  publish("team_chat_typing", viewer.organizationId, {
+    roomId,
+    userId: viewer.userId,
+    name,
+  });
+  return { ok: true as const };
 }
 
 async function requireMember(viewer: TeamChatViewer, roomId: string) {
