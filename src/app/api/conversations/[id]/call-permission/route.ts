@@ -147,6 +147,10 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       const senderName = session.user.name ?? session.user.email ?? "Agente";
+      console.log(
+        "[call-permission] send",
+        JSON.stringify({ conversationId: id, templateName, languageCode }),
+      );
 
       // Templates CALL_PERMISSIONS_REQUEST não usam WhatsApp Flow. Relistar
       // `message_templates` (preview + enrich) no POST estoura o timeout do
@@ -185,7 +189,7 @@ export async function POST(request: Request, context: RouteContext) {
           bodyComponentsFromTemplate(previewRaw?.bodyText ?? "", contactName),
           recipient,
           // Uma tentativa curta: 3×20s estoura o Traefik e o browser vê 502 HTML.
-          { maxAttempts: 1, timeoutMs: 12_000 },
+          { maxAttempts: 1, timeoutMs: 6_000 },
         );
         externalId = result.messages?.[0]?.id ?? null;
       } catch (e: unknown) {
