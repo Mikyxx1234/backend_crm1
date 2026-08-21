@@ -71,8 +71,8 @@ export const SIDEBAR_CATALOG: readonly SidebarCatalogItem[] = [
   },
   {
     key: "team-chat",
-    title: "Órbita",
-    href: "/orbita",
+    title: "Rely",
+    href: "/rely",
     locked: false,
     requiredPermission: "nav:team-chat",
   },
