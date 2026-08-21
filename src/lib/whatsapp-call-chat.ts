@@ -99,7 +99,46 @@ export function extractRecordingUrl(callObj: Record<string, unknown>): string | 
 }
 
 /**
- * String enxuta gerada quando o evento `connect` chega da Meta.
+ * Atendimento real: a Meta manda `connect` (SDP) e `COMPLETED` mesmo
+ * sem o cliente atender. Duração / start_time / ACCEPTED é que importam.
+ * @see https://developers.facebook.com/documentation/business-messaging/whatsapp/calling/business-initiated-calls
+ */
+export function wasWhatsappCallPickedUp(params: {
+  durationSec?: number | null;
+  startTime?: Date | null;
+  endTime?: Date | null;
+  signalingStatuses?: Array<string | null | undefined>;
+}): boolean {
+  if (typeof params.durationSec === "number" && params.durationSec > 0) return true;
+  if (params.startTime) return true;
+  if (params.endTime) return true;
+  return (params.signalingStatuses ?? []).some(
+    (s) => (s ?? "").toUpperCase() === "ACCEPTED",
+  );
+}
+
+export function classifyWhatsappCallEnd(params: {
+  terminateStatus: string;
+  pickedUp: boolean;
+  rejected?: boolean;
+}): "failed" | "missed" | "completed" {
+  const st = (params.terminateStatus || "").toUpperCase();
+  if (st === "FAILED" || st === "ERROR") return "failed";
+  if (
+    params.rejected ||
+    st === "REJECTED" ||
+    st === "MISSED" ||
+    st === "USER_BUSY"
+  ) {
+    return "missed";
+  }
+  if (!params.pickedUp) return "missed";
+  return "completed";
+}
+
+/**
+ * String enxuta gerada quando o cliente atende (sinalização ACCEPTED)
+ * ou, em entrada, quando o webhook `connect` chega da Meta.
  * Mantém apenas Chamada + direção (entrada/saída) + horário — sem
  * `agente: X` redundante (o nome do agente já aparece como
  * `senderName`/avatar da mensagem). O CallActivityItem usa "entrada"/
@@ -135,6 +174,8 @@ export function buildTerminateChatLine(params: {
   startDate: Date | null;
   endDate: Date;
   agentName?: string;
+  pickedUp?: boolean;
+  rejected?: boolean;
 }): string {
   const durShort =
     params.durationSec != null && params.durationSec > 0
@@ -142,13 +183,26 @@ export function buildTerminateChatLine(params: {
         ? `${Math.floor(params.durationSec / 60)}m${String(params.durationSec % 60).padStart(2, "0")}s`
         : `${params.durationSec}s`
       : "";
-  const st = params.terminateStatus;
   const hmStart = params.startDate ? formatCallHm(params.startDate) : null;
   const hmEnd = formatCallHm(params.endDate);
   const span = hmStart && hmStart !== hmEnd ? `${hmStart}–${hmEnd}` : hmEnd;
+  const pickedUp =
+    params.pickedUp ??
+    wasWhatsappCallPickedUp({
+      durationSec: params.durationSec,
+      startTime: params.startDate,
+    });
+  const outcome = classifyWhatsappCallEnd({
+    terminateStatus: params.terminateStatus,
+    pickedUp,
+    rejected: params.rejected,
+  });
 
-  if (st === "FAILED") {
+  if (outcome === "failed") {
     return `Chamada WhatsApp · fim · falhou · ${span}`;
+  }
+  if (outcome === "missed") {
+    return `Chamada WhatsApp · fim · não atendida · ${span}`;
   }
   return durShort
     ? `Chamada WhatsApp · fim · ${durShort} · ${span}`

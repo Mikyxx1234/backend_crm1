@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
+import { classifyWhatsappCallEnd, wasWhatsappCallPickedUp } from "@/lib/whatsapp-call-chat";
 import { prisma } from "@/lib/prisma";
 
 type RouteContext = { params: Promise<{ id: string }> };
@@ -59,6 +60,7 @@ export async function GET(request: Request, context: RouteContext) {
         metaCallId: true,
         direction: true,
         eventKind: true,
+        signalingStatus: true,
         terminateStatus: true,
         durationSec: true,
         startTime: true,
@@ -75,6 +77,7 @@ export async function GET(request: Request, context: RouteContext) {
       durationSec: number | null;
       status: "ringing" | "completed" | "failed" | "rejected";
       lastEventAt: Date;
+      signalingStatuses: string[];
     };
 
     const byCall = new Map<string, CallAggregate>();
@@ -82,14 +85,27 @@ export async function GET(request: Request, context: RouteContext) {
       const existing = byCall.get(ev.metaCallId);
       const baseStart = ev.startTime ?? null;
       const baseEnd = ev.endTime ?? null;
+      const signalingStatuses = [
+        ...(existing?.signalingStatuses ?? []),
+        ...(ev.signalingStatus ? [ev.signalingStatus] : []),
+      ];
 
       let status: CallAggregate["status"] = existing?.status ?? "ringing";
       if (ev.eventKind === "terminate") {
-        const ts = (ev.terminateStatus ?? "").toUpperCase();
-        if (ts === "COMPLETED") status = "completed";
-        else if (ts === "REJECTED" || ts === "MISSED" || ts === "USER_BUSY") status = "rejected";
-        else if (ts === "FAILED" || ts === "ERROR") status = "failed";
-        else status = "completed";
+        const pickedUp = wasWhatsappCallPickedUp({
+          durationSec: ev.durationSec ?? existing?.durationSec,
+          startTime: baseStart ?? existing?.startedAt,
+          endTime: baseEnd ?? existing?.endedAt,
+          signalingStatuses,
+        });
+        const rejected = signalingStatuses.some((s) => s.toUpperCase() === "REJECTED");
+        const outcome = classifyWhatsappCallEnd({
+          terminateStatus: ev.terminateStatus ?? "",
+          pickedUp,
+          rejected,
+        });
+        status =
+          outcome === "completed" ? "completed" : outcome === "failed" ? "failed" : "rejected";
       }
 
       const merged: CallAggregate = {
@@ -105,6 +121,7 @@ export async function GET(request: Request, context: RouteContext) {
         status,
         lastEventAt:
           existing && existing.lastEventAt > ev.createdAt ? existing.lastEventAt : ev.createdAt,
+        signalingStatuses,
       };
 
       byCall.set(ev.metaCallId, merged);

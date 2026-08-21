@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { wasWhatsappCallPickedUp } from "@/lib/whatsapp-call-chat";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { sseBus } from "@/lib/sse-bus";
 import { generateFileName, saveFile } from "@/lib/storage/local";
@@ -105,6 +106,32 @@ export async function POST(request: Request, context: RouteContext) {
       }
 
       const callId = safeStr(form.get("callId")) || null;
+      if (callId) {
+        const evs = await prisma.whatsappCallEvent.findMany({
+          where: { metaCallId: callId },
+          select: {
+            signalingStatus: true,
+            durationSec: true,
+            startTime: true,
+            endTime: true,
+          },
+        });
+        const pickedUp = wasWhatsappCallPickedUp({
+          durationSec: evs.reduce<number | null>(
+            (acc, e) => (e.durationSec != null && e.durationSec > (acc ?? 0) ? e.durationSec : acc),
+            null,
+          ),
+          startTime: evs.find((e) => e.startTime)?.startTime ?? null,
+          endTime: evs.find((e) => e.endTime)?.endTime ?? null,
+          signalingStatuses: evs.map((e) => e.signalingStatus),
+        });
+        if (!pickedUp) {
+          return NextResponse.json(
+            { message: "Gravação só é guardada depois do cliente atender." },
+            { status: 409 },
+          );
+        }
+      }
       const directionRaw = safeStr(form.get("direction"));
       const direction =
         directionRaw === "BUSINESS_INITIATED" || directionRaw === "USER_INITIATED"
