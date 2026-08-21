@@ -313,8 +313,6 @@ export async function repairWhatsappCallConsentFromMessages(
       channel: true,
       whatsappCallConsentStatus: true,
       whatsappCallConsentUpdatedAt: true,
-      whatsappCallConsentType: true,
-      whatsappCallConsentExpiresAt: true,
     },
   });
   if (!conv || conv.channel !== "whatsapp") return false;
@@ -322,9 +320,9 @@ export async function repairWhatsappCallConsentFromMessages(
   if (
     isEffectiveGrant(
       conv.whatsappCallConsentStatus,
-      conv.whatsappCallConsentType,
+      null,
       conv.whatsappCallConsentUpdatedAt,
-      conv.whatsappCallConsentExpiresAt,
+      null,
     )
   ) {
     return false;
@@ -369,6 +367,55 @@ export async function repairWhatsappCallConsentFromMessages(
 
   await applyGrant(conversationId, type, {
     grantedAt: msg.createdAt,
+    fireAutomation: false,
+  });
+  return true;
+}
+
+/**
+ * Garante GRANTED neste ticket antes de `POST .../whatsapp-calls` initiate.
+ * O chip do header pode ficar verde pela timeline enquanto a coluna deste
+ * ticket ainda está REQUESTED (reenvio de template, cópia só no GET de
+ * calling-context). Sem isto a Meta nem é chamada: 403 local.
+ */
+export async function ensureWhatsappCallConsentForOutbound(
+  conversationId: string,
+): Promise<boolean> {
+  try {
+    await repairWhatsappCallConsentFromMessages(conversationId);
+  } catch (err) {
+    console.warn(
+      "[whatsapp-call-consent] repair on initiate:",
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  const conv = await prisma.conversation.findUnique({
+    where: { id: conversationId },
+    select: {
+      contactId: true,
+      channel: true,
+      whatsappCallConsentStatus: true,
+    },
+  });
+  if (!conv || conv.channel !== "whatsapp") return false;
+  if (conv.whatsappCallConsentStatus === "GRANTED") return true;
+
+  if (!conv.contactId) return false;
+  const sibling = await prisma.conversation.findFirst({
+    where: {
+      contactId: conv.contactId,
+      channel: "whatsapp",
+      whatsappCallConsentStatus: "GRANTED",
+      id: { not: conversationId },
+    },
+    orderBy: { whatsappCallConsentUpdatedAt: "desc" },
+    select: { whatsappCallConsentUpdatedAt: true },
+  });
+  if (!sibling) return false;
+
+  await applyGrant(conversationId, "TEMPORARY", {
+    grantedAt: sibling.whatsappCallConsentUpdatedAt ?? new Date(),
     fireAutomation: false,
   });
   return true;
