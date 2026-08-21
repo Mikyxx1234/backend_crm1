@@ -46,6 +46,44 @@ export function formatCallHm(d: Date, timeZone = DEFAULT_TZ): string {
   }).format(d);
 }
 
+function asObj(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : {};
+}
+
+function asStr(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+/** SDP no webhook `calls` — `session` (oficial) ou `connection.webrtc` (variante Meta). */
+export function extractWhatsappCallSdpSession(
+  callObj: Record<string, unknown>,
+): { sdp_type: string; sdp: string } | null {
+  const sess = asObj(callObj.session);
+  let sdpType = asStr(sess.sdp_type);
+  let sdp = asStr(sess.sdp);
+  if (!sdp) {
+    const webrtc = asObj(asObj(callObj.connection).webrtc);
+    sdp = asStr(webrtc.sdp);
+    if (sdp && !sdpType) sdpType = "answer";
+  }
+  if (!sdp || !sdpType) return null;
+  return { sdp_type: sdpType, sdp };
+}
+
+/** Lê o SDP guardado em `WhatsappCallEvent.errorsJson`. */
+export function sessionFromCallEventErrorsJson(
+  raw: unknown,
+): { sdp_type: string; sdp: string } | null {
+  const o = asObj(raw);
+  const sess = asObj(o.session);
+  const sdpType = asStr(sess.sdp_type);
+  const sdp = asStr(sess.sdp);
+  if (!sdpType || !sdp) return null;
+  return { sdp_type: sdpType, sdp };
+}
+
 export function extractRecordingUrl(callObj: Record<string, unknown>): string | null {
   const top = typeof callObj.recording_url === "string" ? callObj.recording_url.trim() : "";
   if (/^https?:\/\//i.test(top)) return top;

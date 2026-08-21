@@ -7,7 +7,14 @@ import {
   metaClientFromConfig,
   type WhatsAppCallSession,
 } from "@/lib/meta-whatsapp/client";
-import { buildCallBizOpaquePayload } from "@/lib/whatsapp-call-chat";
+import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { sseBus } from "@/lib/sse-bus";
+import {
+  buildCallBizOpaquePayload,
+  buildConnectChatLine,
+  buildTerminateChatLine,
+  sessionFromCallEventErrorsJson,
+} from "@/lib/whatsapp-call-chat";
 import { prisma } from "@/lib/prisma";
 import { ensureWhatsappCallConsentForOutbound } from "@/services/whatsapp-call-consent-webhook";
 
@@ -45,12 +52,62 @@ function parseSession(raw: unknown): WhatsAppCallSession | null {
   return { sdp_type, sdp };
 }
 
+function channelPhoneNumberId(config: unknown): string {
+  const c = obj(config);
+  return str(c.phoneNumberId) || str(c.phone_number_id);
+}
+
+async function persistOutboundCallChatLine(params: {
+  conversationId: string;
+  organizationId: string;
+  contactId: string;
+  callId: string;
+  event: "connect" | "terminate";
+  agentName: string;
+  content: string;
+}): Promise<void> {
+  const dedupeKey = `call_evt:${params.callId}:${params.event}`;
+  const already = await prisma.message.findFirst({
+    where: { conversationId: params.conversationId, externalId: dedupeKey },
+    select: { id: true },
+  });
+  if (already) return;
+  const senderName = params.agentName.trim()
+    ? `WhatsApp · ${params.agentName.trim()}`
+    : "WhatsApp";
+  await prisma.message.create({
+    data: withOrgFromCtx({
+      conversationId: params.conversationId,
+      content: params.content,
+      direction: "out",
+      messageType: "whatsapp_call",
+      senderName,
+      externalId: dedupeKey,
+      sendStatus: "delivered",
+    }),
+  });
+  await prisma.conversation
+    .update({
+      where: { id: params.conversationId },
+      data: { updatedAt: new Date(), lastMessageDirection: "out" },
+    })
+    .catch(() => {});
+  sseBus.publish("new_message", {
+    organizationId: params.organizationId,
+    conversationId: params.conversationId,
+    contactId: params.contactId,
+    direction: "out",
+    content: params.content,
+    timestamp: new Date(),
+  });
+}
+
 /**
  * GET: histórico de eventos de chamada (webhook Calling API).
  * POST: proxy para Graph `POST /{phone-number-id}/calls` (WebRTC SDP).
  * @see https://developers.facebook.com/docs/whatsapp/cloud-api/calling/reference
  */
-export async function GET(_request: Request, context: RouteContext) {
+export async function GET(request: Request, context: RouteContext) {
   return withOrgContext(async (session) => {
     try {
       const { id } = await context.params;
@@ -67,6 +124,8 @@ export async function GET(_request: Request, context: RouteContext) {
     if (conv.channel !== "whatsapp") {
       return NextResponse.json({ message: "Chamadas WhatsApp só se aplicam a conversas WhatsApp." }, { status: 400 });
     }
+
+    const answerFor = new URL(request.url).searchParams.get("answerFor")?.trim() || "";
 
     const items = await prisma.whatsappCallEvent.findMany({
       where: { conversationId: id },
@@ -86,7 +145,26 @@ export async function GET(_request: Request, context: RouteContext) {
       },
     });
 
-    return NextResponse.json({ items });
+    if (!answerFor) {
+      return NextResponse.json({ items });
+    }
+
+    const sdpRows = await prisma.whatsappCallEvent.findMany({
+      where: { metaCallId: answerFor },
+      orderBy: { createdAt: "desc" },
+      take: 8,
+      select: { errorsJson: true, eventKind: true },
+    });
+    let pendingAnswer: { sdp_type: string; sdp: string } | null = null;
+    for (const row of sdpRows) {
+      const sess = sessionFromCallEventErrorsJson(row.errorsJson);
+      if (sess && sess.sdp_type.toLowerCase() === "answer") {
+        pendingAnswer = sess;
+        break;
+      }
+    }
+
+    return NextResponse.json({ items, pendingAnswer });
     } catch (e) {
       console.error(e);
       return NextResponse.json({ message: "Erro ao listar chamadas." }, { status: 500 });
@@ -105,6 +183,7 @@ export async function POST(request: Request, context: RouteContext) {
       where: { id },
       select: {
         id: true,
+        organizationId: true,
         contactId: true,
         channel: true,
         whatsappCallConsentStatus: true,
@@ -206,6 +285,41 @@ export async function POST(request: Request, context: RouteContext) {
       const bizOpaque = buildCallBizOpaquePayload(uid, display);
       try {
         const result = await metaClient.initiateVoiceCall(toDigits, sessionSdp, bizOpaque);
+        const callId = result.calls?.[0]?.id?.trim() || "";
+        if (callId) {
+          try {
+            const now = new Date();
+            const phoneNumberId = channelPhoneNumberId(conv.channelRef?.config);
+            await prisma.whatsappCallEvent.create({
+              data: withOrgFromCtx({
+                metaCallId: callId,
+                phoneNumberId: phoneNumberId || "unknown",
+                direction: "BUSINESS_INITIATED",
+                eventKind: "signaling",
+                signalingStatus: "INITIATED",
+                toWa: toDigits,
+                conversationId: conv.id,
+                contactId: conv.contactId,
+                bizOpaque,
+              }),
+            });
+            await persistOutboundCallChatLine({
+              conversationId: conv.id,
+              organizationId: conv.organizationId,
+              contactId: conv.contactId,
+              callId,
+              event: "connect",
+              agentName: display,
+              content: buildConnectChatLine({
+                direction: "BUSINESS_INITIATED",
+                eventTime: now,
+                agentName: display,
+              }),
+            });
+          } catch (e) {
+            console.warn("[whatsapp-calls] persist initiate:", e);
+          }
+        }
         return NextResponse.json(result);
       } catch (err) {
         const raw = err instanceof Error ? err.message : String(err);
@@ -229,6 +343,26 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (action === "terminate") {
       const result = await metaClient.terminateCall(callId);
+      const display =
+        typeof session.user.name === "string" && session.user.name.trim()
+          ? session.user.name.trim()
+          : (session.user.email ?? "Agente");
+      await persistOutboundCallChatLine({
+        conversationId: conv.id,
+        organizationId: conv.organizationId,
+        contactId: conv.contactId,
+        callId,
+        event: "terminate",
+        agentName: display,
+        content: buildTerminateChatLine({
+          terminateStatus: "COMPLETED",
+          durationSec: null,
+          startDate: null,
+          endDate: new Date(),
+        }),
+      }).catch((e) => {
+        console.warn("[whatsapp-calls] chat line terminate:", e);
+      });
       return NextResponse.json(result);
     }
 
