@@ -4,6 +4,13 @@ import { writeFile, readFile, unlink, mkdir } from "fs/promises";
 import os from "os";
 import path from "path";
 
+import { isOggOpus, repacketizeOggOpusToCode3 } from "@/lib/ogg-opus-ptt";
+
+/** MIME oficial da Meta para OGG/Opus. `audio/ogg` sem codecs é rejeitado (131053). */
+export const WHATSAPP_VOICE_MIME = "audio/ogg; codecs=opus";
+/** Limite Cloud API para áudio. */
+export const WHATSAPP_AUDIO_MAX_BYTES = 16 * 1024 * 1024;
+
 function resolveFFmpeg(): string {
   // Preferimos o ffmpeg DO SISTEMA (apt-get install ffmpeg) ao binário do
   // `ffmpeg-static`. Motivo: o pacote npm baixa um build minimalista que
@@ -49,31 +56,31 @@ export function isValidOgg(buf: Buffer): boolean {
 }
 
 /**
- * Só libopus. O encoder opus experimental e o remux (codec copy) geram
- * OggS válido que a Meta aceita, mas o WhatsApp iOS recusa com
- * "Este áudio não está mais disponível" ou "atualize o WhatsApp".
+ * Voice message Meta: OGG + OPUS, mono. 16 kHz / 20 ms / voip replica o PTT nativo.
+ * 48 kHz e remux/experimental opus o iOS recusa.
  */
-function getConversionStrategies(_inputExt: string): { label: string; args: string[] }[] {
+function getConversionStrategies(): { label: string; args: string[] }[] {
   return [
     {
-      label: "transcode libopus 16k voip",
+      label: "libopus 16k voip 20ms",
       args: [
         "-c:a", "libopus",
         "-ac", "1",
         "-ar", "16000",
         "-b:a", "24k",
         "-application", "voip",
+        "-frame_duration", "20",
         "-map_metadata", "-1",
         "-f", "ogg",
       ],
     },
     {
-      label: "transcode libopus 48k voip",
+      label: "libopus 16k voip",
       args: [
         "-c:a", "libopus",
         "-ac", "1",
-        "-ar", "48000",
-        "-b:a", "32k",
+        "-ar", "16000",
+        "-b:a", "24k",
         "-application", "voip",
         "-map_metadata", "-1",
         "-f", "ogg",
@@ -115,7 +122,7 @@ export async function convertToOgg(
     await writeFile(inputPath, inputBuffer);
 
     const bin = getFFmpeg();
-    const strategies = getConversionStrategies(inputExt);
+    const strategies = getConversionStrategies();
 
     for (const strategy of strategies) {
       const fullArgs = ["-i", inputPath, "-vn", ...strategy.args, "-y", outputPath];
@@ -136,7 +143,7 @@ export async function convertToOgg(
 
       const result = await readFile(outputPath);
 
-      if (!isValidOgg(result)) {
+      if (!isOggOpus(result)) {
         console.warn(`[ffmpeg] Estrategia "${strategy.label}" gerou arquivo invalido (${result.length} bytes, magic: ${result.subarray(0, 4).toString("hex")})`);
         await unlink(outputPath).catch(() => {});
         continue;
@@ -313,14 +320,15 @@ function withAudioExt(name: string, ext: string): string {
 }
 
 /**
- * Áudio de saída para a Cloud API — sempre `type=audio`, nunca document.
+ * Áudio de saída WhatsApp (Cloud API e Baileys) — mensagem de voz, nunca document.
  *
- * Formatos oficiais Meta (Cloud API):
- *   audio/aac | audio/mp4 | audio/mpeg | audio/amr | audio/ogg (somente Opus)
- * WebM/browser NÃO entra nessa lista — converter sempre, nunca reenviar o blob.
- *
- * Primário: AAC/M4A (`audio/mp4`, voice=false) — toca no WhatsApp Android e iOS.
- * Depois MP3 (`audio/mpeg`). OGG/Opus só no fim, com `codecs=opus` e voice=true.
+ * Meta (audio-messages):
+ *   - Voice: .ogg OPUS, mono, `voice: true`. Outro codec/container falha transcrição.
+ *   - MIME: `audio/ogg; codecs=opus` (base `audio/ogg` não é suportado).
+ *   - Extensão .ogg tem que bater com o MIME.
+ *   - Máx. 16 MB. Ícone de play só até 512 KB.
+ * WebM do browser não está na lista — sempre reencodar com libopus.
+ * Sem fallback AAC/MP3: isso vira "basic audio" (arquivo AUD-… + fone).
  */
 export async function prepareWhatsAppAudio(
   inputBuffer: Buffer,
@@ -329,37 +337,27 @@ export async function prepareWhatsAppAudio(
 ): Promise<WhatsAppAudioPayload | null> {
   const ext = guessInputExtFromBuffer(inputBuffer, mimeFromExtension(inputExt) || `audio/${inputExt}`);
 
-  const m4a = await convertToM4a(inputBuffer, ext);
-  if (m4a && m4a.length > 0) {
-    return {
-      buffer: m4a,
-      mime: "audio/mp4",
-      fileName: withAudioExt(originalName, "m4a"),
-      voice: false,
-    };
-  }
-
-  const mp3 = await convertToMp3(inputBuffer, ext);
-  if (mp3 && mp3.length > 0) {
-    return {
-      buffer: mp3,
-      mime: "audio/mpeg",
-      fileName: withAudioExt(originalName, "mp3"),
-      voice: false,
-    };
-  }
-
   const ogg = await convertToOgg(inputBuffer, ext);
-  if (ogg && isValidOgg(ogg)) {
-    return {
-      buffer: ogg,
-      mime: "audio/ogg; codecs=opus",
-      fileName: withAudioExt(originalName, "ogg"),
-      voice: true,
-    };
-  }
+  if (!ogg || !isOggOpus(ogg)) return null;
 
-  return null;
+  let packed: Buffer;
+  try {
+    packed = repacketizeOggOpusToCode3(ogg);
+  } catch (err) {
+    console.warn(
+      "[audio-convert] repacketize code-3 falhou, enviando libopus original:",
+      err instanceof Error ? err.message : err,
+    );
+    packed = ogg;
+  }
+  if (!isOggOpus(packed) || packed.length > WHATSAPP_AUDIO_MAX_BYTES) return null;
+
+  return {
+    buffer: packed,
+    mime: WHATSAPP_VOICE_MIME,
+    fileName: withAudioExt(originalName, "ogg"),
+    voice: true,
+  };
 }
 
 /**
@@ -465,4 +463,14 @@ export function mimeFromExtension(ext: string): string | null {
     default:
       return null;
   }
+}
+
+/** Meta rejeita `audio/ogg` e `audio/opus`. Upload de voz exige codecs=opus. */
+export function whatsappUploadAudioMime(mimeType: string, fileName: string): string {
+  const base = mimeType.split(";")[0].trim().toLowerCase();
+  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+  if (base === "audio/ogg" || base === "audio/opus" || ext === "ogg" || ext === "opus") {
+    return WHATSAPP_VOICE_MIME;
+  }
+  return mimeType;
 }

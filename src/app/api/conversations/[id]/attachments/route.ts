@@ -212,7 +212,7 @@ export async function POST(request: Request, context: RouteContext) {
           return NextResponse.json(
             {
               message:
-                "Não foi possível converter o áudio para um formato aceito pela Meta (AAC/MP4, MP3 ou OGG/Opus). O WebM do navegador não é enviado.",
+                "Não foi possível converter o áudio para OGG/Opus (formato obrigatório da Meta para mensagem de voz). Verifique se o FFmpeg com libopus está instalado.",
               code: "AUDIO_CONVERT_FAILED",
             },
             { status: 422 },
@@ -222,7 +222,7 @@ export async function POST(request: Request, context: RouteContext) {
         uploadMime = prepared.mime;
         uploadName = prepared.fileName;
         sendAsVoice = prepared.voice;
-        storeExt = prepared.fileName.split(".").pop() || "m4a";
+        storeExt = prepared.fileName.split(".").pop() || "ogg";
         console.log(
           `[meta-attach] Conversao OK, ${buffer.length} -> ${storeBuffer.length} bytes | mime=${uploadMime} | voice=${sendAsVoice}`,
         );
@@ -249,13 +249,14 @@ export async function POST(request: Request, context: RouteContext) {
       let externalId: string | null = null;
 
       if (useBaileys) {
+        const baileysType = sendAsVoice ? "ptt" : mediaType;
         const msgRow = await prisma.message.create({
           data: withOrgFromCtx({
             conversationId: conv.id,
             channelId: outboundChannelId ?? undefined,
             content: caption || `📎 ${fileName}`,
             direction: "out",
-            messageType: mediaType,
+            messageType: baileysType,
             senderName,
             mediaUrl: publicUrl,
           }),
@@ -266,7 +267,7 @@ export async function POST(request: Request, context: RouteContext) {
           channelRef: outboundChannelRef,
           messageId: msgRow.id,
           mediaUrl: publicUrl,
-          messageType: mediaType,
+          messageType: baileysType,
           caption: caption || undefined,
           waJid: conv.waJid,
         });
@@ -315,7 +316,7 @@ export async function POST(request: Request, context: RouteContext) {
             content: caption || `📎 ${fileName}`,
             createdAt: msgRow.createdAt.toISOString(),
             direction: "out",
-            messageType: mediaType,
+            messageType: baileysType,
             senderName,
             mediaUrl: publicUrl,
             sendStatus: metaSendError ? "failed" : "sent",
@@ -376,6 +377,7 @@ export async function POST(request: Request, context: RouteContext) {
       void metaWhatsApp;
 
       const isAudioFile = mediaType === "audio";
+      const storedType = sendAsVoice ? "ptt" : mediaType;
       const displayContent = caption || (isAudioFile ? "" : `📎 ${fileName}`);
 
       await prisma.message.create({
@@ -384,7 +386,7 @@ export async function POST(request: Request, context: RouteContext) {
           channelId: outboundChannelId ?? undefined,
           content: displayContent,
           direction: "out",
-          messageType: mediaType,
+          messageType: storedType,
           senderName,
           mediaUrl: publicUrl,
           ...(externalId ? { externalId } : {}),
@@ -437,7 +439,7 @@ export async function POST(request: Request, context: RouteContext) {
           content: displayContent,
           createdAt: new Date().toISOString(),
           direction: "out",
-          messageType: mediaType,
+          messageType: storedType,
           senderName,
           mediaUrl: publicUrl,
         },

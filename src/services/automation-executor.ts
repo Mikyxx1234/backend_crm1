@@ -2954,17 +2954,40 @@ async function executeStep(
           }
 
           const fName = filename || resolvedFileName;
-          const metaMediaId = await mediaMetaClient.uploadMedia(buffer, mimeType, fName);
           const mType = mediaType as "image" | "audio" | "video" | "document";
+          let uploadBuffer = buffer;
+          let uploadMime = mimeType;
+          let uploadName = fName;
+          let sendAsVoice = false;
+
+          if (mType === "audio") {
+            const { prepareWhatsAppAudio, guessInputExt } = await import("@/lib/audio-convert");
+            const prepared = await prepareWhatsAppAudio(
+              buffer,
+              guessInputExt(mimeType),
+              fName,
+            );
+            if (!prepared) {
+              throw new MetaSendFailureError(
+                "send_whatsapp_media: falha ao converter áudio para OGG/Opus (mensagem de voz da Meta).",
+              );
+            }
+            uploadBuffer = prepared.buffer;
+            uploadMime = prepared.mime;
+            uploadName = prepared.fileName;
+            sendAsVoice = prepared.voice;
+          }
+
+          const metaMediaId = await mediaMetaClient.uploadMedia(uploadBuffer, uploadMime, uploadName);
           // filename só para document — image/video/audio a Meta rejeita (#100).
-          const sendFileName = mType === "document" ? fName : undefined;
+          const sendFileName = mType === "document" ? uploadName : undefined;
           sendResult = await mediaMetaClient.sendMediaById(
             to,
             metaMediaId,
             mType,
             caption || undefined,
             sendFileName,
-            false,
+            sendAsVoice,
             recipient,
           );
           displayContent = caption || fName || `[${mediaType}]`;

@@ -79,9 +79,15 @@ export function startOutboundConsumer(
             waContent = { video: mediaPayload, caption: content || undefined };
             break;
           case "audio":
-          case "ptt":
-            waContent = { audio: mediaPayload, mimetype: "audio/ogg; codecs=opus", ptt: true };
+          case "ptt": {
+            const isPtt = messageType === "ptt" || ext === "ogg" || ext === "opus";
+            waContent = {
+              audio: mediaPayload,
+              mimetype: isPtt ? "audio/ogg; codecs=opus" : (detectedMime.startsWith("audio/") ? detectedMime : "audio/mpeg"),
+              ptt: isPtt,
+            };
             break;
+          }
           case "sticker":
             waContent = { sticker: mediaPayload };
             break;
