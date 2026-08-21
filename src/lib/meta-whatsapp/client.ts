@@ -269,11 +269,15 @@ export class MetaWhatsAppClient {
     return out;
   }
 
-  private async graphFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  private async graphFetch<T>(
+    path: string,
+    init: RequestInit & { maxAttempts?: number } = {},
+  ): Promise<T> {
+    const { maxAttempts = GRAPH_TRANSIENT_MAX_ATTEMPTS, ...fetchInit } = init;
     let lastErr: unknown;
-    for (let attempt = 1; attempt <= GRAPH_TRANSIENT_MAX_ATTEMPTS; attempt++) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        return await this.graphFetchOnce<T>(path, init);
+        return await this.graphFetchOnce<T>(path, fetchInit);
       } catch (err) {
         lastErr = err;
         const transient =
@@ -281,12 +285,12 @@ export class MetaWhatsAppClient {
           (isMetaTransientServiceCode(err.code) ||
             err.httpStatus === 502 ||
             err.httpStatus === 503);
-        if (!transient || attempt >= GRAPH_TRANSIENT_MAX_ATTEMPTS) {
+        if (!transient || attempt >= maxAttempts) {
           throw err;
         }
         const delay = GRAPH_TRANSIENT_BACKOFF_MS * attempt;
         console.warn(
-          `[MetaWA] transient code=${isMetaGraphError(err) ? err.code : "?"} http=${isMetaGraphError(err) ? err.httpStatus : "?"} — retry ${attempt}/${GRAPH_TRANSIENT_MAX_ATTEMPTS - 1} em ${delay}ms (${path})`,
+          `[MetaWA] transient code=${isMetaGraphError(err) ? err.code : "?"} http=${isMetaGraphError(err) ? err.httpStatus : "?"} — retry ${attempt}/${maxAttempts - 1} em ${delay}ms (${path})`,
         );
         await sleep(delay);
       }
@@ -797,6 +801,7 @@ export class MetaWhatsAppClient {
     languageCode: string = "pt_BR",
     components?: unknown[],
     recipient?: string,
+    options?: { maxAttempts?: number; timeoutMs?: number },
   ): Promise<{ messages: Array<{ id: string }> }> {
     const dest = MetaWhatsAppClient.recipientFields(to, recipient);
     const payload = {
@@ -813,6 +818,10 @@ export class MetaWhatsAppClient {
     return this.graphFetch(`${this.phoneNumberId}/messages`, {
       method: "POST",
       body: JSON.stringify(payload),
+      ...(options?.maxAttempts != null ? { maxAttempts: options.maxAttempts } : {}),
+      ...(options?.timeoutMs != null
+        ? { signal: AbortSignal.timeout(options.timeoutMs) }
+        : {}),
     });
   }
 

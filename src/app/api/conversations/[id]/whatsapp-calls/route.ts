@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 
-import { auth } from "@/lib/auth";
+import { withOrgContext } from "@/lib/auth-helpers";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { mapMetaWhatsappCallGraphError } from "@/lib/meta-whatsapp-call-errors";
 import {
@@ -50,15 +50,11 @@ function parseSession(raw: unknown): WhatsAppCallSession | null {
  * @see https://developers.facebook.com/docs/whatsapp/cloud-api/calling/reference
  */
 export async function GET(_request: Request, context: RouteContext) {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
-
-    const { id } = await context.params;
-    const denied = await requireConversationAccess(session, id);
-    if (denied) return denied;
+  return withOrgContext(async (session) => {
+    try {
+      const { id } = await context.params;
+      const denied = await requireConversationAccess(session, id);
+      if (denied) return denied;
 
     const conv = await prisma.conversation.findUnique({
       where: { id },
@@ -90,22 +86,19 @@ export async function GET(_request: Request, context: RouteContext) {
     });
 
     return NextResponse.json({ items });
-  } catch (e) {
-    console.error(e);
-    return NextResponse.json({ message: "Erro ao listar chamadas." }, { status: 500 });
-  }
+    } catch (e) {
+      console.error(e);
+      return NextResponse.json({ message: "Erro ao listar chamadas." }, { status: 500 });
+    }
+  });
 }
 
 export async function POST(request: Request, context: RouteContext) {
-  try {
-    const session = await auth();
-    if (!session?.user) {
-      return NextResponse.json({ message: "Não autorizado." }, { status: 401 });
-    }
-
-    const { id } = await context.params;
-    const denied = await requireConversationAccess(session, id);
-    if (denied) return denied;
+  return withOrgContext(async (session) => {
+    try {
+      const { id } = await context.params;
+      const denied = await requireConversationAccess(session, id);
+      if (denied) return denied;
 
     const conv = await prisma.conversation.findUnique({
       where: { id },
@@ -255,9 +248,10 @@ export async function POST(request: Request, context: RouteContext) {
     const bizOpaque = str(b.biz_opaque_callback_data) || undefined;
     const result = await metaClient.acceptCall(callId, sessionSdp, bizOpaque);
     return NextResponse.json(result);
-  } catch (e) {
-    console.error(e);
-    const msg = e instanceof Error ? e.message : "Erro na chamada WhatsApp.";
-    return NextResponse.json({ message: msg }, { status: 500 });
-  }
+    } catch (e) {
+      console.error(e);
+      const msg = e instanceof Error ? e.message : "Erro na chamada WhatsApp.";
+      return NextResponse.json({ message: msg }, { status: 500 });
+    }
+  });
 }

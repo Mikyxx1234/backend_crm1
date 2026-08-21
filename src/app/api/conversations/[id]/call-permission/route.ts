@@ -34,6 +34,30 @@ function previewFromBody(b: Record<string, unknown>): {
   return { bodyText, headerText, footerText, buttons };
 }
 
+function fillPlaceholders(text: string, name: string): string {
+  const n = name.trim();
+  if (!n) return text;
+  return text.replace(/\{\{\s*\d+\s*\}\}/g, n);
+}
+
+/** Templates CALL_PERMISSION com `{{1}}` exigem body.parameters no Graph. */
+function bodyComponentsFromTemplate(
+  bodyText: string,
+  contactName: string,
+): unknown[] | undefined {
+  const idxs = [...bodyText.matchAll(/\{\{\s*(\d+)\s*\}\}/g)].map((m) => Number(m[1]));
+  if (idxs.length === 0) return undefined;
+  const max = Math.max(...idxs.filter((n) => Number.isFinite(n) && n > 0));
+  if (!Number.isFinite(max) || max < 1) return undefined;
+  const name = contactName.trim() || "cliente";
+  return [
+    {
+      type: "body",
+      parameters: Array.from({ length: max }, () => ({ type: "text", text: name })),
+    },
+  ];
+}
+
 type RouteContext = { params: Promise<{ id: string }> };
 
 const VALID_PATCH = new Set<string>(Object.values(WhatsappCallConsentStatus));
@@ -80,7 +104,7 @@ export async function POST(request: Request, context: RouteContext) {
       const conv = await prisma.conversation.findUnique({
         where: { id },
         include: {
-          contact: { select: { phone: true, whatsappBsuid: true } },
+          contact: { select: { phone: true, whatsappBsuid: true, name: true } },
           // Resolver cliente Meta correto pelo canal da conversa (per-tenant).
           channelRef: { select: { id: true, config: true } },
         },
@@ -127,7 +151,16 @@ export async function POST(request: Request, context: RouteContext) {
       // Templates CALL_PERMISSIONS_REQUEST não usam WhatsApp Flow. Relistar
       // `message_templates` (preview + enrich) no POST estoura o timeout do
       // EasyPanel e o browser recebe 502 HTML em vez do JSON da API.
-      const preview = previewFromBody(b);
+      const contactName = conv.contact?.name?.trim() ?? "";
+      const previewRaw = previewFromBody(b);
+      const preview = previewRaw
+        ? {
+            bodyText: fillPlaceholders(previewRaw.bodyText, contactName),
+            headerText: fillPlaceholders(previewRaw.headerText, contactName),
+            footerText: fillPlaceholders(previewRaw.footerText, contactName),
+            buttons: previewRaw.buttons,
+          }
+        : null;
       const content = buildOutboundTemplateMessageContent(
         templateName,
         "call_permission",
@@ -149,8 +182,10 @@ export async function POST(request: Request, context: RouteContext) {
           to,
           templateName,
           languageCode,
-          undefined,
+          bodyComponentsFromTemplate(previewRaw?.bodyText ?? "", contactName),
           recipient,
+          // Uma tentativa curta: 3×20s estoura o Traefik e o browser vê 502 HTML.
+          { maxAttempts: 1, timeoutMs: 12_000 },
         );
         externalId = result.messages?.[0]?.id ?? null;
       } catch (e: unknown) {
