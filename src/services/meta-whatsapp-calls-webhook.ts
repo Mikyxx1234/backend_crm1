@@ -10,6 +10,7 @@ import {
   buildConversationTimelineCallRecordingContent,
   buildTerminateChatLine,
   extractRecordingUrl,
+  extractWhatsappCallSdpSession,
   parseCallBizOpaque,
 } from "@/lib/whatsapp-call-chat";
 
@@ -36,8 +37,68 @@ export type CallWebhookDeps = {
     profileName: string | null,
     phoneNumberId?: string,
   ) => Promise<CallWebhookContact>;
-  findOrCreateConversation: (contactId: string) => Promise<{ id: string }>;
+  findOrCreateConversation: (
+    contactId: string,
+    phoneNumberId?: string,
+  ) => Promise<{ id: string; organizationId?: string }>;
 };
+
+type ResolvedCallConv = {
+  conv: { id: string; organizationId: string | null };
+  contact: CallWebhookContact;
+};
+
+async function resolveCallTicket(
+  callId: string,
+  customerWa: string,
+  customerBsuid: string,
+  profileName: string | null,
+  phoneNumberId: string,
+  deps: CallWebhookDeps,
+): Promise<ResolvedCallConv | null> {
+  const prior = await prisma.whatsappCallEvent.findFirst({
+    where: { metaCallId: callId, conversationId: { not: null } },
+    orderBy: { createdAt: "asc" },
+    select: { conversationId: true, contactId: true },
+  });
+  if (prior?.conversationId) {
+    const row = await prisma.conversation.findUnique({
+      where: { id: prior.conversationId },
+      select: { id: true, organizationId: true, contactId: true },
+    });
+    if (row) {
+      return {
+        conv: { id: row.id, organizationId: row.organizationId },
+        contact: {
+          id: prior.contactId || row.contactId,
+          name: profileName || "",
+          phone: customerWa || null,
+        },
+      };
+    }
+  }
+
+  try {
+    const contact = await deps.resolveWebhookContact(
+      customerWa || undefined,
+      customerBsuid || undefined,
+      profileName,
+      phoneNumberId,
+    );
+    const conv = await deps.findOrCreateConversation(contact.id, phoneNumberId);
+    return {
+      conv: { id: conv.id, organizationId: conv.organizationId ?? getOrgIdOrNull() },
+      contact,
+    };
+  } catch (e) {
+    console.warn("[meta-webhook] call webhook sem contato resolvível:", e);
+    return null;
+  }
+}
+
+function sseOrgId(convOrgId: string | null | undefined): string | null {
+  return convOrgId || getOrgIdOrNull();
+}
 
 async function resolveBizOpaqueForCall(callId: string, incoming: string): Promise<string | null> {
   if (incoming) return incoming;
@@ -80,13 +141,18 @@ export async function processMetaWhatsappCallsWebhook(
     if (!callId || !sigStatus) continue;
 
     const profileName = profileNameFromContacts();
+    const contact0 = obj(contactsArr[0]);
+    const resolved = await resolveCallTicket(
+      callId,
+      recipient || str(contact0.wa_id),
+      str(contact0.user_id),
+      profileName,
+      phoneNumberId,
+      deps,
+    );
+    if (!resolved) continue;
+    const { conv, contact } = resolved;
     try {
-      const contact = await deps.resolveWebhookContact(
-        recipient || undefined,
-        undefined,
-        profileName
-      );
-      const conv = await deps.findOrCreateConversation(contact.id);
       await prisma.whatsappCallEvent.create({
         data: withOrgFromCtx({
           metaCallId: callId,
@@ -100,7 +166,7 @@ export async function processMetaWhatsappCallsWebhook(
         }),
       });
       sseBus.publish("whatsapp_call", {
-        organizationId: getOrgIdOrNull(),
+        organizationId: sseOrgId(conv.organizationId),
         conversationId: conv.id,
         contactId: contact.id,
         callId,
@@ -127,23 +193,26 @@ export async function processMetaWhatsappCallsWebhook(
 
     if (!callId || !event) continue;
 
+    const contact0 = obj(contactsArr[0]);
+    const waFromContacts = str(contact0.wa_id);
+    const bsuidFromContacts = str(contact0.user_id);
+    // BIC: `from` é o número da empresa — não usar como cliente.
     const customerWa =
-      direction === "USER_INITIATED" ? fromWa || toWa : toWa || fromWa;
+      direction === "USER_INITIATED"
+        ? fromWa || waFromContacts || toWa
+        : toWa || waFromContacts;
 
     const profileName = profileNameFromContacts();
-    let contact: CallWebhookContact;
-    try {
-      contact = await deps.resolveWebhookContact(
-        customerWa || undefined,
-        undefined,
-        profileName
-      );
-    } catch (e) {
-      console.warn("[meta-webhook] call webhook sem contato resolvível:", e);
-      continue;
-    }
-
-    const conv = await deps.findOrCreateConversation(contact.id);
+    const resolved = await resolveCallTicket(
+      callId,
+      customerWa,
+      bsuidFromContacts,
+      profileName,
+      phoneNumberId,
+      deps,
+    );
+    if (!resolved) continue;
+    const { conv, contact } = resolved;
 
     const terminateStatus = str(c.status);
     const durationRaw = c.duration;
@@ -161,12 +230,20 @@ export async function processMetaWhatsappCallsWebhook(
     const errorsPayload =
       callErrors.length > 0 ? callErrors : valueErrors.length > 0 ? valueErrors : undefined;
 
-    const sessRaw = c.session;
-    const sessObj = sessRaw && typeof sessRaw === "object" ? obj(sessRaw) : null;
-    const sdpType = sessObj ? str(sessObj.sdp_type) : "";
-    const sdpBody = sessObj ? str(sessObj.sdp) : "";
-    const sessionPayload =
-      sdpType && sdpBody ? ({ sdp_type: sdpType, sdp: sdpBody } as const) : undefined;
+    const sessionPayload = extractWhatsappCallSdpSession(c) ?? undefined;
+    const errorsJson: Prisma.InputJsonValue | undefined =
+      sessionPayload || errorsPayload
+        ? ({
+            ...(sessionPayload ? { session: sessionPayload } : {}),
+            ...(errorsPayload ? { errors: errorsPayload } : {}),
+          } as Prisma.InputJsonValue)
+        : undefined;
+
+    if (event === "connect") {
+      console.info(
+        `[meta-webhook] call connect id=${callId} dir=${direction || "?"} conv=${conv.id} sdp=${sessionPayload ? sessionPayload.sdp_type : "none"}`,
+      );
+    }
 
     await prisma.whatsappCallEvent.create({
       data: withOrgFromCtx({
@@ -181,7 +258,7 @@ export async function processMetaWhatsappCallsWebhook(
         startTime: startT ? new Date(Number(startT) * 1000) : null,
         endTime: endT ? new Date(Number(endT) * 1000) : null,
         bizOpaque: str(c.biz_opaque_callback_data) || null,
-        errorsJson: errorsPayload === undefined ? undefined : (errorsPayload as Prisma.InputJsonValue),
+        errorsJson,
         conversationId: conv.id,
         contactId: contact.id,
       }),
@@ -275,7 +352,7 @@ export async function processMetaWhatsappCallsWebhook(
       }
 
       sseBus.publish("new_message", {
-        organizationId: getOrgIdOrNull(),
+        organizationId: sseOrgId(conv.organizationId),
         conversationId: conv.id,
         contactId: contact.id,
         direction: callMessageDirection,
@@ -337,7 +414,7 @@ export async function processMetaWhatsappCallsWebhook(
             })
             .catch(() => {});
           sseBus.publish("new_message", {
-            organizationId: getOrgIdOrNull(),
+            organizationId: sseOrgId(conv.organizationId),
             conversationId: conv.id,
             contactId: contact.id,
             direction: callMessageDirection,
@@ -355,7 +432,7 @@ export async function processMetaWhatsappCallsWebhook(
     }
 
     sseBus.publish("whatsapp_call", {
-      organizationId: getOrgIdOrNull(),
+      organizationId: sseOrgId(conv.organizationId),
       conversationId: conv.id,
       contactId: contact.id,
       callId,

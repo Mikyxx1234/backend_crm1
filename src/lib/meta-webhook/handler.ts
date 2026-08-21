@@ -2230,6 +2230,12 @@ async function executePostBody(
     return NextResponse.json({ status: "ignored" });
   }
 
+  // Chamadas WebRTC: o SDP answer tem de chegar ao browser em segundos.
+  // Não esperar o worker-meta-webhook (fila Redis).
+  if (webhookPayloadHasCallsField(body)) {
+    return processMetaWebhookPayload(body, { metaWebhookEventId });
+  }
+
   // Offload: API só audita + enfileira; o worker-meta-webhook executa o
   // loop pesado. Sem isso, status de campanha (2-4 por mensagem) processam
   // síncrono no processo do inbox e derrubam GET /api/conversations.
@@ -2266,6 +2272,15 @@ async function executePostBody(
  * Extraído de `executePostBody` para reuso pelo `worker-meta-webhook`.
  * Deve rodar dentro de `withSystemContext(organizationId)`.
  */
+function webhookPayloadHasCallsField(body: Record<string, unknown>): boolean {
+  for (const entry of arr(body.entry)) {
+    for (const change of arr(obj(entry).changes)) {
+      if (str(obj(change).field) === "calls") return true;
+    }
+  }
+  return false;
+}
+
 export async function processMetaWebhookPayload(
   body: Record<string, unknown>,
   opts: { metaWebhookEventId: string | null },
