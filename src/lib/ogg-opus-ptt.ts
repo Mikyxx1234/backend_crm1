@@ -117,6 +117,73 @@ export function isOggOpus(buf: Buffer): boolean {
 }
 
 /**
+ * Canais declarados no `OpusHead`. Meta aceita só mono em nota de voz.
+ * Retorna `null` se o buffer não for Ogg/Opus legível.
+ */
+export function oggOpusChannels(buf: Buffer): number | null {
+  if (!isOggOpus(buf)) return null;
+  const head = buf.indexOf("OpusHead", 0, "ascii");
+  if (head < 0 || head + 19 > buf.length) return null;
+  return buf[head + 9] ?? null;
+}
+
+function buildOpusTags(): Buffer {
+  const vendor = Buffer.from("crm-ptt", "ascii");
+  const out = Buffer.alloc(8 + 4 + vendor.length + 4);
+  out.write("OpusTags", 0, "ascii");
+  out.writeUInt32LE(vendor.length, 8);
+  vendor.copy(out, 12);
+  out.writeUInt32LE(0, 12 + vendor.length);
+  return out;
+}
+
+/**
+ * Empacota pacotes Opus crus em um stream Ogg/Opus (RFC 7845).
+ *
+ * `opusHead` vem do `CodecPrivate` do WebM — copiado literalmente para
+ * preservar pre-skip, sample rate e mapeamento de canais do encoder original.
+ * Um pacote por página; a paginação final (agrupamento code-3) é
+ * responsabilidade de `repacketizeOggOpusToCode3`.
+ */
+export function muxOggOpus(opusHead: Buffer, packets: Buffer[], serial = 0x50_54_54_01): Buffer {
+  if (opusHead.length < 19 || opusHead.subarray(0, 8).toString("ascii") !== "OpusHead") {
+    throw new Error("OpusHead inválido");
+  }
+  if (!packets.length) throw new Error("stream Opus sem pacotes");
+
+  const preSkip = opusHead.readUInt16LE(10);
+  const pages: Buffer[] = [
+    buildOggPage(0x02, 0, serial, 0, opusHead),
+    buildOggPage(0x00, 0, serial, 1, buildOpusTags()),
+  ];
+
+  let granule = preSkip;
+  for (let i = 0; i < packets.length; i++) {
+    const packet = packets[i]!;
+    granule += opusPacketSamples48k(packet);
+    const last = i === packets.length - 1;
+    pages.push(buildOggPage(last ? 0x04 : 0x00, granule, serial, i + 2, packet));
+  }
+  return Buffer.concat(pages);
+}
+
+/** Samples a 48 kHz de um pacote Opus completo, respeitando o code do TOC. */
+function opusPacketSamples48k(packet: Buffer): number {
+  if (!packet.length) return 0;
+  const toc = packet[0]!;
+  const perFrame = opusFrameSamples48k(toc >> 3);
+  switch (toc & 0x03) {
+    case 0:
+      return perFrame;
+    case 1:
+    case 2:
+      return perFrame * 2;
+    default:
+      return perFrame * (packet.length > 1 ? packet[1]! & 0x3f : 1);
+  }
+}
+
+/**
  * Reagrupa frames code 0 em pacotes code 3 (padrão 3×20 ms).
  * Idempotente: devolve o input se já for code 3, não-OGG ou não-Opus.
  */
