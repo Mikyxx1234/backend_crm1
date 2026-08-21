@@ -14,8 +14,6 @@ import { WhatsappCallConsentStatus } from "@prisma/client";
 
 import type { InboxMessageDto } from "../messages/route";
 
-/** Tempo máximo que o HTTP espera a Meta — abaixo do corte do Traefik. */
-const HTTP_WAIT_MS = 2_000;
 /** No background a Graph pode demorar; o request já foi respondido. */
 const GRAPH_BG_TIMEOUT_MS = 15_000;
 
@@ -338,33 +336,16 @@ export async function POST(request: Request, context: RouteContext) {
         }),
       );
 
-      const outcome = await Promise.race([
-        pending.then((r) => ({ kind: "done" as const, r })),
-        new Promise<{ kind: "late" }>((resolve) =>
-          setTimeout(() => resolve({ kind: "late" }), HTTP_WAIT_MS),
-        ),
-      ]);
-
-      if (outcome.kind === "late") {
-        // Não aborta a Meta: o Traefik já pode cortar o HTTP. Continua no
-        // processo da API (não depende de worker) e o chat atualiza via SSE.
-        after(() =>
-          pending
-            .then((r) => {
-              if (!r.ok) console.error("[call-permission] bg fail", r.message);
-            })
-            .catch((e) => console.error("[call-permission] bg", e)),
-        );
-        return NextResponse.json({ pending: true }, { status: 202 });
-      }
-
-      if (!outcome.r.ok) {
-        return NextResponse.json({ message: outcome.r.message }, { status: 502 });
-      }
-      return NextResponse.json(
-        { message: outcome.r.dto, consentStatus: "REQUESTED" as const },
-        { status: 201 },
+      // Responde na hora. Esperar a Graph (mesmo 2s) estoura o Traefik do
+      // frontend e o browser vê 502 HTML. O chat atualiza por SSE.
+      after(() =>
+        pending
+          .then((r) => {
+            if (!r.ok) console.error("[call-permission] bg fail", r.message);
+          })
+          .catch((e) => console.error("[call-permission] bg", e)),
       );
+      return NextResponse.json({ pending: true }, { status: 202 });
     } catch (e: unknown) {
       console.error(e);
       const msg = e instanceof Error ? e.message : "Erro ao solicitar permissão de chamada.";
