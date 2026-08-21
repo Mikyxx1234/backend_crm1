@@ -18,6 +18,10 @@ import {
   type RechamadoMetrics,
 } from "./rechamado";
 import { getDistributionResponsibles } from "./responsibles";
+import {
+  getAcademicCockpitMetrics,
+  type AcademicCockpit,
+} from "@/services/ai/cockpit-academic";
 
 export interface CockpitAgent {
   userId: string;
@@ -67,6 +71,7 @@ export interface CockpitData {
    * Ver `rechamado.ts` — painel para calibração ao longo dos dias.
    */
   rechamado: RechamadoMetrics;
+  academic: AcademicCockpit;
   agents: CockpitAgent[];
   consultants: CockpitConsultant[];
 }
@@ -201,6 +206,11 @@ export async function getCockpitData(): Promise<CockpitData> {
     );
 
   const attendingNow = agents.reduce((s, a) => s + a.attendingNow, 0);
+  const academic = await getAcademicCockpitMetrics({
+    organizationId: orgId,
+    since,
+    attendingNow,
+  });
 
   return {
     generatedAt: new Date().toISOString(),
@@ -211,6 +221,7 @@ export async function getCockpitData(): Promise<CockpitData> {
       pendingQueue,
     },
     rechamado,
+    academic,
     agents,
     consultants,
   };
