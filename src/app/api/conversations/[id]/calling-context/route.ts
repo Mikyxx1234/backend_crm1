@@ -4,6 +4,7 @@ import { withOrgContext } from "@/lib/auth-helpers";
 import { getCallPermissionTemplateName } from "@/lib/call-permission-env";
 import { requireConversationAccess } from "@/lib/conversation-access";
 import { prisma } from "@/lib/prisma";
+import { classifyWhatsappCallEnd, wasWhatsappCallPickedUp } from "@/lib/whatsapp-call-chat";
 import { repairWhatsappCallConsentFromMessages } from "@/services/whatsapp-call-consent-webhook";
 
 /**
@@ -74,16 +75,26 @@ function suggestFromText(content: string | null | undefined): boolean {
 const STALE_CONNECT_MS = 30 * 60 * 1000;
 
 function computeActiveCallId(
-  events: { metaCallId: string; eventKind: string; createdAt: Date }[]
+  events: {
+    metaCallId: string;
+    eventKind: string;
+    signalingStatus?: string | null;
+    createdAt: Date;
+  }[],
 ): string | null {
   const asc = [...events].sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
   let active: string | null = null;
   let activeSince: number | null = null;
   for (const e of asc) {
-    if (e.eventKind === "connect") {
+    const sig = (e.signalingStatus ?? "").toUpperCase();
+    if (
+      e.eventKind === "connect" ||
+      (e.eventKind === "signaling" &&
+        (sig === "INITIATED" || sig === "RINGING" || sig === "ACCEPTED"))
+    ) {
       active = e.metaCallId;
       activeSince = e.createdAt.getTime();
-    } else if (e.eventKind === "terminate") {
+    } else if (e.eventKind === "terminate" || sig === "REJECTED") {
       active = null;
       activeSince = null;
     }
@@ -131,7 +142,6 @@ function buildCompactCallTimeline(events: CallEvRow[]): {
     const time = new Intl.DateTimeFormat("pt-BR", { hour: "2-digit", minute: "2-digit" }).format(t);
     let suffix = "";
     if (term) {
-      const st = term.terminateStatus ?? "";
       const ds = term.durationSec;
       const durShort =
         ds != null && ds > 0
@@ -139,9 +149,19 @@ function buildCompactCallTimeline(events: CallEvRow[]): {
             ? `${Math.floor(ds / 60)}m${String(ds % 60).padStart(2, "0")}s`
             : `${ds}s`
           : "";
-      if (st === "COMPLETED") suffix = durShort ? ` · ${durShort} · ok` : " · ok";
-      else if (st === "FAILED") suffix = " · falhou";
-      else suffix = durShort ? ` · ${durShort}` : " · fim";
+      const pickedUp = wasWhatsappCallPickedUp({
+        durationSec: ds,
+        signalingStatuses: ge.map((x) => x.signalingStatus),
+      });
+      const rejected = ge.some((x) => (x.signalingStatus ?? "").toUpperCase() === "REJECTED");
+      const outcome = classifyWhatsappCallEnd({
+        terminateStatus: term.terminateStatus ?? "",
+        pickedUp,
+        rejected,
+      });
+      if (outcome === "completed") suffix = durShort ? ` · ${durShort} · ok` : " · ok";
+      else if (outcome === "failed") suffix = " · falhou";
+      else suffix = " · não atendida";
     } else {
       suffix = " · ativa";
     }

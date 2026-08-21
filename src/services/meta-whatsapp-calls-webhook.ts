@@ -12,6 +12,7 @@ import {
   extractRecordingUrl,
   extractWhatsappCallSdpSession,
   parseCallBizOpaque,
+  wasWhatsappCallPickedUp,
 } from "@/lib/whatsapp-call-chat";
 
 function str(v: unknown): string {
@@ -134,7 +135,8 @@ export async function processMetaWhatsappCallsWebhook(
   const statuses = arr(value.statuses);
   for (const raw of statuses) {
     const st = obj(raw);
-    if (str(st.type) !== "call") continue;
+    const stType = str(st.type).toLowerCase();
+    if (stType && stType !== "call") continue;
     const callId = str(st.id);
     const sigStatus = str(st.status);
     const recipient = str(st.recipient_id);
@@ -172,6 +174,52 @@ export async function processMetaWhatsappCallsWebhook(
         callId,
         signalingStatus: sigStatus,
       });
+
+      // ACCEPTED = cliente atendeu. `connect` (SDP) chega antes, no toque.
+      if (sigStatus.toUpperCase() === "ACCEPTED") {
+        const opaqueJoined = await resolveBizOpaqueForCall(callId, "");
+        const { agentName } = parseCallBizOpaque(opaqueJoined ?? undefined);
+        const chatLine = buildConnectChatLine({
+          direction: "BUSINESS_INITIATED",
+          eventTime: new Date(Number(str(st.timestamp) || 0) * 1000 || Date.now()),
+          agentName,
+        });
+        const senderName = agentName?.trim()
+          ? `WhatsApp · ${agentName.trim()}`
+          : "WhatsApp";
+        const dedupeKey = `call_evt:${callId}:connect`;
+        const already = await prisma.message.findFirst({
+          where: { conversationId: conv.id, externalId: dedupeKey },
+          select: { id: true },
+        });
+        if (!already) {
+          await prisma.message.create({
+            data: withOrgFromCtx({
+              conversationId: conv.id,
+              content: chatLine,
+              direction: "out",
+              messageType: "whatsapp_call",
+              senderName,
+              externalId: dedupeKey,
+              sendStatus: "delivered",
+            }),
+          });
+          await prisma.conversation
+            .update({
+              where: { id: conv.id },
+              data: { updatedAt: new Date(), lastMessageDirection: "out" },
+            })
+            .catch(() => {});
+          sseBus.publish("new_message", {
+            organizationId: sseOrgId(conv.organizationId),
+            conversationId: conv.id,
+            contactId: contact.id,
+            direction: "out",
+            content: chatLine,
+            timestamp: new Date(),
+          });
+        }
+      }
     } catch (e) {
       console.warn("[meta-webhook] call signaling:", e);
     }
@@ -288,21 +336,37 @@ export async function processMetaWhatsappCallsWebhook(
     const { agentName } = parseCallBizOpaque(opaqueJoined ?? undefined);
 
     let chatLine: string | null = null;
-    if (event === "connect") {
+    if (event === "connect" && direction === "USER_INITIATED") {
+      // BIC: `connect` é só o SDP (toque). Sucesso de saída vai no ACCEPTED.
       chatLine = buildConnectChatLine({
         direction,
         eventTime,
-        agentName: direction === "BUSINESS_INITIATED" ? agentName : undefined,
+        agentName: undefined,
       });
     } else if (event === "terminate") {
       const startDate = startT ? new Date(Number(startT) * 1000) : null;
-      const endDate = endT ? new Date(Number(endT) * 1000) : eventTime;
+      const endDateMeta = endT ? new Date(Number(endT) * 1000) : null;
+      const endDate = endDateMeta ?? eventTime;
+      const prior = await prisma.whatsappCallEvent.findMany({
+        where: { metaCallId: callId },
+        select: { signalingStatus: true },
+      });
+      const signalingStatuses = prior.map((p) => p.signalingStatus);
+      const pickedUp = wasWhatsappCallPickedUp({
+        durationSec,
+        startTime: startDate,
+        endTime: endDateMeta,
+        signalingStatuses,
+      });
+      const rejected = signalingStatuses.some((s) => (s ?? "").toUpperCase() === "REJECTED");
       chatLine = buildTerminateChatLine({
         terminateStatus,
         durationSec,
         startDate,
         endDate,
         agentName: direction === "BUSINESS_INITIATED" ? agentName : undefined,
+        pickedUp,
+        rejected,
       });
     }
 

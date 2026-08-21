@@ -8,11 +8,8 @@ import {
   type WhatsAppCallSession,
 } from "@/lib/meta-whatsapp/client";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
-import { sseBus } from "@/lib/sse-bus";
 import {
   buildCallBizOpaquePayload,
-  buildConnectChatLine,
-  buildTerminateChatLine,
   sessionFromCallEventErrorsJson,
 } from "@/lib/whatsapp-call-chat";
 import { prisma } from "@/lib/prisma";
@@ -57,50 +54,6 @@ function channelPhoneNumberId(config: unknown): string {
   return str(c.phoneNumberId) || str(c.phone_number_id);
 }
 
-async function persistOutboundCallChatLine(params: {
-  conversationId: string;
-  organizationId: string;
-  contactId: string;
-  callId: string;
-  event: "connect" | "terminate";
-  agentName: string;
-  content: string;
-}): Promise<void> {
-  const dedupeKey = `call_evt:${params.callId}:${params.event}`;
-  const already = await prisma.message.findFirst({
-    where: { conversationId: params.conversationId, externalId: dedupeKey },
-    select: { id: true },
-  });
-  if (already) return;
-  const senderName = params.agentName.trim()
-    ? `WhatsApp · ${params.agentName.trim()}`
-    : "WhatsApp";
-  await prisma.message.create({
-    data: withOrgFromCtx({
-      conversationId: params.conversationId,
-      content: params.content,
-      direction: "out",
-      messageType: "whatsapp_call",
-      senderName,
-      externalId: dedupeKey,
-      sendStatus: "delivered",
-    }),
-  });
-  await prisma.conversation
-    .update({
-      where: { id: params.conversationId },
-      data: { updatedAt: new Date(), lastMessageDirection: "out" },
-    })
-    .catch(() => {});
-  sseBus.publish("new_message", {
-    organizationId: params.organizationId,
-    conversationId: params.conversationId,
-    contactId: params.contactId,
-    direction: "out",
-    content: params.content,
-    timestamp: new Date(),
-  });
-}
 
 /**
  * GET: histórico de eventos de chamada (webhook Calling API).
@@ -288,7 +241,6 @@ export async function POST(request: Request, context: RouteContext) {
         const callId = result.calls?.[0]?.id?.trim() || "";
         if (callId) {
           try {
-            const now = new Date();
             const phoneNumberId = channelPhoneNumberId(conv.channelRef?.config);
             await prisma.whatsappCallEvent.create({
               data: withOrgFromCtx({
@@ -301,19 +253,6 @@ export async function POST(request: Request, context: RouteContext) {
                 conversationId: conv.id,
                 contactId: conv.contactId,
                 bizOpaque,
-              }),
-            });
-            await persistOutboundCallChatLine({
-              conversationId: conv.id,
-              organizationId: conv.organizationId,
-              contactId: conv.contactId,
-              callId,
-              event: "connect",
-              agentName: display,
-              content: buildConnectChatLine({
-                direction: "BUSINESS_INITIATED",
-                eventTime: now,
-                agentName: display,
               }),
             });
           } catch (e) {
@@ -343,26 +282,6 @@ export async function POST(request: Request, context: RouteContext) {
 
     if (action === "terminate") {
       const result = await metaClient.terminateCall(callId);
-      const display =
-        typeof session.user.name === "string" && session.user.name.trim()
-          ? session.user.name.trim()
-          : (session.user.email ?? "Agente");
-      await persistOutboundCallChatLine({
-        conversationId: conv.id,
-        organizationId: conv.organizationId,
-        contactId: conv.contactId,
-        callId,
-        event: "terminate",
-        agentName: display,
-        content: buildTerminateChatLine({
-          terminateStatus: "COMPLETED",
-          durationSec: null,
-          startDate: null,
-          endDate: new Date(),
-        }),
-      }).catch((e) => {
-        console.warn("[whatsapp-calls] chat line terminate:", e);
-      });
       return NextResponse.json(result);
     }
 
