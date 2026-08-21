@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { after, NextResponse } from "next/server";
 
 import { withOrgContext } from "@/lib/auth-helpers";
 import { getCallPermissionTemplateName } from "@/lib/call-permission-env";
@@ -7,11 +7,17 @@ import { requireConversationAccess } from "@/lib/conversation-access";
 import { metaClientFromConfig } from "@/lib/meta-whatsapp/client";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
+import { getRequestContext, runWithContext } from "@/lib/request-context";
 import { sseBus } from "@/lib/sse-bus";
 
 import { WhatsappCallConsentStatus } from "@prisma/client";
 
 import type { InboxMessageDto } from "../messages/route";
+
+/** Tempo máximo que o HTTP espera a Meta — abaixo do corte do Traefik. */
+const HTTP_WAIT_MS = 2_000;
+/** No background a Graph pode demorar; o request já foi respondido. */
+const GRAPH_BG_TIMEOUT_MS = 15_000;
 
 function strField(v: unknown): string {
   return typeof v === "string" ? v.trim() : "";
@@ -61,6 +67,130 @@ function bodyComponentsFromTemplate(
 type RouteContext = { params: Promise<{ id: string }> };
 
 const VALID_PATCH = new Set<string>(Object.values(WhatsappCallConsentStatus));
+
+type SendResult =
+  | { ok: true; dto: InboxMessageDto }
+  | { ok: false; message: string };
+
+async function dispatchCallPermissionTemplate(args: {
+  conv: { id: string; organizationId: string; contactId: string | null };
+  to: string | undefined;
+  recipient: string | undefined;
+  templateName: string;
+  languageCode: string;
+  contactName: string;
+  bodyTextForParams: string;
+  content: string;
+  senderName: string;
+  orgIdFilter: string;
+  metaClient: ReturnType<typeof metaClientFromConfig>;
+}): Promise<SendResult> {
+  let externalId: string | null = null;
+  try {
+    const result = await args.metaClient.sendTemplate(
+      args.to,
+      args.templateName,
+      args.languageCode,
+      bodyComponentsFromTemplate(args.bodyTextForParams, args.contactName),
+      args.recipient,
+      { maxAttempts: 1, timeoutMs: GRAPH_BG_TIMEOUT_MS },
+    );
+    externalId = result.messages?.[0]?.id ?? null;
+  } catch (e: unknown) {
+    console.error("[call-permission-template]", e);
+    const msg =
+      e instanceof Error ? e.message : "Falha ao enviar template pelo WhatsApp.";
+    try {
+      await prisma.message.create({
+        data: withOrgFromCtx({
+          conversationId: args.conv.id,
+          content: args.content,
+          direction: "out",
+          messageType: "template",
+          senderName: args.senderName,
+          sendStatus: "failed",
+          sendError: msg.slice(0, 500),
+        }),
+      });
+      sseBus.publish("new_message", {
+        organizationId: args.conv.organizationId,
+        conversationId: args.conv.id,
+        contactId: args.conv.contactId,
+        direction: "out",
+        content: args.content,
+        timestamp: new Date(),
+      });
+    } catch (persistErr) {
+      console.error("[call-permission] persist fail", persistErr);
+    }
+    return { ok: false, message: msg };
+  }
+
+  const now = new Date();
+  const [savedMsg] = await prisma.$transaction([
+    prisma.message.create({
+      data: withOrgFromCtx({
+        conversationId: args.conv.id,
+        content: args.content,
+        direction: "out",
+        messageType: "template",
+        senderName: args.senderName,
+        ...(externalId ? { externalId } : {}),
+      }),
+    }),
+    prisma.conversation.update({
+      where: { id: args.conv.id },
+      data: {
+        whatsappCallConsentStatus: "REQUESTED",
+        whatsappCallConsentUpdatedAt: now,
+        updatedAt: now,
+      },
+    }),
+  ]);
+
+  try {
+    await prisma.$executeRaw`
+      UPDATE "conversations"
+      SET
+        "whatsappCallConsentType" = NULL,
+        "whatsappCallConsentExpiresAt" = NULL
+      WHERE "id" = ${args.conv.id}
+        AND "organizationId" = ${args.orgIdFilter}
+    `;
+  } catch (err) {
+    console.warn(
+      "[call-permission] não resetou type/expiresAt (migration pendente?):",
+      err instanceof Error ? err.message : err,
+    );
+  }
+
+  sseBus.publish("new_message", {
+    organizationId: args.conv.organizationId,
+    conversationId: args.conv.id,
+    contactId: args.conv.contactId,
+    direction: "out",
+    content: args.content,
+    timestamp: savedMsg.createdAt,
+  });
+  sseBus.publish("conversation_updated", {
+    organizationId: args.conv.organizationId,
+    conversationId: args.conv.id,
+    contactId: args.conv.contactId,
+    whatsappCallConsentStatus: "REQUESTED",
+  });
+
+  return {
+    ok: true,
+    dto: {
+      id: externalId ?? savedMsg.id,
+      content: args.content,
+      createdAt: savedMsg.createdAt.toISOString(),
+      direction: "out",
+      messageType: "template",
+      senderName: args.senderName,
+    },
+  };
+}
 
 /**
  * POST: envia template de opt-in de chamada e marca REQUESTED.
@@ -180,79 +310,61 @@ export async function POST(request: Request, context: RouteContext) {
           : undefined,
       );
 
-      let externalId: string | null = null;
-      try {
-        const result = await metaClient.sendTemplate(
+      const ctx = getRequestContext();
+      if (!ctx) {
+        return NextResponse.json(
+          { message: "Contexto de organização ausente." },
+          { status: 500 },
+        );
+      }
+
+      const pending = runWithContext(ctx, () =>
+        dispatchCallPermissionTemplate({
+          conv: {
+            id: conv.id,
+            organizationId: conv.organizationId,
+            contactId: conv.contactId,
+          },
           to,
+          recipient,
           templateName,
           languageCode,
-          bodyComponentsFromTemplate(previewRaw?.bodyText ?? "", contactName),
-          recipient,
-          // Uma tentativa curta: 3×20s estoura o Traefik e o browser vê 502 HTML.
-          { maxAttempts: 1, timeoutMs: 6_000 },
-        );
-        externalId = result.messages?.[0]?.id ?? null;
-      } catch (e: unknown) {
-        console.error("[call-permission-template]", e);
-        const msg =
-          e instanceof Error ? e.message : "Falha ao enviar template pelo WhatsApp.";
-        return NextResponse.json({ message: msg }, { status: 502 });
-      }
+          contactName,
+          bodyTextForParams: previewRaw?.bodyText ?? "",
+          content,
+          senderName,
+          orgIdFilter: session.user.organizationId ?? "__no_org__",
+          metaClient,
+        }),
+      );
 
-      const now = new Date();
-      const [savedMsg] = await prisma.$transaction([
-        prisma.message.create({
-          data: withOrgFromCtx({
-            conversationId: conv.id,
-            content,
-            direction: "out",
-            messageType: "template",
-            senderName,
-            ...(externalId ? { externalId } : {}),
-          }),
-        }),
-        prisma.conversation.update({
-          where: { id: conv.id },
-          data: {
-            whatsappCallConsentStatus: "REQUESTED",
-            whatsappCallConsentUpdatedAt: now,
-            updatedAt: now,
-          },
-        }),
+      const outcome = await Promise.race([
+        pending.then((r) => ({ kind: "done" as const, r })),
+        new Promise<{ kind: "late" }>((resolve) =>
+          setTimeout(() => resolve({ kind: "late" }), HTTP_WAIT_MS),
+        ),
       ]);
 
-      // Novo pedido = reseta qualquer tipo/expiração anterior para evitar
-      // inconsistência (cliente respondeu antes e voltamos pra REQUESTED).
-      // Raw SQL porque as colunas são novas e o Prisma Client local pode estar dessincronizado.
-      // Defesa em profundidade: conv ja foi carregado scoped pela extension,
-      // mas adicionamos AND organizationId aqui pra alinhar com RLS futuro.
-      try {
-        const orgIdFilter = session.user.organizationId ?? "__no_org__";
-        await prisma.$executeRaw`
-          UPDATE "conversations"
-          SET
-            "whatsappCallConsentType" = NULL,
-            "whatsappCallConsentExpiresAt" = NULL
-          WHERE "id" = ${conv.id}
-            AND "organizationId" = ${orgIdFilter}
-        `;
-      } catch (err) {
-        console.warn(
-          "[call-permission] não resetou type/expiresAt (migration pendente?):",
-          err instanceof Error ? err.message : err,
+      if (outcome.kind === "late") {
+        // Não aborta a Meta: o Traefik já pode cortar o HTTP. Continua no
+        // processo da API (não depende de worker) e o chat atualiza via SSE.
+        after(() =>
+          pending
+            .then((r) => {
+              if (!r.ok) console.error("[call-permission] bg fail", r.message);
+            })
+            .catch((e) => console.error("[call-permission] bg", e)),
         );
+        return NextResponse.json({ pending: true }, { status: 202 });
       }
 
-      const dto: InboxMessageDto = {
-        id: externalId ?? savedMsg.id,
-        content,
-        createdAt: savedMsg.createdAt.toISOString(),
-        direction: "out",
-        messageType: "template",
-        senderName,
-      };
-
-      return NextResponse.json({ message: dto, consentStatus: "REQUESTED" as const }, { status: 201 });
+      if (!outcome.r.ok) {
+        return NextResponse.json({ message: outcome.r.message }, { status: 502 });
+      }
+      return NextResponse.json(
+        { message: outcome.r.dto, consentStatus: "REQUESTED" as const },
+        { status: 201 },
+      );
     } catch (e: unknown) {
       console.error(e);
       const msg = e instanceof Error ? e.message : "Erro ao solicitar permissão de chamada.";
