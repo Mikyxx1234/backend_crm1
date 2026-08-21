@@ -14,6 +14,7 @@
 
 import { getOrgSetting } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
+import { getOrgIdOrNull } from "@/lib/request-context";
 import {
   contactHasCalouros1008Tag,
   isInauguralLinkWindow,
@@ -41,12 +42,16 @@ async function resolveFirstAttendanceAgent(): Promise<{
   userId: string;
   pipelineId: string | null;
 } | null> {
+  const orgId = getOrgIdOrNull();
+  if (!orgId) return null;
+
   try {
     const forced = await getOrgSetting("ai.firstAttendanceUserId");
     if (forced?.trim()) {
       const u = await prisma.user.findFirst({
         where: {
           id: forced.trim(),
+          organizationId: orgId,
           type: "AI",
           aiAgentConfig: { active: true, autonomyMode: "AUTONOMOUS" },
         },
@@ -68,6 +73,7 @@ async function resolveFirstAttendanceAgent(): Promise<{
 
   const preferred = await prisma.aIAgentConfig.findFirst({
     where: {
+      organizationId: orgId,
       active: true,
       autonomyMode: "AUTONOMOUS",
       archetype: "ATENDIMENTO",
@@ -80,7 +86,11 @@ async function resolveFirstAttendanceAgent(): Promise<{
   }
 
   const any = await prisma.aIAgentConfig.findFirst({
-    where: { active: true, autonomyMode: "AUTONOMOUS" },
+    where: {
+      organizationId: orgId,
+      active: true,
+      autonomyMode: "AUTONOMOUS",
+    },
     orderBy: { createdAt: "asc" },
     select: { userId: true, pipelineId: true },
   });
@@ -449,6 +459,21 @@ export async function tryAssignFirstAttendanceAi(args: {
   if (!agent) {
     logAi("first_attendance_no_agent", {
       conversationId: args.conversationId,
+    });
+    return null;
+  }
+
+  const orgId = getOrgIdOrNull();
+  if (!orgId) return null;
+  const agentInOrg = await prisma.user.findFirst({
+    where: { id: agent.userId, organizationId: orgId, type: "AI" },
+    select: { id: true },
+  });
+  if (!agentInOrg) {
+    logAi("first_attendance_skip_foreign_agent", {
+      conversationId: args.conversationId,
+      aiUserId: agent.userId,
+      orgId,
     });
     return null;
   }
