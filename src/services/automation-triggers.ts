@@ -541,6 +541,10 @@ export async function fireTrigger(  event: string,
             // (status SKIPPED) — serve de evidência de que a reentrada foi
             // bloqueada em vez de duplicar o fluxo.
             try {
+              const skipData =
+                enriched.data && typeof enriched.data === "object"
+                  ? (enriched.data as Record<string, unknown>)
+                  : {};
               await prisma.automationLog.create({
                 data: withOrgFromCtx({
                   automationId: automation.id,
@@ -550,7 +554,18 @@ export async function fireTrigger(  event: string,
                   stepType: null,
                   status: "SKIPPED",
                   message: `Reentrada bloqueada — execução já em andamento (contexto ${activeCtx.id})`,
-                  payload: { event, activeContextId: activeCtx.id },
+                  payload: {
+                    event,
+                    evento: event,
+                    activeContextId: activeCtx.id,
+                    ...(typeof skipData.content === "string" && skipData.content
+                      ? { mensagem: skipData.content.slice(0, 200) }
+                      : {}),
+                    ...(skipData.channel ? { canal: skipData.channel } : {}),
+                    ...(typeof skipData.channelId === "string" && skipData.channelId
+                      ? { channelId: skipData.channelId }
+                      : {}),
+                  },
                 }),
               });
             } catch {

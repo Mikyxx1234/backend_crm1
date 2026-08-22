@@ -1026,8 +1026,6 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
             signatureValid: true,
             processed: true,
             processingError: true,
-            headers: true,
-            rawBody: true,
           },
         },
       },

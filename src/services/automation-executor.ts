@@ -1187,6 +1187,29 @@ function isLifecycleStage(v: string): v is LifecycleStage {
   return LIFECYCLE_STAGES.includes(v as LifecycleStage);
 }
 
+function inboundEventPayload(
+  event: string,
+  data: Record<string, unknown>,
+  extra?: Record<string, unknown>,
+): Record<string, unknown> {
+  const channelId =
+    typeof data.channelId === "string" && data.channelId.trim()
+      ? data.channelId.trim()
+      : undefined;
+  const content =
+    typeof data.content === "string" && data.content.trim()
+      ? data.content.slice(0, 200)
+      : undefined;
+  return {
+    evento: event,
+    event,
+    ...(content ? { mensagem: content } : {}),
+    ...(data.channel ? { canal: data.channel } : {}),
+    ...(channelId ? { channelId } : {}),
+    ...extra,
+  };
+}
+
 async function logStep(args: {
   automationId: string;
   contactId?: string | null;
@@ -4473,17 +4496,38 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     });
   } catch (dbErr) {
     log.error(`[${traceId}] Erro ao carregar automação:`, dbErr);
-    await logStep({ automationId, contactId: context.contactId, dealId: context.dealId, status: "FAILED", message: `Erro ao carregar automação` });
+    await logStep({
+      automationId,
+      contactId: context.contactId,
+      dealId: context.dealId,
+      status: "FAILED",
+      message: `Erro ao carregar automação`,
+      payload: inboundEventPayload(context.event, {}),
+    });
     return;
   }
 
   if (!automation) {
-    await logStep({ automationId, contactId: context.contactId, dealId: context.dealId, status: "FAILED", message: `Automação não encontrada` });
+    await logStep({
+      automationId,
+      contactId: context.contactId,
+      dealId: context.dealId,
+      status: "FAILED",
+      message: `Automação não encontrada`,
+      payload: inboundEventPayload(context.event, {}),
+    });
     return;
   }
 
   if (!automation.active) {
-    await logStep({ automationId, contactId: context.contactId, dealId: context.dealId, status: "SKIPPED", message: `Automação inativa` });
+    await logStep({
+      automationId,
+      contactId: context.contactId,
+      dealId: context.dealId,
+      status: "SKIPPED",
+      message: `Automação inativa`,
+      payload: inboundEventPayload(context.event, {}),
+    });
     return;
   }
 
@@ -4552,19 +4596,23 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     dealId: context.dealId,
     status: "STARTED",
     message: `${contactLabel} — ${context.event === "message_received" ? "mensagem recebida" : context.event}`,
-    payload: {
-      evento: context.event,
+    payload: inboundEventPayload(context.event, contextData, {
       contato: contact?.name ?? "Contato",
-      telefone: contact?.phone ?? undefined,
-      ...(contextData.content ? { mensagem: String(contextData.content).slice(0, 200) } : {}),
-      ...(contextData.channel ? { canal: contextData.channel } : {}),
-    },
+      ...(contact?.phone ? { telefone: contact.phone } : {}),
+    }),
     metaWebhookEventId,
   });
 
   const rt = await resolveRuntimeContext(automationId, payload, automation.name);
   if (!rt) {
-    await logStep({ automationId, contactId: context.contactId, dealId: context.dealId, status: "FAILED", message: `Contato ou negócio não encontrado` });
+    await logStep({
+      automationId,
+      contactId: context.contactId,
+      dealId: context.dealId,
+      status: "FAILED",
+      message: `Contato ou negócio não encontrado`,
+      payload: inboundEventPayload(context.event, contextData),
+    });
     return;
   }
 
@@ -4765,6 +4813,8 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     message: stepsFailed > 0
       ? `${contactLabel} — finalizada com erros (${automation.steps.length} passos)`
       : `${contactLabel} — finalizada com sucesso (${automation.steps.length} passos)`,
+    payload: inboundEventPayload(context.event, contextData),
+    metaWebhookEventId,
   });
 
   if (rt.dealId) {
@@ -4974,6 +5024,9 @@ export async function continueFromStep(
     dealId: deal?.id,
     status: "STARTED",
     message: `${contactLabel} — continuando fluxo`,
+    payload: inboundEventPayload("continue", {
+      ...(contChannelId ? { channelId: contChannelId } : {}),
+    }),
   });
 
   // Continuacao tambem roda como AUTOMATION (mesmo motivo do runAutomationInline).
@@ -5126,6 +5179,9 @@ export async function continueFromStep(
     dealId: deal?.id,
     status: "COMPLETED",
     message: `${contactLabel} — finalizada com sucesso`,
+    payload: inboundEventPayload("continue", {
+      ...(contChannelId ? { channelId: contChannelId } : {}),
+    }),
   });
 
   if (deal?.id) {
