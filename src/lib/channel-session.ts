@@ -18,6 +18,75 @@ function sessionFromLastInbound(lastInboundAt: Date | null): ChannelSessionInfo 
 }
 
 /**
+ * Corte da janela 24h no canal. Gravado em `config.sessionResetAt` quando
+ * o `phoneNumberId` (ou a WABA) muda — a Meta trata o número na BM nova
+ * como outra identidade; inbound anterior não reabre texto livre.
+ */
+export function parseSessionResetAt(config: unknown): Date | null {
+  if (!config || typeof config !== "object") return null;
+  const raw = (config as Record<string, unknown>).sessionResetAt;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const d = new Date(raw);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function channelMessagingIdentity(config: Record<string, unknown>): {
+  phoneNumberId: string;
+  wabaId: string;
+} {
+  const phoneNumberId =
+    typeof config.phoneNumberId === "string" ? config.phoneNumberId.trim() : "";
+  const wabaRaw = config.businessAccountId ?? config.wabaId;
+  const wabaId = typeof wabaRaw === "string" ? wabaRaw.trim() : "";
+  return { phoneNumberId, wabaId };
+}
+
+/**
+ * Na troca de phoneNumberId/WABA, carimba `sessionResetAt`. Em reconnect
+ * só de token, preserva o corte anterior (o provision substitui o config).
+ * Não persiste `resetSessionWindow`.
+ */
+export function applySessionResetOnIdentityChange(
+  previous: Record<string, unknown>,
+  incoming: Record<string, unknown>,
+  now = new Date(),
+): Record<string, unknown> {
+  const next = { ...incoming };
+  delete next.resetSessionWindow;
+  const prevId = channelMessagingIdentity(previous);
+  const nextId = channelMessagingIdentity(next);
+  const identityChanged =
+    (Boolean(prevId.phoneNumberId) &&
+      Boolean(nextId.phoneNumberId) &&
+      prevId.phoneNumberId !== nextId.phoneNumberId) ||
+    (Boolean(prevId.wabaId) &&
+      Boolean(nextId.wabaId) &&
+      prevId.wabaId !== nextId.wabaId);
+  if (identityChanged) {
+    next.sessionResetAt = now.toISOString();
+    return next;
+  }
+  if (typeof next.sessionResetAt !== "string" || !next.sessionResetAt.trim()) {
+    if (
+      typeof previous.sessionResetAt === "string" &&
+      previous.sessionResetAt.trim()
+    ) {
+      next.sessionResetAt = previous.sessionResetAt;
+    }
+  }
+  return next;
+}
+
+function inboundAfterReset(
+  lastInboundAt: Date | null,
+  resetAt: Date | null,
+): Date | null {
+  if (!lastInboundAt) return null;
+  if (resetAt && lastInboundAt.getTime() < resetAt.getTime()) return null;
+  return lastInboundAt;
+}
+
+/**
  * Última inbound real do contato naquele Channel (número Meta).
  *
  * Não usa `conversations.lastInboundAt` — a coluna fica stale (replay,
@@ -26,29 +95,38 @@ function sessionFromLastInbound(lastInboundAt: Date | null): ChannelSessionInfo 
  *
  * Janela da Meta é por (aluno, phone_number_id). `message.channelId`
  * prevalece; mensagens antigas sem snapshot caem no `channelId` atual
- * da conversa.
+ * da conversa. Inbound anterior a `config.sessionResetAt` não conta.
  */
 async function lastInboundOnChannel(
   contactId: string,
   channelId: string,
 ): Promise<Date | null> {
-  const lastInMsg = await prisma.message.findFirst({
-    where: {
-      direction: "in",
-      AND: [
-        { conversation: { contactId } },
-        {
-          OR: [
-            { channelId },
-            { AND: [{ channelId: null }, { conversation: { channelId } }] },
-          ],
-        },
-      ],
-    },
-    orderBy: { createdAt: "desc" },
-    select: { createdAt: true },
-  });
-  return lastInMsg?.createdAt ?? null;
+  const [lastInMsg, channel] = await Promise.all([
+    prisma.message.findFirst({
+      where: {
+        direction: "in",
+        AND: [
+          { conversation: { contactId } },
+          {
+            OR: [
+              { channelId },
+              { AND: [{ channelId: null }, { conversation: { channelId } }] },
+            ],
+          },
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+      select: { createdAt: true },
+    }),
+    prisma.channel.findUnique({
+      where: { id: channelId },
+      select: { config: true },
+    }),
+  ]);
+  return inboundAfterReset(
+    lastInMsg?.createdAt ?? null,
+    parseSessionResetAt(channel?.config),
+  );
 }
 
 /**
@@ -76,7 +154,18 @@ export async function getConversationSession(conv: {
     orderBy: { createdAt: "desc" },
     select: { createdAt: true },
   });
-  return sessionFromLastInbound(lastInMsg?.createdAt ?? null);
+  let lastInboundAt = lastInMsg?.createdAt ?? null;
+  if (lastInboundAt && conv.channelId) {
+    const channel = await prisma.channel.findUnique({
+      where: { id: conv.channelId },
+      select: { config: true },
+    });
+    lastInboundAt = inboundAfterReset(
+      lastInboundAt,
+      parseSessionResetAt(channel?.config),
+    );
+  }
+  return sessionFromLastInbound(lastInboundAt);
 }
 
 /**

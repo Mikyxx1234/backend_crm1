@@ -121,6 +121,9 @@ export async function PUT(request: Request, context: RouteContext) {
           ? b.defaultPipelineId.trim()
           : null;
     }
+    if (b.resetSessionWindow === true) {
+      patch.resetSessionWindow = true;
+    }
 
     if (Object.keys(patch).length === 0) {
       return NextResponse.json({ message: "Nenhum campo para atualizar." }, { status: 400 });

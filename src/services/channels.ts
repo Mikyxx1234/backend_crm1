@@ -10,6 +10,7 @@ import {
   decryptChannelConfig,
   encryptChannelConfig,
 } from "@/lib/channels/config";
+import { applySessionResetOnIdentityChange } from "@/lib/channel-session";
 import { prisma } from "@/lib/prisma";
 import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { logAudit } from "@/lib/audit/log";
@@ -50,6 +51,11 @@ export type UpdateChannelData = {
    * a org corrente em `updateChannel`.
    */
   defaultPipelineId?: string | null;
+  /**
+   * Força `config.sessionResetAt = agora` (janela 24h fecha no inbox).
+   * Uso: número já migrado de BM e o phoneNumberId no banco já é o novo.
+   */
+  resetSessionWindow?: boolean;
 };
 
 export type UpdateChannelStatusExtra = {
@@ -259,31 +265,38 @@ export async function updateChannel(id: string, data: UpdateChannelData): Promis
   // Unchecked input: combina com a extensao `organization-scope` que injeta
   // `organizationId` escalar no data. Misturar com `relation: { connect }`
   // (checked input) faz o Prisma falhar com "Did you mean 'organization'?".
+  const before = await prisma.channel.findUnique({ where: { id } });
   const patch: Prisma.ChannelUncheckedUpdateInput = {};
   if (data.name !== undefined) patch.name = data.name.trim();
   if (data.type !== undefined) patch.type = data.type;
   if (data.provider !== undefined) patch.provider = data.provider;
-  if (data.config !== undefined) {
-    // PR-1.2: encriptacao precisa do provider. Se nao vier no patch, busca
-    // do registro existente. Mantemos uma unica round-trip a mais apenas
-    // quando config muda — calls que so atualizam status/qr nao impactam.
-    let provider: ChannelProvider | undefined = data.provider;
-    if (!provider) {
-      const existing = await prisma.channel.findUnique({
-        where: { id },
-        select: { provider: true },
-      });
-      provider = existing?.provider;
+  if (data.config !== undefined || data.resetSessionWindow) {
+    // PR-1.2: encriptacao precisa do provider. Se nao vier no patch, usa o
+    // registro existente. Troca de phoneNumberId/WABA carimba sessionResetAt
+    // (janela 24h fecha no inbox). Reconnect só de token preserva o corte.
+    const provider: ChannelProvider | undefined =
+      data.provider ?? before?.provider;
+    const previousPlain = before
+      ? decryptChannelConfig(
+          before.provider,
+          (before.config ?? {}) as Record<string, unknown>,
+        )
+      : {};
+    const incomingPlain =
+      data.config !== undefined
+        ? { ...(data.config as Record<string, unknown>) }
+        : { ...previousPlain };
+    const stamped = applySessionResetOnIdentityChange(previousPlain, incomingPlain);
+    if (data.resetSessionWindow) {
+      stamped.sessionResetAt = new Date().toISOString();
     }
     if (provider) {
-      const plainConfig = (data.config ?? {}) as Record<string, unknown>;
       patch.config = encryptChannelConfig(
         provider,
-        plainConfig,
+        stamped,
       ) as Prisma.InputJsonValue;
     } else {
-      // Fallback defensivo: sem provider (canal inexistente?), grava como veio.
-      patch.config = data.config;
+      patch.config = stamped as Prisma.InputJsonValue;
     }
   }
   if (data.phoneNumber !== undefined) patch.phoneNumber = data.phoneNumber?.trim() || null;
@@ -310,7 +323,6 @@ export async function updateChannel(id: string, data: UpdateChannelData): Promis
   }
   if (data.lastConnectedAt !== undefined) patch.lastConnectedAt = data.lastConnectedAt;
 
-  const before = await prisma.channel.findUnique({ where: { id } });
   const updated = await prisma.channel.update({
     where: { id },
     data: patch,

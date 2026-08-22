@@ -15,6 +15,7 @@ import { withOrgFromCtx } from "@/lib/prisma-helpers";
 import { countAgentReplyAsAnswered } from "@/lib/conversation-reply-marking";
 import { getOrgIdOrNull, getOrgIdOrThrow } from "@/lib/request-context";
 import { enrichContactsWithUserAvatarFallback } from "@/lib/contact-avatar-fallback";
+import { parseSessionResetAt } from "@/lib/channel-session";
 import { parseInboxFilterChannelIds } from "@/services/channels";
 import {
   findContactIdsByPhoneDigits,
@@ -191,7 +192,28 @@ async function lastInboundBatch(
   for (const r of rows) {
     map.set(r.conversationId, r.lastIn);
   }
+  await applyChannelSessionResetToInboundMap(conversationIds, map);
   return map;
+}
+
+/** Inbound anterior à troca de phoneNumberId/WABA não reabre a janela 24h. */
+async function applyChannelSessionResetToInboundMap(
+  conversationIds: string[],
+  map: Map<string, Date>,
+): Promise<void> {
+  if (map.size === 0) return;
+  const convs = await prisma.conversation.findMany({
+    where: { id: { in: conversationIds } },
+    select: { id: true, channelRef: { select: { config: true } } },
+  });
+  for (const c of convs) {
+    const resetAt = parseSessionResetAt(c.channelRef?.config);
+    if (!resetAt) continue;
+    const lastIn = map.get(c.id);
+    if (lastIn && lastIn.getTime() < resetAt.getTime()) {
+      map.delete(c.id);
+    }
+  }
 }
 
 async function lastMessagePreviewsBatch(
