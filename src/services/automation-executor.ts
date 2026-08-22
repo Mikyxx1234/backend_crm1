@@ -16,7 +16,7 @@ import {
   normalizeRoundRobinConfig,
   roundRobinOptionsSignature,
 } from "@/lib/automation-round-robin";
-import { readStepAllowedChannelIds } from "@/lib/automation-workflow";
+import { readStepAllowedChannelIds, triggerTypeLabel } from "@/lib/automation-workflow";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 import {
@@ -4595,7 +4595,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     contactId: context.contactId,
     dealId: context.dealId,
     status: "STARTED",
-    message: `${contactLabel} — ${context.event === "message_received" ? "mensagem recebida" : context.event}`,
+    message: `${contactLabel} — ${triggerTypeLabel(context.event)}`,
     payload: inboundEventPayload(context.event, contextData, {
       contato: contact?.name ?? "Contato",
       ...(contact?.phone ? { telefone: contact.phone } : {}),

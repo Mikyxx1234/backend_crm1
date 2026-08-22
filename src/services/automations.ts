@@ -1002,7 +1002,9 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
 
   const where: Prisma.AutomationLogWhereInput = { automationId };
   if (params.stepId === "trigger") {
+    // STARTED é o eco do disparo; a linha útil do card é o desfecho.
     where.stepId = null;
+    where.status = { not: "STARTED" };
   } else if (params.stepId) {
     where.stepId = params.stepId;
   }
