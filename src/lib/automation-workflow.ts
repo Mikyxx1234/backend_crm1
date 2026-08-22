@@ -145,6 +145,31 @@ export function readTriggerChannelIds(cfg: unknown): string[] {
   return one ? [one] : [];
 }
 
+/** `all` = qualquer conexão; `selected` = só os ids em `channelIds`. */
+export function readTriggerChannelScope(cfg: unknown): "all" | "selected" {
+  const c = asRecord(cfg);
+  if (c.channelScope === "selected") return "selected";
+  if (c.channelScope === "all") return "all";
+  return readTriggerChannelIds(cfg).length > 0 ? "selected" : "all";
+}
+
+/**
+ * Allowlist do passo de envio. `null` = todos os canais ativos.
+ * `channelId` legado sozinho NÃO vira filtro — era override de envio.
+ */
+export function readStepAllowedChannelIds(cfg: unknown): string[] | null {
+  const c = asRecord(cfg);
+  if (c.channelScope === "all") return null;
+  const many = Array.isArray(c.channelIds)
+    ? c.channelIds
+        .filter((x): x is string => typeof x === "string" && x.trim() !== "")
+        .map((s) => s.trim())
+    : [];
+  const unique = [...new Set(many)];
+  if (c.channelScope === "selected") return unique;
+  return unique.length > 0 ? unique : null;
+}
+
 export function inheritedChannelFromTrigger(triggerConfig: unknown): string {
   const ids = readTriggerChannelIds(triggerConfig);
   return ids.length === 1 ? ids[0]! : "";
@@ -903,14 +928,14 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
     case "contact_created":
       return {};
     case "conversation_created":
-      return { channel: "", channelIds: [] };
+      return { channel: "", channelIds: [], channelScope: "all" };
     case "lifecycle_changed":
       return { fromLifecycle: "", toLifecycle: "" };
     case "agent_changed":
       return { toAgentId: "" };
     case "message_received":
     case "message_sent":
-      return { channel: "" };
+      return { channel: "", channelIds: [], channelScope: "all" };
     case "call_received":
     case "call_made":
       // status: "" (qualquer) | "answered" | "missed"

@@ -9,6 +9,7 @@ import { normalizeHoursBeforeExpiry } from "@/services/whatsapp-session-expiry";
 import {
   findFirstMessageStepIndex,
   readTriggerChannelIds,
+  readTriggerChannelScope,
   validateFirstMessageChannel,
 } from "@/lib/automation-workflow";
 
@@ -75,6 +76,25 @@ function readTriggerStageIds(cfg: Record<string, unknown>): string[] {
   if (many.length > 0) return many;
   const one = readString(cfg, "stageId");
   return one ? [one] : [];
+}
+
+/** `selected` + lista vazia = não dispara. `all` aceita filtro grosso por tipo. */
+function matchTriggerChannelFilter(
+  cfg: Record<string, unknown>,
+  data: Record<string, unknown>,
+): boolean {
+  const channelIds = readTriggerChannelIds(cfg);
+  const dataChannelId = readString(data, "channelId");
+  if (readTriggerChannelScope(cfg) === "selected") {
+    if (channelIds.length === 0) return false;
+    return Boolean(dataChannelId && channelIds.includes(dataChannelId));
+  }
+  const channel = readString(cfg, "channel");
+  const dataChannel = readString(data, "channel");
+  if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) {
+    return false;
+  }
+  return true;
 }
 
 const STEP_ID_REF_KEYS = new Set([
@@ -204,15 +224,7 @@ export function evaluateTrigger(
       return true;
     }
     case "conversation_created": {
-      const channelIds = readTriggerChannelIds(cfg);
-      const dataChannelId = readString(data, "channelId");
-      if (channelIds.length > 0) {
-        if (!dataChannelId || !channelIds.includes(dataChannelId)) return false;
-      } else {
-        const channel = readString(cfg, "channel");
-        const dataChannel = readString(data, "channel");
-        if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
-      }
+      if (!matchTriggerChannelFilter(cfg, data)) return false;
       return true;
     }
     case "lifecycle_changed": {
@@ -239,15 +251,7 @@ export function evaluateTrigger(
       // deixamos passar — caso contrario o gatilho "mensagem recebida"
       // nunca dispara pra contatos sem negocio aberto, que e o cenario
       // mais comum em receptivo.
-      const channelIds = readTriggerChannelIds(cfg);
-      const dataChannelId = readString(data, "channelId");
-      if (channelIds.length > 0) {
-        if (!dataChannelId || !channelIds.includes(dataChannelId)) return false;
-      } else {
-        const channel = readString(cfg, "channel");
-        const dataChannel = readString(data, "channel");
-        if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
-      }
+      if (!matchTriggerChannelFilter(cfg, data)) return false;
       const stageIds = readTriggerStageIds(cfg);
       const dataStageId = readString(data, "stageId") ?? readString(data, "dealStageId");
       if (stageIds.length > 0 && dataStageId && !stageIds.includes(dataStageId)) return false;

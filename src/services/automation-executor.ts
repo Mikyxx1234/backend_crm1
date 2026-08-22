@@ -16,6 +16,7 @@ import {
   normalizeRoundRobinConfig,
   roundRobinOptionsSignature,
 } from "@/lib/automation-round-robin";
+import { readStepAllowedChannelIds } from "@/lib/automation-workflow";
 import { defaultDealTitleForContact } from "@/lib/display-name";
 import { getLogger } from "@/lib/logger";
 import {
@@ -780,13 +781,24 @@ function resolveOutboundChannelId(
 ): string | null {
   const cfgChannelId = readString(cfg, "channelId")?.trim() || null;
   const bound = resolveBoundChannelId(rt);
+  const allowed = readStepAllowedChannelIds(cfg);
   if (rt.event && INBOUND_BOUND_EVENTS.has(rt.event) && bound) {
+    if (allowed && !allowed.includes(bound)) {
+      throw new MetaSendFailureError(
+        "Canal da conversa não está entre os canais selecionados neste passo.",
+      );
+    }
     if (cfgChannelId && cfgChannelId !== bound) {
       log.info(
         `Envio no canal da conversa ${bound} (passo pedia ${cfgChannelId}; event=${rt.event})`,
       );
     }
     return bound;
+  }
+  if (allowed?.length === 1) return allowed[0] ?? null;
+  if (allowed && allowed.length > 1) {
+    if (bound && allowed.includes(bound)) return bound;
+    return allowed[0] ?? null;
   }
   return cfgChannelId || bound || null;
 }
