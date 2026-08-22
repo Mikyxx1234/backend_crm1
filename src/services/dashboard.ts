@@ -22,7 +22,9 @@
  *     pelas datas).
  *   - Ganhos / perdidos (contagem e valor): status = WON/LOST com
  *     closedAt dentro do período.
- *   - Novos contatos: Contact.createdAt dentro do período.
+ *   - Novos negócios (coorte): Deal.createdAt dentro do período;
+ *     progresso = status atual (OPEN / WON / LOST) desses deals.
+ *   - Novos contatos: Contact.createdAt dentro do período (métrica à parte).
  *
  * A movimentação histórica por etapa (entered/exited via DealEvent) e
  * leads parados ficam para a Fase 2.
@@ -76,6 +78,17 @@ export interface DashboardSummary {
     wonCount: number;
     wonValue: number;
   };
+}
+
+/** Coorte de negócios criados no período e onde estão agora. */
+export interface DashboardNewDeals {
+  count: number;
+  value: number;
+  open: number;
+  won: number;
+  lost: number;
+  wonValue: number;
+  lostValue: number;
 }
 
 export interface DashboardFunnelStage {
@@ -149,6 +162,7 @@ export interface DashboardOwnerRow {
 export interface DashboardResult {
   pipelineId: string;
   summary: DashboardSummary;
+  newDeals: DashboardNewDeals;
   funnel: DashboardFunnelStage[];
   bySource: DashboardSourceRow[];
   byOwner: DashboardOwnerRow[];
@@ -656,6 +670,15 @@ export async function getDashboard(
   const sourceBuckets = new Map<string, Bucket>();
   const tagBuckets = new Map<string, Bucket & { name: string; color: string }>();
   const lossBuckets = new Map<string, { count: number; value: number }>();
+  const newDealsAcc: DashboardNewDeals = {
+    count: 0,
+    value: 0,
+    open: 0,
+    won: 0,
+    lost: 0,
+    wonValue: 0,
+    lostValue: 0,
+  };
 
   // Evolução diária: pré-popula todos os dias do período com zero.
   const dayKey = (d: Date): string => {
@@ -708,6 +731,16 @@ export async function getDashboard(
       for (const tb of tagAccum) tb.count++;
       const d = dailyMap.get(dayKey(row.createdAt));
       if (d) d.novos++;
+      newDealsAcc.count++;
+      newDealsAcc.value += val;
+      if (row.status === "OPEN") newDealsAcc.open++;
+      else if (row.status === "WON") {
+        newDealsAcc.won++;
+        newDealsAcc.wonValue += val;
+      } else if (row.status === "LOST") {
+        newDealsAcc.lost++;
+        newDealsAcc.lostValue += val;
+      }
     }
     if (wonIn) {
       sb.won++;
@@ -789,9 +822,14 @@ export async function getDashboard(
     })
     .sort((a, b) => b.count - a.count);
 
+  newDealsAcc.value = round2(newDealsAcc.value);
+  newDealsAcc.wonValue = round2(newDealsAcc.wonValue);
+  newDealsAcc.lostValue = round2(newDealsAcc.lostValue);
+
   return {
     pipelineId: f.pipelineId,
     summary,
+    newDeals: newDealsAcc,
     funnel,
     bySource,
     byOwner,
