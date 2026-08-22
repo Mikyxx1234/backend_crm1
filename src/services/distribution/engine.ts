@@ -13,6 +13,7 @@
 
 import { Prisma } from "@prisma/client";
 
+import { getConversationSession } from "@/lib/channel-session";
 import { getOrgSettingBool } from "@/lib/org-settings";
 import { prisma } from "@/lib/prisma";
 import { getOrgIdOrThrow } from "@/lib/request-context";
@@ -23,7 +24,6 @@ import {
   syncOwnershipForContact,
 } from "@/services/deals";
 import { hasOrganizationWidget } from "@/services/organization-widgets";
-import { WHATSAPP_SESSION_WINDOW_MS } from "@/services/whatsapp-session-expiry";
 
 import {
   clearOwnershipForRedistribution,
@@ -938,13 +938,19 @@ export async function executeDistribution(
   const priorWasHuman = preAssignSnap?.assigneeType === "HUMAN";
   let sessionOpenForFreeText = true;
   if (input.conversationId) {
-    const sess = await prisma.conversation.findUnique({
+    const conv = await prisma.conversation.findUnique({
       where: { id: input.conversationId },
-      select: { lastInboundAt: true },
+      select: {
+        id: true,
+        contactId: true,
+        channel: true,
+        channelId: true,
+        lastInboundAt: true,
+      },
     });
-    const lastIn = sess?.lastInboundAt?.getTime() ?? null;
-    sessionOpenForFreeText =
-      lastIn != null && Date.now() - lastIn < WHATSAPP_SESSION_WINDOW_MS;
+    sessionOpenForFreeText = conv
+      ? (await getConversationSession(conv)).active
+      : false;
   }
   const shouldFireLeadDistributed =
     selectedIsHuman && !priorWasHuman && sessionOpenForFreeText;
