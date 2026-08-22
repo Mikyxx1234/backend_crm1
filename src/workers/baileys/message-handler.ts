@@ -637,7 +637,10 @@ export async function handleBaileysMessage(
     }
 
     try {
-      await processSalesbotMessage(contact.id, parsed.text);
+      await processSalesbotMessage(contact.id, parsed.text, {
+        channelId,
+        conversationId: conversation.id,
+      });
     } catch (err) {
       log.error("Falha no salesbot:", err);
     }

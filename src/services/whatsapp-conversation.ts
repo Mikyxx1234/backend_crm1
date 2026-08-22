@@ -94,6 +94,11 @@ export type EnsureWhatsAppConversationOptions = {
    * engolia o disparo. A aba Automação cobre RUNNING e PAUSED.
    */
   inheritAssignee?: boolean;
+  /**
+   * Canal WhatsApp de destino. Sem isso, cai no Meta CONNECTED mais antigo
+   * da org — errado quando o inbound (ou o passo) aponta para outra conexão.
+   */
+  channelId?: string | null;
 };
 
 /**
@@ -126,7 +131,21 @@ export async function ensureWhatsAppConversationForContact(
     Boolean(contact.phone?.trim()) || Boolean(contact.whatsappBsuid?.trim());
   if (!hasReachableIdentity) return { status: "skipped_no_phone" };
 
-  const defaultChannel = await resolveDefaultWhatsAppChannel();
+  const preferredChannelId =
+    typeof opts?.channelId === "string" ? opts.channelId.trim() : "";
+  let defaultChannel: DefaultWhatsAppChannel | null = null;
+  if (preferredChannelId) {
+    const preferred = await prisma.channel.findFirst({
+      where: {
+        id: preferredChannelId,
+        type: "WHATSAPP",
+        provider: "META_CLOUD_API",
+      },
+      select: { id: true, name: true },
+    });
+    if (preferred) defaultChannel = preferred;
+  }
+  if (!defaultChannel) defaultChannel = await resolveDefaultWhatsAppChannel();
   if (!defaultChannel) return { status: "skipped_no_channel" };
 
   // Modelo de ticket: reusa apenas conversa nao-RESOLVED. Quando a ultima
@@ -237,7 +256,12 @@ export async function ensureWhatsAppConversationForContact(
   // logEvent. Ver AGENT.md "ID de conversa + logs + gatilho".
   fireTrigger("conversation_created", {
     contactId: contact.id,
-    data: { channel: "whatsapp", inboxName: defaultChannel.name, source: "auto_ensure" },
+    data: {
+      channel: "whatsapp",
+      channelId: defaultChannel.id,
+      inboxName: defaultChannel.name,
+      source: "auto_ensure",
+    },
   }).catch((err) => log.warn("Falha no gatilho conversation_created:", err));
 
   return {

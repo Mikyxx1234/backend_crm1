@@ -283,13 +283,14 @@ export async function createContext(
   contactId: string,
   firstStepId: string,
   timeoutMs?: number,
+  initialVariables?: Record<string, unknown>,
 ) {
   const row = await prisma.automationContext.create({
     data: withOrgFromCtx({
       automationId,
       contactId,
       currentStepId: firstStepId,
-      variables: {},
+      variables: (initialVariables ?? {}) as Prisma.InputJsonValue,
       status: "RUNNING" as const,
       timeoutAt: timeoutMs && timeoutMs > 0 ? new Date(Date.now() + timeoutMs) : null,
     }),
@@ -413,7 +414,11 @@ export async function getContactAutomationHistory(contactId: string, limit = 20)
 export async function processIncomingMessage(
   contactId: string,
   messageContent: string,
-  opts?: { interactiveId?: string | null },
+  opts?: {
+    interactiveId?: string | null;
+    channelId?: string | null;
+    conversationId?: string | null;
+  },
 ) {
   // Só cancela/bloqueia retomada quando HUMANO está no atendimento
   // (`humanAttending`). `suppressAutomation` também é true com assignee IA
@@ -487,6 +492,10 @@ export async function processIncomingMessage(
     const config = currentStep.config as Record<string, unknown>;
     let nextStepId: string | null = null;
     let variables = { ...(ctx.variables as Record<string, unknown>) };
+    const inboundChannelId = opts?.channelId?.trim();
+    const inboundConversationId = opts?.conversationId?.trim();
+    if (inboundChannelId) variables.channelId = inboundChannelId;
+    if (inboundConversationId) variables.conversationId = inboundConversationId;
 
     if (currentStep.type === "wait_for_reply") {
       const varName = String(config.saveToVariable ?? "lastResponse").trim();

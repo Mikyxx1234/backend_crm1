@@ -8,6 +8,7 @@ import { getOrgIdOrThrow } from "@/lib/request-context";
 import { normalizeHoursBeforeExpiry } from "@/services/whatsapp-session-expiry";
 import {
   findFirstMessageStepIndex,
+  readTriggerChannelIds,
   validateFirstMessageChannel,
 } from "@/lib/automation-workflow";
 
@@ -203,9 +204,15 @@ export function evaluateTrigger(
       return true;
     }
     case "conversation_created": {
-      const channel = readString(cfg, "channel");
-      const dataChannel = readString(data, "channel");
-      if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
+      const channelIds = readTriggerChannelIds(cfg);
+      const dataChannelId = readString(data, "channelId");
+      if (channelIds.length > 0) {
+        if (!dataChannelId || !channelIds.includes(dataChannelId)) return false;
+      } else {
+        const channel = readString(cfg, "channel");
+        const dataChannel = readString(data, "channel");
+        if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
+      }
       return true;
     }
     case "lifecycle_changed": {
@@ -232,9 +239,15 @@ export function evaluateTrigger(
       // deixamos passar — caso contrario o gatilho "mensagem recebida"
       // nunca dispara pra contatos sem negocio aberto, que e o cenario
       // mais comum em receptivo.
-      const channel = readString(cfg, "channel");
-      const dataChannel = readString(data, "channel");
-      if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
+      const channelIds = readTriggerChannelIds(cfg);
+      const dataChannelId = readString(data, "channelId");
+      if (channelIds.length > 0) {
+        if (!dataChannelId || !channelIds.includes(dataChannelId)) return false;
+      } else {
+        const channel = readString(cfg, "channel");
+        const dataChannel = readString(data, "channel");
+        if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
+      }
       const stageIds = readTriggerStageIds(cfg);
       const dataStageId = readString(data, "stageId") ?? readString(data, "dealStageId");
       if (stageIds.length > 0 && dataStageId && !stageIds.includes(dataStageId)) return false;
@@ -787,6 +800,7 @@ async function countConnectedChannels(type: "WHATSAPP" | "EMAIL"): Promise<numbe
  */
 async function validateFirstMessageChannelForOrg(
   steps: { type: string; config?: unknown }[],
+  opts?: { triggerType?: string; triggerConfig?: unknown },
 ): Promise<string | null> {
   const idx = findFirstMessageStepIndex(steps);
   if (idx < 0) return null;
@@ -794,7 +808,7 @@ async function validateFirstMessageChannelForOrg(
   const connectedCount = await countConnectedChannels(
     firstType === "send_email" ? "EMAIL" : "WHATSAPP",
   );
-  return validateFirstMessageChannel(steps, connectedCount);
+  return validateFirstMessageChannel(steps, connectedCount, opts);
 }
 
 export type UpdateAutomationInput = {
@@ -827,7 +841,10 @@ export async function updateAutomation(id: string, data: UpdateAutomationInput) 
   const effectiveActive = data.active !== undefined ? data.active : existing.active;
   if (effectiveActive) {
     const effectiveSteps = data.steps ?? existing.steps.map((s) => ({ type: s.type, config: s.config }));
-    const channelErr = await validateFirstMessageChannelForOrg(effectiveSteps);
+    const channelErr = await validateFirstMessageChannelForOrg(effectiveSteps, {
+      triggerType: effectiveTriggerType,
+      triggerConfig: effectiveTriggerConfig,
+    });
     if (channelErr) throw new Error(channelErr);
   }
 
@@ -910,6 +927,8 @@ export async function toggleAutomation(id: string) {
     select: {
       id: true,
       active: true,
+      triggerType: true,
+      triggerConfig: true,
       steps: { select: { type: true, config: true }, orderBy: { position: "asc" } },
     },
   });
@@ -918,7 +937,10 @@ export async function toggleAutomation(id: string) {
   }
   const activating = !existing.active;
   if (activating) {
-    const channelErr = await validateFirstMessageChannelForOrg(existing.steps);
+    const channelErr = await validateFirstMessageChannelForOrg(existing.steps, {
+      triggerType: existing.triggerType,
+      triggerConfig: existing.triggerConfig,
+    });
     if (channelErr) throw new Error(channelErr);
   }
   return prisma.automation.update({

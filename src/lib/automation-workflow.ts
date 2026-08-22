@@ -126,19 +126,46 @@ export function findFirstMessageStepIndex(steps: { type: string }[]): number {
   return steps.findIndex((s) => isMessageChannelStep(s.type));
 }
 
+/** Gatilhos cuja mensagem/ticket já define o canal de envio. */
+export const INBOUND_CHANNEL_TRIGGER_TYPES = new Set([
+  "message_received",
+  "message_sent",
+  "conversation_created",
+]);
+
+/** Conexões (`Channel.id`) do gatilho. Vazio = qualquer canal. */
+export function readTriggerChannelIds(cfg: unknown): string[] {
+  const c = asRecord(cfg);
+  const many = Array.isArray(c.channelIds)
+    ? c.channelIds.filter((x): x is string => typeof x === "string" && x.trim() !== "")
+        .map((s) => s.trim())
+    : [];
+  if (many.length > 0) return [...new Set(many)];
+  const one = typeof c.channelId === "string" ? c.channelId.trim() : "";
+  return one ? [one] : [];
+}
+
+export function inheritedChannelFromTrigger(triggerConfig: unknown): string {
+  const ids = readTriggerChannelIds(triggerConfig);
+  return ids.length === 1 ? ids[0]! : "";
+}
+
+export function triggerBindsInboundChannel(triggerType: string): boolean {
+  return INBOUND_CHANNEL_TRIGGER_TYPES.has(triggerType);
+}
+
 /**
- * Regra de herança de canal: só o PRIMEIRO passo de mensagem do fluxo
- * precisa de `config.channelId` explícito — e só quando a org tem 2+
- * canais conectados do tipo relevante (`connectedChannelCount` já vem
- * filtrado pelo chamador: WhatsApp para os demais tipos, e-mail para
- * `send_email`). Passos posteriores herdam em runtime
- * (`resolveOutboundChannelId`); vazio não é erro para eles.
+ * 1º passo de mensagem só exige `channelId` quando a org tem 2+ canais
+ * E o gatilho não amarra o envio à entrada (inbound / 1 conexão).
  */
 export function validateFirstMessageChannel(
   steps: { type: string; config?: unknown }[],
   connectedChannelCount: number,
+  opts?: { triggerType?: string; triggerConfig?: unknown },
 ): string | null {
   if (connectedChannelCount < 2) return null;
+  if (opts?.triggerType && triggerBindsInboundChannel(opts.triggerType)) return null;
+  if (readTriggerChannelIds(opts?.triggerConfig).length === 1) return null;
   const idx = findFirstMessageStepIndex(steps);
   if (idx < 0) return null;
   const cfg = asRecord(steps[idx].config);
@@ -252,8 +279,15 @@ export function summarizeTriggerConfig(
       return c.pipelineId ? `Pipeline: ${String(c.pipelineId)}` : "Qualquer pipeline";
     case "contact_created":
       return "Novo contato";
-    case "conversation_created":
+    case "conversation_created": {
+      const ids = readTriggerChannelIds(c);
+      if (ids.length === 1) {
+        const id = ids[0]!;
+        return `Conexão: ${lookup?.[id] ?? id.slice(0, 8)}`;
+      }
+      if (ids.length > 1) return `${ids.length} conexões`;
       return c.channel ? `Canal: ${String(c.channel)}` : "Qualquer canal";
+    }
     case "lifecycle_changed": {
       const to = c.toLifecycle ?? c.lifecycleStage;
       const from = c.fromLifecycle ?? c.from;
@@ -869,7 +903,7 @@ export function defaultTriggerConfig(triggerType: string): Record<string, unknow
     case "contact_created":
       return {};
     case "conversation_created":
-      return { channel: "" };
+      return { channel: "", channelIds: [] };
     case "lifecycle_changed":
       return { fromLifecycle: "", toLifecycle: "" };
     case "agent_changed":

@@ -182,22 +182,12 @@ const DEFAULT_WAIT_TIMEOUT_MS = 86_400_000;
  */
 async function pauseAwaitingReply(
   cfg: Record<string, unknown>,
-  rt: { automationId: string; contactId?: string | null },
+  rt: ChannelBindSource & { automationId: string; contactId?: string | null },
   timeoutMs: number | undefined,
 ): Promise<StepResult> {
   const stepId = cfg.__stepId as string | undefined;
   if (stepId && rt.contactId) {
-    const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
-    if (existingCtx) {
-      await advanceContext(
-        existingCtx.id,
-        stepId,
-        (existingCtx.variables as Record<string, unknown>) ?? {},
-        timeoutMs,
-      );
-    } else {
-      await createContext(rt.automationId, rt.contactId, stepId, timeoutMs);
-    }
+    await persistPausedContext(rt, stepId, timeoutMs);
   }
   return { skipRemaining: true };
 }
@@ -322,11 +312,27 @@ async function awaitMetaDeliveryVerdict(
  */
 async function resolveAutomationSendConv(
   contactId: string | null | undefined,
-  opts?: { inheritAssignee?: boolean },
+  opts?: {
+    inheritAssignee?: boolean;
+    conversationId?: string | null;
+    channelId?: string | null;
+  },
 ): Promise<{ id: string } | null> {
   if (!contactId) return null;
+  const preferredId =
+    typeof opts?.conversationId === "string" ? opts.conversationId.trim() : "";
+  if (preferredId) {
+    const pinned = await prisma.conversation.findFirst({
+      where: { id: preferredId, contactId },
+      select: { id: true },
+    });
+    if (pinned) return { id: pinned.id };
+  }
   try {
-    const ensured = await ensureWhatsAppConversationForContact(contactId, opts);
+    const ensured = await ensureWhatsAppConversationForContact(contactId, {
+      inheritAssignee: opts?.inheritAssignee,
+      channelId: opts?.channelId,
+    });
     if ("conversationId" in ensured) return { id: ensured.conversationId };
   } catch (err) {
     log.warn(`resolveAutomationSendConv: ensure falhou p/ contato ${contactId}:`, err);
@@ -353,13 +359,28 @@ function sendConvOptsForRuntime(rt: { event?: string | null }): {
  * canal de cada envio fica gravado em `Message.channelId`, recuperamos o
  * último aqui — mesma fonte que já alimenta o "via {canal}" do inbox.
  */
-async function loadLastAutomationChannelId(contactId: string): Promise<string | null> {
-  const conv = await prisma.conversation.findFirst({
-    where: { contactId, channel: "whatsapp" },
-    orderBy: { updatedAt: "desc" },
-    select: { id: true },
-  });
+async function loadLastAutomationChannelId(
+  contactId: string,
+  opts?: { conversationId?: string | null; channelId?: string | null },
+): Promise<string | null> {
+  const explicit = opts?.channelId?.trim();
+  if (explicit) return explicit;
+
+  const preferredId = opts?.conversationId?.trim();
+  const conv = preferredId
+    ? await prisma.conversation.findFirst({
+        where: { id: preferredId, contactId },
+        select: { id: true, channelId: true },
+      })
+    : await prisma.conversation.findFirst({
+        where: { contactId, channel: "whatsapp" },
+        orderBy: { updatedAt: "desc" },
+        select: { id: true, channelId: true },
+      });
   if (!conv) return null;
+  // Canal do ticket (último inbound) — não o último outbound, que pode
+  // ter sido um disparo antigo em outra conexão da mesma conversa.
+  if (conv.channelId) return conv.channelId;
   const lastMsg = await prisma.message.findFirst({
     where: { conversationId: conv.id, direction: "out", channelId: { not: null } },
     orderBy: { createdAt: "desc" },
@@ -672,20 +693,102 @@ async function resolveAutomationMetaClient(opts: {
 }
 
 /**
- * Resolve o canal (WhatsApp/e-mail) usado num passo de envio: explícito
- * no step (`config.channelId`) OU herdado do último canal usado no
- * caminho de execução (`rt.activeChannelId`). Passos posteriores sem
- * `channelId` próprio herdam o canal do passo anterior — só o PRIMEIRO
- * passo de mensagem do fluxo é obrigado a escolher (validado em
- * `services/automations.ts`). Chamar `rt.activeChannelId = resolved`
- * logo após, para que o PRÓXIMO passo herde.
+ * Gatilhos em que o envio deve sair pelo mesmo número do inbound.
+ * `config.channelId` do 1º passo (obrigatório na UI com 2+ canais) NÃO
+ * pode sobrescrever — senão a Meta devolve 131047 na sessão do outro número.
+ */
+const INBOUND_BOUND_EVENTS = new Set([
+  "message_received",
+  "message_sent",
+  "continue",
+]);
+
+type ChannelBindSource = {
+  event?: string | null;
+  data?: Record<string, unknown>;
+  conversation?: { id?: string; channelId?: string | null } | null;
+  activeChannelId?: string | null;
+};
+
+function resolveBoundChannelId(rt: ChannelBindSource): string | null {
+  const data = rt.data ?? {};
+  const fromData = readString(data, "channelId")?.trim();
+  if (fromData) return fromData;
+  const fromConv = rt.conversation?.channelId?.trim();
+  if (fromConv) return fromConv;
+  const fromActive = rt.activeChannelId?.trim();
+  return fromActive || null;
+}
+
+function channelBindVars(rt: ChannelBindSource): Record<string, unknown> {
+  const data = rt.data ?? {};
+  const channelId = resolveBoundChannelId(rt);
+  const conversationId =
+    readString(data, "conversationId")?.trim() || rt.conversation?.id || "";
+  return {
+    ...(channelId ? { channelId } : {}),
+    ...(conversationId ? { conversationId } : {}),
+  };
+}
+
+async function persistPausedContext(
+  rt: ChannelBindSource & { automationId: string; contactId?: string | null },
+  stepId: string,
+  timeoutMs: number | undefined,
+): Promise<void> {
+  if (!rt.contactId) return;
+  const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
+  const vars = {
+    ...((existingCtx?.variables as Record<string, unknown>) ?? {}),
+    ...channelBindVars(rt),
+  };
+  if (existingCtx) {
+    await advanceContext(existingCtx.id, stepId, vars, timeoutMs);
+  } else {
+    await createContext(rt.automationId, rt.contactId, stepId, timeoutMs, vars);
+  }
+}
+
+function sendConvOptsFromRt(
+  rt: RuntimeContext,
+  channelId?: string | null,
+): {
+  inheritAssignee?: boolean;
+  conversationId?: string | null;
+  channelId?: string | null;
+} {
+  return {
+    ...sendConvOptsForRuntime(rt),
+    conversationId:
+      rt.conversation?.id ?? readString(rt.data, "conversationId") ?? null,
+    channelId: channelId ?? resolveBoundChannelId(rt),
+  };
+}
+
+/**
+ * Resolve o canal usado num passo de envio.
+ *
+ * Em gatilho de inbound (`message_received` etc.) o canal da conversa
+ * ganha de `config.channelId` do passo — o picker do 1º passo era
+ * obrigatório e gerava envio no número errado (sessão 24h fechada).
+ * Campanha / stage_changed / demais: passo explícito, depois o canal
+ * herdado do payload (`rt.activeChannelId` / conversa).
  */
 function resolveOutboundChannelId(
   cfg: Record<string, unknown>,
   rt: RuntimeContext,
 ): string | null {
-  const cfgChannelId = readString(cfg, "channelId")?.trim();
-  return cfgChannelId || rt.activeChannelId || null;
+  const cfgChannelId = readString(cfg, "channelId")?.trim() || null;
+  const bound = resolveBoundChannelId(rt);
+  if (rt.event && INBOUND_BOUND_EVENTS.has(rt.event) && bound) {
+    if (cfgChannelId && cfgChannelId !== bound) {
+      log.info(
+        `Envio no canal da conversa ${bound} (passo pedia ${cfgChannelId}; event=${rt.event})`,
+      );
+    }
+    return bound;
+  }
+  return cfgChannelId || bound || null;
 }
 
 const ACTIVITY_TYPES: ActivityType[] = ["CALL", "EMAIL", "MEETING", "TASK", "NOTE", "WHATSAPP", "OTHER"];
@@ -1144,6 +1247,7 @@ type ConversationSnapshot = {
   id: string;
   status: string;
   channel: string;
+  channelId: string | null;
   isClosed: boolean;
   hasAgentReply: boolean;
   hasError: boolean;
@@ -1328,6 +1432,7 @@ async function loadConversationSnapshot(
           id: true,
           status: true,
           channel: true,
+          channelId: true,
           hasAgentReply: true,
           hasError: true,
           unreadCount: true,
@@ -1343,6 +1448,7 @@ async function loadConversationSnapshot(
           id: true,
           status: true,
           channel: true,
+          channelId: true,
           hasAgentReply: true,
           hasError: true,
           unreadCount: true,
@@ -1358,6 +1464,7 @@ async function loadConversationSnapshot(
     id: conv.id,
     status: statusStr,
     channel: conv.channel,
+    channelId: conv.channelId ?? null,
     isClosed: statusStr === "RESOLVED",
     hasAgentReply: conv.hasAgentReply,
     hasError: conv.hasError,
@@ -1518,14 +1625,12 @@ async function resolveRuntimeContext(
     contactCustomFields: customFieldsSnapshot.contactCustomFields,
     dealCustomFields: customFieldsSnapshot.dealCustomFields,
     depth: typeof ctx.depth === "number" ? ctx.depth : 0,
-    // Campanha tipo AUTOMATION (11/ago/26): o worker envia o canal escolhido
-    // no wizard em `data.channelId`. Sem isso, o 1º passo de envio resolvia
-    // o canal pela conversa do contato — que pode apontar para um canal
-    // DISCONNECTED (token invalidado pela Meta), derrubando o disparo.
+    // Campanha: wizard em `data.channelId`. Inbound: canal da mensagem.
+    // Sem payload, herda o canal do ticket — nunca o 1º CONNECTED da org.
     activeChannelId:
       typeof data.channelId === "string" && data.channelId.trim()
         ? data.channelId.trim()
-        : null,
+        : conversation?.channelId ?? null,
   };
 }
 
@@ -2407,14 +2512,16 @@ async function executeStep(
         );
       }
 
+      const resolvedChannelId = resolveOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
+        const conv = await resolveAutomationSendConv(
+          rt.contactId,
+          sendConvOptsFromRt(rt, resolvedChannelId),
+        );
         conversationId = conv?.id;
         if (!conv) log.warn(`Nenhuma conversa WhatsApp encontrada para o contato ${rt.contactId}`);
       }
-
-      const resolvedChannelId = resolveOutboundChannelId(cfg, rt);
       const metaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId,
@@ -2667,12 +2774,15 @@ async function executeStep(
         );
       }
 
+      const tplChannelId = resolveOutboundChannelId(cfg, rt);
       let tplConversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
+        const conv = await resolveAutomationSendConv(
+          rt.contactId,
+          sendConvOptsFromRt(rt, tplChannelId),
+        );
         tplConversationId = conv?.id;
       }
-      const tplChannelId = resolveOutboundChannelId(cfg, rt);
       const tplMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId: tplConversationId,
@@ -2876,12 +2986,15 @@ async function executeStep(
       const caption = readString(cfg, "caption") ?? "";
       const filename = readString(cfg, "filename") ?? "";
 
+      const mediaChannelId = resolveOutboundChannelId(cfg, rt);
       let mediaConversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
+        const conv = await resolveAutomationSendConv(
+          rt.contactId,
+          sendConvOptsFromRt(rt, mediaChannelId),
+        );
         mediaConversationId = conv?.id;
       }
-      const mediaChannelId = resolveOutboundChannelId(cfg, rt);
       const mediaMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId: mediaConversationId,
@@ -3091,13 +3204,15 @@ async function executeStep(
         ? `${body}\n[Lista: ${btnLabels}]`
         : `${body}\n[Botões: ${btnLabels}]`;
 
+      const interactiveChannelId = resolveOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
+        const conv = await resolveAutomationSendConv(
+          rt.contactId,
+          sendConvOptsFromRt(rt, interactiveChannelId),
+        );
         conversationId = conv?.id;
       }
-
-      const interactiveChannelId = resolveOutboundChannelId(cfg, rt);
       const interactiveMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId,
@@ -3186,12 +3301,7 @@ async function executeStep(
       const rawTimeout = readNumber(cfg, "timeoutMs");
       const interactiveTimeoutMs = rawTimeout && rawTimeout > 0 ? rawTimeout : INTERACTIVE_DEFAULT_TIMEOUT_MS;
       if (stepId && rt.contactId) {
-        const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
-        if (existingCtx) {
-          await advanceContext(existingCtx.id, stepId, (existingCtx.variables as Record<string, unknown>) ?? {}, interactiveTimeoutMs);
-        } else {
-          await createContext(rt.automationId, rt.contactId, stepId, interactiveTimeoutMs);
-        }
+        await persistPausedContext(rt, stepId, interactiveTimeoutMs);
       }
 
       return { skipRemaining: true };
@@ -3262,13 +3372,15 @@ async function executeStep(
       const rowLabels = rows.map((r) => r.title).join(", ");
       const displayContent = `${body}\n[Lista: ${rowLabels}]`;
 
+      const listChannelId = resolveOutboundChannelId(cfg, rt);
       let conversationId: string | undefined;
       if (rt.contactId) {
-        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
+        const conv = await resolveAutomationSendConv(
+          rt.contactId,
+          sendConvOptsFromRt(rt, listChannelId),
+        );
         conversationId = conv?.id;
       }
-
-      const listChannelId = resolveOutboundChannelId(cfg, rt);
       const listMetaClient = await resolveAutomationMetaClient({
         automationId: rt.automationId,
         conversationId,
@@ -3353,17 +3465,7 @@ async function executeStep(
       const listTimeoutMs =
         rawTimeout && rawTimeout > 0 ? rawTimeout : LIST_DEFAULT_TIMEOUT_MS;
       if (stepId && rt.contactId) {
-        const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
-        if (existingCtx) {
-          await advanceContext(
-            existingCtx.id,
-            stepId,
-            (existingCtx.variables as Record<string, unknown>) ?? {},
-            listTimeoutMs,
-          );
-        } else {
-          await createContext(rt.automationId, rt.contactId, stepId, listTimeoutMs);
-        }
+        await persistPausedContext(rt, stepId, listTimeoutMs);
       }
 
       return { skipRemaining: true };
@@ -3707,8 +3809,11 @@ async function executeStep(
         const vars = (cfg as Record<string, unknown>)["__variables"] as Record<string, unknown> | undefined;
         const interpolated = await interpolateMessageVariables(content, rt, vars);
 
-        const conv = await resolveAutomationSendConv(rt.contactId, sendConvOptsForRuntime(rt));
         const questionChannelId = resolveOutboundChannelId(cfg, rt);
+        const conv = await resolveAutomationSendConv(
+          rt.contactId,
+          sendConvOptsFromRt(rt, questionChannelId),
+        );
         const questionMetaClient = await resolveAutomationMetaClient({
           automationId: rt.automationId,
           conversationId: conv?.id,
@@ -3755,12 +3860,7 @@ async function executeStep(
       const questionStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
       const questionTimeoutMs = readNumber(cfg, "timeoutMs");
       if (questionStepId && rt.contactId) {
-        const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
-        if (existingCtx) {
-          await advanceContext(existingCtx.id, questionStepId, (existingCtx.variables as Record<string, unknown>) ?? {}, questionTimeoutMs);
-        } else {
-          await createContext(rt.automationId, rt.contactId, questionStepId, questionTimeoutMs);
-        }
+        await persistPausedContext(rt, questionStepId, questionTimeoutMs);
       }
       return { skipRemaining: true };
     }
@@ -3770,12 +3870,7 @@ async function executeStep(
       const wfrStepId = (cfg as Record<string, unknown>).__stepId as string | undefined;
       const wfrTimeoutMs = readNumber(cfg, "timeoutMs");
       if (wfrStepId) {
-        const existingCtx = await getActiveContext(rt.automationId, rt.contactId);
-        if (existingCtx) {
-          await advanceContext(existingCtx.id, wfrStepId, (existingCtx.variables as Record<string, unknown>) ?? {}, wfrTimeoutMs);
-        } else {
-          await createContext(rt.automationId, rt.contactId, wfrStepId, wfrTimeoutMs);
-        }
+        await persistPausedContext(rt, wfrStepId, wfrTimeoutMs);
       }
       log.debug(`Aguardando resposta do contato ${rt.contactId}`);
       return { skipRemaining: true };
@@ -4366,8 +4461,15 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     (typeof contextData.waMessageId === "string" ? contextData.waMessageId : null) ||
     (context.contactId ? await getLastInboundWamid(context.contactId) : null);
 
-  let runConvIdForMeta: string | undefined;
-  if (context.contactId) {
+  const runChannelId =
+    typeof contextData.channelId === "string" && contextData.channelId.trim()
+      ? contextData.channelId.trim()
+      : null;
+  let runConvIdForMeta: string | undefined =
+    typeof contextData.conversationId === "string" && contextData.conversationId.trim()
+      ? contextData.conversationId.trim()
+      : undefined;
+  if (!runConvIdForMeta && context.contactId) {
     const c = await prisma.conversation.findFirst({
       where: { contactId: context.contactId, channel: "whatsapp" },
       select: { id: true },
@@ -4379,6 +4481,7 @@ export async function runAutomationInline(payload: AutomationJobPayload): Promis
     conversationId: runConvIdForMeta,
     contactId: context.contactId ?? null,
     dealId: context.dealId ?? null,
+    channelId: runChannelId,
   });
 
   if (humanize.markAsRead && wamid && runMetaClient.configured) {
@@ -4778,14 +4881,27 @@ export async function continueFromStep(
     // Continuação após wait/question: mantém profundidade base (0). O
     // encadeamento relevante ocorre no fluxo principal (executeStep).
     depth: 0,
-    // Herda o canal do último envio desta conversa (best-effort) — o
-    // `RuntimeContext` original (com o `activeChannelId` acumulado) não
-    // sobrevive à pausa. Ver `loadLastAutomationChannelId`.
-    activeChannelId: await loadLastAutomationChannelId(contactId),
+    // Canal do ticket/inbound que retomou o fluxo — não o último outbound
+    // (podia ser outra conexão). Ver `loadLastAutomationChannelId`.
+    activeChannelId: await loadLastAutomationChannelId(contactId, {
+      conversationId:
+        conversation?.id ??
+        (typeof variables.conversationId === "string"
+          ? variables.conversationId
+          : null),
+      channelId:
+        (typeof variables.channelId === "string" ? variables.channelId : null) ??
+        conversation?.channelId ??
+        null,
+    }),
   };
 
-  let contConvIdForMeta: string | undefined;
-  {
+  const contChannelId =
+    (typeof variables.channelId === "string" && variables.channelId.trim()
+      ? variables.channelId.trim()
+      : null) ?? conversation?.channelId ?? null;
+  let contConvIdForMeta: string | undefined = conversation?.id;
+  if (!contConvIdForMeta) {
     const c = await prisma.conversation.findFirst({
       where: { contactId, channel: "whatsapp" },
       select: { id: true },
@@ -4797,6 +4913,7 @@ export async function continueFromStep(
     conversationId: contConvIdForMeta,
     contactId,
     dealId: deal?.id ?? null,
+    channelId: contChannelId,
   });
 
   const wamidForRead = await getLastInboundWamid(contactId);

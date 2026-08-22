@@ -2934,6 +2934,8 @@ export async function processMetaWebhookPayload(
             try {
               const salesbotResult = await processSalesbotMessage(contact.id, parsed.text, {
                 interactiveId: parsed.interactiveButtonId,
+                channelId: conversation.channelId,
+                conversationId: conversation.id,
               });
               salesbotHandled = Boolean(salesbotResult?.handled);
             } catch (err) {
