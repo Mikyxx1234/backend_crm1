@@ -997,9 +997,8 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
         },
       },
     }).then(async (logs) => {
-      // Enriquece com dados de ad-tracking do contato. Como nem todo log
-      // tem contactId e nem todo contato tem ad-tracking, fazemos uma
-      // query separada batch e fundimos no frontend.
+      // Enriquece com nome/telefone/negócio + ad-tracking. O log só
+      // guarda IDs; a modal de erros precisa do rótulo para busca.
       const contactIds = Array.from(
         new Set(
           logs
@@ -1007,37 +1006,64 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
             .filter((v): v is string => typeof v === "string"),
         ),
       );
-      if (contactIds.length === 0) return logs;
-      const contacts = await prisma.contact.findMany({
-        where: { id: { in: contactIds } },
-        select: {
-          id: true,
-          adSourceId: true,
-          adSourceType: true,
-          adCtwaClid: true,
-          adHeadline: true,
-          adResolvedId: true,
-          adResolvedName: true,
-          adResolvedAdsetId: true,
-          adResolvedAdsetName: true,
-          adResolvedCampaignId: true,
-          adResolvedCampaignName: true,
-          adResolvedAt: true,
-          adResolveStatus: true,
-          adResolveError: true,
-          adUtmSource: true,
-          adUtmMedium: true,
-          adUtmCampaign: true,
-          adUtmContent: true,
-          adUtmTerm: true,
-        },
+      const dealIds = Array.from(
+        new Set(
+          logs
+            .map((l) => l.dealId)
+            .filter((v): v is string => typeof v === "string"),
+        ),
+      );
+      const [contacts, deals] = await Promise.all([
+        contactIds.length === 0
+          ? Promise.resolve([])
+          : prisma.contact.findMany({
+              where: { id: { in: contactIds } },
+              select: {
+                id: true,
+                name: true,
+                phone: true,
+                number: true,
+                adSourceId: true,
+                adSourceType: true,
+                adCtwaClid: true,
+                adHeadline: true,
+                adResolvedId: true,
+                adResolvedName: true,
+                adResolvedAdsetId: true,
+                adResolvedAdsetName: true,
+                adResolvedCampaignId: true,
+                adResolvedCampaignName: true,
+                adResolvedAt: true,
+                adResolveStatus: true,
+                adResolveError: true,
+                adUtmSource: true,
+                adUtmMedium: true,
+                adUtmCampaign: true,
+                adUtmContent: true,
+                adUtmTerm: true,
+              },
+            }),
+        dealIds.length === 0
+          ? Promise.resolve([])
+          : prisma.deal.findMany({
+              where: { id: { in: dealIds } },
+              select: { id: true, title: true, number: true },
+            }),
+      ]);
+      const contactById = new Map(contacts.map((c) => [c.id, c]));
+      const dealById = new Map(deals.map((d) => [d.id, d]));
+      return logs.map((l) => {
+        const contact = l.contactId ? contactById.get(l.contactId) : undefined;
+        const deal = l.dealId ? dealById.get(l.dealId) : undefined;
+        return {
+          ...l,
+          contactName: contact?.name ?? null,
+          contactPhone: contact?.phone ?? null,
+          dealName: deal?.title ?? null,
+          dealNumber: deal?.number ?? null,
+          contactAdTracking: contact ?? null,
+        };
       });
-      const byId = new Map(contacts.map((c) => [c.id, c]));
-      return logs.map((l) => ({
-        ...l,
-        contactAdTracking:
-          l.contactId && byId.has(l.contactId) ? byId.get(l.contactId) : null,
-      }));
     }),
     prisma.automationLog.count({ where }),
   ]);
