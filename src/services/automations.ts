@@ -9,6 +9,8 @@ import { normalizeHoursBeforeExpiry } from "@/services/whatsapp-session-expiry";
 import {
   findFirstMessageStepIndex,
   newStepId,
+  readTriggerChannelIds,
+  readTriggerChannelScope,
   validateFirstMessageChannel,
 } from "@/lib/automation-workflow";
 
@@ -77,12 +79,23 @@ function readTriggerStageIds(cfg: Record<string, unknown>): string[] {
   return one ? [one] : [];
 }
 
-/** Conexões (Channel.id) do gatilho. Vazio = qualquer canal conectado. */
-function readTriggerChannelIds(cfg: Record<string, unknown>): string[] {
-  const many = readStringArray(cfg, "channelIds");
-  if (many.length > 0) return many;
-  const one = readString(cfg, "channelId");
-  return one ? [one] : [];
+/** `selected` + lista vazia = não dispara. `all` aceita filtro grosso por tipo. */
+function matchTriggerChannelFilter(
+  cfg: Record<string, unknown>,
+  data: Record<string, unknown>,
+): boolean {
+  const channelIds = readTriggerChannelIds(cfg);
+  const dataChannelId = readString(data, "channelId");
+  if (readTriggerChannelScope(cfg) === "selected") {
+    if (channelIds.length === 0) return false;
+    return Boolean(dataChannelId && channelIds.includes(dataChannelId));
+  }
+  const channel = readString(cfg, "channel");
+  const dataChannel = readString(data, "channel");
+  if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) {
+    return false;
+  }
+  return true;
 }
 
 const STEP_ID_REF_KEYS = new Set([
@@ -244,9 +257,7 @@ export function evaluateTrigger(
       return true;
     }
     case "conversation_created": {
-      const channel = readString(cfg, "channel");
-      const dataChannel = readString(data, "channel");
-      if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
+      if (!matchTriggerChannelFilter(cfg, data)) return false;
       return true;
     }
     case "lifecycle_changed": {
@@ -273,17 +284,7 @@ export function evaluateTrigger(
       // deixamos passar — caso contrario o gatilho "mensagem recebida"
       // nunca dispara pra contatos sem negocio aberto, que e o cenario
       // mais comum em receptivo.
-      const channelIds = readTriggerChannelIds(cfg);
-      const dataChannelId = readString(data, "channelId");
-      if (channelIds.length > 0) {
-        if (!dataChannelId || !channelIds.includes(dataChannelId)) return false;
-      } else {
-        // Tipo (whatsapp/email) só vale quando NÃO há conexão específica.
-        // Com channelIds, a conexão já implica o tipo.
-        const channel = readString(cfg, "channel");
-        const dataChannel = readString(data, "channel");
-        if (channel && dataChannel && dataChannel.toLowerCase() !== channel.toLowerCase()) return false;
-      }
+      if (!matchTriggerChannelFilter(cfg, data)) return false;
       const stageIds = readTriggerStageIds(cfg);
       const dataStageId = readString(data, "stageId") ?? readString(data, "dealStageId");
       if (stageIds.length > 0 && dataStageId && !stageIds.includes(dataStageId)) return false;
@@ -836,6 +837,7 @@ async function countConnectedChannels(type: "WHATSAPP" | "EMAIL"): Promise<numbe
  */
 async function validateFirstMessageChannelForOrg(
   steps: { type: string; config?: unknown }[],
+  opts?: { triggerType?: string; triggerConfig?: unknown },
 ): Promise<string | null> {
   const idx = findFirstMessageStepIndex(steps);
   if (idx < 0) return null;
@@ -843,7 +845,7 @@ async function validateFirstMessageChannelForOrg(
   const connectedCount = await countConnectedChannels(
     firstType === "send_email" ? "EMAIL" : "WHATSAPP",
   );
-  return validateFirstMessageChannel(steps, connectedCount);
+  return validateFirstMessageChannel(steps, connectedCount, opts);
 }
 
 export type UpdateAutomationInput = {
@@ -876,7 +878,10 @@ export async function updateAutomation(id: string, data: UpdateAutomationInput) 
   const effectiveActive = data.active !== undefined ? data.active : existing.active;
   if (effectiveActive) {
     const effectiveSteps = data.steps ?? existing.steps.map((s) => ({ type: s.type, config: s.config }));
-    const channelErr = await validateFirstMessageChannelForOrg(effectiveSteps);
+    const channelErr = await validateFirstMessageChannelForOrg(effectiveSteps, {
+      triggerType: effectiveTriggerType,
+      triggerConfig: effectiveTriggerConfig,
+    });
     if (channelErr) throw new Error(channelErr);
   }
 
@@ -961,6 +966,8 @@ export async function toggleAutomation(id: string) {
     select: {
       id: true,
       active: true,
+      triggerType: true,
+      triggerConfig: true,
       steps: { select: { type: true, config: true }, orderBy: { position: "asc" } },
     },
   });
@@ -969,7 +976,10 @@ export async function toggleAutomation(id: string) {
   }
   const activating = !existing.active;
   if (activating) {
-    const channelErr = await validateFirstMessageChannelForOrg(existing.steps);
+    const channelErr = await validateFirstMessageChannelForOrg(existing.steps, {
+      triggerType: existing.triggerType,
+      triggerConfig: existing.triggerConfig,
+    });
     if (channelErr) throw new Error(channelErr);
   }
   return prisma.automation.update({
@@ -1022,9 +1032,8 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
         },
       },
     }).then(async (logs) => {
-      // Enriquece com dados de ad-tracking do contato. Como nem todo log
-      // tem contactId e nem todo contato tem ad-tracking, fazemos uma
-      // query separada batch e fundimos no frontend.
+      // Enriquece com nome/telefone/negócio + ad-tracking. O log só
+      // guarda IDs; a modal de erros precisa do rótulo para busca.
       const contactIds = Array.from(
         new Set(
           logs
@@ -1032,37 +1041,64 @@ export async function getAutomationLogs(automationId: string, params: GetAutomat
             .filter((v): v is string => typeof v === "string"),
         ),
       );
-      if (contactIds.length === 0) return logs;
-      const contacts = await prisma.contact.findMany({
-        where: { id: { in: contactIds } },
-        select: {
-          id: true,
-          adSourceId: true,
-          adSourceType: true,
-          adCtwaClid: true,
-          adHeadline: true,
-          adResolvedId: true,
-          adResolvedName: true,
-          adResolvedAdsetId: true,
-          adResolvedAdsetName: true,
-          adResolvedCampaignId: true,
-          adResolvedCampaignName: true,
-          adResolvedAt: true,
-          adResolveStatus: true,
-          adResolveError: true,
-          adUtmSource: true,
-          adUtmMedium: true,
-          adUtmCampaign: true,
-          adUtmContent: true,
-          adUtmTerm: true,
-        },
+      const dealIds = Array.from(
+        new Set(
+          logs
+            .map((l) => l.dealId)
+            .filter((v): v is string => typeof v === "string"),
+        ),
+      );
+      const [contacts, deals] = await Promise.all([
+        contactIds.length === 0
+          ? Promise.resolve([])
+          : prisma.contact.findMany({
+              where: { id: { in: contactIds } },
+              select: {
+                id: true,
+                name: true,
+                phone: true,
+                number: true,
+                adSourceId: true,
+                adSourceType: true,
+                adCtwaClid: true,
+                adHeadline: true,
+                adResolvedId: true,
+                adResolvedName: true,
+                adResolvedAdsetId: true,
+                adResolvedAdsetName: true,
+                adResolvedCampaignId: true,
+                adResolvedCampaignName: true,
+                adResolvedAt: true,
+                adResolveStatus: true,
+                adResolveError: true,
+                adUtmSource: true,
+                adUtmMedium: true,
+                adUtmCampaign: true,
+                adUtmContent: true,
+                adUtmTerm: true,
+              },
+            }),
+        dealIds.length === 0
+          ? Promise.resolve([])
+          : prisma.deal.findMany({
+              where: { id: { in: dealIds } },
+              select: { id: true, title: true, number: true },
+            }),
+      ]);
+      const contactById = new Map(contacts.map((c) => [c.id, c]));
+      const dealById = new Map(deals.map((d) => [d.id, d]));
+      return logs.map((l) => {
+        const contact = l.contactId ? contactById.get(l.contactId) : undefined;
+        const deal = l.dealId ? dealById.get(l.dealId) : undefined;
+        return {
+          ...l,
+          contactName: contact?.name ?? null,
+          contactPhone: contact?.phone ?? null,
+          dealName: deal?.title ?? null,
+          dealNumber: deal?.number ?? null,
+          contactAdTracking: contact ?? null,
+        };
       });
-      const byId = new Map(contacts.map((c) => [c.id, c]));
-      return logs.map((l) => ({
-        ...l,
-        contactAdTracking:
-          l.contactId && byId.has(l.contactId) ? byId.get(l.contactId) : null,
-      }));
     }),
     prisma.automationLog.count({ where }),
   ]);

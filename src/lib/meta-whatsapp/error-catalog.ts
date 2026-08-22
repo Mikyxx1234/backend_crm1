@@ -193,8 +193,9 @@ const CATALOG: Record<number, MetaErrorInfo> = {
     action: "Ajuste a quantidade de variáveis para corresponder ao template aprovado.",
   },
   132001: {
-    reason: "Template não existe para este nome/idioma.",
-    action: "Confirme o nome exato e o idioma (ex.: pt_BR) do template aprovado.",
+    reason: "Este template não está aprovado na WABA deste número WhatsApp.",
+    action:
+      "Cadastre o template nesse canal ou restrinja os canais do passo. O envio não muda de número.",
   },
   132005: {
     reason: "Texto do template ficou longo demais após preencher as variáveis.",
