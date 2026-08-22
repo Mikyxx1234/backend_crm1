@@ -115,6 +115,21 @@ function toMetaSendFailure(err: unknown): MetaSendFailureError {
  * Classifica erros já lançados como falha de envio (Graph, enrich, timeout,
  * canal/destino, header/template recusado). Retorna null para erros internos.
  */
+function metaGraphCodeOf(err: unknown): number | null {
+  if (isMetaGraphError(err)) return err.code;
+  if (isMetaSendFailureError(err)) return metaGraphCodeOf(err.cause);
+  return null;
+}
+
+function formatOutboundChannelLabel(
+  ch: { name: string | null; phoneNumber: string | null } | null,
+): string {
+  if (!ch) return "este WhatsApp";
+  const name = ch.name?.trim() || "WhatsApp";
+  const phone = ch.phoneNumber?.trim();
+  return phone ? `${name} (${phone})` : name;
+}
+
 function classifyMetaSendFailure(err: unknown): MetaSendFailureError | null {
   if (isMetaSendFailureError(err)) return err;
   if (isMetaGraphError(err) || isMetaFlowEnrichError(err)) return toMetaSendFailure(err);
@@ -2809,6 +2824,14 @@ async function executeStep(
         );
       }
 
+      const tplChannelRow = tplChannelId
+        ? await prisma.channel.findUnique({
+            where: { id: tplChannelId },
+            select: { name: true, phoneNumber: true },
+          })
+        : null;
+      const tplChannelLabel = formatOutboundChannelLabel(tplChannelRow);
+
       let enrichFlowToken: string | null = null;
       let tplExternalId: string | null = null;
       let tplSavedMessageId: string | null = null;
@@ -2898,17 +2921,25 @@ async function executeStep(
       } catch (sendErr) {
         const classified = classifyMetaSendFailure(sendErr);
         if (!classified) throw sendErr;
-        log.error(`Envio template falhou (contato=${rt.contactId ?? "—"}): ${classified.message}`);
+        const code = metaGraphCodeOf(sendErr) ?? metaGraphCodeOf(classified);
+        const outboundErr =
+          code === 132001
+            ? new MetaSendFailureError(
+                `O template "${templateName}" não está aprovado na WABA do canal ${tplChannelLabel}. O envio não usa outro número.`,
+                sendErr,
+              )
+            : classified;
+        log.error(`Envio template falhou (contato=${rt.contactId ?? "—"}): ${outboundErr.message}`);
         await persistFailedAutomationOutbound({
           conversationId: tplConversationId,
           content: tplContent,
           messageType: "template",
           senderName: rt.automationName ?? "Automação",
           triggeredByName: rt.triggeredByName,
-          error: classified,
+          error: outboundErr,
           channelId: tplChannelId,
         });
-        throw classified;
+        throw outboundErr;
       }
 
       if (tplConversationId) {
