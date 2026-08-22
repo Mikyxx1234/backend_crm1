@@ -31,8 +31,12 @@ export async function GET(request: Request, context: RouteContext) {
       const page = parseIntParam(searchParams.get("page"), 1);
       const perPage = parseIntParam(searchParams.get("perPage"), 20);
       const stepId = searchParams.get("stepId") ?? undefined;
+      const statusRaw = searchParams.get("status");
+      const statuses = statusRaw
+        ? statusRaw.split(",").map((s) => s.trim()).filter(Boolean)
+        : undefined;
 
-      const result = await getAutomationLogs(id, { page, perPage, stepId });
+      const result = await getAutomationLogs(id, { page, perPage, stepId, statuses });
       return NextResponse.json(result);
     } catch (e) {
       console.error(e);

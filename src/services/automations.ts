@@ -993,20 +993,47 @@ export type GetAutomationLogsParams = {
   page?: number;
   perPage?: number;
   stepId?: string | null;
+  statuses?: string[] | null;
 };
+
+const ALLOWED_LOG_STATUSES = new Set([
+  "STARTED",
+  "SUCCESS",
+  "COMPLETED",
+  "COMPLETED_WITH_ERRORS",
+  "SKIPPED",
+  "FAILED",
+  "FAILED_HANDLED",
+]);
+
+function normalizeLogStatuses(statuses?: string[] | null): string[] | undefined {
+  if (!statuses?.length) return undefined;
+  const next = [
+    ...new Set(
+      statuses
+        .map((s) => s.trim().toUpperCase())
+        .filter((s) => ALLOWED_LOG_STATUSES.has(s)),
+    ),
+  ];
+  return next.length ? next : undefined;
+}
 
 export async function getAutomationLogs(automationId: string, params: GetAutomationLogsParams = {}) {
   const page = Math.max(1, params.page ?? 1);
   const perPage = Math.min(100, Math.max(1, params.perPage ?? 20));
   const skip = (page - 1) * perPage;
+  const statuses = normalizeLogStatuses(params.statuses);
 
   const where: Prisma.AutomationLogWhereInput = { automationId };
   if (params.stepId === "trigger") {
     // STARTED é o eco do disparo; a linha útil do card é o desfecho.
     where.stepId = null;
-    where.status = { not: "STARTED" };
+    where.status = statuses ? { in: statuses } : { not: "STARTED" };
   } else if (params.stepId) {
     where.stepId = params.stepId;
+    if (statuses) where.status = { in: statuses };
+  } else if (statuses) {
+    where.status = { in: statuses };
   }
 
   const [items, total] = await Promise.all([
